@@ -1,0 +1,145 @@
+{
+  "schemaVersion": 1,
+  "kind": "ultra-fast-wbpp-real-raw-mono-optimization-validation-v1",
+  "validatedAt": "2026-09-02",
+  "productName": "Ultra-Fast WBPP",
+  "candidateState": "uncommitted-local-worktree",
+  "host": {
+    "operatingSystem": "macOS 26.6.2",
+    "architecture": "arm64",
+    "device": "Apple M3 Pro",
+    "memoryGiB": 36
+  },
+  "fixture": {
+    "class": "retained-private-nina-mono-subset",
+    "camera": "QHY268M",
+    "filter": "B",
+    "lightExposureSeconds": 300.0,
+    "lightCount": 8,
+    "rawFlatCount": 8,
+    "rawDarkCount": 8,
+    "rawBiasCount": 8,
+    "inputManifestEqualAcrossRuns": true,
+    "rawFilesRedistributed": false,
+    "sourcePathsRecorded": false,
+    "sourceHashesRecorded": false,
+    "outputPixelsRedistributed": false,
+    "outputHashesRecorded": false
+  },
+  "correctedBaseline": {
+    "wallSeconds": 106.89457120903535,
+    "calibrationMastersBuiltTwice": true,
+    "selectedBackend": "m3-pro-tuned",
+    "acceleratorUsed": true,
+    "finalState": "SOLVED"
+  },
+  "optimizedRuns": {
+    "wallSeconds": [85.39107316598529, 84.06951125001069],
+    "medianWallSeconds": 84.73029220799799,
+    "improvementPercentVersusCorrectedBaseline": [
+      20.11654829598349,
+      21.352871058708498
+    ],
+    "medianImprovementPercentVersusCorrectedBaseline": 20.734709677345993,
+    "optimization": {
+      "registrationCalibrationMastersReused": true,
+      "biasMasterIntegrations": 1,
+      "darkMasterIntegrations": 1,
+      "flatMasterIntegrations": 1,
+      "secondPixelPipelineMasterIntegrations": 0,
+      "xisfSecondConversionEliminated": true,
+      "privateFitsSnapshots": true,
+      "stagedDigestVerifiedBeforeAndAfterPixelConsumption": true,
+      "sourceDigestCacheEnabled": false
+    }
+  },
+  "scientificParity": {
+    "optimizedRunPair": {
+      "finalSolvedFitsByteIdentical": true,
+      "sciencePixelsExact": true,
+      "acceptedCountMapExact": true,
+      "coverageMapExact": true,
+      "rejectionCountMapExact": true,
+      "registrationTransformsExact": true,
+      "integrationWeightsExact": true,
+      "wcsKeywordsExact": true
+    },
+    "optimizedVersusCorrectedBaseline": {
+      "finalSolvedFitsByteIdentical": true,
+      "sciencePixelsExact": true,
+      "acceptedCountMapExact": true,
+      "coverageMapExact": true,
+      "rejectionCountMapExact": true,
+      "registrationTransformsExact": true,
+      "integrationWeightsExact": true,
+      "wcsKeywordsExact": true
+    },
+    "portableCpuVersusM3ProMetal": {
+      "finiteMaskEqual": true,
+      "acceptedCountMapExact": true,
+      "coverageMapExact": true,
+      "rejectionCountMapExact": true,
+      "scienceMaxAbsRelative": 1.65686836139447e-6,
+      "scienceMaxAbsRelativeLimit": 2e-6,
+      "scienceRmseRelative": 4.809432272580759e-9,
+      "scienceRmseRelativeLimit": 2e-7,
+      "passed": true
+    },
+    "priorTileDependentAlgorithmComparison": {
+      "pixelsCompared": 25983360,
+      "changedRejectionPixels": 1,
+      "changedCoordinateZeroBased": {"x": 3468, "y": 3311},
+      "oldRejectedSamples": 0,
+      "newRejectedSamples": 1,
+      "scienceAbsoluteDifference": 0.651031494140625,
+      "finiteMaskEqual": true,
+      "reason": "intentional correction from tile-local to group-level rejection floor"
+    }
+  },
+  "integration": {
+    "rejectionFloorAlgorithm": "fixed-grid-group-mad-plus-float32-ulp-v1",
+    "rejectionFloorTileInvariant": true,
+    "selectedBackend": "m3-pro-tuned",
+    "acceleratorUsed": true,
+    "fastMath": false,
+    "inputFrameCount": 8,
+    "inputFramesTruncated": false,
+    "cpuMetalParityGatePassed": true
+  },
+  "astrometry": {
+    "backend": "astrometry-net",
+    "catalogManaged": true,
+    "matchedStars": 57,
+    "rmsPixels": 2.1289176580656615,
+    "rmsArcsec": 1.376726109017732,
+    "wcsRoundTripPassed": true,
+    "qualityGate": "PASS"
+  },
+  "safety": {
+    "generatedMastersBoundBySha256AndStat": true,
+    "upstreamCalibrationReceiptBoundBySha256AndStat": true,
+    "upstreamReceiptSchemaAndSemanticsValidated": true,
+    "sourceContentManifestPubliclyRecomputable": true,
+    "masterDarkBiasSemanticsExplicit": true,
+    "masterFlatApplicationScale": 1.0,
+    "masterOrReceiptTamperFailsClosed": true,
+    "privateInputSnapshotTamperFailsClosed": true,
+    "failurePublicationRemovesPrivateWorkTree": true,
+    "originalSourcesOpenedReadOnly": true,
+    "finalSourceRehashRetained": true,
+    "atomicNoReplacePublication": true
+  },
+  "scope": {
+    "provesSingleFieldMonoOrdinary": true,
+    "provesM3ProMetal": true,
+    "provesMasterReusePixelParity": true,
+    "provesTileInvariantRejection": true,
+    "provesLocalNormalization": false,
+    "provesDrizzle": false,
+    "provesMultiPanelMosaic": false,
+    "provesRgbLrgb": false,
+    "provesNonM3Hardware": false,
+    "provesPackagedRenamedDesktopBundle": false
+  },
+  "result": "PASS"
+}

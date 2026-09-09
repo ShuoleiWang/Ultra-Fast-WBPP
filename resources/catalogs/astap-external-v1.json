@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "catalogId": "astap-external",
+  "provider": "ASTAP",
+  "version": "user-managed",
+  "homepage": "https://www.hnsky.org/astap.htm",
+  "downloadPage": "https://www.hnsky.org/astap.htm#download",
+  "bundled": false,
+  "redistributionStatus": "user-download-required",
+  "license": "Catalog data license must be confirmed from the selected ASTAP database distribution",
+  "citation": "ASTAP and the selected star database; see the provider documentation",
+  "providerTerms": {
+    "acceptanceId": "astap-external-database-2026-09",
+    "url": "https://www.hnsky.org/astap.htm#download",
+    "summary": "The selected ASTAP database remains externally managed. Review the provider download page and the terms for the exact database before use.",
+    "licenseStatus": "review-required",
+    "requiresExplicitAcceptance": true
+  },
+  "sources": [
+    {"kind": "provider-download-page", "url": "https://www.hnsky.org/astap.htm#download"}
+  ],
+  "allowedDownloadOrigins": [],
+  "coverage": {
+    "sky": "depends on installed database",
+    "magnitude": "depends on installed database",
+    "fieldOfViewDegrees": "depends on installed database"
+  },
+  "artifacts": [
+    {
+      "artifactId": "external-astap-database-directory",
+      "installScope": "external"
+    }
+  ]
+}

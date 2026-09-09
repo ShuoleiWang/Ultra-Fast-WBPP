@@ -1,0 +1,150 @@
+{
+  "$id": "https://openastroflow.org/schema/v1/backend-capabilities-v1.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "BackendFeature": {
+      "enum": [
+        "cpu-execution",
+        "metal-execution",
+        "m3-pro-tuning",
+        "checkpoint-resume",
+        "deterministic-receipts",
+        "offline-astrometric-solver",
+        "drizzle",
+        "mosaic",
+        "fits",
+        "xisf"
+      ],
+      "type": "string"
+    },
+    "HardwareProfile": {
+      "description": "Stable execution profiles. Profiles describe dispatch contracts, not chip names.",
+      "oneOf": [
+        {
+          "description": "Portable non-Windows CPU implementation, including Linux x86-64 CI.",
+          "enum": [
+            "portable-cpu"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Portable `AArch64` CPU implementation for every Apple M-series generation and other compatible Arm64 hosts.",
+          "enum": [
+            "generic-arm64-cpu"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Portable Metal kernels for every Apple Silicon M-series generation.",
+          "enum": [
+            "generic-apple-metal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Aggressively tuned Metal/CPU scheduling for Apple M3 Pro only.",
+          "enum": [
+            "m3-pro-tuned"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Portable Windows CPU implementation (x86-64 or Arm64).",
+          "enum": [
+            "windows-cpu"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "StageKind": {
+      "enum": [
+        "ingest",
+        "quality-control",
+        "calibration",
+        "cosmetic-correction",
+        "debayer",
+        "registration",
+        "local-normalization",
+        "integration",
+        "drizzle",
+        "astrometric-solve",
+        "mosaic",
+        "export"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "backendId": {
+      "type": "string"
+    },
+    "backendVersion": {
+      "type": "string"
+    },
+    "features": {
+      "items": {
+        "$ref": "#/definitions/BackendFeature"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "hardwareProfiles": {
+      "items": {
+        "$ref": "#/definitions/HardwareProfile"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "inputExtensions": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "maximumParallelStages": {
+      "format": "uint16",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "outputExtensions": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "schemaVersion": {
+      "format": "uint16",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "stages": {
+      "items": {
+        "$ref": "#/definitions/StageKind"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "workerBuild": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "backendId",
+    "backendVersion",
+    "features",
+    "hardwareProfiles",
+    "maximumParallelStages",
+    "schemaVersion",
+    "stages",
+    "workerBuild"
+  ],
+  "title": "BackendCapabilities",
+  "type": "object",
+  "x-openastroflow-schema-version": 1
+}

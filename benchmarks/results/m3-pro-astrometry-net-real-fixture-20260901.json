@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "kind": "openastroflow-astrometry-net-real-fixture-validation-v1",
+  "validatedAt": "2026-09-01",
+  "host": {
+    "operatingSystem": "macOS",
+    "architecture": "arm64",
+    "device": "Apple M3 Pro"
+  },
+  "adapter": {
+    "id": "astrometry-net",
+    "adapterVersion": "astrometry-net-process-v4",
+    "solverVersion": "0.97"
+  },
+  "fixture": {
+    "class": "retained-real-autocrop-master",
+    "redistributed": false,
+    "filter": "B",
+    "geometry": [4045, 6194],
+    "pixelDataIncludedInRepository": false,
+    "privatePathIncludedInRepository": false
+  },
+  "catalog": {
+    "installation": "user-managed-local-index-set",
+    "availableSeries": [4107, 4108, 4109, 4110, 4111, 4112],
+    "acceptedIndexIdentity": "astrometry.net:index:4107:healpix:-1:hpnside:0",
+    "catalogManaged": true,
+    "installedSetIdentity": "058420d88fccfb65f10d8b0d5aec5652a068b153dd0e1c445e1df46c82770c1c",
+    "manifestSha256": "f49e16cfd2576444c89db6c8e33dd12daddf4368ee6e900243cdf501a2b92549",
+    "selectedIndexArtifact": {
+      "indexId": "4107",
+      "relativeName": "index-4107.fits",
+      "sizeBytes": 164995200,
+      "sha256": "0bfe80012338923d1a7db3a0660a00f67a79c9e8ca51563619001c32d6cb94d7"
+    },
+    "preSolveHashAndStatVerified": true,
+    "postSolveHashAndStatVerified": true
+  },
+  "hint": {
+    "fieldWidthDegrees": 1.11,
+    "searchRadiusDegrees": 3.0,
+    "scaleWindowDegrees": [0.888, 1.332]
+  },
+  "solveProfile": {
+    "downsample": 4,
+    "sourceLimit": 500,
+    "depth": [10, 500],
+    "pixelError": 2.0,
+    "hintedAttemptBudgetSeconds": 30.0,
+    "totalBudgetSeconds": 120.0,
+    "unconstrainedFallbackAvailable": true
+  },
+  "execution": {
+    "attemptCount": 1,
+    "processSeconds": 4.242,
+    "adapterWallSeconds": 5.451,
+    "timedOut": false,
+    "exitCode": 0,
+    "backendSolvedMarkerVerified": true
+  },
+  "quality": {
+    "matchedStars": 56,
+    "matchTableNmatch": 56,
+    "seedQuadStars": 4,
+    "correspondenceRows": 56,
+    "rmsPixels": 2.1713072828855986,
+    "rmsArcsec": 1.4041439212824918,
+    "parity": "POSITIVE",
+    "minimumMatches": 12,
+    "maximumRmsArcsec": 2.0,
+    "scientificGatePassed": true,
+    "wcsValidationPassed": true,
+    "newFitsAgreementMaximumArcsec": 0.005323605600495954
+  },
+  "scope": {
+    "realImage": true,
+    "fixtureRedistributable": false,
+    "provesPublicAdapterExecution": true,
+    "provesCatalogCorrespondenceQualityGate": true,
+    "provesManagedCatalogByteBinding": true,
+    "shareableEvidenceContainsAbsolutePaths": false,
+    "shareableEvidenceContainsSourceImageSha256": false,
+    "shareableEvidenceContainsRawArgvOrLogs": false,
+    "provesEveryFieldAndCatalogSet": false
+  }
+}

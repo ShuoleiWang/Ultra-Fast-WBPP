@@ -1,0 +1,115 @@
+{
+  "schemaVersion": 1,
+  "kind": "ultra-fast-wbpp-input-screening-calibration-validation-v1",
+  "validatedAt": "2026-09-05",
+  "candidateState": "uncommitted-local-worktree",
+  "gui": {
+    "layout": "compact frame-type tabs, acquisition tables and per-group calibration checks",
+    "nativeWindowVerified": true,
+    "nativeGuiScreeningObserved": {
+      "PASS": 20,
+      "REVIEW": 4,
+      "HARD_FAIL": 2
+    },
+    "missingCalibrationStillAllowsScreening": true,
+    "calibrationReadinessIsMetadataOnly": true,
+    "inputScreenshot": "assets/branding/ultra-fast-wbpp-table.jpg",
+    "screeningScreenshot": "assets/branding/ultra-fast-wbpp-screening.jpg",
+    "screeningImagesAreSynthetic": true
+  },
+  "packagedChecks": {
+    "result": "PASS",
+    "realCalibration": "READY",
+    "syntheticQc": {
+      "HARD_FAIL": 2,
+      "PASS": 20,
+      "REVIEW": 4
+    },
+    "denseWrongField": {
+      "HARD_FAIL": 0,
+      "PASS": 10,
+      "REVIEW": 1
+    },
+    "realNinaQc": {
+      "HARD_FAIL": 0,
+      "PASS": 38,
+      "REVIEW": 0
+    },
+    "gatePolicyDigest": "sha256:e9ad7200e0e191019ce59541706049c7d1f7e0c490f3e31de4add90ded2b8c27"
+  },
+  "realNinaCalibration": {
+    "lightCount": 38,
+    "rawFlatCount": 20,
+    "suppliedMasterBiasCount": 1,
+    "suppliedMasterDarkCount": 1,
+    "captureDates": [
+      "2026-05-21",
+      "2026-06-23",
+      "2026-08-13",
+      "2026-08-14"
+    ],
+    "groupCount": 2,
+    "status": "READY",
+    "warningCodes": [
+      "CAPTURE_SESSION_NOT_VERIFIED"
+    ]
+  },
+  "fixes": [
+    "Sparse-field spatial cloud evidence",
+    "Whole-night FWHM degradation without HFR",
+    "Bounded independently supported reference selection",
+    "Evidence revision invalidates older approvals",
+    "Authoritative calibration preflight in native GUI",
+    "Missing and ambiguous Bias diagnostics kept distinct"
+  ],
+  "referenceBootstrap": {
+    "maximumPairs": 3,
+    "controlStarsPerPair": 32,
+    "fullCatalogValidationRetained": true,
+    "unsupportedCandidateDefault": "REVIEW"
+  },
+  "calibrationMath": {
+    "rawBias": "robust integration",
+    "rawDark": "exposure grouping and integration retaining bias",
+    "rawFlat": "matching FlatDark or Bias subtraction, per-frame normalization, robust integration",
+    "suppliedMasterDark": "explicit bias-included semantics; no double subtraction"
+  },
+  "tests": {
+    "pythonFullSuite": {
+      "passed": 569,
+      "skipped": 3
+    },
+    "subsequentMissingBiasRequiredOptional": {
+      "passed": 2
+    },
+    "desktopReact": {
+      "passed": 27
+    },
+    "desktopRust": {
+      "passed": 31
+    }
+  },
+  "bundle": {
+    "minimumMacosTarget": "14.0.0",
+    "machOFileCount": 289,
+    "signature": {
+      "hardenedRuntime": true,
+      "mode": "ad-hoc",
+      "verified": true
+    },
+    "runtimeTreeSha256": "749039cbf21bf00c1c53c55dfcd2964efae4dde493691c1e26e7067054396b3e",
+    "dmgSha256": "fa8ffcf701b683a89643c0d5a5c5af69492c93a8a05abf9fb827dd645b126fb7",
+    "dmgSizeBytes": 78541386,
+    "dmgChecksumVerified": true
+  },
+  "limits": [
+    "Synthetic defect cases are not a real-world recall guarantee",
+    "Metadata cannot prove unchanged Flat dust, rotation or optical path",
+    "Arbitrary mixed-camera/gain/readout/temperature calibration-library routing is not implemented",
+    "Current generated-master declarations require raw reference temperature metadata",
+    "Insufficient or uniformly poor evidence can require human review",
+    "No raw images are deleted or moved; REVIEW defaults to exclusion but may be explicitly approved",
+    "No new full raw-to-WCS run was repeated for this UI/QC update; packaged QC and calibration preflight were rerun"
+  ],
+  "result": "PASS"
+}

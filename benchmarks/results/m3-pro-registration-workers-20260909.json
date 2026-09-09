@@ -1,0 +1,65 @@
+{
+  "shape": [
+    1536,
+    4096
+  ],
+  "frames": 8,
+  "budgetBytes": 2147483648,
+  "evidenceClass": "isolated-synthetic-affine-warp",
+  "baselineFunctionSha256": "1eac1df20eafc2fbc79ca5f489bc163384d8c460383433692a04c0bd00ea025a",
+  "numpyVersion": "2.5.2",
+  "measurements": [
+    {
+      "kernel": "baseline",
+      "workers": 4,
+      "seconds": 5.724721290986054,
+      "fitsByteIdentical": true
+    },
+    {
+      "kernel": "candidate",
+      "workers": 4,
+      "seconds": 5.044460833072662,
+      "fitsByteIdentical": true
+    },
+    {
+      "kernel": "candidate",
+      "workers": 8,
+      "seconds": 4.352573917014524,
+      "fitsByteIdentical": true
+    },
+    {
+      "kernel": "candidate",
+      "workers": 6,
+      "seconds": 5.315894124913029,
+      "fitsByteIdentical": true
+    },
+    {
+      "kernel": "candidate",
+      "workers": 8,
+      "seconds": 4.315564707969315,
+      "fitsByteIdentical": true
+    },
+    {
+      "kernel": "candidate",
+      "workers": 4,
+      "seconds": 5.191297125071287,
+      "fitsByteIdentical": true
+    }
+  ],
+  "comparison": {
+    "old4WorkerSeconds": 5.724721290986054,
+    "new8WorkerMedianSeconds": 4.33406931249192,
+    "speedup": 1.3208651911693963,
+    "wallTimeReduction": 0.242920468579633,
+    "notEndToEnd": true
+  },
+  "validation": {
+    "pytestPassed": 78,
+    "fitsByteIdenticalForAllBenchmarkedWorkers": true,
+    "workingMemoryBudgetUnchanged": true
+  },
+  "sourceSha256": {
+    "packages/openastroflow-engine/src/openastroflow_engine/calibration.py": "b103c37268bc986f93bdc9aff5c25c2bfc88bd38d24ac40297bf510acebad969",
+    "packages/openastroflow-engine/src/openastroflow_engine/pixel_pipeline.py": "80d22f54c7da5c19d98d715aeb5e023aceec86c2213fe23d01c9f159f4137d79"
+  }
+}

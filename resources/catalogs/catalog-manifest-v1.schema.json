@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openastroflow.org/schema/v1/catalog-manifest-v1.schema.json",
+  "title": "Ultra-Fast WBPP catalog manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "catalogId",
+    "provider",
+    "version",
+    "bundled",
+    "redistributionStatus",
+    "license",
+    "citation",
+    "providerTerms",
+    "allowedDownloadOrigins",
+    "artifacts"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "catalogId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9.-]+$"},
+    "provider": {"type": "string", "minLength": 1},
+    "version": {"type": "string", "minLength": 1},
+    "homepage": {"type": "string", "format": "uri"},
+    "downloadPage": {"type": "string", "format": "uri"},
+    "bundled": {"type": "boolean"},
+    "redistributionStatus": {
+      "enum": ["approved", "user-download-required", "review-required", "forbidden"]
+    },
+    "license": {"type": "string", "minLength": 1},
+    "citation": {"type": "string", "minLength": 1},
+    "providerTerms": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "acceptanceId",
+        "url",
+        "summary",
+        "licenseStatus",
+        "requiresExplicitAcceptance"
+      ],
+      "properties": {
+        "acceptanceId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9.-]+$"},
+        "url": {"type": "string", "pattern": "^https://"},
+        "summary": {"type": "string", "minLength": 1},
+        "licenseStatus": {
+          "enum": ["confirmed", "provider-specific-unresolved", "review-required"]
+        },
+        "requiresExplicitAcceptance": {"type": "boolean"}
+      }
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "url"],
+        "properties": {
+          "kind": {"type": "string", "minLength": 1},
+          "url": {"type": "string", "pattern": "^https://"}
+        }
+      }
+    },
+    "allowedDownloadOrigins": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^https://[A-Za-z0-9.-]+(?::443)?$"}
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sky": {"type": "string"},
+        "magnitude": {"type": "string"},
+        "fieldOfViewDegrees": {"type": "string"}
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["artifactId", "installScope"],
+        "properties": {
+          "artifactId": {"type": "string", "minLength": 1},
+          "url": {"type": "string", "format": "uri"},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "sizeBytes": {"type": "integer", "minimum": 1},
+          "providerMd5": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+          "scale": {"type": "integer", "minimum": 0},
+          "quadScaleArcminutes": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["minimum", "maximum"],
+            "properties": {
+              "minimum": {"type": "number", "exclusiveMinimum": 0},
+              "maximum": {"type": "number", "exclusiveMinimum": 0}
+            }
+          },
+          "recommendedImageFieldOfViewDegrees": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["minimum", "maximum", "basis"],
+            "properties": {
+              "minimum": {"type": "number", "exclusiveMinimum": 0},
+              "maximum": {"type": "number", "exclusiveMinimum": 0},
+              "basis": {"type": "string", "minLength": 1}
+            }
+          },
+          "installScope": {"enum": ["user", "application", "external"]}
+        },
+        "allOf": [
+          {
+            "if": {
+              "required": ["url"]
+            },
+            "then": {
+              "required": ["sha256", "sizeBytes"]
+            }
+          }
+        ]
+      }
+    }
+  }
+}

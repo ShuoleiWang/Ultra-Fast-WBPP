@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openastroflow.org/schema/sidecar-manifest-v2.schema.json",
+  "title": "Ultra-Fast WBPP worker runtime-tree manifest v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "targetTriple",
+    "runtime",
+    "protocol",
+    "versions",
+    "collections"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "kind": { "const": "openastroflow-worker-sidecar" },
+    "targetTriple": {
+      "enum": [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "aarch64-pc-windows-msvc",
+        "x86_64-pc-windows-msvc",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu"
+      ]
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "directoryName",
+        "entryPoint",
+        "treeSha256",
+        "sizeBytes",
+        "fileCount",
+        "entryCount",
+        "entries"
+      ],
+      "properties": {
+        "directoryName": {
+          "type": "string",
+          "pattern": "^openastroflow-worker-[a-zA-Z0-9_-]+$"
+        },
+        "entryPoint": {
+          "type": "string",
+          "pattern": "^openastroflow-worker-[a-zA-Z0-9_-]+(?:\\.exe)?$"
+        },
+        "treeSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "sizeBytes": { "type": "integer", "minimum": 1 },
+        "fileCount": { "type": "integer", "minimum": 1 },
+        "entryCount": { "type": "integer", "minimum": 1 },
+        "entries": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path", "type"],
+                "properties": {
+                  "path": { "type": "string", "minLength": 1 },
+                  "type": { "const": "directory" }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path", "type", "target"],
+                "properties": {
+                  "path": { "type": "string", "minLength": 1 },
+                  "type": { "const": "symlink" },
+                  "target": { "type": "string", "minLength": 1 }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path", "type", "sha256", "sizeBytes", "executable"],
+                "properties": {
+                  "path": { "type": "string", "minLength": 1 },
+                  "type": { "const": "file" },
+                  "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                  "sizeBytes": { "type": "integer", "minimum": 0 },
+                  "executable": { "type": "boolean" }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "engineVersion", "capabilities"],
+      "properties": {
+        "version": { "const": 1 },
+        "engineVersion": { "type": "string", "minLength": 1 },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["backendId", "hardwareProfiles", "stages", "features"],
+          "properties": {
+            "backendId": { "type": "string", "minLength": 1 },
+            "hardwareProfiles": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "stages": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "features": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    "versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["python", "pyinstaller", "packages"],
+      "properties": {
+        "python": { "type": "string", "minLength": 1 },
+        "pyinstaller": { "type": "string", "minLength": 1 },
+        "packages": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "astropy",
+            "drizzle",
+            "reproject",
+            "shapely",
+            "light-frame-qc",
+            "openastroflow-engine",
+            "openastroflow-registration",
+            "xisf"
+          ],
+          "properties": {
+            "astropy": { "type": "string", "minLength": 1 },
+            "drizzle": { "type": "string", "minLength": 1 },
+            "reproject": { "type": "string", "minLength": 1 },
+            "shapely": { "type": "string", "minLength": 1 },
+            "light-frame-qc": { "type": "string", "minLength": 1 },
+            "openastroflow-engine": { "type": "string", "minLength": 1 },
+            "openastroflow-registration": { "type": "string", "minLength": 1 },
+            "xisf": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "collections": {
+      "type": "array",
+      "prefixItems": [
+        { "const": "openastroflow_engine" },
+        { "const": "lightframeqc" },
+        { "const": "openastroflow_registration" },
+        { "const": "astropy" },
+        { "const": "drizzle" }
+        ,{ "const": "reproject" }
+        ,{ "const": "shapely" }
+      ],
+      "items": false,
+      "minItems": 7,
+      "maxItems": 7
+    }
+  }
+}

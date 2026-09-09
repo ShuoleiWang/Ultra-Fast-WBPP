@@ -1,0 +1,41 @@
+# Release process
+
+This is a release checklist, not a stable-release claim. The current distribution is an unsigned/ad-hoc-signed macOS development build. Hosted CI must pass on the actual public commit; local tests and earlier retained receipts do not establish that result. Windows has no accepted installed bundle or real-data E2E, and no Developer ID/notarized or Authenticode-signed artifact is available.
+
+## Before opening the repository
+
+- Select the canonical repository URL and verify the README, package metadata and issue/security links against it.
+- Enable private vulnerability reporting and protect `main` with pull-request review and the `CI gate` status check.
+- Review the source tree and Git history for secrets, private data and redistribution rights. `make source-check` covers tracked and new nonignored files, including README image links; it is not a secret scanner. Run `gitleaks` against the candidate and history separately.
+- Mark the first public version as alpha and list actual platform/scientific limits. Publishing source does not require claiming production readiness.
+
+## Release candidate
+
+1. Freeze protocol, project, recipe, receipt, catalog and publication schemas.
+2. Run the full macOS, Windows and Linux-development CI matrix from a clean checkout.
+3. Run staged `gitleaks`, public-tree checks, `npm audit`, `cargo audit`, Python vulnerability scanning, CodeQL and dependency review.
+4. On each native release platform, install the complete Python/PyInstaller dependency closure from a target-specific lock in which every artifact is exactly versioned and SHA-256 bound, then install the three first-party packages without dependency re-resolution. Run `pip check`, build all first-party wheels from source, install them into empty environments, and run CLI/worker/synthetic E2E smoke tests.
+5. Build native CPU and Metal workers, record compiler/SDK/deployment targets and run CPU↔accelerator differential tests.
+6. Build the Tauri application with an immutable PyInstaller onedir resource; verify no launch-time extraction and no user Python/Rust/Node requirement.
+7. Generate a complete bundle-content SPDX/CycloneDX SBOM, complete third-party notices, artifact SHA-256 files and provenance attestations. Satisfy the GPL/LGPL corresponding-source and relinking requirements described in [licensing](licensing.md); the original-code MIT license does not cover the whole frozen worker. `npm sbom --package-lock-only --sbom-format cyclonedx` is available offline for the complete desktop JavaScript lock graph, but it is only a conservative source-component SBOM: it includes build dependencies and does not prove which modules entered the compiled frontend, inventory the Rust executable/native libraries, or describe the exact PyInstaller contents. It therefore cannot satisfy this gate by itself. The repository does not yet pin or bootstrap `cargo-cyclonedx` or `cyclonedx-py`; a release must not install unpinned generators or infer frozen-worker contents from the build environment. Until pinned generators and a post-bundle merge/verification step are checked in and tested, this gate remains open and no artifact may claim a complete SBOM.
+8. Run retained real-data validation without adding source frames or machine paths to the release repository.
+
+The current repository does not yet contain trustworthy `macOS arm64` or `Windows x64` hash-locked Python closures. The broad dependency ranges in package metadata and `packaging/worker/requirements-build.txt` are development inputs, not release locks, and pip's download cache is not a lockfile. For each platform being shipped, stable builds require a lock generated and verified on that native target, installation with `--require-hashes --only-binary=:all:` without resolver fallback, and a bundled-runtime manifest binding the lock digest, Python ABI and target triple. A macOS-only release need not wait for Windows support, but must exclude Windows artifacts and support claims. Do not synthesize one platform's lock from another platform's installed environment or incomplete cache.
+
+## Signing and publication
+
+macOS release builds require Developer ID signing, hardened runtime, notarization and stapling. Windows installers require Authenticode signing. Signing credentials live only in protected release secrets and are never accepted through project files or command-line arguments written to logs.
+
+Tag-triggered pre-1.0 validation builds use the checked-in `tauri.prerelease.conf.json` to apply an ad-hoc hardened-runtime signature on macOS. This seals the app and bundled worker for integrity testing but does not establish a developer identity or bypass Gatekeeper; the GitHub release is therefore labeled `unsigned prerelease`. Stable automation must replace that identity with protected platform signing material and reject an ad-hoc signature. The macOS artifact must then pass Apple's notarization service and have its ticket stapled before publication.
+
+The root `LICENSE`, `NOTICE`, and `THIRD_PARTY_NOTICES.md` files are mapped directly into the desktop bundle as `legal/LICENSE`, `legal/NOTICE`, and `legal/THIRD_PARTY_NOTICES.md`; there are no copied source-tree mirrors that can drift. The licensing guide and preserved license texts are also mapped to `legal/docs/licensing.md` and `legal/LICENSES`; the attestor rejects missing or changed required legal files. Tauri's `licenseFile` points to the original-code MIT `LICENSE`, so installer documentation must also explain the separate bundled-worker terms. `make desktop-build` selects the same `tauri:build:macos-prerelease` package script as release CI on macOS; `make desktop-build-macos-prerelease` is the explicit equivalent. On macOS, that dependency chain first materializes the digest-pinned Sonoma OpenSSL/mpdecimal OCI inputs with the fail-closed fetcher and supplies them to the sidecar overlay; Windows never runs or consumes this macOS-only step. This command intentionally emits the `.app` only, because the create-only DMG and mounted-image attestation remain separate release steps.
+
+The tag workflow creates a **draft prerelease**; it does not publish artifacts publicly. A maintainer verifies signatures, checksums, inventories, licenses, install/uninstall behavior, and the exact Git commit before publishing that draft. The pre-sign runtime-tree manifest and a separately generated post-sign bundled-tree attestation are both retained; the latter must come from the actual `.app` or installed Windows layout. Unsigned development builds must remain labeled prereleases. A stable release needs a separate signing and verification workflow; the existing tag workflow cannot produce one.
+
+## Catalogs and optional workers
+
+Catalog databases, ASTAP, Astrometry.net and Siril follow separate manifests and licenses. A catalog manifest binds provider, version, URL, expected size/hash, license status, citation and coverage metadata. The desktop downloads only after displaying scope/storage requirements, verifies the hash before installation, and never treats a program binary as proof that an appropriate catalog is present.
+
+## Updates and rollback
+
+There is no automatic update channel in the current application. Retain the previous installer and use manual installation when reverting a version. A future updater needs signed manifests, version-order and platform checks, digest verification and a tested rollback procedure before it is enabled. Scientific artifacts remain independent of application updates; applications must refuse execution when they do not understand a recipe or receipt schema.

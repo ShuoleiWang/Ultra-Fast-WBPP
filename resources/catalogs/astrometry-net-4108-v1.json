@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "catalogId": "astrometry-net-4108",
+  "provider": "Astrometry.net",
+  "version": "4100-series-4108-2013-03-05",
+  "homepage": "https://data.astrometry.net/",
+  "downloadPage": "https://data.astrometry.net/4100/",
+  "bundled": false,
+  "redistributionStatus": "user-download-required",
+  "license": "Index/data terms remain provider-governed; OpenAstroFlow does not redistribute this artifact",
+  "citation": "Lang et al. 2010, Astrometry.net; index-4108 built from the Tycho-2 catalog",
+  "providerTerms": {
+    "acceptanceId": "astrometry-net-index-data-2026-09",
+    "url": "https://astrometry.net/doc/readme.html#getting-index-files",
+    "summary": "Astrometry.net states that index files have separate license conditions. OpenAstroFlow makes no redistribution or license grant and downloads only from the provider after the user reviews this notice and explicitly accepts responsibility for use.",
+    "licenseStatus": "provider-specific-unresolved",
+    "requiresExplicitAcceptance": true
+  },
+  "sources": [
+    {"kind": "scale-guide", "url": "https://astrometry.net/doc/readme.html#getting-index-files"},
+    {"kind": "directory-listing", "url": "https://data.astrometry.net/4100/"},
+    {"kind": "provider-md5", "url": "https://data.astrometry.net/4100/md5sums.txt"}
+  ],
+  "allowedDownloadOrigins": ["https://data.astrometry.net"],
+  "coverage": {
+    "sky": "all sky",
+    "magnitude": "Tycho-2-derived index",
+    "fieldOfViewDegrees": "recommended for quads approximately 30-42 arcminutes"
+  },
+  "artifacts": [
+    {
+      "artifactId": "index-4108.fits",
+      "url": "https://data.astrometry.net/4100/index-4108.fits",
+      "sha256": "192086ee4ba56b6f74e3bc313d1bf56cbbbb486b23b66686a6e121978a06cdf2",
+      "sizeBytes": 94550400,
+      "providerMd5": "e6a3a643fa06cbbdf1dee478e4d84a32",
+      "scale": 8,
+      "quadScaleArcminutes": {"minimum": 30, "maximum": 42},
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.5,
+        "maximum": 7.0,
+        "basis": "Derived from the provider rule that index quads should span approximately 10%-100% of image width"
+      },
+      "installScope": "user"
+    }
+  ]
+}

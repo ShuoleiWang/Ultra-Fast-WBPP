@@ -1,0 +1,36 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      rust:
+        patterns: ["*"]
+  - package-ecosystem: npm
+    directory: "/apps/desktop"
+    schedule:
+      interval: weekly
+    groups:
+      desktop:
+        patterns: ["*"]
+  - package-ecosystem: pip
+    directory: "/packages/light-frame-qc"
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: "/packages/openastroflow-engine"
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: "/engine/native/python"
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: "/packaging/worker"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

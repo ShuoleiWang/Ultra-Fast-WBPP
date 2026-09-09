@@ -1,0 +1,43 @@
+{
+  "$id": "https://openastroflow.org/schema/v1/project-receipt-v1.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Immutable identity binding for the project snapshot consumed by a run.",
+  "properties": {
+    "capturedAtUnixMs": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "inputManifestSha256": {
+      "type": "string"
+    },
+    "projectId": {
+      "type": "string"
+    },
+    "projectSha256": {
+      "type": "string"
+    },
+    "resolvedSourceCount": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "schemaVersion": {
+      "format": "uint16",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "capturedAtUnixMs",
+    "inputManifestSha256",
+    "projectId",
+    "projectSha256",
+    "resolvedSourceCount",
+    "schemaVersion"
+  ],
+  "title": "ProjectReceipt",
+  "type": "object",
+  "x-openastroflow-schema-version": 1
+}

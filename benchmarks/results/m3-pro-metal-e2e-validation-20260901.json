@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "kind": "openastroflow-metal-e2e-validation-v1",
+  "validatedAt": "2026-09-01",
+  "host": {
+    "operatingSystem": "macOS 26.6.2",
+    "architecture": "arm64",
+    "device": "Apple M3 Pro",
+    "logicalCores": 12,
+    "memoryGiB": 36
+  },
+  "nativeLibrary": {
+    "abiVersion": 1,
+    "sha256": "sha256:7fc7cf5d762a22686bc888fc2a9f556a01a3b891257f3570d93a84ed641a4f4c",
+    "fastMath": false
+  },
+  "nativeTests": {
+    "commandClass": "ctest native Metal differential and C ABI",
+    "passed": 4,
+    "failed": 0,
+    "metalSkipped": 0,
+    "includesNinetySixFrameMaskedCAbi": true,
+    "includesFiveHundredTwelveFrameMaskedKernel": true
+  },
+  "wheelPackaging": {
+    "filename": "openastroflow_engine-0.1.0-py3-none-macosx_14_0_arm64.whl",
+    "sha256": "sha256:346cda73a5da37b45e9fd631ce30b5a0d25b1cdac84da085f149bfb97bde1d1e",
+    "rootIsPurelib": false,
+    "containsBundledNativeLibrary": true,
+    "bundledExecutorProbe": "PASS",
+    "sourceTreeRequiredAtRuntime": false
+  },
+  "fullStackNinetySixFrames": {
+    "selectedBackend": "m3-pro-tuned",
+    "acceleratorUsed": true,
+    "algorithm": "cpu-mad-mask-plus-metal-full-stack-weighted-v1",
+    "inputFrameCount": 96,
+    "inputFramesTruncated": false,
+    "partialMeanBatching": false,
+    "tileRows": 64,
+    "inflightBuffers": 2,
+    "peakInflightBuffers": 1,
+    "configuredCpuWorkers": 8,
+    "cpuWorkersUsed": 1,
+    "integrationMemoryBudgetBytes": 4294967296,
+    "executorScope": "integration-group",
+    "deviceName": "Apple M3 Pro",
+    "parityGate": {
+      "finiteMaskEqual": true,
+      "rejectionCountsEqual": true,
+      "pixelsCompared": 4096,
+      "domain": "normalized-float32",
+      "maxAbs": 0.000000059604644775390625,
+      "maxAbsLimit": 0.000002,
+      "rmse": 0.000000059604644775390625,
+      "rmseLimit": 0.0000002,
+      "passed": true
+    }
+  },
+  "exactNinetySixFrameKernelBenchmark": {
+    "artifact": "m3-pro-integration-96-20260901.json",
+    "sha256": "sha256:6d5f4bb51d5b732dd1079a0204393a1efdd1f078368bf1c481ff922a5f52fd4c",
+    "geometry": [4176, 6252],
+    "frameCount": 96,
+    "tileRows": 64,
+    "wallSeconds": 4.2462103329999996,
+    "gpuSeconds": 0.72832741687307134,
+    "includesImageIo": false,
+    "includesRejectionGeneration": false
+  },
+  "syntheticE2E": {
+    "state": "SOLVED",
+    "success": true,
+    "inputLightCount": 8,
+    "passedLightCount": 8,
+    "selectedBackend": "m3-pro-tuned",
+    "acceleratorUsed": true,
+    "deviceName": "Apple M3 Pro",
+    "tileRows": 64,
+    "inflightBuffers": 2,
+    "peakInflightBuffers": 2,
+    "configuredCpuWorkers": 8,
+    "cpuWorkersUsed": 2,
+    "integrationMemoryBudgetBytes": 4294967296,
+    "executorScope": "pipeline",
+    "fastMath": false,
+    "parityGate": {
+      "finiteMaskEqual": true,
+      "rejectionCountsEqual": true,
+      "pixelsCompared": 8192,
+      "domain": "normalized-float32",
+      "maxAbs": 0.000000059604644775390625,
+      "maxAbsLimit": 0.000002,
+      "rmse": 0.00000000822851296843602,
+      "rmseLimit": 0.0000002,
+      "passed": true
+    },
+    "astrometryStatus": "SOLVED",
+    "receiptId": "sha256:cf6a4397667bb214b0d7a920301e6bf20ab83abca2af6250e0f30c80506f638b"
+  },
+  "scope": {
+    "synthetic": true,
+    "provesProductionPythonToCAbiToMetalDispatch": true,
+    "provesRealDataThroughput": false,
+    "provesNonM3Hardware": false
+  }
+}

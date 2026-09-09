@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "calibration": {
+    "flat": "REQUIRED",
+    "dark": "OPTIONAL",
+    "bias": "REQUIRED",
+    "allowMasters": true
+  },
+  "solver": {
+    "policy": "REQUIRED",
+    "backend": "auto",
+    "searchRadiusDegrees": 15.0
+  },
+  "drizzle": {
+    "enabled": true,
+    "backend": "stsci-drizzle-cpu",
+    "scale": 2,
+    "dropShrink": 0.9,
+    "cfaDrizzle": false
+  },
+  "outputFormat": "FITS",
+  "overwrite": false
+}

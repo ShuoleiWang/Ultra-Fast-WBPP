@@ -1,0 +1,83 @@
+# Build and package outputs
+/build/
+**/build/
+/dist/
+/target/
+**/target/
+**/node_modules/
+**/.vite/
+**/coverage/
+apps/desktop/src-tauri/binaries/
+apps/desktop/src-tauri/resources/openastroflow-worker/
+*.dSYM/
+*.app/
+*.dmg
+*.msi
+*.msix
+*.exe
+
+# Native runtime binaries are built and installed into the Python package only
+# inside release staging. Source control retains the C++/Metal implementation.
+/packages/openastroflow-engine/src/openastroflow_engine/native/*.dylib
+/packages/openastroflow-engine/src/openastroflow_engine/native/*.so
+/packages/openastroflow-engine/src/openastroflow_engine/native/*.dll
+
+# Python environments and caches
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Local application state and catalogs
+.openastroflow/
+/catalogs/
+/cache/
+/workspace/
+*.sqlite
+*.sqlite3
+
+# Raw astronomical data and generated scientific products. Tiny public test
+# fixtures must live under tests/fixtures and are explicitly allowed below.
+*.fit
+*.fits
+*.fts
+*.fz
+*.xisf
+*.xdrz
+*.xnml
+*.tif
+*.tiff
+!tests/fixtures/**/*.fit
+!tests/fixtures/**/*.fits
+!tests/fixtures/**/*.fts
+!tests/fixtures/**/*.xisf
+!packages/**/tests/fixtures/**/*.fit
+!packages/**/tests/fixtures/**/*.fits
+!packages/**/tests/fixtures/**/*.fts
+!packages/**/tests/fixtures/**/*.xisf
+
+# Credentials, signing material, and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.xssk
+*.xsgn
+*.mobileprovision
+*.api-key
+secrets.*
+
+# IDE and OS metadata
+.DS_Store
+.idea/
+.vscode/
+*.swp
+Thumbs.db

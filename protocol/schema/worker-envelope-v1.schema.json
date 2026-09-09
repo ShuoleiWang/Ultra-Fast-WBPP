@@ -1,0 +1,1170 @@
+{
+  "$id": "https://openastroflow.org/schema/v1/worker-envelope-v1.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ArtifactDesignation": {
+      "enum": [
+        "intermediate",
+        "diagnostic",
+        "final-master"
+      ],
+      "type": "string"
+    },
+    "ArtifactKind": {
+      "enum": [
+        "frame-manifest",
+        "quality-report",
+        "master-bias",
+        "master-dark",
+        "master-flat",
+        "calibrated-light",
+        "registered-light",
+        "local-normalization-model",
+        "drizzle-data",
+        "integration-master",
+        "drizzled-master",
+        "solved-master",
+        "mosaic-master",
+        "final-master",
+        "run-log"
+      ],
+      "type": "string"
+    },
+    "ArtifactMessage": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact": {
+          "$ref": "#/definitions/ArtifactReceipt"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "stage": {
+          "$ref": "#/definitions/StageReceipt"
+        }
+      },
+      "required": [
+        "artifact",
+        "requestId",
+        "runId",
+        "stage"
+      ],
+      "type": "object"
+    },
+    "ArtifactReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "artifactId": {
+          "type": "string"
+        },
+        "astrometry": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AstrometricSolutionReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attributes": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "createdAtUnixMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "designation": {
+          "$ref": "#/definitions/ArtifactDesignation"
+        },
+        "drizzle": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DrizzleReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "$ref": "#/definitions/ArtifactKind"
+        },
+        "mediaType": {
+          "type": "string"
+        },
+        "producedByStageId": {
+          "type": "string"
+        },
+        "relativePath": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "sizeBytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "artifactId",
+        "createdAtUnixMs",
+        "designation",
+        "kind",
+        "mediaType",
+        "producedByStageId",
+        "relativePath",
+        "schemaVersion",
+        "sha256",
+        "sizeBytes"
+      ],
+      "type": "object"
+    },
+    "AstrometricParity": {
+      "enum": [
+        "POSITIVE",
+        "NEGATIVE"
+      ],
+      "type": "string"
+    },
+    "AstrometricSolutionReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "catalogIdentity": {
+          "description": "SHA-256 identity of the exact catalog rows/release used for the solve.",
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "catalogManaged": {
+          "const": true,
+          "description": "True only when the solver INDEXID is bound to app-managed index bytes.",
+          "type": "boolean"
+        },
+        "catalogManifestSha256": {
+          "description": "Digest of the checked catalog manifest that authorized those bytes.",
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "centerDecDegrees": {
+          "format": "double",
+          "type": "number"
+        },
+        "centerRaDegrees": {
+          "format": "double",
+          "type": "number"
+        },
+        "correspondenceSha256": {
+          "description": "Digest of the correspondence table from which match/RMS evidence was recomputed.",
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "indexArtifacts": {
+          "description": "Exact managed index artifacts selected by the backend's match table.",
+          "items": {
+            "$ref": "#/definitions/SolverIndexArtifactReceipt"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "indexIdentities": {
+          "description": "Backend-native index identifiers (for example INDEXID/healpix tuples).",
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "installedSetIdentity": {
+          "description": "Identity of the immutable installed-set receipt used for this solution.",
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "matchedStars": {
+          "format": "uint32",
+          "minimum": 3.0,
+          "type": "integer"
+        },
+        "parity": {
+          "$ref": "#/definitions/AstrometricParity"
+        },
+        "pixelScaleArcsec": {
+          "format": "double",
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "projection": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "referenceFrame": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "rmsArcsec": {
+          "format": "double",
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "rmsPixels": {
+          "format": "double",
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "rotationDegrees": {
+          "format": "double",
+          "type": "number"
+        },
+        "wcsSha256": {
+          "description": "Digest of the canonical WCS card set embedded in the artifact.",
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "catalogIdentity",
+        "catalogManaged",
+        "catalogManifestSha256",
+        "centerDecDegrees",
+        "centerRaDegrees",
+        "correspondenceSha256",
+        "indexArtifacts",
+        "indexIdentities",
+        "installedSetIdentity",
+        "matchedStars",
+        "parity",
+        "pixelScaleArcsec",
+        "projection",
+        "referenceFrame",
+        "rmsArcsec",
+        "rmsPixels",
+        "rotationDegrees",
+        "wcsSha256"
+      ],
+      "type": "object"
+    },
+    "BackendCapabilities": {
+      "additionalProperties": false,
+      "properties": {
+        "backendId": {
+          "type": "string"
+        },
+        "backendVersion": {
+          "type": "string"
+        },
+        "features": {
+          "items": {
+            "$ref": "#/definitions/BackendFeature"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "hardwareProfiles": {
+          "items": {
+            "$ref": "#/definitions/HardwareProfile"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "inputExtensions": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "maximumParallelStages": {
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "outputExtensions": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "schemaVersion": {
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "stages": {
+          "items": {
+            "$ref": "#/definitions/StageKind"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "workerBuild": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "backendId",
+        "backendVersion",
+        "features",
+        "hardwareProfiles",
+        "maximumParallelStages",
+        "schemaVersion",
+        "stages",
+        "workerBuild"
+      ],
+      "type": "object"
+    },
+    "BackendFeature": {
+      "enum": [
+        "cpu-execution",
+        "metal-execution",
+        "m3-pro-tuning",
+        "checkpoint-resume",
+        "deterministic-receipts",
+        "offline-astrometric-solver",
+        "drizzle",
+        "mosaic",
+        "fits",
+        "xisf"
+      ],
+      "type": "string"
+    },
+    "DrizzleReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "dropShrink": {
+          "format": "float",
+          "type": "number"
+        },
+        "inputFrames": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "kernel": {
+          "type": "string"
+        },
+        "outputHeight": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "outputWidth": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "scale": {
+          "format": "float",
+          "type": "number"
+        }
+      },
+      "required": [
+        "dropShrink",
+        "inputFrames",
+        "kernel",
+        "outputHeight",
+        "outputWidth",
+        "scale"
+      ],
+      "type": "object"
+    },
+    "DrizzleSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "dropShrink": {
+          "default": 0.8999999761581421,
+          "format": "float",
+          "type": "number"
+        },
+        "kernel": {
+          "default": "square",
+          "type": "string"
+        },
+        "result": {
+          "$ref": "#/definitions/ResultRequirement"
+        },
+        "scale": {
+          "default": 2.0,
+          "format": "float",
+          "type": "number"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "type": "object"
+    },
+    "ErrorMessage": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "details": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "message": {
+          "type": "string"
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "runId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stageId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "type": "object"
+    },
+    "ExecuteMessage": {
+      "additionalProperties": false,
+      "properties": {
+        "outputDirectoryName": {
+          "type": "string"
+        },
+        "outputParentHostPath": {
+          "description": "Existing native host directory in which a new result directory is claimed.",
+          "type": "string"
+        },
+        "planId": {
+          "type": "string"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "resumeFromRunId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "outputDirectoryName",
+        "outputParentHostPath",
+        "planId",
+        "requestId",
+        "runId"
+      ],
+      "type": "object"
+    },
+    "HandshakeMessage": {
+      "additionalProperties": false,
+      "properties": {
+        "capabilities": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/BackendCapabilities"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "implementation": {
+          "type": "string"
+        },
+        "implementationVersion": {
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/definitions/PeerRole"
+        },
+        "supportedProtocolVersions": {
+          "items": {
+            "format": "uint16",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "implementation",
+        "implementationVersion",
+        "role",
+        "supportedProtocolVersions"
+      ],
+      "type": "object"
+    },
+    "HardwareProfile": {
+      "description": "Stable execution profiles. Profiles describe dispatch contracts, not chip names.",
+      "oneOf": [
+        {
+          "description": "Portable non-Windows CPU implementation, including Linux x86-64 CI.",
+          "enum": [
+            "portable-cpu"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Portable `AArch64` CPU implementation for every Apple M-series generation and other compatible Arm64 hosts.",
+          "enum": [
+            "generic-arm64-cpu"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Portable Metal kernels for every Apple Silicon M-series generation.",
+          "enum": [
+            "generic-apple-metal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Aggressively tuned Metal/CPU scheduling for Apple M3 Pro only.",
+          "enum": [
+            "m3-pro-tuned"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Portable Windows CPU implementation (x86-64 or Arm64).",
+          "enum": [
+            "windows-cpu"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "InputRole": {
+      "enum": [
+        "light",
+        "flat",
+        "dark",
+        "bias",
+        "master-flat",
+        "master-dark",
+        "master-bias"
+      ],
+      "type": "string"
+    },
+    "PeerRole": {
+      "enum": [
+        "controller",
+        "worker"
+      ],
+      "type": "string"
+    },
+    "PlanMessage": {
+      "additionalProperties": false,
+      "properties": {
+        "inputManifestSha256": {
+          "type": "string"
+        },
+        "planId": {
+          "type": "string"
+        },
+        "project": {
+          "$ref": "#/definitions/Project"
+        },
+        "recipe": {
+          "$ref": "#/definitions/Recipe"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "requestedHardwareProfile": {
+          "$ref": "#/definitions/HardwareProfile"
+        }
+      },
+      "required": [
+        "inputManifestSha256",
+        "planId",
+        "project",
+        "recipe",
+        "requestId",
+        "requestedHardwareProfile"
+      ],
+      "type": "object"
+    },
+    "ProgressMessage": {
+      "additionalProperties": false,
+      "properties": {
+        "completedUnits": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "fraction": {
+          "format": "double",
+          "type": "number"
+        },
+        "message": {
+          "type": "string"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "stageId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/definitions/ProgressState"
+        },
+        "totalUnits": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "fraction",
+        "message",
+        "requestId",
+        "runId",
+        "state"
+      ],
+      "type": "object"
+    },
+    "ProgressState": {
+      "enum": [
+        "queued",
+        "running",
+        "finalizing",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "Project": {
+      "additionalProperties": false,
+      "properties": {
+        "createdAtUnixMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "projectId": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sources": {
+          "items": {
+            "$ref": "#/definitions/ProjectSource"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "createdAtUnixMs",
+        "displayName",
+        "projectId",
+        "schemaVersion",
+        "sources"
+      ],
+      "type": "object"
+    },
+    "ProjectSource": {
+      "additionalProperties": false,
+      "properties": {
+        "filter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hostPath": {
+          "description": "Native path interpreted only by the worker running on the same host.",
+          "type": "string"
+        },
+        "recursive": {
+          "default": false,
+          "type": "boolean"
+        },
+        "role": {
+          "$ref": "#/definitions/InputRole"
+        },
+        "sourceId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "hostPath",
+        "role",
+        "sourceId"
+      ],
+      "type": "object"
+    },
+    "ReceiptError": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "type": "object"
+    },
+    "Recipe": {
+      "additionalProperties": false,
+      "properties": {
+        "displayName": {
+          "type": "string"
+        },
+        "drizzle": {
+          "$ref": "#/definitions/DrizzleSettings"
+        },
+        "parameters": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "recipeId": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "solver": {
+          "$ref": "#/definitions/SolverSettings"
+        },
+        "stages": {
+          "items": {
+            "$ref": "#/definitions/StageSpec"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "displayName",
+        "drizzle",
+        "recipeId",
+        "schemaVersion",
+        "solver",
+        "stages"
+      ],
+      "type": "object"
+    },
+    "ResultRequirement": {
+      "enum": [
+        "disabled",
+        "best-effort",
+        "required"
+      ],
+      "type": "string"
+    },
+    "SolverIndexArtifactReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "indexId": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "installedSetIdentity": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "manifestSha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "relativeName": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "sizeBytes": {
+          "format": "uint64",
+          "minimum": 1.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "indexId",
+        "installedSetIdentity",
+        "manifestSha256",
+        "relativeName",
+        "sha256",
+        "sizeBytes"
+      ],
+      "type": "object"
+    },
+    "SolverSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "catalog": {
+          "default": "gaia-dr3-offline",
+          "type": "string"
+        },
+        "maximumRmsArcsec": {
+          "default": 2.0,
+          "format": "double",
+          "type": "number"
+        },
+        "minimumMatches": {
+          "default": 12,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "projection": {
+          "default": "TAN",
+          "type": "string"
+        },
+        "result": {
+          "$ref": "#/definitions/ResultRequirement"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "type": "object"
+    },
+    "StageKind": {
+      "enum": [
+        "ingest",
+        "quality-control",
+        "calibration",
+        "cosmetic-correction",
+        "debayer",
+        "registration",
+        "local-normalization",
+        "integration",
+        "drizzle",
+        "astrometric-solve",
+        "mosaic",
+        "export"
+      ],
+      "type": "string"
+    },
+    "StageReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "artifactIds": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReceiptError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "finishedAtUnixMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/definitions/StageKind"
+        },
+        "metrics": {
+          "additionalProperties": {
+            "format": "double",
+            "type": "number"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "schemaVersion": {
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "stageId": {
+          "type": "string"
+        },
+        "startedAtUnixMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/definitions/StageStatus"
+        }
+      },
+      "required": [
+        "kind",
+        "schemaVersion",
+        "stageId",
+        "startedAtUnixMs",
+        "status"
+      ],
+      "type": "object"
+    },
+    "StageSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "dependsOn": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/definitions/StageKind"
+        },
+        "parameters": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "stageId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "stageId"
+      ],
+      "type": "object"
+    },
+    "StageStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "succeeded",
+        "failed",
+        "skipped",
+        "cancelled"
+      ],
+      "type": "string"
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "payload": {
+          "$ref": "#/definitions/HandshakeMessage"
+        },
+        "type": {
+          "enum": [
+            "handshake"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "payload",
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "payload": {
+          "$ref": "#/definitions/PlanMessage"
+        },
+        "type": {
+          "enum": [
+            "plan"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "payload",
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "payload": {
+          "$ref": "#/definitions/ExecuteMessage"
+        },
+        "type": {
+          "enum": [
+            "execute"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "payload",
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "payload": {
+          "$ref": "#/definitions/ProgressMessage"
+        },
+        "type": {
+          "enum": [
+            "progress"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "payload",
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "payload": {
+          "$ref": "#/definitions/ArtifactMessage"
+        },
+        "type": {
+          "enum": [
+            "artifact"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "payload",
+        "type"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "payload": {
+          "$ref": "#/definitions/ErrorMessage"
+        },
+        "type": {
+          "enum": [
+            "error"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "payload",
+        "type"
+      ],
+      "type": "object"
+    }
+  ],
+  "properties": {
+    "protocolVersion": {
+      "format": "uint16",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "sentAtUnixMs": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "sequence": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "sessionId": {
+      "type": "string"
+    }
+  },
+  "propertyNames": {
+    "enum": [
+      "protocolVersion",
+      "sessionId",
+      "sequence",
+      "sentAtUnixMs",
+      "type",
+      "payload"
+    ]
+  },
+  "required": [
+    "protocolVersion",
+    "sentAtUnixMs",
+    "sequence",
+    "sessionId"
+  ],
+  "title": "WorkerEnvelope",
+  "type": "object",
+  "x-openastroflow-schema-version": 1
+}

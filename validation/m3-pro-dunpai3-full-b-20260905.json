@@ -1,0 +1,186 @@
+{
+  "schemaVersion": 1,
+  "kind": "ultra-fast-wbpp-real-full-mono-validation-v1",
+  "validatedAt": "2026-09-05",
+  "productName": "Ultra-Fast WBPP",
+  "candidateState": "uncommitted-local-worktree",
+  "host": {
+    "operatingSystem": "macOS 26.6.2",
+    "architecture": "arm64",
+    "device": "Apple M3 Pro",
+    "memoryGiB": 36
+  },
+  "fixture": {
+    "class": "retained-private-nina-mono-full-filter-group",
+    "camera": "QHY268M",
+    "filter": "B",
+    "lightExposureSeconds": 300.0,
+    "lightCount": 38,
+    "rawFlatCount": 20,
+    "suppliedMasterBiasCount": 1,
+    "suppliedMasterDarkCount": 1,
+    "pixInsightReferenceAvailableLocally": true,
+    "inputOrReferencePixelsRedistributed": false,
+    "sourcePathsOrContentHashesRecorded": false,
+    "candidatePixelsOrContentHashesRecorded": false
+  },
+  "execution": {
+    "wallSeconds": 466.11598,
+    "sourceImplementationStableBeforeAndAfter": true,
+    "repeatRunPerformed": false,
+    "registrationResampler": "lanczos-3-clamped",
+    "selectedBackend": "m3-pro-tuned",
+    "acceleratorUsed": true,
+    "device": "Apple M3 Pro",
+    "tilesSubmitted": 66,
+    "cpuPreparationWorkers": 8,
+    "maximumInflightBuffers": 2,
+    "gpuWallSecondsSum": 0.422101,
+    "gpuSecondsSum": 0.133327,
+    "submittedBufferBytes": 5169546624,
+    "fastMath": false,
+    "inputFramesTruncated": false,
+    "finalState": "SOLVED"
+  },
+  "qualityControl": {
+    "passedLights": 38,
+    "reviewLights": 0,
+    "hardFailLights": 0,
+    "excludedLights": 0,
+    "brightnessAloneIsNotARejectionRule": true
+  },
+  "calibrationNumericDomains": {
+    "lightStorage": "UInt16 FITS sensor-code domain",
+    "lightNormalizedUnitScale": 65535.0,
+    "masterBiasStorage": "Float32 XISF with explicit bounds 0:1",
+    "masterDarkStorage": "Float32 XISF with explicit bounds 0:1",
+    "additiveMasterNormalizedUnitScale": 1.0,
+    "additiveApplicationScale": 65535.0,
+    "receiptOracleChecksPassed": 4,
+    "receiptOracleChecksTotal": 4,
+    "registrationAndFullPixelPipelineUseSameScale": true
+  },
+  "registration": {
+    "acceptedTransforms": 38,
+    "referenceFrames": 1,
+    "fullResolutionAffineRefinements": 37,
+    "maximumRmsPixels": 0.5478,
+    "minimumFullResolutionInliers": 667,
+    "independentMasterAlignmentRmsPixels": 0.28758,
+    "independentMasterAlignmentInliers": 789,
+    "candidateCropAreaFractionOfPixInsightAutoCrop": 0.979507
+  },
+  "globalNormalization": {
+    "algorithm": "matched-stellar-scale-plus-smoothed-additive-grid-v3",
+    "referenceFrames": 1,
+    "guardedAdditiveGridFrames": 1,
+    "scalarOffsetFallbackFrames": 36,
+    "stellarScaleHintsBound": 37,
+    "stellarScaleHintsExpected": 37,
+    "stellarScaleMedianRelativeError": 0.01556,
+    "stellarScaleP90RelativeError": 0.03901,
+    "stellarPhotometryMedianAbsoluteMagnitudeError": 0.0170,
+    "stellarPhotometryP90AbsoluteMagnitudeError": 0.0432,
+    "referenceSampleCacheBytes": 14147024,
+    "fullReferenceMaterialized": false,
+    "oracleChecksPassed": 6,
+    "oracleChecksTotal": 6
+  },
+  "integration": {
+    "frameCount": 38,
+    "cpuMetalParity": {
+      "sampledTileCount": 3,
+      "sampledFirstRows": [0, 2112, 4160],
+      "pixelsCompared": 900288,
+      "finiteMaskEqual": true,
+      "rejectionCountsEqual": true,
+      "maxAbs": 5.960464477539063e-8,
+      "maxAbsLimit": 2e-6,
+      "rmse": 2.95e-10,
+      "rmseLimit": 2e-7,
+      "passed": true
+    },
+    "minimumAcceptedSamplesPublished": 23,
+    "candidateRejectedSampleFraction": 0.003382
+  },
+  "astrometry": {
+    "backend": "astrometry-net",
+    "catalogManaged": true,
+    "matchedStars": 55,
+    "rmsPixels": 1.952851,
+    "rmsArcsec": 1.26299,
+    "pixelScaleArcsec": 0.646838,
+    "publishedRoundTripMaxPixels": 3.57e-10,
+    "qualityGate": "PASS"
+  },
+  "publishedMasterIntegrity": {
+    "nonfinitePixelCount": 0,
+    "negativePixelCount": 0,
+    "fitsVerification": "PASS"
+  },
+  "independentPixInsightComparison": {
+    "gateResult": "PASS",
+    "passedChecks": 25,
+    "totalChecks": 25,
+    "photometry": {
+      "matchedStars": 1942,
+      "robustScatterMagnitude": 0.00553,
+      "p90AbsoluteResidualMagnitude": 0.01397,
+      "spatialPeakToPeakMagnitude": 0.00748
+    },
+    "background": {
+      "p05P95SpanFractionOfSky": 0.008812,
+      "robustSigmaFractionOfSky": 0.002123,
+      "meshPearson": 0.992205
+    },
+    "psf": {
+      "medianR50RatioCandidateToReference": 1.00293,
+      "medianR80RatioCandidateToReference": 1.00238
+    },
+    "noise": {
+      "candidateToReferenceSigmaRatio": 0.955955,
+      "absoluteLag1CorrelationDifference": 0.014101
+    },
+    "rejection": {
+      "candidateToReferenceMeanRatio": 0.2845,
+      "blockMeanPearson": 0.8004
+    },
+    "aggregateChecks": {
+      "pearson": {
+        "value": 0.999115428,
+        "minimum": 0.999,
+        "passed": true
+      },
+      "affineNrmse": {
+        "value": 0.04048883,
+        "maximum": 0.05,
+        "passed": true
+      }
+    },
+    "resamplerRegression": {
+      "previousBilinearPearson": 0.998623599,
+      "previousBilinearAffineNrmse": 0.05049725,
+      "previousBilinearR50Ratio": 1.02056,
+      "currentLanczos3Pearson": 0.999115428,
+      "currentLanczos3AffineNrmse": 0.04048883,
+      "currentLanczos3R50Ratio": 1.00293,
+      "postProcessingSharpeningApplied": false,
+      "gateRelaxationApplied": false
+    }
+  },
+  "scope": {
+    "provesSingleFieldMonoOrdinary": true,
+    "provesM3ProMetal": true,
+    "provesAutomaticVerifiedWcs": true,
+    "provesMixedFitsXisfNumericDomainReconciliation": true,
+    "provesPixInsightOrWbppEquivalence": false,
+    "provesLocalNormalization": false,
+    "provesDrizzle": false,
+    "provesMultiPanelMosaic": false,
+    "provesRgbLrgb": false,
+    "provesOscCfa": false,
+    "provesNonM3Hardware": false,
+    "provesPackagedDesktopRealDataE2e": false
+  },
+  "result": "PASS"
+}

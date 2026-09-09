@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "validation": "opt-in-read-only-real-xisf-primary-decode",
+  "date": "2026-09-01",
+  "fixtureClass": "user-supplied-PixInsight-MasterFlat",
+  "sourcePathRecorded": false,
+  "sourceHashRecorded": false,
+  "rawMetadataRecorded": false,
+  "selectedImage": {"id": "integration", "type": "MasterFlat", "geometry": [4176, 6252], "sampleType": "Float32"},
+  "containerImageCount": 3,
+  "ignoredAuxiliaryTypes": ["RejectionMapLow", "RejectionMapHigh"],
+  "storage": "uncompressed-attachment-row-stream",
+  "finitePixelFraction": 1.0,
+  "pixelRange": {"minimum": 0.34160399436950684, "median": 0.48935240507125854, "maximum": 0.5312045812606812},
+  "sourceOpenedReadOnly": true,
+  "privateStagingRemoved": true,
+  "processingHistoryCopied": false,
+  "result": "PASS"
+}

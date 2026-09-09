@@ -1,0 +1,59 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Ultra-Fast WBPP",
+  "version": "0.1.0",
+  "identifier": "org.openastroflow.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Ultra-Fast WBPP",
+        "width": 1280,
+        "height": 840,
+        "minWidth": 880,
+        "minHeight": 640,
+        "center": true,
+        "dragDropEnabled": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": {
+      "resources/openastroflow-worker": "resources/openastroflow-worker",
+      "../../../LICENSE": "legal/LICENSE",
+      "../../../NOTICE": "legal/NOTICE",
+      "../../../THIRD_PARTY_NOTICES.md": "legal/THIRD_PARTY_NOTICES.md",
+      "../../../docs/licensing.md": "legal/docs/licensing.md",
+      "../../../LICENSES": "legal/LICENSES"
+    },
+    "licenseFile": "../../../LICENSE",
+    "copyright": "Copyright 2026 Shuolei Wang and Ultra-Fast WBPP contributors",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Photography",
+    "shortDescription": "End-to-end astrophotography workflow",
+    "longDescription": "Import NINA sessions, quality-gate frames, calibrate, register, integrate, drizzle, and plate-solve in one guided workflow.",
+    "windows": {
+      "wix": {
+        "upgradeCode": "c9df5382-651e-5356-937a-98ee5d0f3e43"
+      }
+    }
+  }
+}

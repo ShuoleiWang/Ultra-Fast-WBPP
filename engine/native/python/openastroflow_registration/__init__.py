@@ -1,0 +1,51 @@
+"""No-PCL star detection, registration, warping, and common-footprint crop."""
+
+from .pipeline import (
+    CalibrationPlan,
+    DetectionConfig,
+    FrameAnalysis,
+    FrameTransform,
+    RegistrationConfig,
+    RegistrationRun,
+    analyze_frames,
+    analyze_frame,
+    calibrate_image,
+    choose_reference,
+    common_autocrop,
+    detect_stars,
+    full_resolution_matrix,
+    read_full_image,
+    register_analyses,
+    run_registration,
+    warp_image,
+)
+from .quality import (
+    StellarScaleEstimate,
+    diagnostic_scores,
+    estimate_stellar_scale_hints,
+    normalize_quality_weights,
+)
+
+__all__ = [
+    "CalibrationPlan",
+    "DetectionConfig",
+    "FrameAnalysis",
+    "FrameTransform",
+    "RegistrationConfig",
+    "RegistrationRun",
+    "analyze_frames",
+    "analyze_frame",
+    "calibrate_image",
+    "choose_reference",
+    "common_autocrop",
+    "detect_stars",
+    "full_resolution_matrix",
+    "read_full_image",
+    "register_analyses",
+    "run_registration",
+    "warp_image",
+    "diagnostic_scores",
+    "normalize_quality_weights",
+    "estimate_stellar_scale_hints",
+    "StellarScaleEstimate",
+]

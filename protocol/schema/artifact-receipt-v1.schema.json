@@ -1,0 +1,315 @@
+{
+  "$id": "https://openastroflow.org/schema/v1/artifact-receipt-v1.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "ArtifactDesignation": {
+      "enum": [
+        "intermediate",
+        "diagnostic",
+        "final-master"
+      ],
+      "type": "string"
+    },
+    "ArtifactKind": {
+      "enum": [
+        "frame-manifest",
+        "quality-report",
+        "master-bias",
+        "master-dark",
+        "master-flat",
+        "calibrated-light",
+        "registered-light",
+        "local-normalization-model",
+        "drizzle-data",
+        "integration-master",
+        "drizzled-master",
+        "solved-master",
+        "mosaic-master",
+        "final-master",
+        "run-log"
+      ],
+      "type": "string"
+    },
+    "AstrometricParity": {
+      "enum": [
+        "POSITIVE",
+        "NEGATIVE"
+      ],
+      "type": "string"
+    },
+    "AstrometricSolutionReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "catalogIdentity": {
+          "description": "SHA-256 identity of the exact catalog rows/release used for the solve.",
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "catalogManaged": {
+          "const": true,
+          "description": "True only when the solver INDEXID is bound to app-managed index bytes.",
+          "type": "boolean"
+        },
+        "catalogManifestSha256": {
+          "description": "Digest of the checked catalog manifest that authorized those bytes.",
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "centerDecDegrees": {
+          "format": "double",
+          "type": "number"
+        },
+        "centerRaDegrees": {
+          "format": "double",
+          "type": "number"
+        },
+        "correspondenceSha256": {
+          "description": "Digest of the correspondence table from which match/RMS evidence was recomputed.",
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "indexArtifacts": {
+          "description": "Exact managed index artifacts selected by the backend's match table.",
+          "items": {
+            "$ref": "#/definitions/SolverIndexArtifactReceipt"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "indexIdentities": {
+          "description": "Backend-native index identifiers (for example INDEXID/healpix tuples).",
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "installedSetIdentity": {
+          "description": "Identity of the immutable installed-set receipt used for this solution.",
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "matchedStars": {
+          "format": "uint32",
+          "minimum": 3.0,
+          "type": "integer"
+        },
+        "parity": {
+          "$ref": "#/definitions/AstrometricParity"
+        },
+        "pixelScaleArcsec": {
+          "format": "double",
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "projection": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "referenceFrame": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "rmsArcsec": {
+          "format": "double",
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "rmsPixels": {
+          "format": "double",
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "rotationDegrees": {
+          "format": "double",
+          "type": "number"
+        },
+        "wcsSha256": {
+          "description": "Digest of the canonical WCS card set embedded in the artifact.",
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "catalogIdentity",
+        "catalogManaged",
+        "catalogManifestSha256",
+        "centerDecDegrees",
+        "centerRaDegrees",
+        "correspondenceSha256",
+        "indexArtifacts",
+        "indexIdentities",
+        "installedSetIdentity",
+        "matchedStars",
+        "parity",
+        "pixelScaleArcsec",
+        "projection",
+        "referenceFrame",
+        "rmsArcsec",
+        "rmsPixels",
+        "rotationDegrees",
+        "wcsSha256"
+      ],
+      "type": "object"
+    },
+    "DrizzleReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "dropShrink": {
+          "format": "float",
+          "type": "number"
+        },
+        "inputFrames": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "kernel": {
+          "type": "string"
+        },
+        "outputHeight": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "outputWidth": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "scale": {
+          "format": "float",
+          "type": "number"
+        }
+      },
+      "required": [
+        "dropShrink",
+        "inputFrames",
+        "kernel",
+        "outputHeight",
+        "outputWidth",
+        "scale"
+      ],
+      "type": "object"
+    },
+    "SolverIndexArtifactReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "indexId": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "installedSetIdentity": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "manifestSha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "relativeName": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "sizeBytes": {
+          "format": "uint64",
+          "minimum": 1.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "indexId",
+        "installedSetIdentity",
+        "manifestSha256",
+        "relativeName",
+        "sha256",
+        "sizeBytes"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "artifactId": {
+      "type": "string"
+    },
+    "astrometry": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/AstrometricSolutionReceipt"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "attributes": {
+      "additionalProperties": true,
+      "default": {},
+      "type": "object"
+    },
+    "createdAtUnixMs": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "designation": {
+      "$ref": "#/definitions/ArtifactDesignation"
+    },
+    "drizzle": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DrizzleReceipt"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "kind": {
+      "$ref": "#/definitions/ArtifactKind"
+    },
+    "mediaType": {
+      "type": "string"
+    },
+    "producedByStageId": {
+      "type": "string"
+    },
+    "relativePath": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "format": "uint16",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "sha256": {
+      "type": "string"
+    },
+    "sizeBytes": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "artifactId",
+    "createdAtUnixMs",
+    "designation",
+    "kind",
+    "mediaType",
+    "producedByStageId",
+    "relativePath",
+    "schemaVersion",
+    "sha256",
+    "sizeBytes"
+  ],
+  "title": "ArtifactReceipt",
+  "type": "object",
+  "x-openastroflow-schema-version": 1
+}

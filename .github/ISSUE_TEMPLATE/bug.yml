@@ -1,0 +1,39 @@
+name: Bug report
+description: Report a reproducible application, workflow, or scientific-result defect
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not upload private frames, credentials, or proprietary software logs. Use the Security policy for path traversal or overwrite vulnerabilities.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: [macOS Apple Silicon, Windows x64, Linux development, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include the recipe, anonymized metadata, and exact steps.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Safe diagnostic evidence
+      description: Remove absolute home paths, source filenames, coordinates, and tokens before pasting.

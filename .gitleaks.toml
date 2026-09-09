@@ -1,0 +1,8 @@
+title = "Ultra-Fast WBPP secret scanning"
+
+[extend]
+useDefault = true
+
+# `gitleaks git` scans committed history, which excludes untracked generated
+# trees. Do not path-allowlist build/resources directories: a force-added secret
+# there must still fail the history scan. Scan candidate files before commit too.

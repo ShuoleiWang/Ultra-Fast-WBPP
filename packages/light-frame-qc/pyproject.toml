@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "light-frame-qc"
+version = "0.3.0"
+description = "Conservative, explainable cloud and hard-obstruction screening for astronomical light frames"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+  {name = "Shuolei Wang"},
+]
+keywords = ["astronomy", "astrophotography", "FITS", "quality-control", "NINA"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS :: MacOS X",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Astronomy",
+]
+dependencies = [
+  "numpy>=2.0",
+  "scipy>=1.14",
+  "astropy>=7.0",
+  "sep>=1.4",
+  "scikit-image>=0.25",
+  "astroalign>=2.6",
+  "Pillow>=11",
+  "xisf>=0.9",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+light-frame-qc = "lightframeqc.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

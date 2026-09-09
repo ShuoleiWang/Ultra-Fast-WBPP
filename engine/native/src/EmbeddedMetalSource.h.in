@@ -1,0 +1,13 @@
+#ifndef OPENASTROFLOW_NATIVE_EMBEDDED_METAL_SOURCE_H
+#define OPENASTROFLOW_NATIVE_EMBEDDED_METAL_SOURCE_H
+
+namespace openastroflow::native
+{
+
+inline constexpr char EmbeddedMetalSource[] = R"OAFMETAL(
+@OAF_EMBEDDED_METAL_SOURCE@
+)OAFMETAL";
+
+} // namespace openastroflow::native
+
+#endif

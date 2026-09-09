@@ -1,0 +1,119 @@
+{
+  "$id": "https://openastroflow.org/schema/v1/stage-receipt-v1.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "ReceiptError": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "type": "object"
+    },
+    "StageKind": {
+      "enum": [
+        "ingest",
+        "quality-control",
+        "calibration",
+        "cosmetic-correction",
+        "debayer",
+        "registration",
+        "local-normalization",
+        "integration",
+        "drizzle",
+        "astrometric-solve",
+        "mosaic",
+        "export"
+      ],
+      "type": "string"
+    },
+    "StageStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "succeeded",
+        "failed",
+        "skipped",
+        "cancelled"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "artifactIds": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ReceiptError"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "finishedAtUnixMs": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "kind": {
+      "$ref": "#/definitions/StageKind"
+    },
+    "metrics": {
+      "additionalProperties": {
+        "format": "double",
+        "type": "number"
+      },
+      "default": {},
+      "type": "object"
+    },
+    "schemaVersion": {
+      "format": "uint16",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "stageId": {
+      "type": "string"
+    },
+    "startedAtUnixMs": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "status": {
+      "$ref": "#/definitions/StageStatus"
+    }
+  },
+  "required": [
+    "kind",
+    "schemaVersion",
+    "stageId",
+    "startedAtUnixMs",
+    "status"
+  ],
+  "title": "StageReceipt",
+  "type": "object",
+  "x-openastroflow-schema-version": 1
+}

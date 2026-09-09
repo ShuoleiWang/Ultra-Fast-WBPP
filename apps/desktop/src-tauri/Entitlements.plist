@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- The prerelease is ad-hoc signed, so its bundled Python framework and
+       native scientific libraries have no common Developer-ID Team ID.
+       Library Validation must remain disabled for that prerelease only. A
+       stable release may remove this entitlement after its complete onedir
+       runtime is recursively signed with the protected application identity
+       and the signed-bundle launch gate passes. -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>

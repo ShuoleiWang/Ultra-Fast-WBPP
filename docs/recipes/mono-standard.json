@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "calibration": {
+    "workflow": "mono-standard-v1",
+    "flat": "REQUIRED",
+    "dark": "OPTIONAL",
+    "bias": "OPTIONAL",
+    "allowMasters": true
+  }
+}

@@ -1,0 +1,172 @@
+{
+  "schemaVersion": 1,
+  "kind": "ultra-fast-wbpp-macos-arm64-local-prerelease-validation-v1",
+  "validatedAt": "2026-09-05",
+  "targetTriple": "aarch64-apple-darwin",
+  "host": {
+    "operatingSystem": "macOS 26.6.2",
+    "architecture": "arm64"
+  },
+  "application": {
+    "bundleName": "Ultra-Fast WBPP.app",
+    "displayName": "Ultra-Fast WBPP",
+    "bundleIdentifier": "org.openastroflow.desktop",
+    "version": "0.1.0",
+    "minimumSystemVersion": "14.0",
+    "executableArchitecture": "arm64",
+    "developmentRegion": "English",
+    "defaultUiLanguage": "English",
+    "optionalUiLanguage": "zh-CN",
+    "languagePreferenceFailSafe": "English when storage is unavailable",
+    "visualStyle": "APPLE_INSPIRED_LIGHT_MINIMAL",
+    "headlineCssPixels": "24-27",
+    "finderDirectLaunch": "PASS",
+    "currentScientificCandidateIncluded": true,
+    "nativeDesktopDistribution": true,
+    "runtimeWebServer": false,
+    "tcpListeningSocketsAtLaunch": 0,
+    "browserPreviewIsDevelopmentOnly": true
+  },
+  "nativeUiScreenshot": {
+    "relativePath": "assets/branding/ultra-fast-wbpp-native-app.png",
+    "geometry": [2560, 1680],
+    "sha256": "b93045296dc1026f034aeb7ccc9b462181d02ea6ebfbfc6f1d62ce01e1a952e2",
+    "containsUserData": false
+  },
+  "workerBuildTree": {
+    "treeForm": "pyinstaller-original-safe-symlink-tree",
+    "entryCount": 582,
+    "fileCount": 407,
+    "sizeBytes": 134335082,
+    "treeSha256": "a99b54051f9082d719b5910cf83e495e1604be3c9988689f59c8c9b58543fd88"
+  },
+  "bundledResourceTree": {
+    "treeForm": "tauri-materialized-zero-symlink-tree",
+    "entryCount": 586,
+    "fileCount": 428,
+    "sizeBytes": 162877826,
+    "treeSha256": "ab446f958ab2dec847316a861723d8f1ab9e9ffd1bc4e6becc6af2b72425bb9c",
+    "relationshipToWorkerBuildTree": "same logical runtime rebuilt and rehashed after safe symlink materialization",
+    "manifestMatchesApplicationTree": true,
+    "verifiedBeforeLaunch": true
+  },
+  "macosDeploymentAudit": {
+    "declaredMinimumSystemVersion": "14.0.0",
+    "maximumObservedMachOMinimumVersion": "14.0.0",
+    "machOFileCount": 289,
+    "sliceCount": 289,
+    "bundledDependencyEdges": 40,
+    "systemDependencyEdges": 379,
+    "unresolvedDependencyEdges": 0,
+    "runtimeOverlay": {
+      "policySha256": "2e73c91745878f62d1cfa068bb788fbec3cba4691ae07dd0b17135626a780dd2",
+      "liveDigestPinnedFetcherValidation": "PASS",
+      "opensslVersion": "3.6.4",
+      "opensslSonomaManifestSha256": "3144599bd44457bbcfdb54b1d48630d262e7cfdf926f90988a73abc489204efc",
+      "opensslSonomaBlobSha256": "01887accd1964e9940ba516509e948eed9850d58d55cc02ca52c503435750685",
+      "mpdecimalVersion": "4.0.1",
+      "mpdecimalSonomaManifestSha256": "79acae86315e68e84f9cb44b5a570f588a86ff70633e08841ab5e8aa92d4c803",
+      "mpdecimalSonomaBlobSha256": "51a9fd907163c4f99be93607db99668cbb3e115ff577f9413e5dd6e5d4070e2c",
+      "pythonAbiSmoke": {
+        "python": "3.12.3",
+        "openssl": "OpenSSL 3.6.4 25 Aug 2026",
+        "libmpdec": "4.0.1",
+        "result": "PASS"
+      }
+    },
+    "realMacos14MachineLaunch": "PENDING",
+    "result": "BINARY_AUDIT_PASS"
+  },
+  "legalResources": {
+    "applicationResourceFileCount": 433,
+    "canonicalLicense": "legal/LICENSE",
+    "canonicalNotice": "legal/NOTICE",
+    "canonicalThirdPartyNotice": "legal/THIRD_PARTY_NOTICES.md",
+    "ordinaryFilesNoSymlinks": true,
+    "byteIdentityToRepositorySources": true,
+    "attestation": "PASS",
+    "completeBundleSbomIncluded": false
+  },
+  "signature": {
+    "mode": "ad-hoc",
+    "hardenedRuntime": true,
+    "deepStrictVerification": "PASS",
+    "developerId": false,
+    "notarized": false
+  },
+  "diskImage": {
+    "fileName": "Ultra-Fast-WBPP_0.1.0_aarch64.dmg",
+    "sizeBytes": 73665265,
+    "sha256": "7daa88aa4130b7a8602b6549dc664a00eaf7e4299becb3a5faea7e909c37d973",
+    "hdiutilVerify": "PASS",
+    "readOnlyMount": "PASS",
+    "applicationsShortcut": true,
+    "mountedAppDeepSignature": "PASS",
+    "mountedWorkerLaunch": "PASS",
+    "mountedGuiDirectLaunch": "PASS"
+  },
+  "mountedWorkerLaunchSeconds": {
+    "version": 1.949882,
+    "catalogList": 1.054829,
+    "runProjectHelp": 1.048788,
+    "canonicalHandshake": 1.365802,
+    "runtimeLibraryAbiSmoke": 0.103677,
+    "maximumGate": 5.0
+  },
+  "qualityReviewSmoke": {
+    "frozenWorkerInvoked": true,
+    "finalFrozenWorkerRerun": "PASS",
+    "realFitsPixelsMeasured": true,
+    "sourceSha256Bound": true,
+    "gatePolicySha256Bound": true,
+    "reviewPreviewTransport": "bounded-in-memory-data-url",
+    "previewMediaType": "image/png",
+    "temporaryPreviewRemovedAfterResponse": true,
+    "finalReceiptContainsPreview": false,
+    "measuredStarCount": 11686,
+    "singleFrameDisposition": "REVIEW_EXPECTED_WITHOUT_NIGHT_OR_REGISTRATION_PEERS",
+    "result": "PASS"
+  },
+  "packagedDoctor": {
+    "appleM3ProTunedDetected": true,
+    "pixelExecutionReady": true,
+    "qualityGateReady": true,
+    "drizzleExecutableReady": true,
+    "solverExecutableReady": true,
+    "staticCatalogCoverageClaimed": false,
+    "coverageVerifiedOnlyBySuccessfulFinalSolve": true,
+    "result": "PASS"
+  },
+  "targetedTests": {
+    "pythonPassed": 548,
+    "pythonExplicitOptInSkipped": 3,
+    "appCoreRust": 53,
+    "desktopRust": 29,
+    "react": 19,
+    "typescriptAndViteBuild": "PASS",
+    "rustfmt": "PASS",
+    "rustClippyWarningsDenied": "PASS",
+    "nativeCpuTests": "PASS",
+    "realM3ProMetalDifferential": "PASS",
+    "realNinetySixFrameProductionAdapter": "PASS"
+  },
+  "distributionBoundary": {
+    "pythonRequiredForInstalledUser": false,
+    "nodeRequiredForInstalledUser": false,
+    "rustRequiredForInstalledUser": false,
+    "terminalRequiredToLaunchApplication": false,
+    "terminalMayBeRequiredForExternalSolverInstall": true,
+    "externalAstrometryNetAndIndexesStillRequired": true,
+    "gatekeeperOneTimeApprovalMayBeRequired": true,
+    "stableSignedRelease": false
+  },
+  "localReleaseCollection": {
+    "exactRenamedDmgOnly": true,
+    "sidecarBuildManifestIncluded": true,
+    "mountedBundleAttestationIncluded": true,
+    "releaseMetadataIncluded": true,
+    "sha256SumsVerified": true,
+    "completeSbomIncluded": false
+  },
+  "result": "PASS"
+}

@@ -1,0 +1,25 @@
+name: Scientific validation
+description: Propose or report a calibration, registration, integration, drizzle, or WCS validation case
+title: "[Science]: "
+labels: [scientific-validation]
+body:
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Stage
+      options: [Quality Gate, Calibration, Registration, Normalization, Integration, Drizzle, Astrometry, Mosaic]
+    validations:
+      required: true
+  - type: textarea
+    id: contract
+    attributes:
+      label: Expected mathematical or metadata contract
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Reproducible evidence and proposed tolerance
+      description: Prefer synthetic or explicitly redistributable fixtures. Do not upload proprietary or private data.
+    validations:
+      required: true

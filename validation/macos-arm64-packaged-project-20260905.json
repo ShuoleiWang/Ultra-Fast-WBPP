@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 1,
+  "kind": "ultra-fast-wbpp-packaged-project-mono-validation-v1",
+  "validatedAt": "2026-09-05",
+  "candidateState": "uncommitted-local-worktree",
+  "host": {
+    "os": "macOS 26.6.2",
+    "device": "Apple M3 Pro",
+    "architecture": "arm64"
+  },
+  "fixture": {
+    "camera": "QHY268M",
+    "filter": "B",
+    "lights": 38,
+    "rawFlats": 20,
+    "suppliedNormalizedXisfMasters": [
+      "Bias",
+      "Dark"
+    ],
+    "explicitContentBoundMetadataDeclarations": true,
+    "reference": "private local PixInsight master; no pixels redistributed"
+  },
+  "execution": {
+    "entryPoint": "packaged-worker run-project --request-json",
+    "wallSeconds": 503.996,
+    "sourceStable": true,
+    "scientificSourceTreeSha256": "4c973c56b89f4c2e70cb418ca0b94c3adabfa2d73cc0e35ec630470084c8d72b",
+    "state": "SOLVED",
+    "passedLights": 38,
+    "excludedLights": 0,
+    "sharedRawFlatIntegrationCount": 1,
+    "selectedBackend": "m3-pro-tuned",
+    "acceleratorUsed": true,
+    "inputFramesTruncated": false,
+    "fastMath": false,
+    "performanceClaim": "Observed public-entry wall time; not a controlled speed comparison. DMG packaging overlapped this run."
+  },
+  "products": [
+    {
+      "product": "master_light_B_solved.fits",
+      "shape": [
+        4047,
+        6127
+      ],
+      "fitsVerification": true,
+      "nonfinitePixels": 0,
+      "negativePixels": 0,
+      "wcsRoundTripMaxPixels": 4.980774231377025e-10
+    }
+  ],
+  "cpuMetalParity": {
+    "passed": true,
+    "scope": "first-middle-last-tiles",
+    "pixelsCompared": 900288,
+    "finiteMaskEqual": true,
+    "rejectionCountsEqual": true,
+    "maxAbs": 5.960464477539063e-08,
+    "rmse": 2.880029302137144e-10
+  },
+  "astrometry": {
+    "catalogManaged": true,
+    "matchedStars": 55,
+    "rmsPixels": 1.9528503456058466,
+    "rmsArcsec": 1.2629891613732114
+  },
+  "referenceComparison": {
+    "status": "MEASURED_NOT_EQUIVALENCE_ACCEPTANCE",
+    "method": "Independent full-centroid affine alignment, cubic reference-grid resampling, finite positive pixel pairs, one affine intensity fit",
+    "alignmentRmsPixels": 0.28757966862807816,
+    "alignmentInliers": 789,
+    "pearson": 0.9989920997325983,
+    "affineNrmseRmsReference": 0.04321608629800701,
+    "prior25CheckAcceptanceReused": false
+  },
+  "bundle": {
+    "target": "aarch64-apple-darwin",
+    "maximumMachOMinimumVersion": "14.0.0",
+    "machOFileCount": 289,
+    "signature": {
+      "hardenedRuntime": true,
+      "mode": "ad-hoc",
+      "verified": true
+    },
+    "runtimeTreeSha256": "c70214d7287a558f4b138e477f845a556d9055866f9ca6a7c26ef388ef4a3754",
+    "mountedRuntimeIdentical": true,
+    "readOnlyDmgNativeLaunch": "PASS",
+    "mountedHandshakeSeconds": 1.592859,
+    "dmgName": "Ultra-Fast-WBPP_0.1.0_aarch64.dmg",
+    "dmgSha256": "e37ec6539e2eb371d6c12c16d1b7638eed4017a9dac714dabe739f071fe89d8b",
+    "dmgSizeBytes": 78524295
+  },
+  "tests": {
+    "pythonBaseline": {
+      "passed": 553,
+      "skipped": 3,
+      "scope": "After numerical fixes, before final two project-entry fixes"
+    },
+    "subsequentPlanningCli": {
+      "passed": 29
+    },
+    "subsequentSharedProject": {
+      "passed": 3
+    },
+    "react": {
+      "passed": 24
+    },
+    "rust": {
+      "passed": 82
+    },
+    "nativeReleaseRealMetal": {
+      "passed": 4
+    }
+  },
+  "scope": {
+    "packagedWorkerPublicProjectRealData": true,
+    "guiInitiatedFullRealRun": false,
+    "pixelOrAlgorithmicPixInsightEquivalence": false,
+    "allMacHardwareValidated": false,
+    "realMacos14Launch": false,
+    "developerIdSignedOrNotarized": false,
+    "externalSolverStillRequired": true,
+    "rgbMosaicDrizzleLocalNormalizationAcceptance": false
+  },
+  "result": "CORE_EXECUTION_AND_BUNDLE_PASS"
+}

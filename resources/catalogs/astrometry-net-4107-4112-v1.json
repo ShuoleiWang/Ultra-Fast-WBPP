@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "catalogId": "astrometry-net-4107-4112",
+  "provider": "Astrometry.net",
+  "version": "4100-series-2013-03-05",
+  "homepage": "https://data.astrometry.net/",
+  "downloadPage": "https://data.astrometry.net/4100/",
+  "bundled": false,
+  "redistributionStatus": "user-download-required",
+  "license": "Provider-specific index-data conditions are unresolved; OpenAstroFlow neither bundles nor redistributes these files",
+  "citation": "Lang, Hogg, Mierle, Blanton & Roweis (2010), AJ 139, 1782; 4100-series indexes built from Tycho-2",
+  "providerTerms": {
+    "acceptanceId": "astrometry-net-index-data-2026-09",
+    "url": "https://astrometry.net/doc/readme.html#getting-index-files",
+    "summary": "Astrometry.net states that index files have separate license conditions. OpenAstroFlow makes no redistribution or license grant and downloads only from the provider after the user reviews this notice and explicitly accepts responsibility for use.",
+    "licenseStatus": "provider-specific-unresolved",
+    "requiresExplicitAcceptance": true
+  },
+  "sources": [
+    {"kind": "scale-guide", "url": "https://astrometry.net/doc/readme.html#getting-index-files"},
+    {"kind": "build-provenance", "url": "https://data.astrometry.net/4100/README"},
+    {"kind": "directory-listing", "url": "https://data.astrometry.net/4100/"},
+    {"kind": "provider-md5", "url": "https://data.astrometry.net/4100/md5sums.txt"}
+  ],
+  "allowedDownloadOrigins": ["https://data.astrometry.net"],
+  "coverage": {
+    "sky": "all sky (Tycho-2-derived)",
+    "magnitude": "Tycho-2-derived bright-star indexes",
+    "fieldOfViewDegrees": "approximately 0.37-28.33 degrees across the set, derived from the provider's 10%-100% quad/image-width guidance; install only scales appropriate to the actual field"
+  },
+  "artifacts": [
+    {
+      "artifactId": "index-4107.fits",
+      "url": "https://data.astrometry.net/4100/index-4107.fits",
+      "sha256": "0bfe80012338923d1a7db3a0660a00f67a79c9e8ca51563619001c32d6cb94d7",
+      "sizeBytes": 164995200,
+      "providerMd5": "f963cdd3bae5aa985d2245464ef444d6",
+      "scale": 7,
+      "quadScaleArcminutes": {"minimum": 22, "maximum": 30},
+      "recommendedImageFieldOfViewDegrees": {"minimum": 0.3666666667, "maximum": 5.0, "basis": "Provider quad scale and 10%-100% image-width guidance"},
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-4108.fits",
+      "url": "https://data.astrometry.net/4100/index-4108.fits",
+      "sha256": "192086ee4ba56b6f74e3bc313d1bf56cbbbb486b23b66686a6e121978a06cdf2",
+      "sizeBytes": 94550400,
+      "providerMd5": "e6a3a643fa06cbbdf1dee478e4d84a32",
+      "scale": 8,
+      "quadScaleArcminutes": {"minimum": 30, "maximum": 42},
+      "recommendedImageFieldOfViewDegrees": {"minimum": 0.5, "maximum": 7.0, "basis": "Provider quad scale and 10%-100% image-width guidance"},
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-4109.fits",
+      "url": "https://data.astrometry.net/4100/index-4109.fits",
+      "sha256": "855bc69ae651d7e83fc0e817faa4db9a9df4a389fc12ffd9d2881c22b5f91916",
+      "sizeBytes": 49772160,
+      "providerMd5": "9a65a52ce04e3e75af950e5866f81b1b",
+      "scale": 9,
+      "quadScaleArcminutes": {"minimum": 42, "maximum": 60},
+      "recommendedImageFieldOfViewDegrees": {"minimum": 0.7, "maximum": 10.0, "basis": "Provider quad scale and 10%-100% image-width guidance"},
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-4110.fits",
+      "url": "https://data.astrometry.net/4100/index-4110.fits",
+      "sha256": "ca5f9470d259c95d1c9ad73facf999de8aa0c97b2c94b700fcbfbf7d350c0169",
+      "sizeBytes": 24871680,
+      "providerMd5": "d9aeb509b107d3bf8f79346329f1c0e3",
+      "scale": 10,
+      "quadScaleArcminutes": {"minimum": 60, "maximum": 85},
+      "recommendedImageFieldOfViewDegrees": {"minimum": 1.0, "maximum": 14.1666666667, "basis": "Provider quad scale and 10%-100% image-width guidance"},
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-4111.fits",
+      "url": "https://data.astrometry.net/4100/index-4111.fits",
+      "sha256": "b0d76303ff1aa4cee1894a4d5bb5209f2a16f683882200cd5bd428e82c213120",
+      "sizeBytes": 10206720,
+      "providerMd5": "cd7c149671d92a430bbe64c046ffcac3",
+      "scale": 11,
+      "quadScaleArcminutes": {"minimum": 85, "maximum": 120},
+      "recommendedImageFieldOfViewDegrees": {"minimum": 1.4166666667, "maximum": 20.0, "basis": "Provider quad scale and 10%-100% image-width guidance"},
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-4112.fits",
+      "url": "https://data.astrometry.net/4100/index-4112.fits",
+      "sha256": "59745b09bb8197acf8d3736ef58716017926837a1ae45021af85591bfd30dd33",
+      "sizeBytes": 5296320,
+      "providerMd5": "76568e3703f492121a1affca7368f3c2",
+      "scale": 12,
+      "quadScaleArcminutes": {"minimum": 120, "maximum": 170},
+      "recommendedImageFieldOfViewDegrees": {"minimum": 2.0, "maximum": 28.3333333333, "basis": "Provider quad scale and 10%-100% image-width guidance"},
+      "installScope": "user"
+    }
+  ]
+}

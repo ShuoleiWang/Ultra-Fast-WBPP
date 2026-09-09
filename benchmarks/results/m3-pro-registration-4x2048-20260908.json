@@ -1,0 +1,64 @@
+{
+  "shape": [
+    2048,
+    2048
+  ],
+  "frames": 4,
+  "device": "Apple M3 Pro",
+  "executor": "production _register_frames",
+  "numpyVersion": "2.5.2",
+  "totalRegistrationMemoryBytes": 536870912,
+  "measurements": [
+    {
+      "workers": 1,
+      "seconds": 5.549433791078627,
+      "budgetBytesPerWorker": 536870912,
+      "fitsSha256": [
+        "afb94ff0420dad859af11800b0198421e7b4458c9cefe94c4e1cda5b9488bbf5",
+        "35986794b5a9a0453c54b430e288dbfbf152c3f723f0271a7e50551ad08636b2",
+        "819c5da24eeff26caa8e40e5bf2f2718a2cc48f3946939bd166fee9b1445459e",
+        "aa4c7019c7dc8c0e9872d29ed93942f506579071c0019988eeb7ff4b46c31dbd"
+      ]
+    },
+    {
+      "workers": 2,
+      "seconds": 3.023231624974869,
+      "budgetBytesPerWorker": 268435456,
+      "fitsSha256": [
+        "afb94ff0420dad859af11800b0198421e7b4458c9cefe94c4e1cda5b9488bbf5",
+        "35986794b5a9a0453c54b430e288dbfbf152c3f723f0271a7e50551ad08636b2",
+        "819c5da24eeff26caa8e40e5bf2f2718a2cc48f3946939bd166fee9b1445459e",
+        "aa4c7019c7dc8c0e9872d29ed93942f506579071c0019988eeb7ff4b46c31dbd"
+      ]
+    },
+    {
+      "workers": 4,
+      "seconds": 1.943352667032741,
+      "budgetBytesPerWorker": 134217728,
+      "fitsSha256": [
+        "afb94ff0420dad859af11800b0198421e7b4458c9cefe94c4e1cda5b9488bbf5",
+        "35986794b5a9a0453c54b430e288dbfbf152c3f723f0271a7e50551ad08636b2",
+        "819c5da24eeff26caa8e40e5bf2f2718a2cc48f3946939bd166fee9b1445459e",
+        "aa4c7019c7dc8c0e9872d29ed93942f506579071c0019988eeb7ff4b46c31dbd"
+      ]
+    }
+  ],
+  "evidenceClass": "isolated-synthetic-affine-warp; not end-to-end",
+  "recordedAt": "2026-09-07T16:17:31.513438+00:00",
+  "sourceSha256": {
+    "packages/openastroflow-engine/src/openastroflow_engine/pixel_pipeline.py": "2c26e8743c705ce56ac5b756ef1cc5bdc25692df4e73d0dacfe983f830b0bc62",
+    "packages/openastroflow-engine/src/openastroflow_engine/calibration.py": "f7765ddf25bc4fe576cd36634d65d69839317ed87567af87b121bf5507a2aa90"
+  },
+  "speedupVersusSerial": {
+    "1": 1.0,
+    "2": 1.8355966328331714,
+    "4": 2.855597898014016
+  },
+  "validation": {
+    "registeredFitsByteIdenticalAcrossWorkers": true,
+    "pixelPipelineAndResamplerTestsPassed": 28,
+    "totalRegistrationBudgetDividedAcrossWorkers": true,
+    "note": "Budget uses the existing per-pixel working-set estimate; does not cap process RSS or OS page cache.",
+    "standardCalibrationTestsPassed": 18
+  }
+}

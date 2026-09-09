@@ -1,0 +1,75 @@
+{
+  "boundary": "single process, synthetic masks; no image I/O or end-to-end pipeline",
+  "shape": [
+    4176,
+    6252
+  ],
+  "repeats": 2,
+  "numpyVersion": "2.5.2",
+  "baselineFunctionSha256": "3ed3a9f62e59717698a9d2fec3043bd2f6796151ea489fee705bf9fc12a39a23",
+  "candidateFunctionSha256": "5b7f39f69e838d7b3aced93e687d7b07c59e91edc66504a48c42abe9321b9356",
+  "cases": {
+    "common-affine-footprint-including-mask-construction": {
+      "seconds": {
+        "before": [
+          3.1296039579901844,
+          3.274232125026174
+        ],
+        "after": [
+          0.27566020796075463,
+          0.26376033399719745
+        ]
+      },
+      "exactRectangleMatch": true,
+      "rectangle": [
+        33,
+        29,
+        4142,
+        6225
+      ],
+      "speedup": 11.871694874229574
+    },
+    "finite-mask-with-internal-hole-histogram-only": {
+      "seconds": {
+        "before": [
+          2.836695750011131,
+          2.801452458021231
+        ],
+        "after": [
+          0.037644875003024936,
+          0.0374292079359293
+        ]
+      },
+      "exactRectangleMatch": true,
+      "rectangle": [
+        17301440,
+        7,
+        2085,
+        4167,
+        6244
+      ],
+      "speedup": 75.10112661138955
+    },
+    "dense-random-holes-128-rows-histogram-only": {
+      "seconds": {
+        "before": [
+          0.10785183298867196,
+          0.10791783302556723
+        ],
+        "after": [
+          0.056576917064376175,
+          0.05692445894237608
+        ]
+      },
+      "exactRectangleMatch": true,
+      "rectangle": [
+        20,
+        120,
+        1393,
+        122,
+        1403
+      ],
+      "speedup": 1.9010312791397608
+    }
+  }
+}

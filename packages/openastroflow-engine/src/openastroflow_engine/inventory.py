@@ -1,0 +1,336 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import math
+from pathlib import Path
+import re
+from typing import Iterable
+
+from lightframeqc.models import FrameRole
+from lightframeqc.readers import (
+    FrameReadError,
+    discover_paths,
+    probe_frame_metadata,
+)
+
+from .models import (
+    AssetRole,
+    AssetStatus,
+    FrameAsset,
+    InventoryIssue,
+    IssueSeverity,
+    ProjectInventory,
+    SourceStat,
+)
+
+
+_ROLE_MAP = {
+    FrameRole.LIGHT: AssetRole.LIGHT,
+    FrameRole.RAW_FLAT: AssetRole.FLAT,
+    FrameRole.DARK: AssetRole.DARK,
+    FrameRole.BIAS: AssetRole.BIAS,
+    FrameRole.MASTER_FLAT: AssetRole.MASTER_FLAT,
+    FrameRole.MASTER_DARK: AssetRole.MASTER_DARK,
+    FrameRole.MASTER_BIAS: AssetRole.MASTER_BIAS,
+    FrameRole.MASTER_LIGHT: AssetRole.MASTER_LIGHT,
+    FrameRole.UNKNOWN: AssetRole.UNKNOWN,
+}
+
+
+class InventoryBuildError(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
+def _digest(payload: object) -> str:
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _source_stat(path: Path) -> SourceStat:
+    stat = path.stat(follow_symlinks=False)
+    if not path.is_file():
+        raise OSError("not a regular file")
+    return SourceStat(
+        size_bytes=stat.st_size,
+        mtime_ns=stat.st_mtime_ns,
+        device=stat.st_dev,
+        inode=stat.st_ino,
+    )
+
+
+def _asset_id(path: Path, source_stat: SourceStat) -> str:
+    return _digest(
+        {
+            "path": os.path.normcase(str(path)),
+            "sizeBytes": source_stat.size_bytes,
+            "mtimeNs": source_stat.mtime_ns,
+            "device": source_stat.device,
+            "inode": source_stat.inode,
+        }
+    )
+
+
+def _format(path: Path) -> str:
+    return "XISF" if path.name.casefold().endswith(".xisf") else "FITS"
+
+
+def _group_id(
+    *,
+    role: AssetRole,
+    width: int,
+    height: int,
+    channels: int,
+    filter_name: str,
+    target: str,
+    camera: str,
+    exposure_seconds: float | None,
+    temperature_celsius: float | None,
+    gain: float | None,
+    offset: float | None,
+    binning_x: int,
+    binning_y: int,
+    cfa_pattern: str,
+    readout_mode: str,
+) -> str:
+    group_role = {
+        AssetRole.MASTER_FLAT: AssetRole.FLAT,
+        AssetRole.MASTER_DARK: AssetRole.DARK,
+        AssetRole.MASTER_BIAS: AssetRole.BIAS,
+    }.get(role, role)
+    payload = {
+        "role": group_role.value,
+        "geometry": [width, height, channels],
+        "filter": filter_name if group_role in {AssetRole.LIGHT, AssetRole.FLAT} else None,
+        "target": target if group_role == AssetRole.LIGHT else None,
+        "camera": camera,
+        "exposureSeconds": exposure_seconds
+        if group_role in {AssetRole.LIGHT, AssetRole.DARK}
+        else None,
+        "temperatureCelsius": temperature_celsius
+        if group_role in {AssetRole.LIGHT, AssetRole.DARK}
+        else None,
+        "gain": gain,
+        "offset": offset,
+        "binning": [binning_x, binning_y],
+        "cfaPattern": cfa_pattern,
+        "readoutMode": readout_mode,
+    }
+    return _digest(payload)
+
+
+def _temperature_celsius(header: dict[str, object]) -> float | None:
+    for key in ("CCD-TEMP", "CCD_TEMP", "SENSORT", "SENSOR-T", "CAMTEMP"):
+        value = header.get(key)
+        try:
+            number = float(value) if value is not None else math.nan
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            return number
+    return None
+
+
+def _cfa_is_explicit(header: dict[str, object]) -> bool:
+    keys = {str(key).strip().upper() for key in header}
+    return bool(keys & {"BAYERPAT", "BAYERPATTERN", "CFA", "CFAPAT", "COLORTYP"})
+
+
+def _default_project_name(roots: tuple[Path, ...]) -> str:
+    if len(roots) == 1:
+        return roots[0].stem or roots[0].name or "Ultra-Fast WBPP Project"
+    try:
+        common = Path(os.path.commonpath([str(path) for path in roots]))
+    except ValueError:
+        # Multiple Windows drives have no common path.
+        return "Ultra-Fast WBPP Project"
+    return common.name or "Ultra-Fast WBPP Project"
+
+
+def _normalized_roots(
+    inputs: str | os.PathLike[str] | Iterable[str | os.PathLike[str]],
+) -> tuple[Path, ...]:
+    if isinstance(inputs, (str, os.PathLike)):
+        inputs = (inputs,)
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for value in inputs:
+        path = Path(value).expanduser()
+        if not path.exists():
+            raise InventoryBuildError("INPUT_NOT_FOUND", f"input does not exist: {path}")
+        resolved = path.resolve(strict=True)
+        key = os.path.normcase(str(resolved))
+        if key not in seen:
+            roots.append(resolved)
+            seen.add(key)
+    if not roots:
+        raise InventoryBuildError("NO_INPUTS", "at least one input path is required")
+    return tuple(sorted(roots, key=lambda path: os.path.normcase(str(path))))
+
+
+def inventory_project(
+    inputs: str | os.PathLike[str] | Iterable[str | os.PathLike[str]],
+    *,
+    name: str | None = None,
+) -> ProjectInventory:
+    """Recursively inventory NINA FITS/XISF assets using header-only probes.
+
+    The returned source identities are stat snapshots, not content hashes. They
+    make a plan auditable without forcing a full read of every large frame.
+    Execution backends must content-hash and revalidate their inputs before
+    publishing outputs.
+    """
+
+    roots = _normalized_roots(inputs)
+    try:
+        paths = discover_paths(roots)
+    except FrameReadError as error:
+        raise InventoryBuildError(error.code, str(error)) from error
+
+    assets: list[FrameAsset] = []
+    issues: list[InventoryIssue] = []
+    for path in paths:
+        try:
+            source_stat = _source_stat(path)
+        except OSError as error:
+            issues.append(
+                InventoryIssue(
+                    code="SOURCE_STAT_FAILED",
+                    severity=IssueSeverity.ERROR,
+                    message=str(error),
+                    path=str(path),
+                )
+            )
+            continue
+        asset_id = _asset_id(path, source_stat)
+        try:
+            metadata = probe_frame_metadata(path)
+        except FrameReadError as error:
+            assets.append(
+                FrameAsset(
+                    asset_id=asset_id,
+                    path=str(path),
+                    format=_format(path),
+                    role=AssetRole.UNKNOWN,
+                    status=AssetStatus.UNREADABLE,
+                    source_stat=source_stat,
+                    error_code=error.code,
+                    error_message=error.detail,
+                )
+            )
+            issues.append(
+                InventoryIssue(
+                    code=error.code,
+                    severity=IssueSeverity.ERROR,
+                    message=error.detail,
+                    path=str(path),
+                )
+            )
+            continue
+
+        role = _ROLE_MAP[metadata.role]
+        status = AssetStatus.CONFLICT if metadata.role_conflicts else AssetStatus.READY
+        observed_at = (
+            metadata.observed_at.isoformat() if metadata.observed_at is not None else None
+        )
+        group_id = _group_id(
+            role=role,
+            width=metadata.width,
+            height=metadata.height,
+            channels=metadata.channels,
+            filter_name=metadata.filter_name,
+            target=metadata.target,
+            camera=metadata.camera,
+            exposure_seconds=metadata.exposure_seconds,
+            temperature_celsius=_temperature_celsius(metadata.header),
+            gain=metadata.gain,
+            offset=metadata.offset,
+            binning_x=metadata.binning_x,
+            binning_y=metadata.binning_y,
+            cfa_pattern=metadata.cfa_pattern,
+            readout_mode=metadata.readout_mode,
+        )
+        asset = FrameAsset(
+            asset_id=asset_id,
+            path=str(path),
+            format=_format(path),
+            role=role,
+            status=status,
+            width=metadata.width,
+            height=metadata.height,
+            channels=metadata.channels,
+            filter_name=metadata.filter_name,
+            target=metadata.target,
+            camera=metadata.camera,
+            exposure_seconds=metadata.exposure_seconds,
+            temperature_celsius=_temperature_celsius(metadata.header),
+            gain=metadata.gain,
+            offset=metadata.offset,
+            binning_x=metadata.binning_x,
+            binning_y=metadata.binning_y,
+            cfa_pattern=metadata.cfa_pattern,
+            cfa_explicit=_cfa_is_explicit(metadata.header),
+            readout_mode=metadata.readout_mode,
+            observed_at=observed_at,
+            role_evidence=tuple(metadata.role_evidence),
+            role_conflicts=tuple(metadata.role_conflicts),
+            group_id=group_id,
+            source_stat=source_stat,
+        )
+        assets.append(asset)
+        if metadata.role_conflicts:
+            issues.append(
+                InventoryIssue(
+                    code="ROLE_CONFLICT",
+                    severity=IssueSeverity.ERROR,
+                    message="; ".join(metadata.role_conflicts),
+                    path=str(path),
+                    details={"evidence": metadata.role_evidence},
+                )
+            )
+        elif role == AssetRole.UNKNOWN:
+            issues.append(
+                InventoryIssue(
+                    code="ROLE_UNKNOWN",
+                    severity=IssueSeverity.WARNING,
+                    message="frame role could not be established from metadata or path",
+                    path=str(path),
+                    details={"evidence": metadata.role_evidence},
+                )
+            )
+
+    if not any(asset.role == AssetRole.LIGHT for asset in assets):
+        issues.append(
+            InventoryIssue(
+                code="NO_LIGHTS",
+                severity=IssueSeverity.ERROR,
+                message="the selected inputs contain no unprocessed Light frames",
+            )
+        )
+
+    if name is not None and not isinstance(name, str):
+        raise InventoryBuildError("INVALID_PROJECT_NAME", "project name must be a string")
+    project_name = (name or _default_project_name(roots)).strip()
+    if not project_name:
+        raise InventoryBuildError("INVALID_PROJECT_NAME", "project name cannot be empty")
+    project_id = _digest(
+        {
+            "roots": [os.path.normcase(str(path)) for path in roots],
+            "assets": [asset.asset_id for asset in assets],
+        }
+    )
+    return ProjectInventory(
+        project_id=project_id,
+        name=re.sub(r"\s+", " ", project_name),
+        source_roots=tuple(str(path) for path in roots),
+        assets=tuple(assets),
+        issues=tuple(issues),
+    )
+
+
+__all__ = ["InventoryBuildError", "inventory_project"]

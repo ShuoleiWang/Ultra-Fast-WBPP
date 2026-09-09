@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "kind": "ultra-fast-wbpp-macos-runtime-library-overlay",
+  "targetTriple": "aarch64-apple-darwin",
+  "maximumDeploymentTarget": "14.0.0",
+  "ociSource": {
+    "registry": "ghcr.io",
+    "apiBaseUrl": "https://ghcr.io/v2",
+    "tokenUrl": "https://ghcr.io/token",
+    "tokenService": "ghcr.io",
+    "maximumRedirects": 3,
+    "allowedRedirectHosts": ["pkg-containers.githubusercontent.com"],
+    "allowedRedirectHostSuffixes": [".blob.core.windows.net"]
+  },
+  "runtimeSmoke": {
+    "opensslPrefix": "OpenSSL 3.6.4 ",
+    "libmpdecVersion": "4.0.1"
+  },
+  "packages": [
+    {
+      "formula": "openssl@3",
+      "version": "3.6.4",
+      "license": "Apache-2.0",
+      "bottleTag": "arm64_sonoma",
+      "sourceRevision": "d739f6ddad12f937d557bc0513e8660d312431e5",
+      "oci": {
+        "repository": "homebrew/core/openssl/3",
+        "manifestDigest": "sha256:3144599bd44457bbcfdb54b1d48630d262e7cfdf926f90988a73abc489204efc",
+        "manifestMediaType": "application/vnd.oci.image.manifest.v1+json",
+        "configMediaType": "application/vnd.oci.image.config.v1+json",
+        "layerMediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+        "manifestRelativePath": "openssl/manifest.json",
+        "manifestSha256": "3144599bd44457bbcfdb54b1d48630d262e7cfdf926f90988a73abc489204efc",
+        "manifestSizeBytes": 4831,
+        "configRelativePath": "openssl/88b9463dbe87a7e05171b5226dad6f39430640e298e3fe54d73fb46db04f40b4",
+        "configSha256": "88b9463dbe87a7e05171b5226dad6f39430640e298e3fe54d73fb46db04f40b4",
+        "configSizeBytes": 222,
+        "blobRelativePath": "openssl/01887accd1964e9940ba516509e948eed9850d58d55cc02ca52c503435750685",
+        "blobSha256": "01887accd1964e9940ba516509e948eed9850d58d55cc02ca52c503435750685",
+        "blobSizeBytes": 10938984
+      },
+      "libraries": [
+        {
+          "archiveMemberPath": "openssl@3/3.6.4/lib/libcrypto.3.dylib",
+          "sourceRelativePath": "extracted/openssl@3/3.6.4/lib/libcrypto.3.dylib",
+          "sourceSha256": "0f7e41dc70ebeca83ff7c5e2557993c05674c599ccd7bd44e194d49baf9704fd",
+          "sourceSizeBytes": 4835152,
+          "destinationName": "libcrypto.3.dylib",
+          "sourceInstallName": "@@HOMEBREW_PREFIX@@/opt/openssl@3/lib/libcrypto.3.dylib",
+          "relocatedInstallName": "@rpath/libcrypto.3.dylib",
+          "changes": [],
+          "rpaths": ["@loader_path"]
+        },
+        {
+          "archiveMemberPath": "openssl@3/3.6.4/lib/libssl.3.dylib",
+          "sourceRelativePath": "extracted/openssl@3/3.6.4/lib/libssl.3.dylib",
+          "sourceSha256": "46660849365867e1eec6bf9cb705a875ee7f0a1276f5de3d5dc864671124b820",
+          "sourceSizeBytes": 883072,
+          "destinationName": "libssl.3.dylib",
+          "sourceInstallName": "@@HOMEBREW_PREFIX@@/opt/openssl@3/lib/libssl.3.dylib",
+          "relocatedInstallName": "@rpath/libssl.3.dylib",
+          "changes": [
+            {
+              "from": "@@HOMEBREW_CELLAR@@/openssl@3/3.6.4/lib/libcrypto.3.dylib",
+              "to": "@rpath/libcrypto.3.dylib"
+            }
+          ],
+          "rpaths": ["@loader_path"]
+        }
+      ]
+    },
+    {
+      "formula": "mpdecimal",
+      "version": "4.0.1",
+      "license": "BSD-2-Clause",
+      "bottleTag": "arm64_sonoma",
+      "sourceRevision": "f65e13ecb99c0366d8e3f39e458636c7c4e34bec",
+      "oci": {
+        "repository": "homebrew/core/mpdecimal",
+        "manifestDigest": "sha256:79acae86315e68e84f9cb44b5a570f588a86ff70633e08841ab5e8aa92d4c803",
+        "manifestMediaType": "application/vnd.oci.image.manifest.v1+json",
+        "configMediaType": "application/vnd.oci.image.config.v1+json",
+        "layerMediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+        "manifestRelativePath": "mpdecimal/manifest.json",
+        "manifestSha256": "79acae86315e68e84f9cb44b5a570f588a86ff70633e08841ab5e8aa92d4c803",
+        "manifestSizeBytes": 2111,
+        "configRelativePath": "mpdecimal/e79add28731fd9c7281b19f5f51b1ef876af18b833389c96a5678349cc7117d6",
+        "configSha256": "e79add28731fd9c7281b19f5f51b1ef876af18b833389c96a5678349cc7117d6",
+        "configSizeBytes": 222,
+        "blobRelativePath": "mpdecimal/51a9fd907163c4f99be93607db99668cbb3e115ff577f9413e5dd6e5d4070e2c",
+        "blobSha256": "51a9fd907163c4f99be93607db99668cbb3e115ff577f9413e5dd6e5d4070e2c",
+        "blobSizeBytes": 182013
+      },
+      "libraries": [
+        {
+          "archiveMemberPath": "mpdecimal/4.0.1/lib/libmpdec.4.0.1.dylib",
+          "sourceRelativePath": "extracted/mpdecimal/4.0.1/lib/libmpdec.4.0.1.dylib",
+          "sourceSha256": "634857ee7aee89e4e152661efec26cc54a5b4e0d58610d3ec412bad3585cded9",
+          "sourceSizeBytes": 189376,
+          "destinationName": "libmpdec.4.dylib",
+          "sourceInstallName": "@@HOMEBREW_PREFIX@@/opt/mpdecimal/lib/libmpdec.4.dylib",
+          "relocatedInstallName": "@rpath/libmpdec.4.dylib",
+          "changes": [],
+          "rpaths": ["@loader_path"]
+        }
+      ]
+    }
+  ]
+}

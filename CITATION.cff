@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use Ultra-Fast WBPP in research, please cite this software and the scientific dependencies recorded by the run manifest."
+title: "Ultra-Fast WBPP"
+type: software
+abstract: "A pre-1.0, fail-closed desktop and headless workflow for quality-gated mono astrophotography calibration, registration, integration, and verified astrometric publication."
+authors:
+  - family-names: "Wang"
+    given-names: "Shuolei"
+license: "MIT"
+keywords:
+  - astrophotography
+  - image calibration
+  - drizzle
+  - astrometry
+  - FITS
+  - Apple Silicon

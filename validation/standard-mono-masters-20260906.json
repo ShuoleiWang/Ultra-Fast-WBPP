@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "kind": "standard-mono-master-workflow-review-v1",
+  "validatedAt": "2026-09-06",
+  "candidateState": "uncommitted-local-worktree",
+  "reference": {
+    "installedWbppVersion": "3.0.1",
+    "piCodeCopied": false,
+    "defaultMatching": "geometry/binning, filter for Flat, exposure for Dark, optional grouping keywords",
+    "gainOffsetReadoutTemperatureDefaultMandatory": false,
+    "missingBayerDefault": "mono",
+    "standardDark": "bias-inclusive"
+  },
+  "desktop": {
+    "workflow": "mono-standard-v1",
+    "masterForms": "collapsed optional advanced overrides",
+    "unknownNumericValues": "null/blank, never zero or copied from Lights",
+    "shaConfirmationRequired": false,
+    "masterDarkDefaultBiasIncluded": true,
+    "explicitBayerBlocked": true,
+    "knownMetadataConflictsBlocked": true,
+    "sparseOverrides": true,
+    "legacyCliDefault": "strict-v1"
+  },
+  "actualMasterMetadata": {
+    "unrecorded": [
+      "gain",
+      "offset",
+      "readoutMode",
+      "temperature"
+    ],
+    "darkRawHeadersVerified": {
+      "count": 20,
+      "gain": 0,
+      "offset": 30,
+      "temperatureCelsius": -10,
+      "readoutMode": "High Gain 2CMS"
+    },
+    "firstCartwheelLightHeadersAgreeWithDarkSources": true
+  },
+  "actual90InputPreflight": {
+    "totalLights": 85,
+    "masters": 5,
+    "rgbGroupsReady": true,
+    "remainingErrorCodes": [
+      "FLAT_MATCH_MISSING"
+    ],
+    "missingFlatFilter": "L",
+    "affectedLights": 27,
+    "metadataOverrides": 0
+  },
+  "validation": {
+    "pythonFullPassed": 591,
+    "pythonExplicitOptInSkipped": 3,
+    "frontendPassed": 30,
+    "desktopRustPassed": 34,
+    "syntheticPublicPixelE2e": 2,
+    "cases": [
+      "PI normalized XISF Bias/Dark + raw Flats without temperature",
+      "MasterFlat + bias-inclusive MasterDark without a separate Bias"
+    ],
+    "packagedRealAttempt": {
+      "lightCount": 19,
+      "masterFlatCount": 1,
+      "masterDarkCount": 1,
+      "biasCount": 0,
+      "manualOverrides": 0,
+      "masterCalibrationPreparation": "VERIFIED",
+      "qcAdmitted": 1,
+      "qcExcluded": 18,
+      "result": "REGISTRATION_FAILED",
+      "wallSeconds": 210.2431140409317,
+      "sourceStable": true,
+      "fullImagePublished": false,
+      "excludedFrameReasonsRetained": false,
+      "exclusionCorrectness": "NOT_ESTABLISHED_FROM_THIS_FAILED_RUN"
+    }
+  },
+  "bundle": {
+    "minimumMacosTarget": "14.0.0",
+    "machOFiles": 289,
+    "signature": {
+      "hardenedRuntime": true,
+      "mode": "ad-hoc",
+      "verified": true
+    },
+    "runtimeTreeSha256": "7016751b9f64717dc1639c3409ae26731883504f55a4dd716c71d969bdbe4554",
+    "dmgSha256": "fa883254da8020fbb0e21328ca08057b9e99b01541aa156d210949ef7e57a00b",
+    "dmgSizeBytes": 78552420,
+    "dmgChecksumVerified": true
+  },
+  "result": "DEFAULT_MASTER_WORKFLOW_TESTS_PASS_REAL_RUN_PARTIAL"
+}

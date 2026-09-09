@@ -1,0 +1,161 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python ${{ matrix.python }} · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            packages/light-frame-qc/pyproject.toml
+            engine/native/python/pyproject.toml
+            packages/openastroflow-engine/pyproject.toml
+      - name: Install local packages
+        run: >-
+          python -m pip install
+          -e "./packages/light-frame-qc[test]"
+          -e "./engine/native/python[test]"
+          -e "./packages/openastroflow-engine[test,all]"
+      - name: Check installed dependency consistency
+        run: python -m pip check
+      - name: Test Quality Gate and engine
+        run: >-
+          python -m pytest -q
+          packages/light-frame-qc/tests
+          engine/native/python/tests
+          packages/openastroflow-engine/tests
+          tests
+      - name: Enforce public-tree boundary
+        run: |
+          python scripts/check_public_tree.py .
+          python scripts/check_local_links.py .
+      - name: Smoke CLI and worker handshake
+        shell: bash
+        run: |
+          ultra-fast-wbpp --version
+          openastroflow-engine --version
+          ultra-fast-wbpp doctor --json
+          printf '%s\n' '{"protocolVersion":1,"sessionId":"ci-smoke","sequence":0,"sentAtUnixMs":0,"type":"handshake","payload":{"role":"controller","implementation":"ci-smoke","implementationVersion":"1","supportedProtocolVersions":[1]}}' \
+            | openastroflow-worker \
+            | python scripts/verify_worker_handshake.py --runner-os "${RUNNER_OS}" --runner-arch "${RUNNER_ARCH}"
+
+  rust:
+    name: Rust · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Select Rust toolchain
+        shell: bash
+        run: |
+          rustup set profile minimal
+          rustup toolchain install 1.88 --component clippy --component rustfmt
+          rustup default 1.88
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Windows interface contracts (not scientific acceptance)
+        if: runner.os == 'Windows'
+        run: |
+          cargo test -p openastroflow-app-core --test fs_contract
+          cargo test -p openastroflow-desktop platform::windows::tests
+
+  frontend:
+    name: React desktop shell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - run: npm ci
+        working-directory: apps/desktop
+      - run: npm test
+        working-directory: apps/desktop
+      - run: npm run build
+        working-directory: apps/desktop
+
+  native:
+    name: Native C++ · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Configure strict CPU baseline
+        run: cmake -S engine/native -B build/native -DOAF_BUILD_TESTS=ON -DOAF_ENABLE_METAL=OFF
+      - name: Build
+        run: cmake --build build/native --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build/native -C Release --output-on-failure
+
+  apple-metal:
+    name: Apple Silicon Metal compile/differential
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Assert Apple Silicon runner contract
+        run: test "$(uname -m)" = "arm64"
+      - name: Configure Apple arm64 CPU + Metal
+        run: cmake -S engine/native -B build/native-metal -DOAF_BUILD_TESTS=ON -DOAF_ENABLE_METAL=ON -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build/native-metal --config Release --parallel
+      - name: Run Metal differential when the hosted runner exposes a device
+        run: ctest --test-dir build/native-metal -C Release --output-on-failure
+
+  ci-gate:
+    name: CI gate
+    if: always()
+    needs: [python, rust, frontend, native, apple-metal]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every platform matrix
+        env:
+          PYTHON_RESULT: ${{ needs.python.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+          APPLE_METAL_RESULT: ${{ needs['apple-metal'].result }}
+        run: |
+          test "${PYTHON_RESULT}" = success
+          test "${RUST_RESULT}" = success
+          test "${FRONTEND_RESULT}" = success
+          test "${NATIVE_RESULT}" = success
+          test "${APPLE_METAL_RESULT}" = success
