@@ -1,3 +1,3 @@
 # Build-only dependency. Runtime scientific dependencies come from the three
 # local Python packages and are frozen into the immutable onedir sidecar.
-pyinstaller>=6.11,<7
+pyinstaller>=6.22.3,<7
