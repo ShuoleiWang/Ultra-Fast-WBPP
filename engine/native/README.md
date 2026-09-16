@@ -16,6 +16,18 @@ The production parity gate is evaluated in a documented normalized Float32 domai
 
 The build embeds the audited Metal source into the native library and runtime-compiles it with safe math (`fastMathEnabled=NO`, or `MTLMathModeSafe` on newer macOS). The stable C ABI owns an opaque reusable executor, so Python never owns Objective-C objects. A canonical external source path remains available for development differential tests. Release packaging records the native-library SHA-256 and retains a receipt-visible CPU fallback on every Apple Silicon Mac.
 
+The portable kernels in `src/PortableKernels.cpp` (`WarpLanczos3Clamped`,
+`MadRejectionMask`, `MaskedWeightedMean`) are multithreaded C++ implementations
+of the Python engine's NumPy reference arithmetic. They are deliberately
+operation-for-operation reproductions: the same Float32/Float64 intermediate
+types, evaluation order, `nanmedian` even-count semantics, and NaN policy, so
+`packages/openastroflow-engine/tests/test_native_kernels.py` can require
+value-identical pixels, masks, and counts from both paths (only the sign of an
+exact zero may differ). They are exposed through the C ABI as
+`oaf_native_cpu_warp_lanczos3_v1`, `oaf_native_cpu_mad_rejection_v1`, and
+`oaf_native_cpu_masked_mean_v1`, are compiled with `-fno-fast-math
+-ffp-contract=off`, and are covered by `tests/PortableKernelTests.cpp`.
+
 Ordinary integration uses a two-stage exact full-stack path. CPU code computes the same per-sample median/MAD rejection decision used by the portable integrator; `fused_ln_masked_weighted_integration` then reduces every frame in one Metal request. It never averages partial batches. The product policy admits up to 512 frames; resource/capability failure falls back to CPU with `inputFramesTruncated=false` and a reason in the receipt. The older native linear-fit rejection kernel remains limited to 64 frames because it uses private per-thread sorting storage and is not used for larger ordinary stacks.
 
 The synthetic Metal throughput benchmark is opt-in and refuses to replace its JSON output:

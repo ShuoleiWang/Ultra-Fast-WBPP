@@ -58,6 +58,7 @@ from .e2e import (
     _build_registration_masters,
     _canonical_inputs,
     _capture_source,
+    _capture_sources,
     _fsync_directory,
     _input_frame_info,
     _read_image_header,
@@ -579,7 +580,7 @@ def _all_sources(request: E2ERequest) -> tuple[Any, ...]:
         ("MASTER_DARK", request.master_dark_files),
         ("MASTER_FLAT", request.master_flat_files),
     )
-    identities = []
+    flattened: list[tuple[str, Path]] = []
     seen: set[str] = set()
     for role, values in grouped:
         for path in _canonical_inputs(values, role, required=False):
@@ -587,8 +588,8 @@ def _all_sources(request: E2ERequest) -> tuple[Any, ...]:
             if key in seen:
                 raise ProjectE2EError("INPUT_ROLE_OVERLAP", "one source appears more than once", path=str(path))
             seen.add(key)
-            identities.append(_capture_source(path, role))
-    return tuple(identities)
+            flattened.append((role, path))
+    return tuple(_capture_sources(flattened, workers=max(1, int(request.workers))))
 
 
 def _build_shared_calibration(

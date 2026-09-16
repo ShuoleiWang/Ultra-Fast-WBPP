@@ -360,3 +360,73 @@ class RegistrationGeometryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LocalCentroidReferenceTests(unittest.TestCase):
+    """The gathered centroid refinement equals the one-star-at-a-time loop."""
+
+    @staticmethod
+    def _reference(image, approximate, radius):
+        import math
+
+        height, width = image.shape
+        refined, retained = [], []
+        size = 2 * radius + 1
+        for index, (x, y) in enumerate(approximate):
+            center_x = int(round(float(x)))
+            center_y = int(round(float(y)))
+            x0, x1 = center_x - radius, center_x + radius + 1
+            y0, y1 = center_y - radius, center_y + radius + 1
+            if x0 < 0 or y0 < 0 or x1 > width or y1 > height:
+                continue
+            patch = np.asarray(image[y0:y1, x0:x1], dtype=np.float64)
+            if patch.shape != (size, size) or not np.all(np.isfinite(patch)):
+                continue
+            border = np.concatenate((patch[0], patch[-1], patch[1:-1, 0], patch[1:-1, -1]))
+            signal = np.maximum(patch - np.median(border), 0.0)
+            total = float(np.sum(signal))
+            if not math.isfinite(total) or total <= 0:
+                continue
+            yy, xx = np.indices(signal.shape, dtype=np.float64)
+            centroid_x = x0 + float(np.sum(signal * xx) / total)
+            centroid_y = y0 + float(np.sum(signal * yy) / total)
+            if math.hypot(centroid_x - x, centroid_y - y) > radius * 0.5:
+                continue
+            refined.append((centroid_x, centroid_y))
+            retained.append(index)
+        return (
+            np.asarray(refined, dtype=np.float64).reshape((-1, 2)),
+            np.asarray(retained, dtype=np.int64),
+        )
+
+    def test_matches_per_star_loop(self) -> None:
+        rng = np.random.default_rng(17)
+        height, width = 160, 200
+        image = rng.normal(100.0, 3.0, (height, width)).astype(np.float32)
+        yy, xx = np.indices((height, width), dtype=np.float64)
+        truth = rng.uniform(-4.0, 4.0 + 0, (60, 2)) + np.column_stack(
+            (rng.uniform(0, width, 60), rng.uniform(0, height, 60))
+        )
+        for x, y in truth:
+            image += (rng.uniform(200, 4000) * np.exp(-((xx - x) ** 2 + (yy - y) ** 2) / 4.5)).astype(np.float32)
+        image[40:45, 60:66] = np.nan
+        image[100:112, 150:162] = 50.0  # flat, background-only patch
+        approximate = truth + rng.normal(0.0, 0.4, truth.shape)
+        approximate = np.vstack((approximate, [[62.0, 42.0], [156.0, 106.0], [-3.0, 10.0], [width - 1.0, 5.0], [30.5, 12.5]]))
+        approximate[7] += 6.0  # displaced beyond half the radius
+        for radius in (3, 5):
+            with self.subTest(radius=radius):
+                expected_points, expected_indices = self._reference(image, approximate, radius)
+                points, indices = registration_pipeline._local_centroids(image, approximate, radius)
+                np.testing.assert_array_equal(indices, expected_indices)
+                np.testing.assert_array_equal(points, expected_points)
+                self.assertGreater(indices.size, 30)
+                self.assertLess(indices.size, approximate.shape[0])
+
+    def test_empty_and_nonfinite_positions(self) -> None:
+        image = np.ones((20, 20), dtype=np.float32)
+        points, indices = registration_pipeline._local_centroids(image, np.empty((0, 2)), 3)
+        self.assertEqual(points.shape, (0, 2))
+        self.assertEqual(indices.size, 0)
+        with self.assertRaises(ValueError):
+            registration_pipeline._local_centroids(image, np.asarray([[np.nan, 5.0]]), 3)

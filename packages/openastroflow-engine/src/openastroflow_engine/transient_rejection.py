@@ -11,6 +11,7 @@ Stored inputs and pixels outside those corridors remain unchanged.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -69,16 +70,40 @@ class TransientRejectionModel:
         changed = np.any(original & ~accepted, axis=0)
         if not np.any(changed):
             return
-        correction = np.zeros_like(values)
-        self.background_alignment.apply_rows(correction, first_row)
+        # Only rows that contain an additionally rejected pixel need the
+        # per-pixel correction; the model is evaluated on those contiguous
+        # row runs alone, which gives the same values as the full tile.
+        changed_rows = np.flatnonzero(np.any(changed, axis=1))
         weights = np.asarray(self.background_alignment.weights)[:, None, None]
-        denominator = np.sum(original * weights, axis=0)
-        anchor = np.divide(np.sum(np.where(original, correction, 0) * weights, axis=0),
-                           denominator, out=np.zeros_like(denominator), where=denominator > 0)
-        # Equivalent to mean_new(X-C) + mean_original(C). No correction is
-        # applied elsewhere, so ordinary integration controls stay bitwise equal.
-        for index in range(values.shape[0]):
-            values[index, changed] += (correction[index, changed]-anchor[changed]).astype(np.float32)
+        run_start = int(changed_rows[0])
+        previous = run_start
+        runs: list[tuple[int, int]] = []
+        for row in changed_rows[1:]:
+            row = int(row)
+            if row != previous + 1:
+                runs.append((run_start, previous + 1))
+                run_start = row
+            previous = row
+        runs.append((run_start, previous + 1))
+        for row0, row1 in runs:
+            correction = np.zeros(
+                (values.shape[0], row1 - row0, values.shape[2]), dtype=values.dtype
+            )
+            self.background_alignment.apply_rows(correction, first_row + row0)
+            original_rows = original[:, row0:row1]
+            changed_rows_mask = changed[row0:row1]
+            denominator = np.sum(original_rows * weights, axis=0)
+            anchor = np.divide(
+                np.sum(np.where(original_rows, correction, 0) * weights, axis=0),
+                denominator, out=np.zeros_like(denominator), where=denominator > 0,
+            )
+            # Equivalent to mean_new(X-C) + mean_original(C). No correction is
+            # applied elsewhere, so ordinary integration controls stay bitwise equal.
+            for index in range(values.shape[0]):
+                block = values[index, row0:row1]
+                block[changed_rows_mask] += (
+                    correction[index, changed_rows_mask] - anchor[changed_rows_mask]
+                ).astype(np.float32)
 
     def serializable(self) -> dict[str, Any]:
         return {
@@ -116,9 +141,14 @@ class TransientRejectionModel:
             accepted[trail.frame, corridor] = False
 
 
-def detect_transient_trails(values: NDArray[np.float32], bin_factor: int
-                           ) -> TransientRejectionModel:
-    """Fit deterministic corridors from block-mean registered frame samples."""
+def detect_transient_trails(values: NDArray[np.float32], bin_factor: int,
+                            *, workers: int = 1) -> TransientRejectionModel:
+    """Fit deterministic corridors from block-mean registered frame samples.
+
+    Frames are analysed independently against the shared temporal median, so
+    ``workers`` frames run concurrently; the fitted corridors are identical
+    for any worker count and keep frame order.
+    """
     from scipy.ndimage import binary_dilation, gaussian_filter
     from skimage.transform import hough_line, hough_line_peaks
 
@@ -132,16 +162,20 @@ def detect_transient_trails(values: NDArray[np.float32], bin_factor: int
         reference[common] = np.nanmedian(values[:, common], axis=0)
     yy, xx = np.mgrid[:height, :width].astype(np.float64)
     theta = np.linspace(-np.pi / 2, np.pi / 2, 1440, endpoint=False)
-    trails: list[TransientTrail] = []
-    for frame_index in range(frame_count):
+    # Shared stars, diffraction spikes, and resolved structure cannot seed
+    # a trail; the structure map depends only on the reference.
+    structure = reference - gaussian_filter(reference, 3)
+
+    def frame_trails(frame_index: int) -> list[TransientTrail]:
+        trails: list[TransientTrail] = []
         valid = common & finite[frame_index]
         if np.count_nonzero(valid) < 256:
-            continue
+            return trails
         residual = np.where(valid, values[frame_index] - reference, 0.0)
         location = float(np.median(residual[valid]))
         sigma = float(1.4826 * np.median(np.abs(residual[valid] - location)))
         if not np.isfinite(sigma) or sigma <= 0:
-            continue
+            return trails
         # Clipping keeps a satellite itself from raising the background model.
         clipped = np.clip(residual - location, -3 * sigma, 3 * sigma)
         support = gaussian_filter(valid.astype(np.float32), 8)
@@ -151,10 +185,9 @@ def detect_transient_trails(values: NDArray[np.float32], bin_factor: int
         sigma = float(1.4826 * np.median(np.abs(
             residual[valid] - np.median(residual[valid]))))
         if not np.isfinite(sigma) or sigma <= 0:
-            continue
-        # Shared stars, diffraction spikes, and resolved structure cannot seed
-        # a trail. The final corridor can cross them, using other frames there.
-        structure = reference - gaussian_filter(reference, 3)
+            return trails
+        # The final corridor can cross protected structure, using other
+        # frames there.
         protected = binary_dilation(structure > 4 * sigma, iterations=2)
         # Normalized smoothing remains valid at a footprint boundary: requiring
         # almost full support would truncate every fitted trail by several
@@ -238,4 +271,15 @@ def detect_transient_trails(values: NDArray[np.float32], bin_factor: int
                 float(stop * bin_factor + shift * (nx - ny) + 2 * bin_factor),
                 half_width * bin_factor, int(px.size), supported, significance,
             ))
+        return trails
+
+    frame_workers = max(1, min(workers, frame_count))
+    if frame_workers == 1:
+        per_frame = [frame_trails(index) for index in range(frame_count)]
+    else:
+        with ThreadPoolExecutor(
+            max_workers=frame_workers, thread_name_prefix="oaf-trails"
+        ) as executor:
+            per_frame = list(executor.map(frame_trails, range(frame_count)))
+    trails = [trail for frame in per_frame for trail in frame]
     return TransientRejectionModel(bin_factor, tuple(trails))

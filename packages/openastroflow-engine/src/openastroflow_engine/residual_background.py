@@ -8,6 +8,8 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.ndimage import gaussian_filter
 
+from .robust_statistics import nanmedian_rows
+
 
 @dataclass(frozen=True, slots=True)
 class ResidualBackgroundAlignment:
@@ -97,13 +99,24 @@ def fit_residual_background(values: NDArray[np.float32], bin_factor: int,
             # a low-value selection bias in the target frame's noise.
             limit=float(np.quantile(ref[valid_ref],.85))
             background=valid_ref & (ref<=limit)
-            for frame in range(n):
-                sample=values[frame,y0:y0+cell,x0:x0+cell]-ref
-                selected=sample[background & np.isfinite(sample)]
-                if selected.size<16: continue
-                center=float(np.median(selected));sigma=float(1.4826*np.median(abs(selected-center)))
-                if sigma>0: selected=selected[abs(selected-center)<3.5*sigma]
-                if selected.size>=16: nodes[frame,iy,ix]=float(np.median(selected))
+            # All frames of the cell at once. Unselected samples are NaN, so
+            # each row median equals np.median of that frame's compacted
+            # selection; the Float32 centre/MAD/clip arithmetic and the
+            # 16-sample gates are those of the per-frame loop.
+            samples=values[:,y0:y0+cell,x0:x0+cell]-ref
+            selected_mask=(background[None,:,:] & np.isfinite(samples)).reshape(n,-1)
+            counts=np.count_nonzero(selected_mask,axis=1)
+            enough=counts>=16
+            if not np.any(enough): continue
+            padded=np.where(selected_mask,samples.reshape(n,-1),np.float32(np.nan))
+            center=nanmedian_rows(padded)
+            deviation=abs(padded-center[:,None])
+            sigma=1.4826*nanmedian_rows(deviation)
+            clipped=np.where((sigma>0)[:,None],deviation<(3.5*sigma)[:,None],selected_mask)
+            final_counts=np.count_nonzero(clipped,axis=1)
+            final=nanmedian_rows(np.where(clipped,padded,np.float32(np.nan)))
+            fitted=enough & (final_counts>=16)
+            nodes[fitted,iy,ix]=final[fitted]
     yy,xx=np.indices(nodes.shape[1:]);checker=(yy+xx)%2==0
     fields=[];evidence=[]
     for frame,observed in enumerate(nodes):

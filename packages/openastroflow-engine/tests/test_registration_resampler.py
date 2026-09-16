@@ -433,12 +433,18 @@ def test_noninteger_half_turn_uses_one_lanczos_warp(
         observed.append((x.shape, y.shape))
         return sample(frame, x, y)
 
+    # This contract describes the NumPy reference resampler; the native kernel
+    # is covered by its own differential tests.
+    monkeypatch.setattr(pipeline, "load_native_kernels", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(FitsFrame, "sample_lanczos3_clamped", sample_once)
+    execution: dict = {}
     pipeline._register_frame(
         source, destination, transform, _registration_info(source),
         max_memory_bytes=shape[0] * shape[1] * 192, resampler="lanczos-3-clamped",
+        execution=execution,
     )
     assert observed == [(shape, shape)]
+    assert execution["warpBackend"] == "numpy"
     assert fits.getheader(destination)["OAFRSAMP"] == "LANCZOS-3-CLAMPED"
     assert fits.getheader(destination)["OAFRMARG"] == 2
     assert pipeline._registration_provenance(

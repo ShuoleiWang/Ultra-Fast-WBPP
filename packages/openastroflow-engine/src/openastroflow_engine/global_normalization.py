@@ -18,6 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import math
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 from typing import Any, Sequence
@@ -26,6 +28,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.ndimage import gaussian_filter
 
+from .native_kernels import TILE_OFFSET_KERNEL_ID, load_native_kernels
 from .calibration import CalibrationError, FitsFrame
 
 
@@ -338,6 +341,8 @@ class _ReferenceSampleCache:
         self._values: dict[
             tuple[tuple[str, int], int], NDArray[np.float32]
         ] = {}
+        self._rows: dict[int, NDArray[np.float32]] = {}
+        self._lock = threading.Lock()
         self.requests = 0
         self.hits = 0
         self.cached_samples = 0
@@ -348,30 +353,52 @@ class _ReferenceSampleCache:
         y: int,
         x_indices: NDArray[np.int64],
     ) -> NDArray[np.float32]:
-        self.requests += 1
-        expected = self._indices.get(role)
-        if expected is None:
-            expected = np.asarray(x_indices, dtype=np.int64).copy()
-            expected.setflags(write=False)
-            self._indices[role] = expected
-            self._last_index_objects[role] = x_indices
-        elif self._last_index_objects.get(role) is not x_indices:
-            if not np.array_equal(expected, x_indices):
-                raise RuntimeError("reference sample-cache coordinate role changed")
-            self._last_index_objects[role] = x_indices
-        key = (role, int(y))
-        cached = self._values.get(key)
-        if cached is not None:
-            self.hits += 1
-            return cached
-        values = np.asarray(
-            self.reference.read_rows(int(y), int(y) + 1)[0, x_indices],
-            dtype=np.float32,
-        )
-        values.setflags(write=False)
-        self._values[key] = values
-        self.cached_samples += int(values.size)
-        return values
+        # Target frames are fitted concurrently; the lock keeps the cache and
+        # its evidence counters deterministic.
+        with self._lock:
+            self.requests += 1
+            expected = self._indices.get(role)
+            if expected is None:
+                expected = np.asarray(x_indices, dtype=np.int64).copy()
+                expected.setflags(write=False)
+                self._indices[role] = expected
+                self._last_index_objects[role] = x_indices
+            elif self._last_index_objects.get(role) is not x_indices:
+                if not np.array_equal(expected, x_indices):
+                    raise RuntimeError("reference sample-cache coordinate role changed")
+                self._last_index_objects[role] = x_indices
+            key = (role, int(y))
+            cached = self._values.get(key)
+            if cached is not None:
+                self.hits += 1
+                return cached
+            values = np.asarray(
+                self.reference.read_rows(int(y), int(y) + 1)[0, x_indices],
+                dtype=np.float32,
+            )
+            values.setflags(write=False)
+            self._values[key] = values
+            self.cached_samples += int(values.size)
+            return values
+
+    def rows(self, y_indices: NDArray[np.int64]) -> NDArray[np.float32]:
+        """Return the requested reference rows, decoding each row once."""
+
+        with self._lock:
+            width = self.reference.shape[1]
+            result = np.empty((len(y_indices), width), dtype=np.float32)
+            for position, y in enumerate(y_indices):
+                self.requests += 1
+                row = self._rows.get(int(y))
+                if row is None:
+                    row = self.reference.read_rows(int(y), int(y) + 1)[0]
+                    row.setflags(write=False)
+                    self._rows[int(y)] = row
+                    self.cached_samples += int(row.size)
+                else:
+                    self.hits += 1
+                result[position] = row
+            return result
 
     def serializable(self) -> dict[str, Any]:
         return {
@@ -380,6 +407,7 @@ class _ReferenceSampleCache:
             "hits": self.hits,
             "misses": self.requests - self.hits,
             "coordinateRoles": len(self._indices),
+            "cachedRows": len(self._rows),
             "cachedSamples": self.cached_samples,
             "cachedBytes": self.cached_samples * np.dtype(np.float32).itemsize,
             "fullReferenceMaterialized": False,
@@ -405,9 +433,13 @@ def _paired_samples(
     reference_chunks: list[NDArray[np.float64]] = []
     x_chunks: list[NDArray[np.float64]] = []
     y_chunks: list[NDArray[np.float64]] = []
-    for y in y_indices:
-        target_row = target.read_rows(int(y), int(y) + 1)[0, x_indices]
-        reference_row = reference_cache.sample(("global", 0), int(y), x_indices)
+    # One gather per frame replaces one read per sampled row; the per-row
+    # pairing and selection below are unchanged.
+    target_sampled = target.read_sampled_rows(y_indices)[:, x_indices]
+    reference_sampled = reference_cache.rows(y_indices)[:, x_indices]
+    for position, y in enumerate(y_indices):
+        target_row = target_sampled[position]
+        reference_row = reference_sampled[position]
         finite = np.isfinite(target_row) & np.isfinite(reference_row)
         if np.any(finite):
             target_chunks.append(
@@ -517,6 +549,7 @@ def _fit_additive_offset_grid(
     sample_y: NDArray[np.float64],
     parameters: GlobalNormalizationParameters,
     reference_cache: _ReferenceSampleCache,
+    native_threads: int | None = None,
 ) -> tuple[
     tuple[tuple[float, ...], ...],
     tuple[float, ...],
@@ -536,6 +569,10 @@ def _fit_additive_offset_grid(
     sample_counts = np.zeros(offsets.shape, dtype=np.int64)
     residual_mads = np.full(offsets.shape, np.nan, dtype=np.float64)
     maximum_tile_samples = 2_048
+    kernels = load_native_kernels()
+    tile_targets: list[NDArray[np.float64]] = []
+    tile_references: list[NDArray[np.float64]] = []
+    tile_positions: list[tuple[int, int]] = []
     for grid_y in range(len(y_nodes)):
         y0 = grid_y * parameters.offset_tile_size_pixels
         y1 = min(height, y0 + parameters.offset_tile_size_pixels)
@@ -552,12 +589,6 @@ def _fit_additive_offset_grid(
             ),
         )
         y_indices = _uniform_integer_indices(tile_height, target_rows) + y0
-        target_chunks: list[list[NDArray[np.float64]]] = [
-            [] for _ in range(len(x_nodes))
-        ]
-        reference_chunks: list[list[NDArray[np.float64]]] = [
-            [] for _ in range(len(x_nodes))
-        ]
         x_indices_by_tile: list[NDArray[np.int64]] = []
         for grid_x in range(len(x_nodes)):
             x0 = grid_x * parameters.offset_tile_size_pixels
@@ -566,34 +597,51 @@ def _fit_additive_offset_grid(
             x_indices_by_tile.append(
                 _uniform_integer_indices(x1 - x0, count) + x0
         )
-        for y in y_indices:
-            target_row = target.read_rows(int(y), int(y) + 1)[0]
-            for grid_x, x_indices in enumerate(x_indices_by_tile):
-                target_chunks[grid_x].append(
-                    np.asarray(target_row[x_indices], dtype=np.float64)
-                )
-                reference_chunks[grid_x].append(
-                    np.asarray(
-                        reference_cache.sample(
-                            ("offset-tile", grid_y * len(x_nodes) + grid_x),
-                            int(y),
-                            x_indices,
-                        ),
-                        dtype=np.float64,
-                    )
-                )
-        for grid_x in range(len(x_nodes)):
-            fit = _tile_offset(
-                np.concatenate(target_chunks[grid_x]),
-                np.concatenate(reference_chunks[grid_x]),
-                scale,
-                parameters,
-            )
-            if fit is None:
+        # One band read per tile row replaces one read per sampled row; the
+        # sampled rows and columns, and hence every tile's sample sequence
+        # (row-major), are exactly those of the per-row formulation.
+        target_band = target.read_rows(int(y0), int(y1))
+        sampled_target = target_band[y_indices - y0]
+        sampled_reference = reference_cache.rows(y_indices)
+        for grid_x, x_indices in enumerate(x_indices_by_tile):
+            tile_target = np.asarray(
+                sampled_target[:, x_indices], dtype=np.float64
+            ).ravel()
+            tile_reference = np.asarray(
+                sampled_reference[:, x_indices], dtype=np.float64
+            ).ravel()
+            if kernels is None:
+                fit = _tile_offset(tile_target, tile_reference, scale, parameters)
+                if fit is None:
+                    continue
+                offsets[grid_y, grid_x], sample_counts[grid_y, grid_x], residual_mads[
+                    grid_y, grid_x
+                ] = fit
+            else:
+                tile_targets.append(tile_target)
+                tile_references.append(tile_reference)
+                tile_positions.append((grid_y, grid_x))
+    if kernels is not None and tile_targets:
+        boundaries = np.concatenate(
+            ([0], np.cumsum([tile.size for tile in tile_targets]))
+        ).astype(np.uint64)
+        tile_offsets, tile_counts, tile_mads, tile_valid = kernels.tile_offsets(
+            np.concatenate(tile_targets),
+            np.concatenate(tile_references),
+            boundaries,
+            scale=scale,
+            lower_quantile=parameters.lower_quantile,
+            upper_quantile=parameters.upper_quantile,
+            minimum_samples=parameters.minimum_samples_per_offset_tile,
+            residual_clip_sigma=parameters.residual_clip_sigma,
+            threads=native_threads,
+        )
+        for index, (grid_y, grid_x) in enumerate(tile_positions):
+            if not tile_valid[index]:
                 continue
-            offsets[grid_y, grid_x], sample_counts[grid_y, grid_x], residual_mads[
-                grid_y, grid_x
-            ] = fit
+            offsets[grid_y, grid_x] = float(tile_offsets[index])
+            sample_counts[grid_y, grid_x] = int(tile_counts[index])
+            residual_mads[grid_y, grid_x] = float(tile_mads[index])
 
     valid = np.isfinite(offsets)
     valid_count = int(np.count_nonzero(valid))
@@ -738,6 +786,9 @@ def _fit_additive_offset_grid(
         "coordinateConvention": "absolute-zero-based-pixel-centers",
         "boundaryConvention": "clamp-to-nearest-grid-node",
         "tileSizePixels": parameters.offset_tile_size_pixels,
+        "tileStatisticsKernel": (
+            TILE_OFFSET_KERNEL_ID if kernels is not None else "numpy-tile-offset-v1"
+        ),
         "smoothingSigmaNodes": parameters.offset_smoothing_sigma_nodes,
         "effectiveSmoothingSigmaPixels": (
             parameters.offset_tile_size_pixels
@@ -794,6 +845,7 @@ def _fit_coefficient(
     parameters: GlobalNormalizationParameters,
     scale_hint: StellarScaleHint | None,
     reference_cache: _ReferenceSampleCache,
+    native_threads: int | None = None,
 ) -> GlobalNormalizationCoefficient:
     x, y, sample_x, sample_y, paired_before_selection = _paired_samples(
         target, reference, parameters, reference_cache
@@ -888,6 +940,7 @@ def _fit_coefficient(
             sample_y,
             parameters,
             reference_cache,
+            native_threads,
         )
         offset = 0.0
         mode = (
@@ -940,9 +993,17 @@ def fit_registered_group_global_normalization(
     reference_index: int,
     parameters: GlobalNormalizationParameters | None = None,
     stellar_scale_hints: Sequence[StellarScaleHint | None] | None = None,
+    workers: int = 1,
 ) -> GlobalNormalizationResult:
+    """Fit every target against the reference; ``workers`` fits targets
+    concurrently and cannot change any coefficient."""
+
     parameters = parameters or GlobalNormalizationParameters()
     parameters.validate()
+    if workers < 1:
+        raise CalibrationError(
+            "GLOBAL_NORMALIZATION_WORKERS_INVALID", "workers must be positive"
+        )
     if not parameters.enabled:
         raise CalibrationError(
             "GLOBAL_NORMALIZATION_DISABLED", "global normalization is disabled"
@@ -1014,40 +1075,47 @@ def fit_registered_group_global_normalization(
                     "registered frame geometries differ",
                     path=str(frame.path),
                 )
-        coefficients: list[GlobalNormalizationCoefficient] = []
-        for index, frame in enumerate(frames):
+        def fit(index: int) -> GlobalNormalizationCoefficient:
+            frame = frames[index]
             if index == reference_index:
-                coefficients.append(
-                    GlobalNormalizationCoefficient(
-                        str(frame.path),
-                        1.0,
-                        0.0,
-                        "REFERENCE_IDENTITY",
-                        {
-                            "selectedBackgroundSamples": 0,
-                            "brightStructureExcludedByJointQuantiles": True,
-                            "multiplicativeScaleSpatialOrder": 0,
-                            "additiveModel": {"model": "REFERENCE_IDENTITY"},
-                            "stellarScale": (
-                                hints[index].serializable()
-                                if hints[index] is not None
-                                else None
-                            ),
-                            "backgroundCovarianceUsedForScale": False,
-                            "fallbackReason": None,
-                        },
-                    )
+                return GlobalNormalizationCoefficient(
+                    str(frame.path),
+                    1.0,
+                    0.0,
+                    "REFERENCE_IDENTITY",
+                    {
+                        "selectedBackgroundSamples": 0,
+                        "brightStructureExcludedByJointQuantiles": True,
+                        "multiplicativeScaleSpatialOrder": 0,
+                        "additiveModel": {"model": "REFERENCE_IDENTITY"},
+                        "stellarScale": (
+                            hints[index].serializable()
+                            if hints[index] is not None
+                            else None
+                        ),
+                        "backgroundCovarianceUsedForScale": False,
+                        "fallbackReason": None,
+                    },
                 )
-            else:
-                coefficients.append(
-                    _fit_coefficient(
-                        frame,
-                        reference,
-                        parameters,
-                        hints[index],
-                        reference_cache,
-                    )
-                )
+            assert reference_cache is not None
+            return _fit_coefficient(
+                frame,
+                reference,
+                parameters,
+                hints[index],
+                reference_cache,
+                native_threads,
+            )
+
+        fit_workers = max(1, min(workers, len(frames)))
+        native_threads = max(1, workers // fit_workers)
+        if fit_workers == 1:
+            coefficients = [fit(index) for index in range(len(frames))]
+        else:
+            with ThreadPoolExecutor(
+                max_workers=fit_workers, thread_name_prefix="oaf-normalize"
+            ) as executor:
+                coefficients = list(executor.map(fit, range(len(frames))))
     finally:
         while frames:
             frames.pop().close()

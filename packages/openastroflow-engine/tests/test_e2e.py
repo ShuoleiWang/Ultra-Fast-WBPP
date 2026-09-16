@@ -741,6 +741,7 @@ def test_single_field_generated_master_reuse_matches_raw_rebuild_pixel_oracle(
     monkeypatch.setattr(pixel_module, "integrate_expressions", count_pixel_integrations)
     monkeypatch.setattr(e2e_module, "_run_portable_pipeline_fits", capture_pixel_run)
 
+    source_bytes_before = _all_source_bytes(synthetic_project)
     output = tmp_path / "reuse-e2e"
     result = run_e2e(
         _request(synthetic_project, output),
@@ -755,12 +756,14 @@ def test_single_field_generated_master_reuse_matches_raw_rebuild_pixel_oracle(
     assert pixel_master_integrations == []
     assert captured["trusted"] is not None
     assert e2e_master_sources
-    assert all("pixel-inputs" in path for path in e2e_master_sources)
+    # FITS sources are consumed in place through read-only handles: every
+    # master was integrated directly from an original, and no private copy of
+    # any original was created or left behind.
     original_source_paths = {
         str(path) for paths in synthetic_project.values() for path in paths
     }
-    assert original_source_paths.isdisjoint(e2e_master_sources)
-    assert all(not Path(path).exists() for path in e2e_master_sources)
+    assert set(e2e_master_sources) <= original_source_paths
+    assert _all_source_bytes(synthetic_project) == source_bytes_before
     registration_receipt = json.loads(
         (output / "receipts" / "registration.json").read_text(encoding="utf-8")
     )
@@ -821,7 +824,10 @@ def test_single_field_generated_master_reuse_matches_raw_rebuild_pixel_oracle(
     (
         ("master", "TRUSTED_GENERATED_MASTER_CHANGED"),
         ("receipt", "TRUSTED_GENERATED_CALIBRATION_RECEIPT_CHANGED"),
-        ("staged", "PRIVATE_PIXEL_STAGING_CHANGED"),
+        # FITS sources are consumed in place (no private byte copy), so a
+        # Light mutated between the trust handoff and pixel consumption is
+        # caught by its captured stat identity as a source change.
+        ("source", "SOURCE_CHANGED"),
     ),
 )
 def test_single_field_generated_master_handoff_detects_tampering(
@@ -833,6 +839,20 @@ def test_single_field_generated_master_handoff_detects_tampering(
 ) -> None:
     import openastroflow_engine.e2e as e2e_module
 
+    project = synthetic_project
+    if target == "source":
+        # Never mutate the shared module fixture; tamper a private copy.
+        copied: dict[str, tuple[Path, ...]] = {}
+        for role, paths in synthetic_project.items():
+            values: list[Path] = []
+            for source in paths:
+                destination = tmp_path / "tamper-input" / role / source.name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+                destination.chmod(0o644)
+                values.append(destination)
+            copied[role] = tuple(values)
+        project = copied
     original = e2e_module._run_portable_pipeline_fits
 
     def tamper_before_consume(**kwargs: Any) -> Any:
@@ -856,7 +876,7 @@ def test_single_field_generated_master_handoff_detects_tampering(
     output = tmp_path / f"tampered-{target}"
     with pytest.raises(E2EError) as raised:
         run_e2e(
-            _request(synthetic_project, output),
+            _request(project, output),
             solver_backends=(FakeSolver(),),
         )
     assert raised.value.code == expected_code
@@ -923,13 +943,15 @@ def test_e2e_reuses_identity_bound_digests_and_excludes_review_light(
         )
     }
     review_path = str(synthetic_project["lights"][8].resolve(strict=True))
-    assert set(pixel_source_hashes) == passed_source_paths
+    # The pixel pipeline receives the inventory digests bound to each source's
+    # stat identity, so it never rereads an original merely to rehash it.
+    assert pixel_source_hashes == []
     assert review_path not in pixel_source_hashes
-    assert all(pixel_source_hashes.count(path) == 1 for path in passed_source_paths)
+    assert passed_source_paths <= source_paths
     assert set(e2e_source_hashes) == source_paths
     # One inventory hash plus one deliberate final publication hash.  Override
-    # lookup, source selection, snapshot creation, and generated-master handoff
-    # reuse the captured path/stat-bound digest instead of rereading originals.
+    # lookup, source selection, and generated-master handoff reuse the captured
+    # path/stat-bound digest instead of rereading originals.
     assert all(e2e_source_hashes.count(path) == 2 for path in source_paths)
 
 

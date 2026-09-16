@@ -1,0 +1,155 @@
+#ifndef OPENASTROFLOW_NATIVE_PORTABLEKERNELS_H
+#define OPENASTROFLOW_NATIVE_PORTABLEKERNELS_H
+
+#include <cstddef>
+#include <cstdint>
+#include <span>
+
+namespace openastroflow::native
+{
+
+// Multithreaded portable CPU kernels for the ordinary mono pipeline.
+//
+// Every kernel reproduces the arithmetic of the NumPy reference implementation
+// in the Python engine operation for operation: the same Float32/Float64
+// intermediate types, the same evaluation order, and the same NaN policy. A
+// differential test in the Python package therefore expects value-identical
+// output (the sign of an exact zero is the only permitted difference). The
+// kernels never change scientific parameters; they only change where the
+// work runs.
+
+// Output-to-input affine map in pixel coordinates. The parenthesized
+// evaluation order is part of the contract because it reproduces the NumPy
+// broadcast expression used by the reference resampler:
+//   xIn = ((m00*xOut) + (m01*yOut)) + m02
+//   yIn = ((m10*xOut) + (m11*yOut)) + m12
+struct AffineInverse
+{
+   double m00 = 1;
+   double m01 = 0;
+   double m02 = 0;
+   double m10 = 0;
+   double m11 = 1;
+   double m12 = 0;
+};
+
+struct WarpLanczos3Request
+{
+   // Native-endian Float32 physical source values, row-major,
+   // sourceHeight*sourceWidth samples. Nonfinite samples are permitted and
+   // invalidate every output sample whose nonzero support touches them.
+   std::span<const float> source;
+   std::uint32_t sourceWidth = 0;
+   std::uint32_t sourceHeight = 0;
+   AffineInverse inverse;
+   std::uint32_t outputWidth = 0;
+   std::uint32_t firstRow = 0;
+   std::uint32_t rowCount = 0;
+   // Declared normalized-unit scale of the numeric domain; the upper clamp is
+   // max(support maximum, domainScale), the lower clamp min(support minimum, 0).
+   float domainScale = 0;
+   std::uint32_t threads = 1;
+
+   void Validate() const;
+   std::size_t OutputPixels() const;
+};
+
+// Normalized, domain-bounded 6x6 Lanczos-3 resampling of one band of output
+// rows. Writes rowCount*outputWidth Float32 samples; NaN marks samples whose
+// coordinates fall outside the two-pixel interpolation margin or whose active
+// support contains a nonfinite source pixel.
+void WarpLanczos3Clamped( const WarpLanczos3Request& request,
+                          std::span<float> destination );
+
+struct MadRejectionRequest
+{
+   // Frame-major Float32 samples: frameCount*rowCount*width.
+   std::span<const float> frameMajorSamples;
+   std::uint32_t frameCount = 0;
+   std::uint32_t rowCount = 0;
+   std::uint32_t width = 0;
+   float sigmaClip = 4.0F;
+   std::uint32_t minimumRejectionFrames = 3;
+   float groupSigmaFloor = 1.0e-7F;
+   float absoluteFloor = 1.0e-7F;
+   // Already multiplied: epsilonFactor*float32 epsilon.
+   float epsilonFloor = 16.0F*1.1920928955078125e-07F;
+   std::uint32_t threads = 1;
+
+   void Validate() const;
+   std::size_t TilePixels() const;
+};
+
+// Per-pixel median/MAD sigma clipping over the complete frame stack. Writes
+// one accepted flag per sample (frame-major, 1 accepted / 0 rejected or
+// unavailable) and the per-pixel Float32 centre (NaN without finite samples).
+void MadRejectionMask( const MadRejectionRequest& request,
+                       std::span<std::uint8_t> accepted,
+                       std::span<float> center );
+
+struct MaskedMeanRequest
+{
+   std::span<const float> frameMajorSamples;
+   std::span<const std::uint8_t> frameMajorAccepted;
+   std::span<const double> frameWeights;
+   std::uint32_t frameCount = 0;
+   std::uint32_t rowCount = 0;
+   std::uint32_t width = 0;
+   std::uint32_t threads = 1;
+
+   void Validate() const;
+   std::size_t TilePixels() const;
+};
+
+struct MaskedMeanOutput
+{
+   std::span<float> integrated;
+   std::span<std::uint16_t> acceptedSamples;
+   std::span<std::uint16_t> rejectedSamples;
+};
+
+// Exact full-stack weighted mean with Float64 accumulation in frame order.
+// Pixels without accepted samples are NaN. rejectedSamples counts finite
+// samples that were not accepted; nonfinite samples count in neither total.
+void MaskedWeightedMean( const MaskedMeanRequest& request,
+                         const MaskedMeanOutput& output );
+
+struct TileOffsetRequest
+{
+   // Paired Float64 samples for every tile, concatenated; tile t occupies
+   // [boundaries[t], boundaries[t+1]).  Nonfinite pairs are ignored.
+   std::span<const double> target;
+   std::span<const double> reference;
+   std::span<const std::uint64_t> boundaries;
+   std::uint32_t tileCount = 0;
+   double scale = 1.0;
+   double lowerQuantile = 0.05;
+   double upperQuantile = 0.95;
+   std::uint32_t minimumSamples = 512;
+   double residualClipSigma = 3.0;
+   std::uint32_t threads = 1;
+
+   void Validate() const;
+};
+
+struct TileOffsetOutput
+{
+   std::span<double> offset;          // NaN when the tile is invalid
+   std::span<std::uint32_t> count;    // residual samples that formed offset
+   std::span<double> residualMad;     // NaN when the tile is invalid
+   std::span<std::uint8_t> valid;     // 1 valid, 0 invalid
+};
+
+// Per-tile additive offset between reference and scale*target, reproducing
+// global_normalization._tile_offset: joint 5-95% quantile selection with
+// NumPy's linear interpolation, median/MAD clipping at residualClipSigma,
+// and the median residual plus its robust dispersion.  Tiles are independent
+// and run concurrently.
+void TileOffsets( const TileOffsetRequest& request, const TileOffsetOutput& output );
+
+// Hardware concurrency clamped to [1, 64]; never zero.
+std::uint32_t DefaultKernelThreads() noexcept;
+
+} // namespace openastroflow::native
+
+#endif // OPENASTROFLOW_NATIVE_PORTABLEKERNELS_H

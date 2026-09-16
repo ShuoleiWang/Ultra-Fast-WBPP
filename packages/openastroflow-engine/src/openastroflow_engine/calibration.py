@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from .calibration_policy import bias_from_header
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -25,17 +26,38 @@ from astropy.io import fits
 import numpy as np
 from numpy.typing import NDArray
 
+from .native_kernels import (
+    MAD_KERNEL_ID,
+    MEAN_KERNEL_ID,
+    default_kernel_threads,
+    load_native_kernels,
+)
 from .transient_rejection import TransientRejectionModel, detect_transient_trails
 from .residual_background import fit_residual_background
+from .robust_statistics import nanmedian_frames
 
 
 FITS_BLOCK_BYTES = 2880
 DEFAULT_MEMORY_BUDGET = 256 * 1024 * 1024
 REJECTION_FLOOR_ALGORITHM = "fixed-grid-group-mad-plus-float32-ulp-v1"
 REJECTION_FLOOR_MAX_SAMPLES = 65_536
+# Rows evaluated per read while binning frames for spatial transient
+# detection; a performance knob only, the block statistics do not depend on it.
+TRANSIENT_BAND_ROWS = 128
 REJECTION_FLOOR_GROUP_FRACTION = 0.05
 REJECTION_FLOOR_ABSOLUTE = 1.0e-7
 REJECTION_FLOOR_EPSILON_FACTOR = 16.0
+NUMPY_MAD_KERNEL_ID = "numpy-nanmedian-mad-v1"
+NUMPY_MEAN_KERNEL_ID = "numpy-float64-weighted-mean-v1"
+# Lanczos-3 tap constants for offsets k = -2..3, evaluated through exact
+# trigonometric identities: sin(pi(f-k)) = (-1)^k sin(pi f) and
+# sin(pi(f-k)/3) = sin(pi f/3) cos(k pi/3) - cos(pi f/3) sin(k pi/3).
+# The same literals appear in the native kernel; both paths must agree.
+LANCZOS3_TAP_OFFSETS = (-2, -1, 0, 1, 2, 3)
+_SQRT3_HALF = 0.8660254037844386
+LANCZOS3_TAP_SIGNS = (1.0, -1.0, 1.0, -1.0, 1.0, -1.0)
+LANCZOS3_TAP_COSINES = (-0.5, 0.5, 1.0, 0.5, -0.5, -1.0)
+LANCZOS3_TAP_SINES = (-_SQRT3_HALF, -_SQRT3_HALF, 0.0, _SQRT3_HALF, _SQRT3_HALF, 0.0)
 
 
 class CalibrationError(RuntimeError):
@@ -365,6 +387,16 @@ class FitsFrame:
         raw = self._data[y0:y1]
         return self._physical_values(raw)
 
+    def read_sampled_rows(self, y_indices: NDArray[np.int64]) -> NDArray[np.float32]:
+        """Decode the listed rows in one gather; values equal per-row reads."""
+
+        if self._data is None:
+            raise RuntimeError("FitsFrame is not open")
+        rows = np.asarray(y_indices, dtype=np.int64)
+        if rows.ndim != 1 or rows.size == 0 or np.any(rows < 0) or np.any(rows >= self.shape[0]):
+            raise ValueError("invalid sampled rows")
+        return self._physical_values(self._data[rows])
+
     def _physical_values(self, raw: NDArray[Any]) -> NDArray[np.float32]:
         # Apply the FITS storage transform before rounding to the output type.
         # In particular, signed storage for uint32 uses BZERO=2**31: casting
@@ -410,6 +442,11 @@ class FitsFrame:
         raw = self._data[y, x]
         return self._physical_values(raw)
 
+    def full_values(self) -> NDArray[np.float32]:
+        """Decode the complete image to native Float32 physical values."""
+
+        return self.read_rows(0, self.shape[0])
+
     def sample_bilinear(
         self,
         x_coordinates: NDArray[Any],
@@ -417,51 +454,7 @@ class FitsFrame:
     ) -> NDArray[np.float32]:
         """Sample a bounded coordinate tile without decoding the full image."""
 
-        x = np.asarray(x_coordinates, dtype=np.float64)
-        y = np.asarray(y_coordinates, dtype=np.float64)
-        if x.shape != y.shape or x.ndim != 2:
-            raise ValueError("coordinate tiles must be same-shaped two-dimensional arrays")
-        height, width = self.shape
-        valid = (
-            np.isfinite(x)
-            & np.isfinite(y)
-            & (x >= 0.0)
-            & (x <= width - 1)
-            & (y >= 0.0)
-            & (y <= height - 1)
-        )
-        result = np.full(x.shape, np.nan, dtype=np.float32)
-        if not np.any(valid):
-            return result
-        xv = x[valid]
-        yv = y[valid]
-        x0 = np.floor(xv).astype(np.int64)
-        y0 = np.floor(yv).astype(np.int64)
-        x1 = np.minimum(x0 + 1, width - 1)
-        y1 = np.minimum(y0 + 1, height - 1)
-        dx = (xv - x0).astype(np.float32)
-        dy = (yv - y0).astype(np.float32)
-        v00 = self._physical_index(y0, x0)
-        v10 = self._physical_index(y0, x1)
-        v01 = self._physical_index(y1, x0)
-        v11 = self._physical_index(y1, x1)
-        weights = (
-            (1.0 - dx) * (1.0 - dy),
-            dx * (1.0 - dy),
-            (1.0 - dx) * dy,
-            dx * dy,
-        )
-        samples = np.zeros(v00.shape, dtype=np.float32)
-        sample_valid = np.ones(v00.shape, dtype=bool)
-        for neighbor, weight in zip((v00, v10, v01, v11), weights, strict=True):
-            active = weight > 0
-            finite_neighbor = np.isfinite(neighbor)
-            sample_valid &= ~active | finite_neighbor
-            samples += np.where(active & finite_neighbor, neighbor * weight, 0.0)
-        selected = result[valid]
-        selected[sample_valid] = samples[sample_valid]
-        result[valid] = selected
-        return result
+        return _sample_bilinear_from(self, x_coordinates, y_coordinates)
 
     def sample_lanczos3_clamped(
         self,
@@ -470,152 +463,303 @@ class FitsFrame:
     ) -> NDArray[np.float32]:
         """Sample with a normalized, bounded six-tap Lanczos-3 kernel.
 
-        The separable kernel is evaluated from first principles and normalized
-        independently on both axes so a constant field remains constant.  A
-        sample is valid only when the complete nonzero support is available;
-        any nonfinite pixel carrying nonzero weight invalidates the result.
-
-        Lanczos' negative lobes retain substantially more stellar detail than
-        bilinear interpolation, but can create new out-of-domain extrema around
-        saturated or defective pixels.  The final bound is the union of the
-        declared physical domain and the finite 6x6 source support.  This clips
-        interpolation-created excursions without clipping negative or
-        over-range values that were already present in the calibrated input,
-        and without applying any post-registration sharpening.
+        See :func:`_sample_lanczos3_clamped_from` for the contract; the same
+        implementation serves file-backed and in-memory frames.
         """
 
-        x = np.asarray(x_coordinates, dtype=np.float64)
-        y = np.asarray(y_coordinates, dtype=np.float64)
-        if x.shape != y.shape or x.ndim != 2:
-            raise ValueError("coordinate tiles must be same-shaped two-dimensional arrays")
-        height, width = self.shape
-        domain_scale = self.info.normalized_unit_scale
-        if (
-            domain_scale is None
-            or not math.isfinite(domain_scale)
-            or domain_scale <= 0.0
-        ):
-            raise ValueError(
-                "Lanczos-3 registration requires a declared finite numeric domain"
-            )
-        # For a fractional coordinate, Lanczos-3 touches floor(q)-2 through
-        # floor(q)+3.  At the upper integer endpoint the final coefficient is
-        # exactly zero, so clipping that unused index is safe and keeps the
-        # symmetric two-pixel interpolation margin used by registration.
-        valid = (
-            np.isfinite(x)
-            & np.isfinite(y)
-            & (x >= 2.0)
-            & (x <= width - 3.0)
-            & (y >= 2.0)
-            & (y <= height - 3.0)
-        )
-        result = np.full(x.shape, np.nan, dtype=np.float32)
-        if not np.any(valid):
-            return result
+        return _sample_lanczos3_clamped_from(self, x_coordinates, y_coordinates)
 
-        xv = x[valid]
-        yv = y[valid]
-        x_floor = np.floor(xv).astype(np.int64)
-        y_floor = np.floor(yv).astype(np.int64)
-        x_fraction = xv - x_floor
-        y_fraction = yv - y_floor
-        offsets = (-2, -1, 0, 1, 2, 3)
 
-        def weights(fraction: NDArray[np.float64]) -> tuple[NDArray[np.float32], ...]:
-            values: list[NDArray[np.float32]] = []
-            total = np.zeros(fraction.shape, dtype=np.float64)
-            for offset in offsets:
-                distance = fraction - float(offset)
-                absolute = np.abs(distance)
-                weight = np.zeros(distance.shape, dtype=np.float64)
-                at_origin = absolute <= 1.0e-14
-                inside = (absolute < 3.0) & ~at_origin
-                weight[at_origin] = 1.0
-                if np.any(inside):
-                    phase = np.pi * distance[inside]
-                    weight[inside] = (
-                        (np.sin(phase) / phase)
-                        * (np.sin(phase / 3.0) / (phase / 3.0))
-                    )
-                # Exact integer offsets other than zero are mathematical
-                # zeros.  Making them exact prevents a distant NaN from
-                # invalidating an integer-coordinate sample through roundoff.
-                integer_zero = (
-                    (absolute > 1.0e-14)
-                    & (np.abs(distance - np.rint(distance)) <= 1.0e-14)
-                )
-                weight[integer_zero] = 0.0
-                total += weight
-                values.append(np.asarray(weight, dtype=np.float32))
-            if not np.all(np.isfinite(total)) or np.any(np.abs(total) < 1.0e-12):
-                raise RuntimeError("Lanczos-3 weight normalization is singular")
-            for weight in values:
-                np.divide(weight, total, out=weight, casting="unsafe")
-            return tuple(values)
+class _MemoryFrame:
+    """In-memory Float32 physical image with the FitsFrame sampling interface.
 
-        x_weights = weights(x_fraction)
-        y_weights = weights(y_fraction)
-        samples = np.zeros(xv.shape, dtype=np.float32)
-        sample_valid = np.ones(xv.shape, dtype=bool)
-        support_minimum = np.full(xv.shape, np.inf, dtype=np.float32)
-        support_maximum = np.full(xv.shape, -np.inf, dtype=np.float32)
-        x_index = np.empty_like(x_floor)
-        y_index = np.empty_like(y_floor)
-        combined_weight = np.empty_like(samples)
+    Fused calibration keeps a calibrated Light in memory and registers it
+    directly, so the resamplers below accept either a FitsFrame or this
+    object.  ``read_rows`` returns copies because expression evaluation
+    mutates the rows it receives.
+    """
 
-        for y_offset, y_weight in zip(offsets, y_weights, strict=True):
-            np.add(y_floor, y_offset, out=y_index)
-            if y_offset == 3:
-                np.minimum(y_index, height - 1, out=y_index)
-            for x_offset, x_weight in zip(offsets, x_weights, strict=True):
-                np.multiply(y_weight, x_weight, out=combined_weight)
-                active = combined_weight != 0.0
-                all_active = bool(np.all(active))
-                if not all_active and not np.any(active):
-                    continue
-                # Valid coordinates guarantee every offset except +3 is in
-                # bounds. Only the zero-weight upper integer endpoint needs
-                # clipping; keep the original tap order and pixel values.
-                np.add(x_floor, x_offset, out=x_index)
-                if x_offset == 3:
-                    np.minimum(x_index, width - 1, out=x_index)
-                neighbor = self._physical_index(y_index, x_index)
-                finite_neighbor = np.isfinite(neighbor)
-                if all_active:
-                    # Fractional affine coordinates normally activate every
-                    # tap. A nonfinite neighbor permanently invalidates its
-                    # sample, so its intermediate sum/bounds are never used.
-                    # Unmasked ufuncs avoid several full-tile boolean/select
-                    # passes while retaining the exact finite-pixel ordering.
-                    sample_valid &= finite_neighbor
-                    np.minimum(support_minimum, neighbor, out=support_minimum)
-                    np.maximum(support_maximum, neighbor, out=support_maximum)
-                    np.multiply(neighbor, combined_weight, out=neighbor)
-                    np.add(samples, neighbor, out=samples, where=sample_valid)
-                    continue
-                accepted = active & finite_neighbor
-                sample_valid &= ~active | finite_neighbor
-                np.minimum(
-                    support_minimum, neighbor, out=support_minimum, where=accepted
-                )
-                np.maximum(
-                    support_maximum, neighbor, out=support_maximum, where=accepted
-                )
-                # Neighbor is a private physical-value copy. Reuse it only
-                # after recording the support bounds, preserving tap order
-                # and Float32 multiply/add rounding without a product tile.
-                np.multiply(neighbor, combined_weight, out=neighbor)
-                neighbor[~accepted] = 0.0
-                samples += neighbor
+    def __init__(
+        self,
+        values: NDArray[Any],
+        info: FrameInfo,
+        path: str | os.PathLike[str] | None = None,
+    ) -> None:
+        array = np.ascontiguousarray(values, dtype=np.float32)
+        if array.ndim != 2 or array.shape[0] < 1 or array.shape[1] < 1:
+            raise ValueError("memory frames require a nonempty two-dimensional image")
+        self._values = array
+        self.shape: tuple[int, int] = (int(array.shape[0]), int(array.shape[1]))
+        self.info = info
+        self.path = Path(path) if path is not None else Path(info.path)
 
-        lower_bound = np.minimum(support_minimum, np.float32(0.0))
-        upper_bound = np.maximum(support_maximum, np.float32(domain_scale))
-        samples = np.minimum(np.maximum(samples, lower_bound), upper_bound)
-        selected = result[valid]
-        selected[sample_valid] = samples[sample_valid]
-        result[valid] = selected
+    def __enter__(self) -> _MemoryFrame:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    @property
+    def values(self) -> NDArray[np.float32]:
+        return self._values
+
+    def read_rows(self, y0: int, y1: int) -> NDArray[np.float32]:
+        if y0 < 0 or y1 > self.shape[0] or y0 >= y1:
+            raise ValueError("invalid row interval")
+        return np.array(self._values[y0:y1], dtype=np.float32, copy=True)
+
+    def read_sampled_rows(self, y_indices: NDArray[np.int64]) -> NDArray[np.float32]:
+        rows = np.asarray(y_indices, dtype=np.int64)
+        if rows.ndim != 1 or rows.size == 0 or np.any(rows < 0) or np.any(rows >= self.shape[0]):
+            raise ValueError("invalid sampled rows")
+        return np.array(self._values[rows], dtype=np.float32, copy=True)
+
+    def full_values(self) -> NDArray[np.float32]:
+        return self._values
+
+    def _physical_index(
+        self, y: NDArray[np.int64], x: NDArray[np.int64]
+    ) -> NDArray[np.float32]:
+        return self._values[y, x]
+
+    def sample_bilinear(
+        self,
+        x_coordinates: NDArray[Any],
+        y_coordinates: NDArray[Any],
+    ) -> NDArray[np.float32]:
+        return _sample_bilinear_from(self, x_coordinates, y_coordinates)
+
+    def sample_lanczos3_clamped(
+        self,
+        x_coordinates: NDArray[Any],
+        y_coordinates: NDArray[Any],
+    ) -> NDArray[np.float32]:
+        return _sample_lanczos3_clamped_from(self, x_coordinates, y_coordinates)
+
+
+def _sample_bilinear_from(
+    frame: Any,
+    x_coordinates: NDArray[Any],
+    y_coordinates: NDArray[Any],
+) -> NDArray[np.float32]:
+    """Sample a bounded coordinate tile without decoding the full image."""
+
+    x = np.asarray(x_coordinates, dtype=np.float64)
+    y = np.asarray(y_coordinates, dtype=np.float64)
+    if x.shape != y.shape or x.ndim != 2:
+        raise ValueError("coordinate tiles must be same-shaped two-dimensional arrays")
+    height, width = frame.shape
+    valid = (
+        np.isfinite(x)
+        & np.isfinite(y)
+        & (x >= 0.0)
+        & (x <= width - 1)
+        & (y >= 0.0)
+        & (y <= height - 1)
+    )
+    result = np.full(x.shape, np.nan, dtype=np.float32)
+    if not np.any(valid):
         return result
+    xv = x[valid]
+    yv = y[valid]
+    x0 = np.floor(xv).astype(np.int64)
+    y0 = np.floor(yv).astype(np.int64)
+    x1 = np.minimum(x0 + 1, width - 1)
+    y1 = np.minimum(y0 + 1, height - 1)
+    dx = (xv - x0).astype(np.float32)
+    dy = (yv - y0).astype(np.float32)
+    v00 = frame._physical_index(y0, x0)
+    v10 = frame._physical_index(y0, x1)
+    v01 = frame._physical_index(y1, x0)
+    v11 = frame._physical_index(y1, x1)
+    weights = (
+        (1.0 - dx) * (1.0 - dy),
+        dx * (1.0 - dy),
+        (1.0 - dx) * dy,
+        dx * dy,
+    )
+    samples = np.zeros(v00.shape, dtype=np.float32)
+    sample_valid = np.ones(v00.shape, dtype=bool)
+    for neighbor, weight in zip((v00, v10, v01, v11), weights, strict=True):
+        active = weight > 0
+        finite_neighbor = np.isfinite(neighbor)
+        sample_valid &= ~active | finite_neighbor
+        samples += np.where(active & finite_neighbor, neighbor * weight, 0.0)
+    selected = result[valid]
+    selected[sample_valid] = samples[sample_valid]
+    result[valid] = selected
+    return result
+
+
+def _sample_lanczos3_clamped_from(
+    frame: Any,
+    x_coordinates: NDArray[Any],
+    y_coordinates: NDArray[Any],
+) -> NDArray[np.float32]:
+    """Sample with a normalized, bounded six-tap Lanczos-3 kernel.
+
+    The separable kernel is evaluated from first principles and normalized
+    independently on both axes so a constant field remains constant.  A
+    sample is valid only when the complete nonzero support is available;
+    any nonfinite pixel carrying nonzero weight invalidates the result.
+
+    Lanczos' negative lobes retain substantially more stellar detail than
+    bilinear interpolation, but can create new out-of-domain extrema around
+    saturated or defective pixels.  The final bound is the union of the
+    declared physical domain and the finite 6x6 source support.  This clips
+    interpolation-created excursions without clipping negative or
+    over-range values that were already present in the calibrated input,
+    and without applying any post-registration sharpening.
+
+    The native ``warp_lanczos3`` kernel reproduces this arithmetic value for
+    value; this NumPy implementation remains the portable reference.
+    """
+
+    x = np.asarray(x_coordinates, dtype=np.float64)
+    y = np.asarray(y_coordinates, dtype=np.float64)
+    if x.shape != y.shape or x.ndim != 2:
+        raise ValueError("coordinate tiles must be same-shaped two-dimensional arrays")
+    height, width = frame.shape
+    domain_scale = frame.info.normalized_unit_scale
+    if (
+        domain_scale is None
+        or not math.isfinite(domain_scale)
+        or domain_scale <= 0.0
+    ):
+        raise ValueError(
+            "Lanczos-3 registration requires a declared finite numeric domain"
+        )
+    # For a fractional coordinate, Lanczos-3 touches floor(q)-2 through
+    # floor(q)+3.  At the upper integer endpoint the final coefficient is
+    # exactly zero, so clipping that unused index is safe and keeps the
+    # symmetric two-pixel interpolation margin used by registration.
+    valid = (
+        np.isfinite(x)
+        & np.isfinite(y)
+        & (x >= 2.0)
+        & (x <= width - 3.0)
+        & (y >= 2.0)
+        & (y <= height - 3.0)
+    )
+    result = np.full(x.shape, np.nan, dtype=np.float32)
+    if not np.any(valid):
+        return result
+
+    xv = x[valid]
+    yv = y[valid]
+    x_floor = np.floor(xv).astype(np.int64)
+    y_floor = np.floor(yv).astype(np.int64)
+    x_fraction = xv - x_floor
+    y_fraction = yv - y_floor
+    offsets = LANCZOS3_TAP_OFFSETS
+
+    def weights(fraction: NDArray[np.float64]) -> tuple[NDArray[np.float32], ...]:
+        values: list[NDArray[np.float32]] = []
+        total = np.zeros(fraction.shape, dtype=np.float64)
+        # Three transcendental evaluations serve all six taps exactly.
+        primary_sine = np.sin(np.pi * fraction)
+        reduced = np.pi * fraction / 3.0
+        reduced_sine = np.sin(reduced)
+        reduced_cosine = np.cos(reduced)
+        for offset, sign, tap_cosine, tap_sine in zip(
+            offsets, LANCZOS3_TAP_SIGNS, LANCZOS3_TAP_COSINES, LANCZOS3_TAP_SINES,
+            strict=True,
+        ):
+            distance = fraction - float(offset)
+            absolute = np.abs(distance)
+            weight = np.zeros(distance.shape, dtype=np.float64)
+            at_origin = absolute <= 1.0e-14
+            inside = (absolute < 3.0) & ~at_origin
+            weight[at_origin] = 1.0
+            if np.any(inside):
+                phase = np.pi * distance[inside]
+                primary = (sign * primary_sine[inside]) / phase
+                secondary = (
+                    reduced_sine[inside] * tap_cosine
+                    - reduced_cosine[inside] * tap_sine
+                ) / (phase / 3.0)
+                weight[inside] = primary * secondary
+            # Exact integer offsets other than zero are mathematical
+            # zeros.  Making them exact prevents a distant NaN from
+            # invalidating an integer-coordinate sample through roundoff.
+            integer_zero = (
+                (absolute > 1.0e-14)
+                & (np.abs(distance - np.rint(distance)) <= 1.0e-14)
+            )
+            weight[integer_zero] = 0.0
+            total += weight
+            values.append(np.asarray(weight, dtype=np.float32))
+        if not np.all(np.isfinite(total)) or np.any(np.abs(total) < 1.0e-12):
+            raise RuntimeError("Lanczos-3 weight normalization is singular")
+        for weight in values:
+            np.divide(weight, total, out=weight, casting="unsafe")
+        return tuple(values)
+
+    x_weights = weights(x_fraction)
+    y_weights = weights(y_fraction)
+    samples = np.zeros(xv.shape, dtype=np.float32)
+    sample_valid = np.ones(xv.shape, dtype=bool)
+    support_minimum = np.full(xv.shape, np.inf, dtype=np.float32)
+    support_maximum = np.full(xv.shape, -np.inf, dtype=np.float32)
+    x_index = np.empty_like(x_floor)
+    y_index = np.empty_like(y_floor)
+    combined_weight = np.empty_like(samples)
+
+    for y_offset, y_weight in zip(offsets, y_weights, strict=True):
+        np.add(y_floor, y_offset, out=y_index)
+        if y_offset == 3:
+            np.minimum(y_index, height - 1, out=y_index)
+        for x_offset, x_weight in zip(offsets, x_weights, strict=True):
+            np.multiply(y_weight, x_weight, out=combined_weight)
+            active = combined_weight != 0.0
+            all_active = bool(np.all(active))
+            if not all_active and not np.any(active):
+                continue
+            # Valid coordinates guarantee every offset except +3 is in
+            # bounds. Only the zero-weight upper integer endpoint needs
+            # clipping; keep the original tap order and pixel values.
+            np.add(x_floor, x_offset, out=x_index)
+            if x_offset == 3:
+                np.minimum(x_index, width - 1, out=x_index)
+            neighbor = frame._physical_index(y_index, x_index)
+            finite_neighbor = np.isfinite(neighbor)
+            if all_active:
+                # Fractional affine coordinates normally activate every
+                # tap. A nonfinite neighbor permanently invalidates its
+                # sample, so its intermediate sum/bounds are never used.
+                # Unmasked ufuncs avoid several full-tile boolean/select
+                # passes while retaining the exact finite-pixel ordering.
+                sample_valid &= finite_neighbor
+                np.minimum(support_minimum, neighbor, out=support_minimum)
+                np.maximum(support_maximum, neighbor, out=support_maximum)
+                np.multiply(neighbor, combined_weight, out=neighbor)
+                np.add(samples, neighbor, out=samples, where=sample_valid)
+                continue
+            accepted = active & finite_neighbor
+            sample_valid &= ~active | finite_neighbor
+            np.minimum(
+                support_minimum, neighbor, out=support_minimum, where=accepted
+            )
+            np.maximum(
+                support_maximum, neighbor, out=support_maximum, where=accepted
+            )
+            # Neighbor is a private physical-value copy. Reuse it only
+            # after recording the support bounds, preserving tap order
+            # and Float32 multiply/add rounding without a product tile.
+            np.multiply(neighbor, combined_weight, out=neighbor)
+            neighbor[~accepted] = 0.0
+            samples += neighbor
+
+    lower_bound = np.minimum(support_minimum, np.float32(0.0))
+    upper_bound = np.maximum(support_maximum, np.float32(domain_scale))
+    samples = np.minimum(np.maximum(samples, lower_bound), upper_bound)
+    selected = result[valid]
+    selected[sample_valid] = samples[sample_valid]
+    result[valid] = selected
+    return result
 
 
 def read_frame_info(path: str | os.PathLike[str]) -> FrameInfo:
@@ -645,18 +789,38 @@ def _fits_header(
 
 
 class FitsFloatWriter:
-    """Incremental big-endian Float32 FITS writer."""
+    """Incremental big-endian Float32 FITS writer.
+
+    Rows are written through one buffered file handle (sequential rows
+    append; out-of-order rows seek), so the page cache absorbs the data
+    without the page-fault and synchronous writeback cost of a memory map.
+    ``durable`` controls the closing ``fsync``: published products keep it,
+    transient intermediates that are deleted before the run ends skip it.
+    When rows arrive once each in ascending order the writer also folds the
+    exact file bytes (header, big-endian samples, block padding) into a
+    SHA-256 digest, so publication receipts never reread large intermediates.
+    """
 
     def __init__(
         self,
         path: str | os.PathLike[str],
         shape: tuple[int, int],
         metadata: Mapping[str, Any] | None = None,
+        *,
+        durable: bool = True,
     ) -> None:
         self.path = Path(path)
         self.shape = shape
         self.metadata = metadata
-        self._mapping: np.memmap[Any] | None = None
+        self.durable = bool(durable)
+        self._stream: Any = None
+        self._data_offset = 0
+        self._padding = 0
+        self._position_row = 0
+        self._digest: Any = hashlib.sha256()
+        self._next_row = 0
+        self._sequential = True
+        self.sha256: str | None = None
 
     def __enter__(self) -> FitsFloatWriter:
         height, width = self.shape
@@ -665,29 +829,29 @@ class FitsFloatWriter:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         _, encoded = _fits_header(self.shape, self.metadata)
         data_bytes = height * width * np.dtype(">f4").itemsize
-        padding = (-data_bytes) % FITS_BLOCK_BYTES
+        self._padding = (-data_bytes) % FITS_BLOCK_BYTES
+        self._data_offset = len(encoded)
         try:
-            with self.path.open("xb") as stream:
-                stream.write(encoded)
-                stream.truncate(len(encoded) + data_bytes + padding)
-                stream.flush()
-                os.fsync(stream.fileno())
-            self._mapping = np.memmap(
-                self.path,
-                dtype=">f4",
-                mode="r+",
-                offset=len(encoded),
-                shape=self.shape,
-                order="C",
-            )
+            stream = self.path.open("xb", buffering=8 * 1024 * 1024)
         except FileExistsError as error:
             raise CalibrationError(
                 "OUTPUT_EXISTS", "refusing to overwrite output", path=str(self.path)
             ) from error
+        try:
+            stream.write(encoded)
+            # Pre-size the file so unwritten rows and the block padding are
+            # zero and seeks beyond the current position are valid.
+            stream.truncate(self._data_offset + data_bytes + self._padding)
+        except Exception:
+            stream.close()
+            raise
+        self._stream = stream
+        self._digest.update(encoded)
+        self._position_row = 0
         return self
 
     def write_rows(self, y0: int, values: NDArray[Any]) -> None:
-        if self._mapping is None:
+        if self._stream is None:
             raise RuntimeError("FitsFloatWriter is not open")
         rows = np.asarray(values, dtype=np.float32)
         if rows.ndim != 2 or rows.shape[1] != self.shape[1]:
@@ -695,14 +859,31 @@ class FitsFloatWriter:
         y1 = y0 + rows.shape[0]
         if y0 < 0 or y1 > self.shape[0]:
             raise ValueError("output tile is outside image bounds")
-        self._mapping[y0:y1] = rows
+        # One big-endian conversion feeds both the file and the digest.
+        encoded = np.ascontiguousarray(rows, dtype=">f4")
+        if y0 != self._position_row:
+            self._stream.seek(self._data_offset + y0 * self.shape[1] * 4)
+        self._stream.write(memoryview(encoded).cast("B"))
+        self._position_row = y1
+        if self._sequential and y0 == self._next_row:
+            self._digest.update(memoryview(encoded).cast("B"))
+            self._next_row = y1
+        else:
+            self._sequential = False
 
     def close(self) -> None:
-        if self._mapping is not None:
-            self._mapping.flush()
-            self._mapping = None
-            with self.path.open("r+b") as stream:
-                os.fsync(stream.fileno())
+        if self._stream is not None:
+            stream = self._stream
+            self._stream = None
+            try:
+                stream.flush()
+                if self.durable:
+                    os.fsync(stream.fileno())
+            finally:
+                stream.close()
+            if self._sequential and self._next_row == self.shape[0]:
+                self._digest.update(bytes(self._padding))
+                self.sha256 = "sha256:" + self._digest.hexdigest()
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         self.close()
@@ -800,7 +981,11 @@ def _add_offset_grid_rows(
     y0: int,
     y1: int,
     width: int,
+    absolute_rows: Sequence[int] | None = None,
 ) -> None:
+    """Add the bilinear offset grid to ``result``; rows are ``range(y0, y1)`` or
+    the explicit ``absolute_rows`` (one per result row), evaluated identically."""
+
     grid = np.asarray(grid_value, dtype=np.float64)
     y_nodes = np.asarray(y_nodes_value, dtype=np.float64)
     x_lo, x_hi, wx = _offset_grid_x_plan(x_nodes_value, width)
@@ -817,7 +1002,8 @@ def _add_offset_grid_rows(
             horizontal_rows[node_index] = cached
         return cached
 
-    for local_row, absolute_y in enumerate(range(y0, y1)):
+    rows = range(y0, y1) if absolute_rows is None else absolute_rows
+    for local_row, absolute_y in enumerate(rows):
         clipped_y = min(max(float(absolute_y), y_nodes[0]), y_nodes[-1])
         y_hi = min(
             max(int(np.searchsorted(y_nodes, clipped_y, side="right")), 1),
@@ -874,6 +1060,59 @@ def _expression_rows(
             y0,
             y1,
             result.shape[1],
+        )
+    if expression.offset != 0.0:
+        result += np.float32(expression.offset)
+    return result
+
+
+def _expression_sampled_rows(
+    expression: FrameExpression,
+    sources: Mapping[str, Any],
+    y_indices: NDArray[np.int64],
+    *,
+    division_floor: float,
+) -> NDArray[np.float32]:
+    """Evaluate ``expression`` on the listed rows with one gather per source.
+
+    Every operation is elementwise, so each returned row equals the row that
+    ``_expression_rows`` produces for the same absolute row.
+    """
+
+    rows = np.asarray(y_indices, dtype=np.int64)
+    result = sources[expression.source_path].read_sampled_rows(rows)
+    if expression.subtract_path is not None:
+        subtract = sources[expression.subtract_path].read_sampled_rows(rows)
+        if expression.subtract_scale != 1.0:
+            subtract *= np.float32(expression.subtract_scale)
+        result -= subtract
+    subtract_scales = expression.subtract_scales or (1.0,) * len(
+        expression.subtract_paths
+    )
+    for subtract_path, subtract_scale in zip(
+        expression.subtract_paths, subtract_scales, strict=True
+    ):
+        subtract = sources[subtract_path].read_sampled_rows(rows)
+        if subtract_scale != 1.0:
+            subtract *= np.float32(subtract_scale)
+        result -= subtract
+    if expression.divide_path is not None:
+        divisor = sources[expression.divide_path].read_sampled_rows(rows)
+        valid = np.isfinite(divisor) & (divisor > division_floor)
+        np.divide(result, divisor, out=result, where=valid)
+        result[~valid] = np.nan
+    if expression.scale != 1.0:
+        result *= np.float32(expression.scale)
+    if expression.offset_grid:
+        _add_offset_grid_rows(
+            result,
+            expression.offset_grid,
+            expression.offset_grid_x,
+            expression.offset_grid_y,
+            0,
+            int(rows.size),
+            result.shape[1],
+            absolute_rows=[int(value) for value in rows],
         )
     if expression.offset != 0.0:
         result += np.float32(expression.offset)
@@ -1061,16 +1300,11 @@ def _sample_expression(
     division_floor: float,
 ) -> NDArray[np.float32]:
     y_indices, x_indices = _sample_coordinates(shape, max_samples)
+    sampled_rows = _expression_sampled_rows(
+        expression, sources, y_indices, division_floor=division_floor
+    )[:, x_indices]
     chunks: list[NDArray[np.float32]] = []
-    for y in y_indices:
-        row = _expression_rows(
-            expression,
-            sources,
-            int(y),
-            int(y) + 1,
-            division_floor=division_floor,
-        )
-        sampled = row[0, x_indices]
+    for sampled in sampled_rows:
         finite = sampled[np.isfinite(sampled)]
         if finite.size:
             chunks.append(finite.astype(np.float32, copy=False))
@@ -1146,10 +1380,15 @@ class _StatsAccumulator:
         self.finite += count
         self.invalid += int(array.size - count)
         if count:
-            selected = array[finite]
-            self.minimum = min(self.minimum, float(np.min(selected)))
-            self.maximum = max(self.maximum, float(np.max(selected)))
-            self.total += float(np.sum(selected, dtype=np.float64))
+            # Masked reductions avoid materializing a compacted copy of every
+            # finite sample for each written frame.
+            self.minimum = min(
+                self.minimum, float(np.min(array, initial=np.inf, where=finite))
+            )
+            self.maximum = max(
+                self.maximum, float(np.max(array, initial=-np.inf, where=finite))
+            )
+            self.total += float(np.sum(array, dtype=np.float64, where=finite))
 
     def result(self) -> PixelStatistics:
         return PixelStatistics(
@@ -1209,10 +1448,15 @@ class IntegrationResult:
     quality_weights: tuple[float, ...] = ()
     map_paths: Mapping[str, str] = field(default_factory=dict)
     execution: Mapping[str, Any] = field(default_factory=dict)
+    # Digests computed by the streaming writer over the exact published bytes;
+    # None when a writer could not stream (never rereads a file to fill them).
+    output_sha256: str | None = None
+    map_sha256: Mapping[str, str] = field(default_factory=dict)
 
     def serializable(self) -> dict[str, Any]:
         return {
             "outputPath": self.output_path,
+            "outputSha256": self.output_sha256,
             "shape": list(self.shape),
             "frameCount": self.frame_count,
             "tileRows": self.tile_rows,
@@ -1350,33 +1594,29 @@ def _estimate_rejection_sigma_floor(
             coordinate_sha256,
         )
 
-    sigma_chunks: list[NDArray[np.float32]] = []
-    for y in y_indices:
-        row_values = np.empty((len(expressions), x_indices.size), dtype=np.float32)
-        for frame_index, expression in enumerate(expressions):
-            row = _expression_rows(
-                expression,
-                sources,
-                int(y),
-                int(y) + 1,
-                division_floor=parameters.division_floor,
-            )
-            row_values[frame_index] = row[0, x_indices]
-        finite_count = np.count_nonzero(np.isfinite(row_values), axis=0)
-        eligible = finite_count >= parameters.minimum_rejection_frames
-        if not np.any(eligible):
-            continue
-        selected = row_values[:, eligible]
+    # Every sampled coordinate is evaluated across the complete frame group in
+    # one pass: one gather per frame, then per-coordinate statistics in
+    # row-major coordinate order, exactly as a row-by-row loop would produce.
+    coordinate_values = np.empty(
+        (len(expressions), int(y_indices.size) * int(x_indices.size)), dtype=np.float32
+    )
+    for frame_index, expression in enumerate(expressions):
+        coordinate_values[frame_index] = _expression_sampled_rows(
+            expression, sources, y_indices, division_floor=parameters.division_floor
+        )[:, x_indices].reshape(-1)
+    finite_count = np.count_nonzero(np.isfinite(coordinate_values), axis=0)
+    eligible = finite_count >= parameters.minimum_rejection_frames
+    sampled_sigma = np.empty(0, dtype=np.float32)
+    if np.any(eligible):
+        selected = coordinate_values[:, eligible]
         selected[~np.isfinite(selected)] = np.nan
-        center = np.nanmedian(selected, axis=0)
-        mad = np.nanmedian(np.abs(selected - center[None, :]), axis=0)
+        center = nanmedian_frames(selected)
+        mad = nanmedian_frames(np.abs(selected - center[None, :]))
         robust_sigma = np.asarray(np.float32(1.4826) * mad, dtype=np.float32)
         usable = np.isfinite(robust_sigma) & (robust_sigma > 0)
-        if np.any(usable):
-            sigma_chunks.append(robust_sigma[usable])
+        sampled_sigma = robust_sigma[usable]
 
-    if sigma_chunks:
-        sampled_sigma = np.concatenate(sigma_chunks)
+    if sampled_sigma.size:
         sampled_sigma_median = float(np.median(sampled_sigma))
         usable_sigma_count = int(sampled_sigma.size)
         group_sigma_floor = max(
@@ -1402,6 +1642,14 @@ def _estimate_rejection_sigma_floor(
     )
 
 
+def _rejection_kernel_id() -> str:
+    return MAD_KERNEL_ID if load_native_kernels() is not None else NUMPY_MAD_KERNEL_ID
+
+
+def _reduction_kernel_id() -> str:
+    return MEAN_KERNEL_ID if load_native_kernels() is not None else NUMPY_MEAN_KERNEL_ID
+
+
 def _ordinary_mad_rejection_decision(
     values: NDArray[np.float32],
     parameters: IntegrationParameters,
@@ -1409,16 +1657,39 @@ def _ordinary_mad_rejection_decision(
     *,
     transient_model: TransientRejectionModel | None = None,
     first_row: int = 0,
+    native_threads: int | None = None,
 ) -> tuple[NDArray[np.bool_], NDArray[np.float32], NDArray[np.bool_]]:
     """Return finite samples, per-pixel centre, and accepted samples.
 
     This is the single rejection-decision implementation shared by portable CPU
-    integration and the CPU-produced mask consumed by Metal.
+    integration and the CPU-produced mask consumed by Metal.  The native
+    multithreaded kernel and the NumPy reference below make value-identical
+    decisions; the kernel merely runs them on every core.
     """
 
     samples = np.asarray(values, dtype=np.float32)
     if samples.ndim != 3:
         raise ValueError("ordinary integration values must be frame-major 3-D")
+    kernels = load_native_kernels()
+    if kernels is not None:
+        finite = np.isfinite(samples)
+        accepted, center = kernels.mad_rejection(
+            samples,
+            sigma_clip=parameters.sigma_clip,
+            minimum_rejection_frames=parameters.minimum_rejection_frames,
+            group_sigma_floor=sigma_floor.group_sigma_floor,
+            absolute_floor=REJECTION_FLOOR_ABSOLUTE,
+            epsilon_floor=float(
+                np.float32(REJECTION_FLOOR_EPSILON_FACTOR * np.finfo(np.float32).eps)
+            ),
+            threads=native_threads,
+        )
+        if transient_model is not None and samples.shape[0] >= parameters.minimum_rejection_frames:
+            enough_samples = (
+                np.count_nonzero(finite, axis=0) >= parameters.minimum_rejection_frames
+            )
+            transient_model.reject_rows(accepted, first_row, enough_samples)
+        return finite, center, accepted
     finite = np.isfinite(samples)
     valid_pixels = np.any(finite, axis=0)
     center = np.full(samples.shape[1:], np.nan, dtype=np.float32)
@@ -1485,8 +1756,15 @@ def _prepare_transient_rejection(
     shape: tuple[int, int],
     parameters: IntegrationParameters,
     weights: NDArray[np.float64],
+    *,
+    workers: int | None = None,
 ) -> TransientRejectionModel:
-    """Read block means once and fit one tile-independent spatial mask model."""
+    """Read block means once and fit one tile-independent spatial mask model.
+
+    Each frame's block means are independent, so frames are read concurrently
+    by ``workers`` threads; the fitted model is identical for every worker
+    count.
+    """
     height, width = shape
     if not parameters.transient_rejection:
         return TransientRejectionModel(1, status="DISABLED")
@@ -1505,22 +1783,45 @@ def _prepare_transient_rejection(
             f"spatial rejection needs {estimated_bytes} bytes; increase max_memory_bytes",
         )
     preview = np.full((len(expressions), by, bx), np.nan, dtype=np.float32)
-    for index, expression in enumerate(expressions):
-        for row in range(by):
-            y0, y1 = row * factor, min(height, (row + 1) * factor)
-            values = _expression_rows(expression, sources, y0, y1,
-                                      division_floor=parameters.division_floor)
-            finite = np.isfinite(values)
-            sums = np.sum(np.where(finite, values, 0), axis=0, dtype=np.float64)
-            counts = np.sum(finite, axis=0)
-            offsets = np.arange(0, width, factor)
-            sums = np.add.reduceat(sums, offsets)
-            counts = np.add.reduceat(counts, offsets)
-            # Exclude partly covered blocks from spatial detection. Ordinary
-            # per-pixel rejection still handles all valid edge samples.
-            expected = (y1 - y0) * np.minimum(factor, width - offsets)
-            np.divide(sums, counts, out=preview[index, row],
-                      where=counts == expected, casting="unsafe")
+
+    # Several block rows are evaluated per read; each block row is then
+    # reduced from its own row slice, so the statistics equal a
+    # one-block-row-at-a-time evaluation.
+    block_rows_per_band = max(1, TRANSIENT_BAND_ROWS // factor)
+    offsets = np.arange(0, width, factor)
+    covered_width = np.minimum(factor, width - offsets)
+
+    def block_means(index: int) -> None:
+        expression = expressions[index]
+        for first_block in range(0, by, block_rows_per_band):
+            last_block = min(by, first_block + block_rows_per_band)
+            band_y0 = first_block * factor
+            band_y1 = min(height, last_block * factor)
+            band = _expression_rows(expression, sources, band_y0, band_y1,
+                                    division_floor=parameters.division_floor)
+            for row in range(first_block, last_block):
+                y0, y1 = row * factor, min(height, (row + 1) * factor)
+                values = band[y0 - band_y0 : y1 - band_y0]
+                finite = np.isfinite(values)
+                sums = np.sum(np.where(finite, values, 0), axis=0, dtype=np.float64)
+                counts = np.sum(finite, axis=0)
+                sums = np.add.reduceat(sums, offsets)
+                counts = np.add.reduceat(counts, offsets)
+                # Exclude partly covered blocks from spatial detection. Ordinary
+                # per-pixel rejection still handles all valid edge samples.
+                expected = (y1 - y0) * covered_width
+                np.divide(sums, counts, out=preview[index, row],
+                          where=counts == expected, casting="unsafe")
+
+    reader_count = max(1, min(int(workers or 1), len(expressions)))
+    if reader_count == 1:
+        for index in range(len(expressions)):
+            block_means(index)
+    else:
+        with ThreadPoolExecutor(
+            max_workers=reader_count, thread_name_prefix="oaf-transient"
+        ) as pool:
+            list(pool.map(block_means, range(len(expressions))))
     try:
         background = fit_residual_background(preview, factor, weights)
     except ValueError as error:
@@ -1529,21 +1830,23 @@ def _prepare_transient_rejection(
         background.apply_coordinates(preview,
             np.arange(bx,dtype=np.float64)*factor+(factor-1)/2,
             np.arange(by,dtype=np.float64)*factor+(factor-1)/2)
-    model = detect_transient_trails(preview, factor)
+    model = detect_transient_trails(preview, factor, workers=reader_count)
     return TransientRejectionModel(factor, model.trails, model.status, background)
 
 
 def _ordinary_integration_tile(
     values: NDArray[np.float32], parameters: IntegrationParameters,
     sigma_floor: _RejectionSigmaFloor, transient_model: TransientRejectionModel,
-    first_row: int,
+    first_row: int, native_threads: int | None = None,
 ) -> tuple[NDArray[np.bool_], NDArray[np.float32], NDArray[np.bool_]]:
     """Original MAD decisions plus spatial rejection, with its sky reference kept.
 
     Only pixels with an additional spatial rejection have their temporary sample
     values normalized. This routine is shared by CPU and Metal preparation.
     """
-    finite, center, accepted = _ordinary_mad_rejection_decision(values, parameters, sigma_floor)
+    finite, center, accepted = _ordinary_mad_rejection_decision(
+        values, parameters, sigma_floor, native_threads=native_threads
+    )
     if transient_model.trails:
         original = accepted.copy()
         enough = np.sum(finite, axis=0) >= parameters.minimum_rejection_frames
@@ -1641,11 +1944,21 @@ def integrate_expressions(
     parameters: IntegrationParameters | None = None,
     quality_weights: Sequence[float] | None = None,
     map_paths: IntegrationMapPaths | None = None,
+    native_threads: int | None = None,
+    durable: bool = True,
 ) -> IntegrationResult:
-    """Robustly integrate expressions without materializing full input images."""
+    """Robustly integrate expressions without materializing full input images.
+
+    ``native_threads`` bounds the threads used by the native rejection and
+    reduction kernels (and the transient-preparation readers); the result does
+    not depend on it.  ``durable`` selects whether outputs are fsynced.
+    """
 
     parameters = parameters or IntegrationParameters()
     parameters.validate()
+    native_threads = (
+        default_kernel_threads() if native_threads is None else int(native_threads)
+    )
     canonical = tuple(_canonical_expression(item) for item in expressions)
     if not canonical:
         raise CalibrationError("NO_INPUTS", "at least one integration input is required")
@@ -1687,7 +2000,11 @@ def integrate_expressions(
             rejection_sigma_floor = _estimate_rejection_sigma_floor(
                 canonical, sources, shape, parameters
             )
-            transient_model = _prepare_transient_rejection(canonical, sources, shape, parameters, weights)
+            transient_model = _prepare_transient_rejection(
+                canonical, sources, shape, parameters, weights,
+                workers=native_threads,
+            )
+            kernels = load_native_kernels()
             stats = _StatsAccumulator()
             accepted_total = 0
             rejected_total = 0
@@ -1696,7 +2013,7 @@ def integrate_expressions(
             output_metadata.setdefault("OAFNFRM", len(canonical))
             output_metadata.setdefault("OAFREJ", parameters.sigma_clip)
             writer = stack.enter_context(
-                FitsFloatWriter(temporary, shape, output_metadata)
+                FitsFloatWriter(temporary, shape, output_metadata, durable=durable)
             )
             map_writers: dict[str, FitsFloatWriter] = {}
             map_metadata = {
@@ -1719,7 +2036,9 @@ def integrate_expressions(
             }
             for name, temporary_map in map_temporaries.items():
                 map_writers[name] = stack.enter_context(
-                    FitsFloatWriter(temporary_map, shape, map_metadata[name])
+                    FitsFloatWriter(
+                        temporary_map, shape, map_metadata[name], durable=durable
+                    )
                 )
             for y0 in range(0, height, tile_rows):
                 y1 = min(height, y0 + tile_rows)
@@ -1736,23 +2055,37 @@ def integrate_expressions(
                     )
                 finite, center, accepted = _ordinary_integration_tile(
                     stack_values, parameters, rejection_sigma_floor, transient_model, y0,
+                    native_threads,
                 )
-                weighted = accepted * weights[:, None, None]
-                denominator = np.sum(weighted, axis=0, dtype=np.float64)
-                numerator = np.sum(
-                    np.where(accepted, stack_values, 0.0)
-                    * weights[:, None, None],
-                    axis=0,
-                    dtype=np.float64,
-                )
-                result = np.full(center.shape, np.nan, dtype=np.float32)
-                np.divide(
-                    numerator,
-                    denominator,
-                    out=result,
-                    where=denominator > 0,
-                    casting="unsafe",
-                )
+                if kernels is not None:
+                    result, accepted_map, rejected_map = kernels.masked_weighted_mean(
+                        stack_values, accepted, weights, threads=native_threads
+                    )
+                    accepted_per_pixel = accepted_map.astype(np.float32)
+                    rejected_per_pixel = rejected_map.astype(np.float32)
+                else:
+                    weighted = accepted * weights[:, None, None]
+                    denominator = np.sum(weighted, axis=0, dtype=np.float64)
+                    numerator = np.sum(
+                        np.where(accepted, stack_values, 0.0)
+                        * weights[:, None, None],
+                        axis=0,
+                        dtype=np.float64,
+                    )
+                    result = np.full(center.shape, np.nan, dtype=np.float32)
+                    np.divide(
+                        numerator,
+                        denominator,
+                        out=result,
+                        where=denominator > 0,
+                        casting="unsafe",
+                    )
+                    accepted_per_pixel = np.sum(
+                        accepted, axis=0, dtype=np.uint16
+                    ).astype(np.float32)
+                    rejected_per_pixel = np.sum(
+                        finite & ~accepted, axis=0, dtype=np.uint16
+                    ).astype(np.float32)
                 accepted_count = int(np.count_nonzero(accepted))
                 finite_count = int(np.count_nonzero(finite))
                 accepted_total += accepted_count
@@ -1760,12 +2093,6 @@ def integrate_expressions(
                 stats.update(result)
                 writer.write_rows(y0, result)
                 if map_writers:
-                    accepted_per_pixel = np.sum(
-                        accepted, axis=0, dtype=np.uint16
-                    ).astype(np.float32)
-                    rejected_per_pixel = np.sum(
-                        finite & ~accepted, axis=0, dtype=np.uint16
-                    ).astype(np.float32)
                     map_writers["acceptedSampleCount"].write_rows(
                         y0, accepted_per_pixel
                     )
@@ -1795,6 +2122,14 @@ def integrate_expressions(
             noise_weights=serialized_noise_weights,
             quality_weights=serialized_quality_weights,
             map_paths={name: str(path) for name, path in map_destinations.items()},
+            output_sha256=writer.sha256,
+            map_sha256={
+                name: digest
+                for name, digest in (
+                    (name, map_writer.sha256) for name, map_writer in map_writers.items()
+                )
+                if digest is not None
+            },
             execution={
                 "requestedBackend": "portable-cpu",
                 "selectedBackend": "portable-cpu",
@@ -1802,12 +2137,15 @@ def integrate_expressions(
                 "rejectionMask": {
                     "producer": "portable-cpu",
                     "method": "median-mad-sigma",
+                    "kernel": _rejection_kernel_id(),
                     "sigma": parameters.sigma_clip,
                     "scope": "all-frames-per-pixel",
                     "partialMeanBatching": False,
                     "sigmaFloor": rejection_sigma_floor.serializable(),
                     "spatialTransients": transient_model.serializable(),
                 },
+                "reducer": _reduction_kernel_id(),
+                "nativeThreads": native_threads,
                 "fastMath": False,
             },
         )
@@ -1879,6 +2217,7 @@ __all__ = [
     "DEFAULT_MEMORY_BUDGET",
     "FitsFloatWriter",
     "FitsFrame",
+    "_MemoryFrame",
     "FrameExpression",
     "FrameInfo",
     "IntegrationMapPaths",

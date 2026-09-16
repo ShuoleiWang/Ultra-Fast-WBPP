@@ -846,36 +846,66 @@ def _local_centroids(
     """Refine approximate star positions with small raw-image patches."""
 
     height, width = image.shape
-    refined: list[tuple[float, float]] = []
-    retained: list[int] = []
     size = 2 * radius + 1
-    for index, (x, y) in enumerate(approximate):
-        center_x = int(round(float(x)))
-        center_y = int(round(float(y)))
-        x0, x1 = center_x - radius, center_x + radius + 1
-        y0, y1 = center_y - radius, center_y + radius + 1
-        if x0 < 0 or y0 < 0 or x1 > width or y1 > height:
-            continue
-        patch = np.asarray(image[y0:y1, x0:x1], dtype=np.float64)
-        if patch.shape != (size, size) or not np.all(np.isfinite(patch)):
-            continue
-        border = np.concatenate(
-            (patch[0], patch[-1], patch[1:-1, 0], patch[1:-1, -1])
-        )
-        signal = np.maximum(patch - np.median(border), 0.0)
-        total = float(np.sum(signal))
-        if not math.isfinite(total) or total <= 0:
-            continue
-        yy, xx = np.indices(signal.shape, dtype=np.float64)
-        centroid_x = x0 + float(np.sum(signal * xx) / total)
-        centroid_y = y0 + float(np.sum(signal * yy) / total)
-        if math.hypot(centroid_x - x, centroid_y - y) > radius * 0.5:
-            continue
-        refined.append((centroid_x, centroid_y))
-        retained.append(index)
+    positions = np.asarray(approximate, dtype=np.float64).reshape((-1, 2))
+    empty = (np.empty((0, 2), dtype=np.float64), np.empty(0, dtype=np.int64))
+    if positions.shape[0] == 0:
+        return empty
+    if not np.all(np.isfinite(positions)):
+        raise ValueError("cannot convert float NaN to integer")
+    # Every patch is gathered at once and reduced per star with the same
+    # Float64 arithmetic as a one-star-at-a-time loop: patches are cast
+    # elementwise, each border median and each patch sum reduce one star's
+    # contiguous samples, so the centroids are value-identical.
+    center = np.rint(positions).astype(np.int64)  # round half to even, as round()
+    x0 = center[:, 0] - radius
+    y0 = center[:, 1] - radius
+    inside = (
+        (x0 >= 0) & (y0 >= 0) & (x0 + size <= width) & (y0 + size <= height)
+    )
+    candidates = np.flatnonzero(inside)
+    if candidates.size == 0:
+        return empty
+    offsets = np.arange(size, dtype=np.int64)
+    rows = y0[candidates, None, None] + offsets[None, :, None]
+    columns = x0[candidates, None, None] + offsets[None, None, :]
+    patches = np.asarray(image[rows, columns], dtype=np.float64)
+    finite = np.all(np.isfinite(patches.reshape(candidates.size, -1)), axis=1)
+    candidates = candidates[finite]
+    if candidates.size == 0:
+        return empty
+    patches = patches[finite]
+    border = np.concatenate(
+        (patches[:, 0, :], patches[:, -1, :], patches[:, 1:-1, 0], patches[:, 1:-1, -1]),
+        axis=1,
+    )
+    background = np.median(border, axis=1)
+    signal = np.maximum(patches - background[:, None, None], 0.0)
+    flat_signal = signal.reshape(candidates.size, -1)
+    total = np.sum(flat_signal, axis=1)
+    positive = np.isfinite(total) & (total > 0)
+    candidates = candidates[positive]
+    if candidates.size == 0:
+        return empty
+    signal = signal[positive]
+    flat_signal = flat_signal[positive]
+    total = total[positive]
+    yy, xx = np.indices((size, size), dtype=np.float64)
+    centroid_x = x0[candidates] + np.sum((signal * xx).reshape(candidates.size, -1), axis=1) / total
+    centroid_y = y0[candidates] + np.sum((signal * yy).reshape(candidates.size, -1), axis=1) / total
+    limit = radius * 0.5
+    close = np.fromiter(
+        (
+            math.hypot(float(cx) - float(x), float(cy) - float(y)) <= limit
+            for cx, cy, (x, y) in zip(centroid_x, centroid_y, positions[candidates], strict=True)
+        ),
+        dtype=np.bool_,
+        count=int(candidates.size),
+    )
+    refined = np.column_stack((centroid_x[close], centroid_y[close]))
     return (
         np.asarray(refined, dtype=np.float64).reshape((-1, 2)),
-        np.asarray(retained, dtype=np.int64),
+        np.asarray(candidates[close], dtype=np.int64),
     )
 
 
@@ -1258,8 +1288,15 @@ def register_analyses(
     reference_index: int | None = None,
     config: RegistrationConfig | None = None,
     validate_warp: bool = True,
+    workers: int = 1,
 ) -> tuple[int, tuple[FrameTransform, ...]]:
+    """Estimate every transform; ``workers`` bounds concurrent full-resolution
+    refinements, which are independent per frame and give identical results
+    for any worker count."""
+
     selected = config or RegistrationConfig()
+    if workers < 1:
+        raise ValueError("workers must be positive")
     index = choose_reference(analyses) if reference_index is None else reference_index
     if index < 0 or index >= len(analyses):
         raise IndexError("reference_index is out of range")
@@ -1300,14 +1337,15 @@ def register_analyses(
 
         anchor_result = results[anchor_index]
         assert anchor_result is not None
-        for source_index in group_indices:
-            if results[source_index] is not None:
-                continue
+        pending = [
+            source_index
+            for source_index in group_indices
+            if results[source_index] is None
+        ]
+
+        def estimate_member(source_index: int) -> FrameTransform:
             if anchor_index == index:
-                results[source_index] = _estimate_one(
-                    analyses[source_index], reference, selected
-                )
-                continue
+                return _estimate_one(analyses[source_index], reference, selected)
             recovered = _estimate_via_bridge(
                 analyses[source_index],
                 analyses[anchor_index],
@@ -1317,25 +1355,54 @@ def register_analyses(
             )
             # Direct fallback retains generality for unusual same-filter
             # failures without penalizing the normal fast path.
-            results[source_index] = recovered or _estimate_one(
+            return recovered or _estimate_one(
                 analyses[source_index], reference, selected
             )
 
+        # Member estimates depend only on the anchor and the shared catalogs,
+        # so they run concurrently; results keep input order.
+        member_workers = max(1, min(workers, len(pending)))
+        if member_workers == 1:
+            estimates = [estimate_member(source_index) for source_index in pending]
+        else:
+            with ThreadPoolExecutor(max_workers=member_workers) as executor:
+                estimates = list(executor.map(estimate_member, pending))
+        for source_index, estimate in zip(pending, estimates, strict=True):
+            results[source_index] = estimate
+
     if selected.refine_full_centroids:
         reference_image = read_full_image(reference.path)
-        for source_index, optional_result in enumerate(tuple(results)):
-            assert optional_result is not None
-            if source_index == index or not optional_result.accepted:
-                continue
+        refine_indices = [
+            source_index
+            for source_index, optional_result in enumerate(results)
+            if optional_result is not None
+            and source_index != index
+            and optional_result.accepted
+        ]
+
+        def refine(source_index: int) -> FrameTransform:
+            coarse = results[source_index]
+            assert coarse is not None
+            # Each worker decodes its own full-resolution frame; the shared
+            # reference image is read-only.
             source_image = read_full_image(analyses[source_index].path)
-            results[source_index] = _refine_full_resolution(
-                optional_result,
+            return _refine_full_resolution(
+                coarse,
                 analyses[source_index],
                 reference,
                 source_image,
                 reference_image,
                 selected,
             )
+
+        refine_workers = max(1, min(workers, len(refine_indices)))
+        if refine_workers == 1:
+            refined = [refine(source_index) for source_index in refine_indices]
+        else:
+            with ThreadPoolExecutor(max_workers=refine_workers) as executor:
+                refined = list(executor.map(refine, refine_indices))
+        for source_index, result in zip(refine_indices, refined, strict=True):
+            results[source_index] = result
 
     validated: list[FrameTransform] = []
     for analysis, optional_result in zip(analyses, results, strict=True):
@@ -1514,6 +1581,7 @@ def run_registration(
         reference_index=reference_index,
         config=registration,
         validate_warp=validate_warp,
+        workers=workers,
     )
     registration_wall_seconds = time.perf_counter() - registration_started
     accepted = [item for item in transforms if item.accepted and item.full_matrix is not None]

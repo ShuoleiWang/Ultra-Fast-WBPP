@@ -79,15 +79,45 @@ an acceptance test pass.
 
 ## Performance
 
-Work is tiled and bounded by configured memory budgets. Registration uses up to
-eight threads where the hardware profile permits, dividing one shared scratch
-budget between them. Lower-memory profiles keep fewer workers. These estimates
-do not cap process RSS or the OS file cache.
+Work is tiled and bounded by configured memory budgets. These estimates do not
+cap process RSS or the OS file cache.
 
-Metal currently accelerates the weighted integration kernel, while CPU code
-prepares tiles, masks and statistics. It does not accelerate the entire pipeline;
-low average GPU utilization is therefore possible. See the scoped, reproducible
-measurements in [benchmarks](../benchmarks/README.md).
+The three hot loops of the ordinary pipeline run in multithreaded native CPU
+kernels (`engine/native/src/PortableKernels.cpp`, bound through
+[`native_kernels.py`](../packages/openastroflow-engine/src/openastroflow_engine/native_kernels.py)):
+the Lanczos-3 registration warp, the full-stack median/MAD rejection decision,
+and the weighted reduction. Each kernel reproduces the NumPy reference
+arithmetic operation for operation, so the two paths publish identical pixels;
+the NumPy path remains the portable fallback and every receipt names the kernel
+that ran. Calibration and registration are fused: a Light is decoded once,
+calibrated in memory against once-decoded masters, warped directly, and only the
+registered frame is written (streaming SHA-256, no reread). The number of Lights
+in flight follows the registration memory budget; each warp receives the
+remaining CPU share. Sources are read in place; the E2E path keeps one inventory
+hash and one final publication hash per original.
+
+The Metal path accelerates only the weighted integration kernel while CPU code
+prepares tiles, masks and statistics, so `auto` ordinary integration now selects
+the native CPU kernels whenever they are loaded: the measured M-series cost is
+the rejection statistics, and the Metal weighted mean's host-side normalization,
+buffer copies and parity reruns exceed its few milliseconds of GPU time. An
+explicit `generic-apple-metal` or `m3-pro-tuned` request still runs the audited
+Metal path, and every receipt names the backend and kernels that ran. FITS
+intermediates are written through buffered sequential writes; only published
+products are fsynced.
+
+Statistics passes that sample the images (integration statistics, the
+group-wide rejection sigma floor, global-normalization pairing) gather all
+sampled rows of a frame in one read and evaluate the per-coordinate medians in
+one vectorized pass that reproduces NumPy's `nanmedian` arithmetic; the
+per-star registration refinement, the residual-background cell statistics and
+the transient binning pass are likewise batched, and the last submission round
+of fused warps spreads over the idle cores. These are pure overhead removals:
+every replacement is held to its one-row, one-star or one-frame reference by a
+differential test. (Light Frame QC group
+analysis stays sequential: its astroalign bootstrap is GIL-bound Python, and
+threads measured slower.) See the scoped, reproducible measurements in
+[benchmarks](../benchmarks/README.md).
 
 ## Platform and solver support
 

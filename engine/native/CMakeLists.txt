@@ -10,15 +10,19 @@ option(OAF_BUILD_TESTS "Build native scientific contract tests" ON)
 option(OAF_ENABLE_METAL "Build the Apple Metal backend when available" ON)
 option(OAF_BUILD_BENCHMARKS "Build opt-in native performance benchmarks" OFF)
 
+find_package(Threads REQUIRED)
+
 add_library(openastroflow_native_math STATIC
   src/Calibration.cpp
   src/FusedLnIntegration.cpp
   src/ImageTile.cpp
   src/OfflineWcsSolver.cpp
+  src/PortableKernels.cpp
 )
 add_library(OpenAstroFlow::NativeMath ALIAS openastroflow_native_math)
 target_include_directories(openastroflow_native_math PUBLIC include)
 target_compile_features(openastroflow_native_math PUBLIC cxx_std_20)
+target_link_libraries(openastroflow_native_math PUBLIC Threads::Threads)
 set_target_properties(openastroflow_native_math PROPERTIES
   POSITION_INDEPENDENT_CODE ON
 )
@@ -250,6 +254,18 @@ if(OAF_BUILD_TESTS)
   )
   target_compile_features(openastroflow_native_c_api_tests PRIVATE cxx_std_20)
   add_test(NAME native-c-api COMMAND openastroflow_native_c_api_tests)
+
+  add_executable(openastroflow_portable_kernel_tests tests/PortableKernelTests.cpp)
+  target_link_libraries(openastroflow_portable_kernel_tests
+    PRIVATE OpenAstroFlow::NativeMath OpenAstroFlow::NativeAbi
+  )
+  target_compile_features(openastroflow_portable_kernel_tests PRIVATE cxx_std_20)
+  if(NOT MSVC)
+    target_compile_options(openastroflow_portable_kernel_tests PRIVATE
+      -Wall -Wextra -Wpedantic -Werror -fno-fast-math -ffp-contract=off
+    )
+  endif()
+  add_test(NAME native-portable-kernels COMMAND openastroflow_portable_kernel_tests)
 
   if(UNIX)
     add_executable(openastroflow_calibration_tests tests/CalibrationTests.cpp)

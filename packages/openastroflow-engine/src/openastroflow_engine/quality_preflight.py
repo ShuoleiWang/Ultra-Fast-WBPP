@@ -47,7 +47,7 @@ def _bounded_preview(path: str | None) -> bytes | None:
                 candidate = image.copy()
                 candidate.thumbnail((edge, edge), Image.Resampling.LANCZOS)
                 stream = BytesIO()
-                candidate.save(stream, format="PNG", optimize=True)
+                candidate.save(stream, format="PNG", optimize=False, compress_level=3)
                 value = stream.getvalue()
                 if len(value) <= _MAX_PREVIEW_BYTES:
                     return value

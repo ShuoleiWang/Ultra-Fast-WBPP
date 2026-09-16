@@ -66,14 +66,17 @@ def select_execution_tuning(
     cores = max(1, int(logical_cores or os.cpu_count() or 1))
     memory = max(2 * GIB, int(physical_memory_bytes or _physical_memory_bytes()))
     usable = max(1 * GIB, int(memory * 0.62))
-    registration = min(max(128 * 1024**2, usable // 8), 2 * GIB)
+    # Fused calibrate+register keeps whole decoded Lights in memory (about
+    # 12 bytes per pixel each); the registration budget therefore sets how
+    # many Lights are in flight while the native kernels use every core.
+    registration = min(max(128 * 1024**2, usable // 6), 4 * GIB)
     integration = min(max(256 * 1024**2, usable // 4), 4 * GIB)
 
     if hardware.m3_pro_tuned and memory >= 24 * GIB:
         return ExecutionTuning(
             profile_id="apple-m3-pro-tuned-v1",
             cpu_workers=min(8, cores),
-            qc_workers=min(2, cores),
+            qc_workers=min(8, cores),
             registration_memory_bytes=registration,
             integration_memory_bytes=integration,
             integration_tile_rows=64,
@@ -83,16 +86,18 @@ def select_execution_tuning(
         )
 
     if hardware.apple_silicon:
+        # Every M-series chip has at least eight cores; previews and warps are
+        # bounded per worker, so worker counts scale with cores and memory.
         if memory < 12 * GIB:
-            workers, rows, buffers = 1, 24, 1
+            workers, rows, buffers = min(2, cores), 24, 1
         elif memory < 24 * GIB:
-            workers, rows, buffers = min(2, cores), 32, 1
+            workers, rows, buffers = min(4, cores), 32, 1
         else:
-            workers, rows, buffers = min(4, cores), 48, 2
+            workers, rows, buffers = min(8, cores), 48, 2
         return ExecutionTuning(
             profile_id="apple-silicon-generic-v1",
             cpu_workers=workers,
-            qc_workers=min(2, workers),
+            qc_workers=workers,
             registration_memory_bytes=registration,
             integration_memory_bytes=integration,
             integration_tile_rows=rows,

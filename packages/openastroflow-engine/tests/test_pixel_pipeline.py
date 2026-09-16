@@ -172,12 +172,34 @@ def test_parallel_warps_preserve_fits_and_ordered_provenance(
         execution = receipt["statistics"]["registration"]
         assert execution["cpuWorkersUsed"] == workers
         assert execution["perWorkerMemoryBudgetBytes"] * workers <= parameters.registration_memory_bytes
+        # The Lights of the final submission round take the idle workers' CPU
+        # share; the identical outputs below show the thread count is immaterial.
+        light_count = len(lights)
+        rounds = -(-light_count // workers)
+        assert execution["tailLights"] == light_count - (rounds - 1) * workers
+        assert execution["tailNativeThreads"] == max(
+            execution["nativeThreadsPerWorker"], workers // execution["tailLights"]
+        )
         receipts.append(receipt)
 
     # Full artifact hashes cover registered/master pixels, FITS headers, maps
     # and previews. Provenance order stays CAL/REGISTERED for each input frame.
     assert receipts[0]["outputs"] == receipts[1]["outputs"]
-    assert receipts[0]["registration"] == receipts[1]["registration"]
+
+    def without_thread_counts(registration: dict) -> dict:
+        # The kernel thread count is execution evidence that legitimately
+        # differs between worker configurations; everything else must match.
+        stripped = {}
+        for path, entry in registration.items():
+            entry = dict(entry)
+            if isinstance(entry.get("execution"), dict):
+                entry["execution"] = {
+                    key: value for key, value in entry["execution"].items() if key != "nativeThreads"
+                }
+            stripped[path] = entry
+        return stripped
+
+    assert without_thread_counts(receipts[0]["registration"]) == without_thread_counts(receipts[1]["registration"])
     assert receipts[0]["inputs"] == receipts[1]["inputs"]
     light_kinds = [item["kind"] for item in receipts[1]["outputs"] if item["kind"] in {"CALIBRATED_LIGHT", "REGISTERED_LIGHT"}]
     assert light_kinds == ["CALIBRATED_LIGHT", "REGISTERED_LIGHT"] * len(lights)

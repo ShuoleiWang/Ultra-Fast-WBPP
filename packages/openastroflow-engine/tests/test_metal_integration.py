@@ -151,7 +151,7 @@ def test_apple_profiles_drive_real_tile_and_buffer_settings(
         [FrameExpression(str(path)) for path in paths],
         tmp_path / "master.fits",
         parameters=IntegrationParameters(max_memory_bytes=1024 * 1024),
-        requested_backend="auto",
+        requested_backend=expected_backend,
         hardware=profile,
         tuning=tuning,
     )
@@ -343,6 +343,9 @@ def test_rejection_maps_are_apple_profile_and_tile_invariant(
                 max_statistics_samples=100,
                 minimum_rejection_frames=5,
             ),
+            requested_backend=(
+                "m3-pro-tuned" if profile.m3_pro_tuned else "generic-apple-metal"
+            ),
             hardware=profile,
             tuning=tuning,
             map_paths=IntegrationMapPaths(accepted, coverage, rejected),
@@ -384,6 +387,46 @@ def test_rejection_maps_are_apple_profile_and_tile_invariant(
         )
     np.testing.assert_array_equal(fits.getdata(cpu_accepted)[3, 3:5], [5, 3])
     np.testing.assert_array_equal(fits.getdata(cpu_rejected)[3, 3:5], [1, 0])
+
+
+def test_auto_prefers_native_cpu_kernels_and_explicit_metal_still_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openastroflow_engine import native_kernels
+
+    monkeypatch.setattr(metal, "NativeMetalExecutor", _FakeMetalExecutor)
+    paths = [_write(tmp_path / f"auto-{index}.fits", 10.0 + index, (96, 8)) for index in range(5)]
+    profile = _apple_profile("Apple M3 Pro", "apple-m3-pro-tuned-v1")
+    tuning = select_execution_tuning(profile, logical_cores=12, physical_memory_bytes=36 * 1024**3)
+    automatic = metal.integrate_registered_group(
+        [FrameExpression(str(path)) for path in paths],
+        tmp_path / "auto-master.fits",
+        parameters=IntegrationParameters(max_memory_bytes=1024 * 1024),
+        requested_backend="auto",
+        hardware=profile,
+        tuning=tuning,
+    )
+    if native_kernels.load_native_kernels() is not None:
+        assert automatic.execution["selectedBackend"] == "portable-cpu"
+        assert automatic.execution["selectionPolicy"] == "native-cpu-kernels-preferred"
+        assert automatic.execution["fallbackReason"] == metal.NATIVE_CPU_AUTO_REASON
+        assert automatic.execution["acceleratorUsed"] is False
+        assert automatic.execution["rejectionMask"]["kernel"] == native_kernels.MAD_KERNEL_ID
+    else:
+        assert automatic.execution["selectedBackend"] == "m3-pro-tuned"
+    explicit = metal.integrate_registered_group(
+        [FrameExpression(str(path)) for path in paths],
+        tmp_path / "explicit-master.fits",
+        parameters=IntegrationParameters(max_memory_bytes=1024 * 1024),
+        requested_backend="m3-pro-tuned",
+        hardware=profile,
+        tuning=tuning,
+    )
+    assert explicit.execution["selectedBackend"] == "m3-pro-tuned"
+    assert explicit.execution["acceleratorUsed"] is True
+    np.testing.assert_array_equal(
+        fits.getdata(tmp_path / "auto-master.fits"), fits.getdata(tmp_path / "explicit-master.fits")
+    )
 
 
 def test_portable_mask_counts_separate_nan_coverage_from_rejection() -> None:
