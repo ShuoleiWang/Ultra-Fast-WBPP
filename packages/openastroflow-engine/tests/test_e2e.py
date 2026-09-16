@@ -4,7 +4,7 @@ from dataclasses import replace
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import shutil
 import stat
 import sys
@@ -47,6 +47,7 @@ from openastroflow_engine.e2e import (
     _inferred_solver_hints,
     _register_lights,
     _share_safe_receipt_core,
+    _share_safe_string,
     _solve_one,
     _SourceIdentity,
     _validate_cross_filter_wcs,
@@ -97,6 +98,20 @@ def test_late_top_level_receipt_evidence_is_share_safe(tmp_path: Path) -> None:
     assert receipt["nativeLibrary"]["path"] == "local-redacted/libopenastroflow_native.dylib"
     assert set(receipt["nativeLibrary"]) == {"path", "sha256"}
     assert receipt["sourcePath"].startswith("source/src-")
+
+
+@pytest.mark.parametrize(
+    ("staging", "master_path"),
+    [
+        (Path("/staging/run"), "/staging/run/work/calibration/master_bias.fits"),
+        (PureWindowsPath("C:/staging/run"), "C:\\staging\\run\\work\\calibration\\master_bias.fits"),
+        (PureWindowsPath("C:/staging/run"), "C:/staging/run/work/calibration/master_bias.fits"),
+    ],
+)
+def test_generated_artifact_paths_use_portable_separators(staging, master_path) -> None:
+    public_path = _share_safe_string(master_path, staging=staging, source_tokens={})
+    assert public_path == "artifact/work/calibration/master_bias.fits"
+    assert _share_safe_string(str(staging), staging=staging, source_tokens={}) == "artifact/."
 
 
 def _header(

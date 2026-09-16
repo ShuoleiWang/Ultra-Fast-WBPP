@@ -186,20 +186,23 @@ def test_parallel_warps_preserve_fits_and_ordered_provenance(
     # and previews. Provenance order stays CAL/REGISTERED for each input frame.
     assert receipts[0]["outputs"] == receipts[1]["outputs"]
 
-    def without_thread_counts(registration: dict) -> dict:
-        # The kernel thread count is execution evidence that legitimately
-        # differs between worker configurations; everything else must match.
+    def without_execution_tuning(registration: dict) -> dict:
+        # Threads and tile rows reflect the per-worker memory/CPU budget.
+        # Artifact hashes above still require identical scientific outputs.
         stripped = {}
         for path, entry in registration.items():
             entry = dict(entry)
             if isinstance(entry.get("execution"), dict):
+                if "tileRows" in entry["execution"]:
+                    assert entry["execution"]["tileRows"] > 0
                 entry["execution"] = {
-                    key: value for key, value in entry["execution"].items() if key != "nativeThreads"
+                    key: value for key, value in entry["execution"].items()
+                    if key not in {"nativeThreads", "tileRows"}
                 }
             stripped[path] = entry
         return stripped
 
-    assert without_thread_counts(receipts[0]["registration"]) == without_thread_counts(receipts[1]["registration"])
+    assert without_execution_tuning(receipts[0]["registration"]) == without_execution_tuning(receipts[1]["registration"])
     assert receipts[0]["inputs"] == receipts[1]["inputs"]
     light_kinds = [item["kind"] for item in receipts[1]["outputs"] if item["kind"] in {"CALIBRATED_LIGHT", "REGISTERED_LIGHT"}]
     assert light_kinds == ["CALIBRATED_LIGHT", "REGISTERED_LIGHT"] * len(lights)

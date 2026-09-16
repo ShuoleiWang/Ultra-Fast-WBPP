@@ -28,7 +28,7 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePath, PureWindowsPath
 import re
 import shutil
 import stat
@@ -699,7 +699,7 @@ _LOCAL_STAT_KEYS = {
 def _share_safe_string(
     value: str,
     *,
-    staging: Path,
+    staging: PurePath,
     source_tokens: Mapping[str, str],
 ) -> str:
     """Redact host paths while retaining an auditable opaque source token."""
@@ -708,9 +708,19 @@ def _share_safe_string(
     for private, public in sorted(source_tokens.items(), key=lambda item: -len(item[0])):
         result = result.replace(private, public)
     staging_text = str(staging)
+    # Artifact identities use forward slashes on every host. Replacing only
+    # the Windows staging prefix leaves backslashes in the suffix and breaks
+    # the exact path/hash/size binding when generated masters are handed off.
+    for prefix in dict.fromkeys((staging_text, staging.as_posix())):
+        if result == prefix:
+            return "artifact/."
+        separator = "\\" if isinstance(staging, PureWindowsPath) and "\\" in prefix else "/"
+        if result.startswith(prefix + separator):
+            relative = result[len(prefix) + 1 :]
+            if isinstance(staging, PureWindowsPath):
+                relative = PureWindowsPath(relative).as_posix()
+            return "artifact/" + relative
     result = result.replace(staging_text + os.sep, "artifact/")
-    if result == staging_text:
-        return "artifact/."
     # Any remaining absolute path is an execution-environment detail (solver
     # executable, temporary catalog path, etc.).  Preserve only the basename;
     # the backend/version/catalog identities remain elsewhere in the receipt.
