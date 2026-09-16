@@ -888,7 +888,6 @@ def _local_centroids(
     if candidates.size == 0:
         return empty
     signal = signal[positive]
-    flat_signal = flat_signal[positive]
     total = total[positive]
     yy, xx = np.indices((size, size), dtype=np.float64)
     centroid_x = x0[candidates] + np.sum((signal * xx).reshape(candidates.size, -1), axis=1) / total

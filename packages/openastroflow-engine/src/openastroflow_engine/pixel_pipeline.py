@@ -3641,6 +3641,9 @@ def _run_portable_pipeline_fits(
             try:
                 calibrated_dir.rmdir()
             except OSError:
+                # Removing this unused staging directory is best effort.
+                # Keep it for diagnostics if cleanup fails; artifact and
+                # final-publication validation still run independently.
                 pass
 
         registration_execution = {

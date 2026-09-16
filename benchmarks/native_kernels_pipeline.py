@@ -229,7 +229,6 @@ def _with_native(enabled: bool):
 
 
 def benchmark_warp(scratch: Path, shape: tuple[int, int], repeats: int, threads: int) -> dict[str, Any]:
-    height, width = shape
     rng = np.random.default_rng(1)
     calibrated = rng.normal(1000, 30, shape).astype(np.float32)
     header = fits.Header()

@@ -47,10 +47,8 @@ from .calibration import (
     integrate_expressions,
 )
 from .hardware import HardwareProfile, detect_hardware
-from .native_kernels import (  # noqa: F401
-    MAD_KERNEL_ID,
+from .native_kernels import (
     _candidate_library_paths,
-    _library_filename,
     load_native_kernels,
 )
 from .performance_profile import ExecutionTuning, select_execution_tuning
