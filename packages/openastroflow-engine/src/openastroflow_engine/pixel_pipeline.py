@@ -8,6 +8,8 @@ All pixel operations use vertical slices and all input FITS files stay read-only
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
+import threading
 import ctypes
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -37,11 +39,19 @@ from .calibration import (
     IntegrationMapPaths,
     IntegrationParameters,
     PixelStatistics,
+    _MemoryFrame,
+    _StatsAccumulator,
+    _atomic_publish_file,
+    _canonical_expression,
+    _expression_rows,
+    _temporary_output,
+    _validate_expression_shapes,
     integrate_expressions,
     read_frame_info,
     robust_location,
     write_expression,
 )
+from .native_kernels import WARP_KERNEL_ID, load_native_kernels
 from .preview import render_auto_stretch_preview
 from .hardware import detect_hardware
 from .metal_integration import (
@@ -66,9 +76,19 @@ from .xisf_pixels import XisfDecodePolicy, convert_xisf_to_fits
 PIPELINE_VERSION = "portable-pixel-pipeline-v1"
 OUTPUT_STATE = "UNSOLVED_WORKING"
 REGISTRATION_RESAMPLERS = frozenset({"bilinear", "lanczos-3-clamped"})
+# v2: tap weights are evaluated through exact trigonometric identities from
+# three transcendental calls per axis instead of twelve; the interpolation
+# contract is unchanged and results differ from v1 by at most one Float32 ulp.
 LANCZOS3_REGISTRATION_ALGORITHM = (
-    "normalized-lanczos-3-domain-union-support-clamp-v1"
+    "normalized-lanczos-3-domain-union-support-clamp-v2"
 )
+NUMPY_WARP_KERNEL_ID = "numpy-lanczos3-warp-v2"
+# Fused calibrate+register working set per Light: the Float32 result, one
+# master temporary during subtraction/division, and masks/temporaries.
+FUSED_LIGHT_BYTES_PER_PIXEL = 12
+# Native warp per output row: Float32 band, finite mask, statistics selection
+# and the big-endian conversion inside the FITS writer.
+NATIVE_WARP_BYTES_PER_PIXEL = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,10 +269,22 @@ class PipelineParameters:
     )
     master_metadata_overrides: tuple[MasterMetadataOverride, ...] = ()
     raw_frame_metadata_overrides: tuple[RawFrameMetadataOverride, ...] = ()
+    # Calibrated Lights are computed in memory and registered directly.  They
+    # are written to disk only when a consumer (Drizzle, the public portable
+    # pipeline) needs them; the ordinary E2E path keeps them transient.
+    materialize_calibrated_lights: bool = True
+    # Published pipeline outputs are fsynced.  An enclosing run whose whole
+    # pipeline directory is transient (the E2E work tree) turns this off and
+    # relies on its own fsynced promotion of the final products.
+    durable_intermediates: bool = True
 
     def validate(self) -> None:
         if self.calibration_workflow not in WORKFLOWS:
             raise ValueError("unsupported calibration_workflow")
+        if not isinstance(self.materialize_calibrated_lights, bool):
+            raise ValueError("materialize_calibrated_lights must be a boolean")
+        if not isinstance(self.durable_intermediates, bool):
+            raise ValueError("durable_intermediates must be a boolean")
         self.integration.validate()
         if self.registration_memory_bytes < 1024:
             raise ValueError("registration_memory_bytes is too small")
@@ -317,6 +349,8 @@ class PipelineParameters:
             "rawFrameMetadataOverrides": [
                 item.serializable() for item in self.raw_frame_metadata_overrides
             ],
+            "materializeCalibratedLights": self.materialize_calibrated_lights,
+            "durableIntermediates": self.durable_intermediates,
         }
 
 
@@ -1470,12 +1504,19 @@ def _artifact_record(
     *,
     statistics: PixelStatistics | None = None,
     details: Mapping[str, Any] | None = None,
+    sha256: str | None = None,
 ) -> dict[str, Any]:
+    """Describe one staged artifact; ``sha256`` may come from a streaming writer.
+
+    A writer-side digest covers exactly the bytes it wrote, so it equals the
+    file hash without rereading large intermediates.
+    """
+
     stat = path.stat()
     record: dict[str, Any] = {
         "path": str(path.relative_to(staging)),
         "kind": kind,
-        "sha256": _hash_file(path),
+        "sha256": sha256 if sha256 is not None else _hash_file(path),
         "sizeBytes": stat.st_size,
     }
     if statistics is not None:
@@ -1538,10 +1579,21 @@ def _resolve_transforms(
         basename_counts[path.name] = basename_counts.get(path.name, 0) + 1
     used: set[str] = set()
     result: dict[Path, AffineTransform] = {}
+    # Callers may key transforms by any spelling of a Light path; resolve
+    # every key once so symlinked temporary roots and relative paths match
+    # the canonical Light list exactly as quality weights already do.
+    canonical_keys: dict[str, list[str]] = {}
+    for key in transforms:
+        try:
+            canonical = str(Path(key).expanduser().resolve(strict=True))
+        except OSError:
+            continue
+        canonical_keys.setdefault(os.path.normcase(canonical), []).append(key)
     for path in light_paths:
         candidates = [str(path), os.path.normcase(str(path))]
         if basename_counts[path.name] == 1:
             candidates.append(path.name)
+        candidates.extend(canonical_keys.get(os.path.normcase(str(path)), ()))
         matching = [key for key in candidates if key in transforms]
         matching = list(dict.fromkeys(matching))
         if len(matching) > 1:
@@ -1868,6 +1920,8 @@ def _register_frames(
     max_memory_bytes: int,
     resampler: str,
     cpu_workers: int,
+    native_threads: int | None = None,
+    execution_records: list[dict[str, Any]] | None = None,
 ) -> tuple[PixelStatistics, ...]:
     workers = _registration_worker_count(
         jobs,
@@ -1876,8 +1930,10 @@ def _register_frames(
         cpu_workers=cpu_workers,
     )
     worker_memory_bytes = max_memory_bytes // workers
+    records: list[dict[str, Any]] = [{} for _ in jobs]
 
-    def register(job: _RegistrationJob) -> PixelStatistics:
+    def register(index: int) -> PixelStatistics:
+        job = jobs[index]
         # Every worker opens its own read-only input and unique output writer.
         # Pixel buffers, writable headers, and accumulators are never shared.
         return _register_frame(
@@ -1888,23 +1944,28 @@ def _register_frames(
             max_memory_bytes=worker_memory_bytes,
             resampler=resampler,
             source_exposure_seconds=job.source_exposure_seconds,
+            native_threads=native_threads,
+            execution=records[index],
         )
 
     if workers == 1:
-        return tuple(register(job) for job in jobs)
-
-    executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="wbpp-warp")
-    try:
-        futures = [executor.submit(register, job) for job in jobs]
-        # Keep provenance and artifact order independent of completion order.
-        return tuple(future.result() for future in futures)
-    finally:
-        # A failed warp must finish/cancel every writer before staging cleanup.
-        executor.shutdown(wait=True, cancel_futures=True)
+        results = tuple(register(index) for index in range(len(jobs)))
+    else:
+        executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="wbpp-warp")
+        try:
+            futures = [executor.submit(register, index) for index in range(len(jobs))]
+            # Keep provenance and artifact order independent of completion order.
+            results = tuple(future.result() for future in futures)
+        finally:
+            # A failed warp must finish/cancel every writer before staging cleanup.
+            executor.shutdown(wait=True, cancel_futures=True)
+    if execution_records is not None:
+        execution_records.extend(records)
+    return results
 
 
 def _read_half_turn_rows(
-    source: FitsFrame, y0: int, y1: int, translation: tuple[int, int]
+    source: Any, y0: int, y1: int, translation: tuple[int, int]
 ) -> NDArray[np.float32]:
     height, width = source.shape
     tx, ty = translation
@@ -1921,8 +1982,14 @@ def _read_half_turn_rows(
     return values
 
 
+def _open_registration_source(source: Path | _MemoryFrame) -> Any:
+    if isinstance(source, _MemoryFrame):
+        return nullcontext(source)
+    return FitsFrame(source)
+
+
 def _register_frame(
-    source_path: Path,
+    source: Path | _MemoryFrame,
     destination: Path,
     transform: AffineTransform,
     info: FrameInfo,
@@ -1930,22 +1997,63 @@ def _register_frame(
     max_memory_bytes: int,
     resampler: str,
     source_exposure_seconds: float | None = None,
+    native_threads: int | None = None,
+    execution: dict[str, Any] | None = None,
+    durable: bool = True,
 ) -> PixelStatistics:
+    """Resample one calibrated Light (file or in-memory) into a new FITS.
+
+    Exact identity and integer half-turn transforms copy pixels.  General
+    transforms use the native multithreaded Lanczos-3 kernel when it is
+    available and the budget holds the decoded source; otherwise the NumPy
+    reference resampler runs on bounded coordinate tiles.  Both produce
+    value-identical output.  ``execution`` receives the backend actually used.
+    """
+
     matrix = transform.validated_matrix()
     inverse = np.linalg.inv(matrix)
-    with FitsFrame(source_path) as source:
-        height, width = source.shape
+    with _open_registration_source(source) as frame:
+        height, width = frame.shape
         is_identity = transform.is_identity
-        half_turn = _exact_half_turn_translation(transform, source.shape)
-        bytes_per_pixel = _registration_bytes_per_pixel(
-            transform, resampler, source.shape
-        )
-        bytes_per_row = width * bytes_per_pixel
-        if bytes_per_row > max_memory_bytes:
-            raise CalibrationError(
-                "MEMORY_BUDGET_TOO_SMALL", "one registration row exceeds memory budget"
+        half_turn = _exact_half_turn_translation(transform, frame.shape)
+        kernels = None
+        source_values: NDArray[np.float32] | None = None
+        domain_scale = frame.info.normalized_unit_scale
+        if is_identity:
+            warp_backend = "identity-copy"
+        elif half_turn is not None:
+            warp_backend = "half-turn-copy"
+        else:
+            warp_backend = "numpy"
+        if (
+            warp_backend == "numpy"
+            and resampler == "lanczos-3-clamped"
+            and domain_scale is not None
+            and math.isfinite(domain_scale)
+            and domain_scale > 0.0
+        ):
+            kernels = load_native_kernels()
+        if kernels is not None:
+            decoded_bytes = 0 if isinstance(frame, _MemoryFrame) else height * width * 4
+            native_row_bytes = width * NATIVE_WARP_BYTES_PER_PIXEL
+            if decoded_bytes + native_row_bytes <= max_memory_bytes:
+                warp_backend = "native-cpu"
+                tile_rows = max(
+                    1,
+                    min(height, (max_memory_bytes - decoded_bytes) // native_row_bytes),
+                )
+            else:
+                kernels = None
+        if warp_backend != "native-cpu":
+            bytes_per_pixel = _registration_bytes_per_pixel(
+                transform, resampler, frame.shape
             )
-        tile_rows = max(1, min(height, max_memory_bytes // bytes_per_row))
+            bytes_per_row = width * bytes_per_pixel
+            if bytes_per_row > max_memory_bytes:
+                raise CalibrationError(
+                    "MEMORY_BUDGET_TOO_SMALL", "one registration row exceeds memory budget"
+                )
+            tile_rows = max(1, min(height, max_memory_bytes // bytes_per_row))
         temporary = destination.with_name(f".{destination.name}.partial")
         if temporary.exists() or os.path.lexists(temporary):
             raise CalibrationError(
@@ -1956,23 +2064,38 @@ def _register_frame(
         stats_sum = 0.0
         finite_total = 0
         invalid_total = 0
+        digest: str | None = None
         try:
             with FitsFloatWriter(
                 temporary,
-                source.shape,
+                frame.shape,
                 _registration_metadata(
                     info,
                     transform,
                     resampler=resampler,
                     source_exposure_seconds=source_exposure_seconds,
                 ),
+                durable=durable,
             ) as writer:
+                if warp_backend == "native-cpu":
+                    source_values = frame.full_values()
                 for y0 in range(0, height, tile_rows):
                     y1 = min(height, y0 + tile_rows)
                     if is_identity:
-                        values = source.read_rows(y0, y1)
+                        values = frame.read_rows(y0, y1)
                     elif half_turn is not None:
-                        values = _read_half_turn_rows(source, y0, y1, half_turn)
+                        values = _read_half_turn_rows(frame, y0, y1, half_turn)
+                    elif warp_backend == "native-cpu":
+                        assert kernels is not None and source_values is not None
+                        values = kernels.warp_lanczos3(
+                            source_values,
+                            inverse[:2],
+                            first_row=y0,
+                            row_count=y1 - y0,
+                            output_width=width,
+                            domain_scale=float(domain_scale),
+                            threads=native_threads,
+                        )
                     else:
                         output_y = np.arange(y0, y1, dtype=np.float64)[:, None]
                         output_x = np.arange(width, dtype=np.float64)[None, :]
@@ -1989,9 +2112,9 @@ def _register_frame(
                         input_x = np.broadcast_to(input_x, (y1 - y0, width))
                         input_y = np.broadcast_to(input_y, (y1 - y0, width))
                         if resampler == "lanczos-3-clamped":
-                            values = source.sample_lanczos3_clamped(input_x, input_y)
+                            values = frame.sample_lanczos3_clamped(input_x, input_y)
                         else:
-                            values = source.sample_bilinear(input_x, input_y)
+                            values = frame.sample_bilinear(input_x, input_y)
                     finite = np.isfinite(values)
                     count = int(np.count_nonzero(finite))
                     finite_total += count
@@ -2002,6 +2125,7 @@ def _register_frame(
                         stats_max = max(stats_max, float(np.max(selected)))
                         stats_sum += float(np.sum(selected, dtype=np.float64))
                     writer.write_rows(y0, values)
+            digest = writer.sha256
             try:
                 os.link(temporary, destination)
             except FileExistsError as error:
@@ -2014,6 +2138,22 @@ def _register_frame(
         finally:
             if temporary.exists():
                 temporary.unlink()
+    if execution is not None:
+        execution.update(
+            {
+                "warpBackend": warp_backend,
+                "warpKernel": (
+                    WARP_KERNEL_ID
+                    if warp_backend == "native-cpu"
+                    else NUMPY_WARP_KERNEL_ID
+                    if warp_backend == "numpy" and resampler == "lanczos-3-clamped"
+                    else warp_backend
+                ),
+                "tileRows": tile_rows,
+                "nativeThreads": native_threads if warp_backend == "native-cpu" else None,
+                "sha256": digest,
+            }
+        )
     return PixelStatistics(
         finite_pixels=finite_total,
         invalid_pixels=invalid_total,
@@ -2021,6 +2161,243 @@ def _register_frame(
         maximum=stats_max if finite_total else None,
         mean=stats_sum / finite_total if finite_total else None,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _LightJob:
+    """One Light's fused calibrate-in-memory then register work item."""
+
+    source_path: Path
+    expression: FrameExpression
+    calibrated_path: Path | None
+    calibrated_metadata: Mapping[str, Any]
+    destination: Path
+    transform: AffineTransform
+    info: FrameInfo
+    source_exposure_seconds: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class _LightJobResult:
+    calibrated_statistics: PixelStatistics
+    calibrated_sha256: str | None
+    registered_statistics: PixelStatistics
+    registered_sha256: str | None
+    execution: dict[str, Any]
+
+
+class _MasterCache:
+    """Decoded Float32 masters shared read-only by every fused worker.
+
+    Each master is converted from its FITS storage exactly once; workers
+    receive copies of the rows they ask for, so the cache is never mutated.
+    """
+
+    def __init__(self) -> None:
+        self._frames: dict[str, _MemoryFrame] = {}
+        self._lock = threading.Lock()
+
+    def frame(self, path: str) -> _MemoryFrame:
+        key = str(Path(path).expanduser().resolve(strict=True))
+        with self._lock:
+            cached = self._frames.get(key)
+            if cached is None:
+                with FitsFrame(key) as source:
+                    cached = _MemoryFrame(source.full_values(), source.info, key)
+                self._frames[key] = cached
+            return cached
+
+    @property
+    def decoded_bytes(self) -> int:
+        with self._lock:
+            return sum(frame.values.nbytes for frame in self._frames.values())
+
+
+def _write_float_fits(
+    values: NDArray[np.float32],
+    destination: Path,
+    metadata: Mapping[str, Any],
+    *,
+    durable: bool = True,
+) -> str | None:
+    """Publish one in-memory Float32 image atomically and return its digest."""
+
+    if destination.exists() or os.path.lexists(destination):
+        raise CalibrationError(
+            "OUTPUT_EXISTS", "refusing to overwrite output", path=str(destination)
+        )
+    temporary = _temporary_output(destination)
+    try:
+        with FitsFloatWriter(temporary, values.shape, metadata, durable=durable) as writer:
+            writer.write_rows(0, values)
+        _atomic_publish_file(temporary, destination)
+        return writer.sha256
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _process_light_job(
+    job: _LightJob,
+    *,
+    master_cache: _MasterCache,
+    max_memory_bytes: int,
+    resampler: str,
+    native_threads: int,
+    division_floor: float,
+    durable: bool = True,
+) -> _LightJobResult:
+    expression = _canonical_expression(job.expression)
+    sources: dict[str, Any] = {}
+    with FitsFrame(expression.source_path) as light:
+        sources[expression.source_path] = light
+        for master_path in (
+            expression.subtract_path,
+            *expression.subtract_paths,
+            expression.divide_path,
+        ):
+            if master_path is not None:
+                sources[master_path] = master_cache.frame(master_path)
+        height, _width = _validate_expression_shapes((expression,), sources)
+        # The Light's decoded Float32 buffer becomes the calibrated image in
+        # place: the same arithmetic as write_expression, without a disk trip.
+        calibrated = _expression_rows(
+            expression, sources, 0, height, division_floor=division_floor
+        )
+    statistics = _StatsAccumulator()
+    statistics.update(calibrated)
+    calibrated_statistics = statistics.result()
+    if calibrated_statistics.finite_pixels == 0:
+        raise CalibrationError(
+            "NO_FINITE_OUTPUT", "calibration produced no finite pixels",
+            path=str(job.source_path),
+        )
+    calibrated_sha256: str | None = None
+    if job.calibrated_path is not None:
+        calibrated_sha256 = _write_float_fits(
+            calibrated, job.calibrated_path, job.calibrated_metadata, durable=durable
+        )
+    memory_frame = _MemoryFrame(
+        calibrated, job.info, job.calibrated_path or job.source_path
+    )
+    execution: dict[str, Any] = {}
+    # The calibrated image already occupies its share; leave the rest of the
+    # worker budget to warp tiles, but always allow at least one NumPy row.
+    warp_budget = max(
+        max_memory_bytes - calibrated.nbytes,
+        calibrated.shape[1]
+        * _registration_bytes_per_pixel(job.transform, resampler, calibrated.shape),
+    )
+    registered_statistics = _register_frame(
+        memory_frame,
+        job.destination,
+        job.transform,
+        job.info,
+        max_memory_bytes=warp_budget,
+        resampler=resampler,
+        source_exposure_seconds=job.source_exposure_seconds,
+        native_threads=native_threads,
+        execution=execution,
+        durable=durable,
+    )
+    registered_sha256 = execution.pop("sha256", None)
+    return _LightJobResult(
+        calibrated_statistics=calibrated_statistics,
+        calibrated_sha256=calibrated_sha256,
+        registered_statistics=registered_statistics,
+        registered_sha256=registered_sha256,
+        execution=execution,
+    )
+
+
+def _fused_job_bytes(job: _LightJob, resampler: str) -> int:
+    height, width = job.info.shape
+    per_row = width * max(
+        NATIVE_WARP_BYTES_PER_PIXEL,
+        _registration_bytes_per_pixel(job.transform, resampler, job.info.shape),
+    )
+    return height * width * FUSED_LIGHT_BYTES_PER_PIXEL + per_row
+
+
+def _fused_worker_count(
+    jobs: Sequence[_LightJob],
+    *,
+    max_memory_bytes: int,
+    resampler: str,
+    cpu_workers: int,
+) -> int:
+    largest = max((_fused_job_bytes(job, resampler) for job in jobs), default=1)
+    return max(1, min(cpu_workers, len(jobs), max_memory_bytes // max(1, largest)))
+
+
+def _calibrate_and_register_frames(
+    jobs: Sequence[_LightJob],
+    *,
+    master_cache: _MasterCache,
+    max_memory_bytes: int,
+    resampler: str,
+    cpu_workers: int,
+    division_floor: float,
+    durable: bool = True,
+) -> tuple[tuple[_LightJobResult, ...], dict[str, Any]]:
+    """Calibrate and register every Light with one shared memory budget.
+
+    Lights run concurrently in ``workers`` threads; each thread hands its warp
+    to the native kernel with the remaining CPU share, so all cores stay busy
+    whether memory allows many Lights in flight or only one.
+    """
+
+    workers = _fused_worker_count(
+        jobs,
+        max_memory_bytes=max_memory_bytes,
+        resampler=resampler,
+        cpu_workers=cpu_workers,
+    )
+    native_threads = max(1, cpu_workers // workers)
+    worker_memory_bytes = max_memory_bytes // workers
+    # Lights start in submission order, so the last ``len(jobs) % workers``
+    # Lights run while the other workers are already idle; their warps take
+    # the CPU share those workers would have used. Warp results do not depend
+    # on the thread count.
+    rounds = max(1, math.ceil(len(jobs) / workers))
+    tail_start = (rounds - 1) * workers
+    tail_threads = max(native_threads, cpu_workers // max(1, len(jobs) - tail_start))
+
+    def run(index: int, job: _LightJob) -> _LightJobResult:
+        return _process_light_job(
+            job,
+            master_cache=master_cache,
+            max_memory_bytes=worker_memory_bytes,
+            resampler=resampler,
+            native_threads=tail_threads if index >= tail_start else native_threads,
+            division_floor=division_floor,
+            durable=durable,
+        )
+
+    if workers == 1:
+        results = tuple(run(index, job) for index, job in enumerate(jobs))
+    else:
+        executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="wbpp-light")
+        try:
+            futures = [executor.submit(run, index, job) for index, job in enumerate(jobs)]
+            results = tuple(future.result() for future in futures)
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
+    backends: dict[str, int] = {}
+    for result in results:
+        backend = str(result.execution.get("warpBackend", "unknown"))
+        backends[backend] = backends.get(backend, 0) + 1
+    return results, {
+        "executor": "thread-pool" if workers > 1 else "serial",
+        "executionModel": "fused-calibrate-warp-v1",
+        "cpuWorkersUsed": workers,
+        "nativeThreadsPerWorker": native_threads,
+        "tailNativeThreads": tail_threads,
+        "tailLights": len(jobs) - tail_start,
+        "perWorkerMemoryBudgetBytes": worker_memory_bytes,
+        "warpBackends": backends,
+        "masterCacheBytes": master_cache.decoded_bytes,
+    }
 
 
 def _histogram_rectangle(
@@ -2140,7 +2517,9 @@ def _crop_fits(
     metadata: Mapping[str, Any],
     *,
     max_memory_bytes: int,
-) -> PixelStatistics:
+    durable: bool = True,
+) -> tuple[PixelStatistics, str | None]:
+    """Crop one FITS into a new file; returns statistics and the writer digest."""
     top, left, bottom, right = crop
     with FitsFrame(source_path) as source:
         height, width = source.shape
@@ -2162,7 +2541,9 @@ def _crop_fits(
         minimum = math.inf
         maximum = -math.inf
         try:
-            with FitsFloatWriter(temporary, output_shape, metadata) as writer:
+            with FitsFloatWriter(
+                temporary, output_shape, metadata, durable=durable
+            ) as writer:
                 output_y = 0
                 for source_y in range(top, bottom, tile_rows):
                     source_y1 = min(bottom, source_y + tile_rows)
@@ -2178,6 +2559,7 @@ def _crop_fits(
                         total += float(np.sum(selected, dtype=np.float64))
                     writer.write_rows(output_y, values)
                     output_y += values.shape[0]
+            digest = writer.sha256
             try:
                 os.link(temporary, destination)
             except FileExistsError as error:
@@ -2194,7 +2576,7 @@ def _crop_fits(
         minimum=minimum if finite_total else None,
         maximum=maximum if finite_total else None,
         mean=total / finite_total if finite_total else None,
-    )
+    ), digest
 
 
 def _rename_directory_no_replace(source: Path, destination: Path) -> None:
@@ -2283,8 +2665,14 @@ def _run_portable_pipeline_fits(
     _source_aliases: Mapping[str, Path] | None = None,
     _xisf_conversions: Sequence[Mapping[str, Any]] = (),
     _trusted_generated_calibration: _TrustedGeneratedCalibrationSet | None = None,
+    _source_identity_seed: Mapping[str, tuple[str, Mapping[str, int]]] | None = None,
 ) -> PipelineResult:
     """Run raw or pre-integrated calibration through unsolved linear masters.
+
+    ``_source_identity_seed`` maps canonical original paths to a content
+    digest and the stat identity that digest was captured with.  Seeded
+    sources are not rehashed; a stat mismatch against the seed still fails
+    closed as ``SOURCE_CHANGED``.
 
     A calibration profile may use raw frames or a supplied master, never both
     for the same bias/filter/exposure identity.  Supplied masters are opened
@@ -2337,6 +2725,9 @@ def _run_portable_pipeline_fits(
         ("LIGHT", lights),
     )
     source_identity_cache: _SourceIdentityCache = {}
+    for seed_path, (seed_digest, seed_identity) in (_source_identity_seed or {}).items():
+        seed_key = os.path.normcase(str(Path(seed_path).expanduser().resolve(strict=True)))
+        source_identity_cache[seed_key] = (str(seed_digest), dict(seed_identity))
     trusted_generated: dict[str, Any] | None = None
     if _trusted_generated_calibration is not None:
         trusted_generated = _validate_trusted_generated_calibration_set(
@@ -2691,6 +3082,8 @@ def _run_portable_pipeline_fits(
                     **_numeric_domain_metadata(reference_bias),
                 },
                 parameters=parameters.integration,
+                native_threads=None,
+                durable=parameters.durable_intermediates,
             )
             artifacts.append(
                 _artifact_record(
@@ -2698,6 +3091,7 @@ def _run_portable_pipeline_fits(
                     master_bias,
                     "MASTER_BIAS",
                     statistics=bias_integration.statistics,
+                    sha256=bias_integration.output_sha256,
                 )
             )
             stage_statistics["masterBias"] = {
@@ -2778,6 +3172,7 @@ def _run_portable_pipeline_fits(
                         **_numeric_domain_metadata(dark_reference),
                     },
                     parameters=parameters.integration,
+                    durable=parameters.durable_intermediates,
                 )
                 master_darks[exposure] = destination
                 master_dark_domain_info[exposure] = dark_reference
@@ -2787,6 +3182,7 @@ def _run_portable_pipeline_fits(
                         destination,
                         "MASTER_DARK",
                         statistics=integration.statistics,
+                        sha256=integration.output_sha256,
                         details={"exposureSeconds": exposure, "biasIncluded": True},
                     )
                 )
@@ -2962,6 +3358,7 @@ def _run_portable_pipeline_fits(
                     "OAFNSCL": 1.0,
                 },
                 parameters=parameters.integration,
+                durable=parameters.durable_intermediates,
             )
             master_flats[filter_name] = destination
             flat_application_scales[filter_name] = 1.0
@@ -2971,6 +3368,7 @@ def _run_portable_pipeline_fits(
                     destination,
                     "MASTER_FLAT",
                     statistics=integration.statistics,
+                    sha256=integration.output_sha256,
                     details={
                         "filter": filter_name,
                         "normalizations": normalizations,
@@ -3014,8 +3412,8 @@ def _run_portable_pipeline_fits(
         execution_tuning = select_execution_tuning(hardware_profile)
         registered: dict[Path, Path] = {}
         registration_records: dict[str, Any] = {}
-        registration_jobs: list[_RegistrationJob] = []
-        calibrated_artifacts: list[dict[str, Any]] = []
+        light_jobs: list[_LightJob] = []
+        calibrated_details: list[dict[str, Any]] = []
         for index, path in enumerate(lights, start=1):
             info = light_info[path]
             filter_name = info.filter_name
@@ -3084,92 +3482,88 @@ def _run_portable_pipeline_fits(
                 additive_label="raw Light",
             )
             stem = re.sub(r"[^A-Za-z0-9._-]+", "_", path.stem).strip("_") or "light"
-            calibrated_path = calibrated_dir / f"{index:05d}_{stem}.fits"
-            calibrated_stats = write_expression(
-                FrameExpression(
-                    source_path=str(path),
-                    subtract_path=str(subtract_path),
-                    subtract_scale=subtract_scale,
-                    subtract_paths=(str(master_bias),) if not dark_bias_included else (),
-                    subtract_scales=(bias_scale,) if not dark_bias_included else (),
-                    divide_path=str(flat_path),
-                    scale=(
-                        flat_application_scales[filter_name]
-                        * reference_exposures[filter_name]
-                        / float(info.exposure_seconds)
-                        * light_domain_scale
-                    ),
+            calibrated_path = (
+                calibrated_dir / f"{index:05d}_{stem}.fits"
+                if parameters.materialize_calibrated_lights
+                else None
+            )
+            registered_path = registered_dir / f"{index:05d}_{stem}.fits"
+            expression = FrameExpression(
+                source_path=str(path),
+                subtract_path=str(subtract_path),
+                subtract_scale=subtract_scale,
+                subtract_paths=(str(master_bias),) if not dark_bias_included else (),
+                subtract_scales=(bias_scale,) if not dark_bias_included else (),
+                divide_path=str(flat_path),
+                scale=(
+                    flat_application_scales[filter_name]
+                    * reference_exposures[filter_name]
+                    / float(info.exposure_seconds)
+                    * light_domain_scale
                 ),
-                calibrated_path,
-                metadata={
-                    "IMAGETYP": "Calibrated Light",
-                    "FILTER": filter_name,
-                    "OBJECT": info.target,
-                    "EXPTIME": reference_exposures[filter_name],
-                    "OAFSRCEX": info.exposure_seconds,
-                    "OAFEXPSC": reference_exposures[filter_name]
-                    / float(info.exposure_seconds),
-                    "OAFSTATE": OUTPUT_STATE,
-                    "OAFBIAS": bias_mode,
-                    **_numeric_domain_metadata(light_output_domain),
-                },
-                max_memory_bytes=parameters.integration.max_memory_bytes,
-                division_floor=parameters.integration.division_floor,
             )
-            calibrated_artifacts.append(
-                _artifact_record(
-                    staging,
-                    calibrated_path,
-                    "CALIBRATED_LIGHT",
-                    statistics=calibrated_stats,
-                    details={
-                        "source": str(display_path(path)),
-                        "filter": filter_name,
-                        "subtractedMaster": _path_receipt_reference(
-                            staging,
-                            subtract_path,
-                            source_aliases,
-                            trusted_generated["byPath"]
-                            if trusted_generated is not None
-                            else None,
-                            source_identity_cache,
-                        ),
-                        "biasMode": bias_mode,
-                        "sourceNumericDomain": info.numeric_domain,
-                        "additiveNumericDomain": subtract_info.numeric_domain,
-                        "additiveApplicationScale": subtract_scale,
-                        "additiveApplicationScaleSource": "normalized-unit-domain-ratio",
-                        "biasApplicationScale": (
-                            bias_scale if not dark_bias_included else None
-                        ),
-                        "outputNumericDomain": light_output_domain.numeric_domain,
-                        "sourceToOutputDomainScale": light_domain_scale,
-                        "dividedMasterFlat": _path_receipt_reference(
-                            staging,
-                            flat_path,
-                            source_aliases,
-                            trusted_generated["byPath"]
-                            if trusted_generated is not None
-                            else None,
-                            source_identity_cache,
-                        ),
-                        "flatApplicationNormalization": flat_application_scales[
-                            filter_name
-                        ],
-                        "exposureNormalization": {
-                            "sourceSeconds": info.exposure_seconds,
-                            "referenceSeconds": reference_exposures[filter_name],
-                            "scale": reference_exposures[filter_name]
-                            / float(info.exposure_seconds),
-                        },
+            calibrated_metadata = {
+                "IMAGETYP": "Calibrated Light",
+                "FILTER": filter_name,
+                "OBJECT": info.target,
+                "EXPTIME": reference_exposures[filter_name],
+                "OAFSRCEX": info.exposure_seconds,
+                "OAFEXPSC": reference_exposures[filter_name]
+                / float(info.exposure_seconds),
+                "OAFSTATE": OUTPUT_STATE,
+                "OAFBIAS": bias_mode,
+                **_numeric_domain_metadata(light_output_domain),
+            }
+            calibrated_details.append(
+                {
+                    "source": str(display_path(path)),
+                    "filter": filter_name,
+                    "subtractedMaster": _path_receipt_reference(
+                        staging,
+                        subtract_path,
+                        source_aliases,
+                        trusted_generated["byPath"]
+                        if trusted_generated is not None
+                        else None,
+                        source_identity_cache,
+                    ),
+                    "biasMode": bias_mode,
+                    "sourceNumericDomain": info.numeric_domain,
+                    "additiveNumericDomain": subtract_info.numeric_domain,
+                    "additiveApplicationScale": subtract_scale,
+                    "additiveApplicationScaleSource": "normalized-unit-domain-ratio",
+                    "biasApplicationScale": (
+                        bias_scale if not dark_bias_included else None
+                    ),
+                    "outputNumericDomain": light_output_domain.numeric_domain,
+                    "sourceToOutputDomainScale": light_domain_scale,
+                    "dividedMasterFlat": _path_receipt_reference(
+                        staging,
+                        flat_path,
+                        source_aliases,
+                        trusted_generated["byPath"]
+                        if trusted_generated is not None
+                        else None,
+                        source_identity_cache,
+                    ),
+                    "flatApplicationNormalization": flat_application_scales[
+                        filter_name
+                    ],
+                    "exposureNormalization": {
+                        "sourceSeconds": info.exposure_seconds,
+                        "referenceSeconds": reference_exposures[filter_name],
+                        "scale": reference_exposures[filter_name]
+                        / float(info.exposure_seconds),
                     },
-                )
+                }
             )
-
-            registration_jobs.append(
-                _RegistrationJob(
-                    source_path=calibrated_path,
-                    destination=registered_dir / calibrated_path.name,
+            light_jobs.append(
+                _LightJob(
+                    source_path=path,
+                    expression=expression,
+                    calibrated_path=calibrated_path,
+                    calibrated_metadata=calibrated_metadata,
+                    destination=registered_path,
                     transform=resolved_transforms[path],
                     info=replace(
                         info,
@@ -3181,43 +3575,54 @@ def _run_portable_pipeline_fits(
                 )
             )
 
-        registration_workers = _registration_worker_count(
-            registration_jobs,
-            max_memory_bytes=parameters.registration_memory_bytes,
-            resampler=parameters.registration_resampler,
-            cpu_workers=execution_tuning.cpu_workers,
-        )
-        registration_started = time.perf_counter()
-        registration_results = _register_frames(
-            registration_jobs,
-            max_memory_bytes=parameters.registration_memory_bytes,
-            resampler=parameters.registration_resampler,
-            cpu_workers=execution_tuning.cpu_workers,
-        )
-        # Calibrate first, then warp within one shared registration budget.
+        # Calibrate in memory and warp within one shared registration budget.
         # Source-identity caches and receipt construction stay on this thread.
-        for path, job, calibrated_artifact, registered_stats in zip(
-            lights, registration_jobs, calibrated_artifacts, registration_results,
-            strict=True,
+        master_cache = _MasterCache()
+        registration_started = time.perf_counter()
+        light_results, fused_execution = _calibrate_and_register_frames(
+            light_jobs,
+            master_cache=master_cache,
+            max_memory_bytes=parameters.registration_memory_bytes,
+            resampler=parameters.registration_resampler,
+            cpu_workers=execution_tuning.cpu_workers,
+            division_floor=parameters.integration.division_floor,
+            durable=parameters.durable_intermediates,
+        )
+        registration_wall_seconds = time.perf_counter() - registration_started
+        del master_cache
+        for path, job, details, result in zip(
+            lights, light_jobs, calibrated_details, light_results, strict=True,
         ):
             transform = job.transform
             resampling = _registration_provenance(
                 transform, job.info.shape, parameters.registration_resampler
             )
-            registered_path = job.destination
-            registered[path] = registered_path
-            artifacts.append(calibrated_artifact)
+            registered[path] = job.destination
+            if job.calibrated_path is not None:
+                artifacts.append(
+                    _artifact_record(
+                        staging,
+                        job.calibrated_path,
+                        "CALIBRATED_LIGHT",
+                        statistics=result.calibrated_statistics,
+                        details=details,
+                        sha256=result.calibrated_sha256,
+                    )
+                )
             artifacts.append(
                 _artifact_record(
                     staging,
-                    registered_path,
+                    job.destination,
                     "REGISTERED_LIGHT",
-                    statistics=registered_stats,
+                    statistics=result.registered_statistics,
                     details={
                         "source": str(display_path(path)),
                         "transformInputToOutput": transform.serializable(),
                         **resampling,
+                        "warpBackend": result.execution.get("warpBackend"),
+                        "warpKernel": result.execution.get("warpKernel"),
                     },
+                    sha256=result.registered_sha256,
                 )
             )
             registration_records[str(display_path(path))] = {
@@ -3225,17 +3630,37 @@ def _run_portable_pipeline_fits(
                 "identity": transform.is_identity,
                 **resampling,
                 "qualityWeight": resolved_quality_weights[path],
+                "calibration": {
+                    "materialized": job.calibrated_path is not None,
+                    "statistics": result.calibrated_statistics.serializable(),
+                    **details,
+                },
+                "execution": dict(result.execution),
             }
+        if not parameters.materialize_calibrated_lights:
+            try:
+                calibrated_dir.rmdir()
+            except OSError:
+                # Removing this unused staging directory is best effort.
+                # Keep it for diagnostics if cleanup fails; artifact and
+                # final-publication validation still run independently.
+                pass
 
         registration_execution = {
-            "executor": "thread-pool" if registration_workers > 1 else "serial",
+            "executor": fused_execution["executor"],
+            "executionModel": fused_execution["executionModel"],
             "configuredCpuWorkers": execution_tuning.cpu_workers,
-            "cpuWorkersUsed": registration_workers,
-            "frameCount": len(registration_jobs),
+            "cpuWorkersUsed": fused_execution["cpuWorkersUsed"],
+            "nativeThreadsPerWorker": fused_execution["nativeThreadsPerWorker"],
+            "tailNativeThreads": fused_execution["tailNativeThreads"],
+            "tailLights": fused_execution["tailLights"],
+            "frameCount": len(light_jobs),
             "totalMemoryBudgetBytes": parameters.registration_memory_bytes,
-            "perWorkerMemoryBudgetBytes": parameters.registration_memory_bytes
-            // registration_workers,
-            "wallSeconds": time.perf_counter() - registration_started,
+            "perWorkerMemoryBudgetBytes": fused_execution["perWorkerMemoryBudgetBytes"],
+            "warpBackends": fused_execution["warpBackends"],
+            "calibratedLightsMaterialized": parameters.materialize_calibrated_lights,
+            "masterCacheBytes": fused_execution["masterCacheBytes"],
+            "wallSeconds": registration_wall_seconds,
         }
         if parameters.ordinary_integration_backend != "portable-cpu":
             try:
@@ -3353,6 +3778,7 @@ def _run_portable_pipeline_fits(
                     reference_index=reference_index,
                     parameters=parameters.global_normalization,
                     stellar_scale_hints=group_hints,
+                    workers=execution_tuning.cpu_workers,
                 )
                 integration_expressions = [
                     FrameExpression(
@@ -3425,6 +3851,7 @@ def _run_portable_pipeline_fits(
                 tuning=execution_tuning,
                 quality_weights=[resolved_quality_weights[path] for path in paths],
                 map_paths=full_maps,
+                durable=parameters.durable_intermediates,
             )
             fallback_reason = str(integration.execution.get("fallbackReason") or "")
             if (
@@ -3455,7 +3882,7 @@ def _run_portable_pipeline_fits(
                     f"common crop retains only {crop_fraction:.3%} of the frame",
                 )
             master_light = masters_dir / f"master_light_{token}.fits"
-            master_stats = _crop_fits(
+            master_stats, master_sha256 = _crop_fits(
                 full_master,
                 master_light,
                 crop,
@@ -3474,6 +3901,7 @@ def _run_portable_pipeline_fits(
                     ),
                 },
                 max_memory_bytes=parameters.integration.max_memory_bytes,
+                durable=parameters.durable_intermediates,
             )
             master_lights.append(master_light)
             artifacts.append(
@@ -3482,6 +3910,7 @@ def _run_portable_pipeline_fits(
                     master_light,
                     "MASTER_LIGHT_LINEAR_UNSOLVED",
                     statistics=master_stats,
+                    sha256=master_sha256,
                     details={
                         "filter": filter_name,
                         "crop": {
@@ -3515,7 +3944,7 @@ def _run_portable_pipeline_fits(
             map_statistics: dict[str, Any] = {}
             for map_name, full_map, artifact_kind in map_specs:
                 destination = coverage_dir / f"{token}_{map_name}.fits"
-                statistics = _crop_fits(
+                statistics, map_sha256 = _crop_fits(
                     full_map,
                     destination,
                     crop,
@@ -3527,6 +3956,7 @@ def _run_portable_pipeline_fits(
                         "OAFNFRM": len(paths),
                     },
                     max_memory_bytes=parameters.integration.max_memory_bytes,
+                    durable=parameters.durable_intermediates,
                 )
                 cropped_maps[map_name] = destination
                 map_statistics[map_name] = statistics.serializable()
@@ -3536,6 +3966,7 @@ def _run_portable_pipeline_fits(
                         destination,
                         artifact_kind,
                         statistics=statistics,
+                        sha256=map_sha256,
                         details={
                             "filter": filter_name,
                             "sourceIntegration": str(full_master.relative_to(staging)),

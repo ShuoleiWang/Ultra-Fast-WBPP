@@ -163,6 +163,136 @@ OAF_NATIVE_API int oaf_native_metal_masked_weighted_v1(
    char* error_message,
    size_t error_message_capacity );
 
+
+// Portable multithreaded CPU kernels (see PortableKernels.h). Every kernel
+// reproduces the Python engine's NumPy reference arithmetic value for value.
+
+typedef struct OafNativeWarpLanczos3RequestV1
+{
+   uint32_t struct_size;
+   uint32_t source_width;
+   uint32_t source_height;
+   uint32_t output_width;
+   uint32_t first_row;
+   uint32_t row_count;
+   uint32_t threads;
+   uint32_t reserved;
+   // Native-endian Float32 physical source samples, source_height*source_width.
+   const float* source_samples;
+   size_t source_sample_count;
+   // Row-major 2x3 output-to-input affine map: m00 m01 m02 m10 m11 m12.
+   double inverse[6];
+   float domain_scale;
+   float reserved_scale;
+} OafNativeWarpLanczos3RequestV1;
+
+// Writes row_count*output_width Float32 samples (NaN outside the valid
+// support). destination_capacity counts samples, not bytes.
+OAF_NATIVE_API int oaf_native_cpu_warp_lanczos3_v1(
+   const OafNativeWarpLanczos3RequestV1* request,
+   float* destination,
+   size_t destination_capacity,
+   char* error_message,
+   size_t error_message_capacity );
+
+typedef struct OafNativeMadRejectionRequestV1
+{
+   uint32_t struct_size;
+   uint32_t frame_count;
+   uint32_t row_count;
+   uint32_t width;
+   uint32_t minimum_rejection_frames;
+   uint32_t threads;
+   const float* frame_major_samples;
+   size_t sample_count;
+   float sigma_clip;
+   float group_sigma_floor;
+   float absolute_floor;
+   float epsilon_floor;
+} OafNativeMadRejectionRequestV1;
+
+// accepted receives one byte per sample (frame-major, 1 = accepted); center
+// receives row_count*width Float32 per-pixel centres. Capacities count
+// elements.
+OAF_NATIVE_API int oaf_native_cpu_mad_rejection_v1(
+   const OafNativeMadRejectionRequestV1* request,
+   uint8_t* accepted,
+   size_t accepted_capacity,
+   float* center,
+   size_t center_capacity,
+   char* error_message,
+   size_t error_message_capacity );
+
+typedef struct OafNativeMaskedMeanRequestV1
+{
+   uint32_t struct_size;
+   uint32_t frame_count;
+   uint32_t row_count;
+   uint32_t width;
+   uint32_t threads;
+   uint32_t reserved;
+   const float* frame_major_samples;
+   size_t sample_count;
+   const uint8_t* frame_major_accepted;
+   size_t accepted_count;
+   const double* frame_weights;
+   size_t weight_count;
+} OafNativeMaskedMeanRequestV1;
+
+typedef struct OafNativeMaskedMeanOutputV1
+{
+   uint32_t struct_size;
+   uint32_t reserved;
+   float* integrated;
+   uint16_t* accepted_samples;
+   uint16_t* rejected_samples;
+   size_t pixel_capacity;
+} OafNativeMaskedMeanOutputV1;
+
+OAF_NATIVE_API int oaf_native_cpu_masked_mean_v1(
+   const OafNativeMaskedMeanRequestV1* request,
+   OafNativeMaskedMeanOutputV1* output,
+   char* error_message,
+   size_t error_message_capacity );
+
+typedef struct OafNativeTileOffsetRequestV1
+{
+   uint32_t struct_size;
+   uint32_t tile_count;
+   uint32_t minimum_samples;
+   uint32_t threads;
+   const double* target;
+   const double* reference;
+   size_t sample_count;
+   const uint64_t* boundaries;
+   size_t boundary_count;
+   double scale;
+   double lower_quantile;
+   double upper_quantile;
+   double residual_clip_sigma;
+} OafNativeTileOffsetRequestV1;
+
+typedef struct OafNativeTileOffsetOutputV1
+{
+   uint32_t struct_size;
+   uint32_t reserved;
+   double* offset;
+   uint32_t* count;
+   double* residual_mad;
+   uint8_t* valid;
+   size_t tile_capacity;
+} OafNativeTileOffsetOutputV1;
+
+// Per-tile additive offsets for global normalization (see PortableKernels.h).
+OAF_NATIVE_API int oaf_native_cpu_tile_offsets_v1(
+   const OafNativeTileOffsetRequestV1* request,
+   OafNativeTileOffsetOutputV1* output,
+   char* error_message,
+   size_t error_message_capacity );
+
+// Hardware concurrency clamped to [1, 64].
+OAF_NATIVE_API uint32_t oaf_native_default_kernel_threads_v1(void);
+
 #ifdef __cplusplus
 }
 #endif

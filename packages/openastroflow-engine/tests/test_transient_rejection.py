@@ -156,3 +156,73 @@ def test_only_added_rejections_receive_sky_alignment_and_original_mad_stays_fixe
         pieces.append(_ordinary_integration_tile(tiled[:,y0:y0+37],IntegrationParameters(),_floor(),model,y0)[2])
     np.testing.assert_array_equal(tiled,corrected)
     np.testing.assert_array_equal(np.concatenate(pieces,axis=1),accepted)
+
+
+def _reference_fit_residual_background(values, bin_factor, weights):
+    """The previous one-frame-at-a-time cell statistics, kept as the reference."""
+    from openastroflow_engine import residual_background as module
+
+    n, height, width = values.shape
+    cell = max(4, int(np.ceil(128 / bin_factor)))
+    ys = list(range(0, height, cell)); xs = list(range(0, width, cell))
+    if n < 5 or len(xs) < 4 or len(ys) < 4:
+        return None
+    finite = np.isfinite(values)
+    common = np.sum(finite, axis=0) >= max(5, (n + 1) // 2)
+    reference = np.full((height, width), np.nan, np.float32)
+    reference[common] = np.nanmedian(np.where(finite, values, np.nan)[:, common], axis=0)
+    nodes = np.full((n, len(ys), len(xs)), np.nan, np.float64)
+    for iy, y0 in enumerate(ys):
+        for ix, x0 in enumerate(xs):
+            ref = reference[y0:y0 + cell, x0:x0 + cell]
+            valid_ref = np.isfinite(ref)
+            if np.count_nonzero(valid_ref) < 16:
+                continue
+            limit = float(np.quantile(ref[valid_ref], .85))
+            background = valid_ref & (ref <= limit)
+            for frame in range(n):
+                sample = values[frame, y0:y0 + cell, x0:x0 + cell] - ref
+                selected = sample[background & np.isfinite(sample)]
+                if selected.size < 16:
+                    continue
+                center = float(np.median(selected)); sigma = float(1.4826 * np.median(abs(selected - center)))
+                if sigma > 0:
+                    selected = selected[abs(selected - center) < 3.5 * sigma]
+                if selected.size >= 16:
+                    nodes[frame, iy, ix] = float(np.median(selected))
+    return nodes
+
+
+def test_vectorized_cell_statistics_match_per_frame_reference(monkeypatch) -> None:
+    from openastroflow_engine import residual_background as module
+
+    rng = np.random.default_rng(31)
+    n, height, width = 7, 150, 190
+    yy, xx = np.indices((height, width), dtype=np.float64)
+    preview = np.empty((n, height, width), dtype=np.float32)
+    for index in range(n):
+        gradient = 0.02 * index * xx - 0.01 * index * yy
+        preview[index] = (1000.0 + gradient + rng.normal(0.0, 4.0, (height, width))).astype(np.float32)
+    preview[:, 40:50, 60:70] += 300.0  # shared structure, cancels in the residual
+    preview[rng.random(preview.shape) < 0.02] = np.nan
+    preview[2, :30, :] = np.nan
+    preview[3, 70:90, 100:120] = np.inf
+    preview[5, 100:118, 20:38] = 1000.0  # constant cell: zero dispersion path
+    expected_nodes = _reference_fit_residual_background(preview, 9, np.ones(n))
+    # Recover the vectorized nodes from the per-frame robust fits (each frame
+    # is fitted once for the holdout trial and, when beneficial, once more).
+    real_robust_fit = module._robust_fit
+    seen: list[np.ndarray] = []
+
+    def spy_robust_fit(nodes, valid, sigma_nodes):
+        if not seen or not np.array_equal(seen[-1], nodes, equal_nan=True):
+            seen.append(np.array(nodes, copy=True))
+        return real_robust_fit(nodes, valid, sigma_nodes)
+
+    monkeypatch.setattr(module, "_robust_fit", spy_robust_fit)
+    module.fit_residual_background(preview, 9, np.ones(n))
+    assert len(seen) == n
+    actual_nodes = np.stack(seen)
+    assert actual_nodes.shape == expected_nodes.shape
+    assert np.isfinite(expected_nodes).sum() > 0.5 * expected_nodes.size
+    assert np.array_equal(actual_nodes, expected_nodes, equal_nan=True)

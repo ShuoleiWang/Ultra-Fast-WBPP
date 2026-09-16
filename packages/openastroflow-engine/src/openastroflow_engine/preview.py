@@ -149,7 +149,12 @@ def render_auto_stretch_preview(
         pixels, stretch = _stretch(preview)
         if flip_vertical:
             pixels = np.flipud(pixels)
-        Image.fromarray(pixels, mode="L").save(temporary, format="PNG", optimize=True)
+        # Lossless PNG at a fast deflate level: the pixels are identical to the
+        # optimized encoding, only the byte stream (and hence the file digest)
+        # differs, and the exhaustive strategy search cost seconds per preview.
+        Image.fromarray(pixels, mode="L").save(
+            temporary, format="PNG", optimize=False, compress_level=1
+        )
         with temporary.open("r+b") as stream:
             os.fsync(stream.fileno())
         try:

@@ -1,0 +1,736 @@
+"""Differential tests: native kernels versus the NumPy reference arithmetic.
+
+Every kernel must reproduce the NumPy implementation value for value (the
+sign of an exact zero is the only tolerated difference).  The tests skip when
+the native library is not built, because the NumPy path is the portable
+fallback and the differential contract is what a native build must satisfy.
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+import json
+import os
+from pathlib import Path
+import warnings
+
+from astropy.io import fits
+import numpy as np
+import pytest
+
+from openastroflow_engine import native_kernels
+from openastroflow_engine.calibration import (
+    REJECTION_FLOOR_ABSOLUTE,
+    REJECTION_FLOOR_EPSILON_FACTOR,
+    FitsFrame,
+    FrameExpression,
+    IntegrationMapPaths,
+    IntegrationParameters,
+    _MemoryFrame,
+    _RejectionSigmaFloor,
+    _ordinary_mad_rejection_decision,
+    integrate_expressions,
+    read_frame_info,
+)
+from openastroflow_engine.global_normalization import GlobalNormalizationParameters
+from openastroflow_engine import pixel_pipeline as pipeline
+from openastroflow_engine.pixel_pipeline import AffineTransform, PipelineParameters
+
+
+KERNELS = native_kernels.load_native_kernels()
+requires_native = pytest.mark.skipif(
+    KERNELS is None, reason="native kernel library is not built in this checkout"
+)
+
+
+def _numpy_mad_decision(
+    samples: np.ndarray, parameters: IntegrationParameters, group_floor: float
+):
+    """Run the NumPy reference decision with the native kernels disabled."""
+
+    floor = _RejectionSigmaFloor(
+        True, group_floor, None, 200_000, 65_536, 1, 1, 1, 1,
+        parameters.minimum_rejection_frames, "sha256:test",
+    )
+    original = native_kernels.load_native_kernels
+    native_kernels_module_cache = dict(native_kernels._CACHE)
+    try:
+        os.environ[native_kernels.DISABLE_ENVIRONMENT_VARIABLE] = "1"
+        finite, center, accepted = _ordinary_mad_rejection_decision(
+            samples, parameters, floor
+        )
+    finally:
+        os.environ.pop(native_kernels.DISABLE_ENVIRONMENT_VARIABLE, None)
+        native_kernels._CACHE.clear()
+        native_kernels._CACHE.update(native_kernels_module_cache)
+    assert native_kernels.load_native_kernels is original
+    return floor, finite, center, accepted
+
+
+def _random_stack(seed: int, frames: int, rows: int, width: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    stack = rng.normal(1000.0, 30.0, (frames, rows, width)).astype(np.float32)
+    # Sparse NaN/inf coverage, exact ties, an isolated outlier and a pixel
+    # with fewer finite samples than the rejection minimum.
+    stack[rng.random(stack.shape) < 0.02] = np.nan
+    stack[rng.random(stack.shape) < 0.005] = np.inf
+    stack[:, 1, 2] = np.float32(1000.0)
+    stack[min(3, frames - 1), 1, 2] = np.float32(1000.5)
+    stack[min(5, frames - 1), 2, 3] += np.float32(5000.0)
+    stack[:, 0, 0] = np.nan
+    stack[:2, 0, 0] = [np.float32(999.0), np.float32(1001.0)]
+    stack[0, 0, 1] = np.float32(-0.0)
+    return stack
+
+
+@requires_native
+@pytest.mark.parametrize("frames", [3, 4, 9, 38])
+def test_native_mad_rejection_matches_numpy_decisions_bitwise(frames: int) -> None:
+    assert KERNELS is not None
+    samples = _random_stack(11 + frames, frames, 7, 13)
+    parameters = IntegrationParameters(sigma_clip=4.0, minimum_rejection_frames=3)
+    group_floor = 0.75
+    floor, finite, center, accepted = _numpy_mad_decision(samples, parameters, group_floor)
+    native_accepted, native_center = KERNELS.mad_rejection(
+        samples,
+        sigma_clip=parameters.sigma_clip,
+        minimum_rejection_frames=parameters.minimum_rejection_frames,
+        group_sigma_floor=group_floor,
+        absolute_floor=REJECTION_FLOOR_ABSOLUTE,
+        epsilon_floor=float(np.float32(REJECTION_FLOOR_EPSILON_FACTOR * np.finfo(np.float32).eps)),
+        threads=3,
+    )
+    np.testing.assert_array_equal(native_accepted, accepted)
+    assert np.array_equal(native_center, center, equal_nan=True)
+    assert native_accepted.dtype == np.bool_
+    if frames >= 5:
+        assert not native_accepted[5, 2, 3]
+    # The production entry point selects the kernel and must agree too.
+    production_finite, production_center, production_accepted = (
+        _ordinary_mad_rejection_decision(samples, parameters, floor)
+    )
+    np.testing.assert_array_equal(production_accepted, accepted)
+    np.testing.assert_array_equal(production_finite, finite)
+    assert np.array_equal(production_center, center, equal_nan=True)
+
+
+@requires_native
+def test_native_masked_mean_matches_numpy_float64_accumulation_bitwise() -> None:
+    assert KERNELS is not None
+    rng = np.random.default_rng(5)
+    samples = _random_stack(21, 12, 6, 9)
+    accepted = np.isfinite(samples) & (rng.random(samples.shape) > 0.15)
+    weights = rng.random(12) / 12.0
+    integrated, accepted_count, rejected_count = KERNELS.masked_weighted_mean(
+        samples, accepted, weights, threads=4
+    )
+    numerator = np.sum(
+        np.where(accepted, samples, 0.0) * weights[:, None, None], axis=0, dtype=np.float64
+    )
+    denominator = np.sum(accepted * weights[:, None, None], axis=0, dtype=np.float64)
+    expected = np.full(numerator.shape, np.nan, dtype=np.float32)
+    np.divide(numerator, denominator, out=expected, where=denominator > 0, casting="unsafe")
+    assert np.array_equal(integrated, expected, equal_nan=True)
+    np.testing.assert_array_equal(accepted_count, np.sum(accepted, axis=0))
+    np.testing.assert_array_equal(
+        rejected_count, np.sum(np.isfinite(samples) & ~accepted, axis=0)
+    )
+    single_thread = KERNELS.masked_weighted_mean(samples, accepted, weights, threads=1)[0]
+    assert np.array_equal(single_thread, integrated, equal_nan=True)
+
+
+@requires_native
+def test_integrate_expressions_native_and_numpy_paths_publish_identical_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stack = _random_stack(31, 9, 40, 24)
+    paths = []
+    for index, values in enumerate(stack):
+        path = tmp_path / f"frame-{index:02d}.fits"
+        fits.writeto(path, values, overwrite=False)
+        paths.append(path)
+    parameters = IntegrationParameters(
+        max_memory_bytes=1024 * 1024, max_statistics_samples=100, minimum_rejection_frames=3
+    )
+    outputs = {}
+    for label in ("native", "numpy"):
+        if label == "numpy":
+            monkeypatch.setenv(native_kernels.DISABLE_ENVIRONMENT_VARIABLE, "1")
+        native_kernels.reset_native_kernel_cache()
+        maps = IntegrationMapPaths(
+            tmp_path / f"{label}-accepted.fits",
+            tmp_path / f"{label}-coverage.fits",
+            tmp_path / f"{label}-rejected.fits",
+        )
+        result = integrate_expressions(
+            [FrameExpression(str(path)) for path in paths],
+            tmp_path / f"{label}-master.fits",
+            parameters=parameters,
+            map_paths=maps,
+            native_threads=3,
+        )
+        outputs[label] = (result, maps)
+        monkeypatch.delenv(native_kernels.DISABLE_ENVIRONMENT_VARIABLE, raising=False)
+        native_kernels.reset_native_kernel_cache()
+    native_result, native_maps = outputs["native"]
+    numpy_result, numpy_maps = outputs["numpy"]
+    assert native_result.execution["rejectionMask"]["kernel"] == native_kernels.MAD_KERNEL_ID
+    assert native_result.execution["reducer"] == native_kernels.MEAN_KERNEL_ID
+    assert numpy_result.execution["rejectionMask"]["kernel"] == "numpy-nanmedian-mad-v1"
+    assert numpy_result.execution["reducer"] == "numpy-float64-weighted-mean-v1"
+    assert native_result.accepted_samples == numpy_result.accepted_samples
+    assert native_result.rejected_samples == numpy_result.rejected_samples
+    assert fits.getdata(native_result.output_path).tobytes() == fits.getdata(
+        numpy_result.output_path
+    ).tobytes()
+    for native_map, numpy_map in zip(
+        (native_maps.accepted_count, native_maps.coverage, native_maps.rejection_count),
+        (numpy_maps.accepted_count, numpy_maps.coverage, numpy_maps.rejection_count),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(fits.getdata(native_map), fits.getdata(numpy_map))
+
+
+def _declared_frame(path: Path, pixels: np.ndarray, unit_scale: float) -> Path:
+    header = fits.Header()
+    header["IMAGETYP"] = "Calibrated Light"
+    header["OAFNDOM"] = "NORMALIZED_TEST"
+    header["OAFNSCL"] = unit_scale
+    fits.writeto(path, np.asarray(pixels, dtype=np.float32), header, overwrite=False)
+    return path
+
+
+def _warp_transforms(shape: tuple[int, int]) -> dict[str, AffineTransform]:
+    height, width = shape
+    angle = np.deg2rad(0.44)
+    return {
+        "fractional-translation": AffineTransform.from_value(
+            ((1.0, 0.0, 3.37), (0.0, 1.0, -2.61), (0.0, 0.0, 1.0))
+        ),
+        "small-rotation": AffineTransform.from_value(
+            (
+                (np.cos(angle), -np.sin(angle), 1.25),
+                (np.sin(angle), np.cos(angle), 0.75),
+                (0.0, 0.0, 1.0),
+            )
+        ),
+        "near-half-turn": AffineTransform.from_value(
+            (
+                (np.cos(np.pi - angle), -np.sin(np.pi - angle), width - 1.0),
+                (np.sin(np.pi - angle), np.cos(np.pi - angle), height - 1.0),
+                (0.0, 0.0, 1.0),
+            )
+        ),
+        "shear-scale": AffineTransform.from_value(
+            ((1.002, 0.0015, -0.4), (-0.0011, 0.998, 0.9), (0.0, 0.0, 1.0))
+        ),
+        "integer-translation": AffineTransform.from_value(
+            ((1.0, 0.0, 4.0), (0.0, 1.0, -3.0), (0.0, 0.0, 1.0))
+        ),
+    }
+
+
+@requires_native
+@pytest.mark.parametrize("case", list(_warp_transforms((1, 1))))
+def test_native_lanczos_warp_matches_numpy_resampler_bitwise(
+    tmp_path: Path, case: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shape = (37, 53)
+    rng = np.random.default_rng(3)
+    pixels = rng.normal(0.4, 0.05, shape).astype(np.float32)
+    pixels[:, 20] = 2.5  # above the declared domain scale
+    pixels[7, 9] = -0.3  # below zero
+    pixels[15, 30] = np.nan
+    pixels[28, 41] = np.inf
+    pixels[3, 3] = np.float32(-0.0)
+    source = _declared_frame(tmp_path / "source.fits", pixels, 1.0)
+    info = replace(
+        read_frame_info(source),
+        normalized_unit_scale=1.0,
+        numeric_domain_authority="CONTENT_BOUND_OVERRIDE",
+    )
+    transform = _warp_transforms(shape)[case]
+    budget = shape[0] * shape[1] * 192
+    numpy_destination = tmp_path / "numpy.fits"
+    native_destination = tmp_path / "native.fits"
+    numpy_execution: dict = {}
+    monkeypatch.setattr(pipeline, "load_native_kernels", lambda *_a, **_k: None)
+    numpy_stats = pipeline._register_frame(
+        source, numpy_destination, transform, info,
+        max_memory_bytes=budget, resampler="lanczos-3-clamped",
+        execution=numpy_execution,
+    )
+    monkeypatch.undo()
+    native_execution: dict = {}
+    native_stats = pipeline._register_frame(
+        source, native_destination, transform, info,
+        max_memory_bytes=budget, resampler="lanczos-3-clamped",
+        native_threads=3, execution=native_execution,
+    )
+    assert numpy_execution["warpBackend"] == "numpy"
+    assert native_execution["warpBackend"] == "native-cpu"
+    assert native_execution["warpKernel"] == native_kernels.WARP_KERNEL_ID
+    numpy_values = fits.getdata(numpy_destination)
+    native_values = fits.getdata(native_destination)
+    assert np.array_equal(np.isnan(numpy_values), np.isnan(native_values))
+    assert np.array_equal(numpy_values, native_values, equal_nan=True)
+    assert native_stats == numpy_stats
+    assert np.count_nonzero(np.isfinite(native_values)) > shape[0] * shape[1] // 2
+    # Streaming digest equals the published file's digest.
+    assert native_execution["sha256"] == pipeline._hash_file(native_destination)
+    assert fits.getheader(native_destination)["OAFRSAMP"] == "LANCZOS-3-CLAMPED"
+
+
+@requires_native
+def test_memory_frame_register_matches_file_backed_register(tmp_path: Path) -> None:
+    shape = (24, 31)
+    rng = np.random.default_rng(9)
+    pixels = rng.normal(500.0, 20.0, shape).astype(np.float32)
+    pixels[4, 5] = np.nan
+    source = _declared_frame(tmp_path / "source.fits", pixels, 65535.0)
+    info = replace(
+        read_frame_info(source),
+        normalized_unit_scale=65535.0,
+        numeric_domain_authority="CONTENT_BOUND_OVERRIDE",
+    )
+    transform = _warp_transforms(shape)["small-rotation"]
+    with FitsFrame(source) as frame:
+        memory = _MemoryFrame(frame.full_values(), info, source)
+    for label, candidate in (("file", source), ("memory", memory)):
+        pipeline._register_frame(
+            candidate, tmp_path / f"{label}.fits", transform, info,
+            max_memory_bytes=shape[0] * shape[1] * 192, resampler="lanczos-3-clamped",
+        )
+    assert fits.getdata(tmp_path / "file.fits").tobytes() == fits.getdata(
+        tmp_path / "memory.fits"
+    ).tobytes()
+
+
+@requires_native
+def test_native_warp_falls_back_to_numpy_when_the_budget_cannot_hold_the_source(
+    tmp_path: Path,
+) -> None:
+    shape = (64, 20)
+    pixels = np.full(shape, 0.25, dtype=np.float32)
+    source = _declared_frame(tmp_path / "small.fits", pixels, 1.0)
+    info = replace(
+        read_frame_info(source),
+        normalized_unit_scale=1.0,
+        numeric_domain_authority="CONTENT_BOUND_OVERRIDE",
+    )
+    transform = _warp_transforms(shape)["fractional-translation"]
+    execution: dict = {}
+    pipeline._register_frame(
+        source, tmp_path / "tiny-budget.fits", transform, info,
+        max_memory_bytes=shape[1] * 192, resampler="lanczos-3-clamped",
+        execution=execution,
+    )
+    assert execution["warpBackend"] == "numpy"
+    assert execution["tileRows"] == 1
+
+
+@requires_native
+def test_disable_environment_variable_forces_numpy_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(native_kernels.DISABLE_ENVIRONMENT_VARIABLE, "1")
+    native_kernels.reset_native_kernel_cache()
+    try:
+        assert native_kernels.load_native_kernels() is None
+    finally:
+        monkeypatch.delenv(native_kernels.DISABLE_ENVIRONMENT_VARIABLE, raising=False)
+        native_kernels.reset_native_kernel_cache()
+    assert native_kernels.load_native_kernels() is not None
+
+
+def _write_frame(path: Path, role: str, data: np.ndarray, *, exposure: float = 30.0) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header = fits.Header()
+    header["IMAGETYP"] = role
+    header["FILTER"] = "R"
+    header["OBJECT"] = "SYNTHETIC"
+    header["INSTRUME"] = "SYNTH-CAM"
+    header["EXPTIME"] = exposure
+    header["GAIN"] = 100
+    header["OFFSET"] = 50
+    header["XBINNING"] = 1
+    header["YBINNING"] = 1
+    header["READOUTM"] = "MODE-1"
+    header["BAYERPAT"] = "NONE"
+    header["CCD-TEMP"] = -10.0
+    fits.writeto(path, np.asarray(np.rint(data), dtype=np.uint16), header, overwrite=False)
+    return path
+
+
+@requires_native
+@pytest.mark.parametrize("materialize", [True, False])
+def test_fused_pipeline_matches_numpy_pipeline_and_optionally_skips_calibrated_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, materialize: bool
+) -> None:
+    height, width = 48, 64
+    rng = np.random.default_rng(17)
+    y, x = np.mgrid[:height, :width]
+    response = np.linspace(0.85, 1.15, width, dtype=np.float32)[None, :].repeat(height, axis=0)
+    signal = (600.0 + 2.0 * x + 1.5 * y).astype(np.float32)
+    root = tmp_path / "raw"
+    biases = [_write_frame(root / "bias" / f"bias_{i}.fits", "Bias", np.full((height, width), 100.0 + i), exposure=0.001) for i in range(3)]
+    darks = [_write_frame(root / "dark" / f"dark_{i}.fits", "Dark", np.full((height, width), 120.0 + i)) for i in range(3)]
+    flats = [_write_frame(root / "flat" / f"flat_{i}.fits", "Flat", 100.0 + 1000.0 * response, exposure=2.0) for i in range(3)]
+    lights = []
+    for index in range(6):
+        raw = 120.0 + signal * response + rng.normal(0.0, 3.0, (height, width))
+        if index == 5:
+            raw[20, 30] += 9000.0
+        lights.append(_write_frame(root / "light" / f"light_{index}.fits", "Light", raw))
+    angle = np.deg2rad(0.3)
+    transforms = {
+        str(path): AffineTransform.from_value(
+            (
+                (np.cos(angle * index), -np.sin(angle * index), 0.37 * index),
+                (np.sin(angle * index), np.cos(angle * index), -0.21 * index),
+                (0.0, 0.0, 1.0),
+            )
+        )
+        for index, path in enumerate(lights)
+    }
+    parameters = PipelineParameters(
+        integration=IntegrationParameters(
+            sigma_clip=4.0, minimum_rejection_frames=3,
+            max_memory_bytes=512 * 1024, max_statistics_samples=200,
+        ),
+        registration_memory_bytes=4 * 1024 * 1024,
+        preview_max_long_edge=64,
+        ordinary_integration_backend="portable-cpu",
+        materialize_calibrated_lights=materialize,
+        global_normalization=GlobalNormalizationParameters(enabled=False),
+    )
+    results = {}
+    for label in ("native", "numpy"):
+        if label == "numpy":
+            monkeypatch.setenv(native_kernels.DISABLE_ENVIRONMENT_VARIABLE, "1")
+        native_kernels.reset_native_kernel_cache()
+        result = pipeline.run_portable_pipeline(
+            bias_files=biases, dark_files=darks, flat_files=flats, light_files=lights,
+            output_directory=tmp_path / f"{label}-{materialize}",
+            parameters=parameters, transforms=transforms,
+        )
+        receipt = json.loads(Path(result.receipt_path).read_text())
+        results[label] = (result, receipt)
+        monkeypatch.delenv(native_kernels.DISABLE_ENVIRONMENT_VARIABLE, raising=False)
+        native_kernels.reset_native_kernel_cache()
+    native_result, native_receipt = results["native"]
+    numpy_result, numpy_receipt = results["numpy"]
+    assert fits.getdata(native_result.master_light_paths[0]).tobytes() == fits.getdata(
+        numpy_result.master_light_paths[0]
+    ).tobytes()
+    native_registration = native_receipt["statistics"]["registration"]
+    assert native_registration["executionModel"] == "fused-calibrate-warp-v1"
+    assert native_registration["warpBackends"] == {"identity-copy": 1, "native-cpu": 5}
+    assert numpy_receipt["statistics"]["registration"]["warpBackends"] == {
+        "identity-copy": 1, "numpy": 5,
+    }
+    assert native_registration["calibratedLightsMaterialized"] is materialize
+    kinds = [item["kind"] for item in native_receipt["outputs"]]
+    assert kinds.count("REGISTERED_LIGHT") == 6
+    assert kinds.count("CALIBRATED_LIGHT") == (6 if materialize else 0)
+    assert (Path(native_result.output_directory) / "calibrated").exists() is materialize
+    # Every published artifact digest must equal the file's digest, including
+    # the ones computed by the streaming writer.
+    for item in native_receipt["outputs"]:
+        assert item["sha256"] == pipeline._hash_file(
+            Path(native_result.output_directory) / item["path"]
+        )
+    # Registered pixels are identical across backends and the receipts agree on
+    # every scientific field.
+    native_registered = sorted((Path(native_result.output_directory) / "registered").glob("*.fits"))
+    numpy_registered = sorted((Path(numpy_result.output_directory) / "registered").glob("*.fits"))
+    for left, right in zip(native_registered, numpy_registered, strict=True):
+        assert fits.getdata(left).tobytes() == fits.getdata(right).tobytes()
+    group = native_receipt["statistics"]["integrationGroups"]["R"]["integration"]
+    assert group["rejectedSamples"] >= 1
+    assert group["execution"]["rejectionMask"]["kernel"] == native_kernels.MAD_KERNEL_ID
+
+
+def _random_tile_pairs(seed: int) -> list[tuple[np.ndarray, np.ndarray]]:
+    rng = np.random.default_rng(seed)
+    tiles: list[tuple[np.ndarray, np.ndarray]] = []
+    for index in range(40):
+        size = int(rng.integers(0, 2600))
+        target = rng.normal(900.0, 40.0, size)
+        reference = 1.1 * target + 35.0 + rng.normal(0.0, 3.0, size)
+        if index % 5 == 0 and size:
+            reference[rng.random(size) < 0.03] += 4000.0  # outliers
+        if index % 7 == 0 and size:
+            target[rng.random(size) < 0.05] = np.nan
+            reference[rng.random(size) < 0.02] = np.inf
+        if index % 11 == 0 and size:
+            reference[:] = 1.1 * target + 12.0  # zero residual dispersion
+        tiles.append((np.asarray(target, dtype=np.float64), np.asarray(reference, dtype=np.float64)))
+    tiles.append((np.full(700, 5.0), np.full(700, 9.0)))  # constant tile
+    tiles.append((np.array([], dtype=np.float64), np.array([], dtype=np.float64)))
+    return tiles
+
+
+@requires_native
+def test_native_tile_offsets_match_numpy_tile_offset_bitwise() -> None:
+    from openastroflow_engine.global_normalization import _tile_offset
+
+    assert KERNELS is not None
+    tiles = _random_tile_pairs(23)
+    parameters = GlobalNormalizationParameters(minimum_samples_per_offset_tile=200)
+    scale = 1.1
+    boundaries = np.concatenate(([0], np.cumsum([target.size for target, _ in tiles]))).astype(np.uint64)
+    offsets, counts, mads, valid = KERNELS.tile_offsets(
+        np.concatenate([target for target, _ in tiles]),
+        np.concatenate([reference for _, reference in tiles]),
+        boundaries,
+        scale=scale,
+        lower_quantile=parameters.lower_quantile,
+        upper_quantile=parameters.upper_quantile,
+        minimum_samples=parameters.minimum_samples_per_offset_tile,
+        residual_clip_sigma=parameters.residual_clip_sigma,
+        threads=3,
+    )
+    valid_count = 0
+    for index, (target, reference) in enumerate(tiles):
+        expected = _tile_offset(target, reference, scale, parameters)
+        if expected is None:
+            assert not valid[index]
+            assert np.isnan(offsets[index]) and np.isnan(mads[index])
+            continue
+        valid_count += 1
+        assert valid[index]
+        assert offsets[index] == expected[0]
+        assert int(counts[index]) == expected[1]
+        assert mads[index] == expected[2]
+    assert valid_count >= 20
+
+
+def _registered_group(tmp_path: Path, seed: int = 5) -> list[Path]:
+    rng = np.random.default_rng(seed)
+    height, width = 640, 768
+    y, x = np.mgrid[:height, :width]
+    base = 1200.0 + 0.05 * x + 0.02 * y
+    paths = []
+    for index in range(3):
+        values = base * (1.0 + 0.03 * index) + 15.0 * index + 0.01 * index * x
+        values = values + rng.normal(0.0, 4.0, (height, width))
+        values[:, :5] = np.nan
+        header = fits.Header()
+        header["IMAGETYP"] = "Registered Light"
+        header["OAFNDOM"] = "INTEGER_16_PHYSICAL_0_BASED"
+        header["OAFNSCL"] = 65535.0
+        path = tmp_path / f"registered-{index}.fits"
+        fits.writeto(path, values.astype(np.float32), header, overwrite=False)
+        paths.append(path)
+    return paths
+
+
+@requires_native
+def test_global_normalization_native_and_numpy_coefficients_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openastroflow_engine.global_normalization import (
+        fit_registered_group_global_normalization,
+    )
+
+    paths = _registered_group(tmp_path)
+    parameters = GlobalNormalizationParameters(minimum_valid_offset_tiles=4)
+    results = {}
+    for label in ("native", "numpy"):
+        if label == "numpy":
+            monkeypatch.setenv(native_kernels.DISABLE_ENVIRONMENT_VARIABLE, "1")
+        native_kernels.reset_native_kernel_cache()
+        results[label] = fit_registered_group_global_normalization(
+            [str(path) for path in paths], reference_index=0, parameters=parameters, workers=3
+        )
+        monkeypatch.delenv(native_kernels.DISABLE_ENVIRONMENT_VARIABLE, raising=False)
+        native_kernels.reset_native_kernel_cache()
+    native, numpy_result = results["native"], results["numpy"]
+    for left, right in zip(native.coefficients, numpy_result.coefficients, strict=True):
+        assert left.scale == right.scale
+        assert left.offset == right.offset
+        assert left.mode == right.mode
+        assert left.offset_grid == right.offset_grid
+        assert left.offset_grid_x == right.offset_grid_x
+        assert left.offset_grid_y == right.offset_grid_y
+        left_model = dict(left.evidence["additiveModel"])
+        right_model = dict(right.evidence["additiveModel"])
+        left_model.pop("tileStatisticsKernel", None)
+        right_model.pop("tileStatisticsKernel", None)
+        assert left_model == right_model
+    modes = {item.mode for item in native.coefficients}
+    assert modes & {"STELLAR_SCALE_ADDITIVE_GRID", "UNIT_SCALE_ADDITIVE_GRID_STELLAR_UNAVAILABLE",
+                    "UNIT_SCALE_SCALAR_OFFSET_STELLAR_UNAVAILABLE", "STELLAR_SCALE_SCALAR_OFFSET"}
+    assert native.coefficients[1].evidence["additiveModel"].get("tileStatisticsKernel") in (
+        native_kernels.TILE_OFFSET_KERNEL_ID, None
+    )
+
+
+def test_trail_background_normalization_row_runs_match_full_tile_reference() -> None:
+    from openastroflow_engine.residual_background import ResidualBackgroundAlignment
+    from openastroflow_engine.transient_rejection import TransientRejectionModel
+
+    rng = np.random.default_rng(3)
+    frames, rows, width = 6, 40, 32
+    x_nodes = np.linspace(0.0, width - 1, 4)
+    y_nodes = np.linspace(0.0, 200.0, 5)
+    corrections = rng.normal(0.0, 2.0, (frames, y_nodes.size, x_nodes.size))
+    alignment = ResidualBackgroundAlignment(
+        x_nodes=x_nodes, y_nodes=y_nodes, corrections=corrections,
+        evidence=tuple({} for _ in range(frames)), weights=tuple(rng.random(frames) + 0.1),
+    )
+    values = rng.normal(500.0, 10.0, (frames, rows, width)).astype(np.float32)
+    original = rng.random((frames, rows, width)) > 0.1
+    accepted = original.copy()
+    for row in (3, 4, 5, 17, 30, 31):
+        accepted[2, row, rng.random(width) > 0.5] = False
+    model = TransientRejectionModel(4, (), "APPLIED", alignment)
+
+    # Reference: the previous whole-tile formulation.
+    reference = values.copy()
+    changed = np.any(original & ~accepted, axis=0)
+    correction = np.zeros_like(reference)
+    alignment.apply_rows(correction, 120)
+    weights = np.asarray(alignment.weights)[:, None, None]
+    denominator = np.sum(original * weights, axis=0)
+    anchor = np.divide(np.sum(np.where(original, correction, 0) * weights, axis=0),
+                       denominator, out=np.zeros_like(denominator), where=denominator > 0)
+    for index in range(frames):
+        reference[index, changed] += (correction[index, changed] - anchor[changed]).astype(np.float32)
+
+    candidate = values.copy()
+    model.normalize_rejected_rows(candidate, 120, original, accepted)
+    np.testing.assert_array_equal(candidate, reference)
+    untouched = values.copy()
+    model.normalize_rejected_rows(untouched, 120, original, original)
+    np.testing.assert_array_equal(untouched, values)
+
+
+def test_sampled_expression_rows_match_per_row_evaluation(tmp_path: Path) -> None:
+    from openastroflow_engine.calibration import (
+        _canonical_expression,
+        _expression_rows,
+        _expression_sampled_rows,
+        _open_expression_sources,
+        _sample_expression,
+    )
+    from contextlib import ExitStack
+
+    rng = np.random.default_rng(29)
+    height, width = 37, 41
+    light = rng.normal(1200.0, 40.0, (height, width)).astype(np.float32)
+    dark = rng.normal(300.0, 3.0, (height, width)).astype(np.float32)
+    flat = rng.normal(1.0, 0.02, (height, width)).astype(np.float32)
+    flat[5, 7] = 0.0
+    flat[9, 3] = np.nan
+    light[12, 12] = np.inf
+    paths = {}
+    for name, values in (("light", light), ("dark", dark), ("flat", flat)):
+        path = tmp_path / f"{name}.fits"
+        fits.writeto(path, values, fits.Header({"IMAGETYP": name}), overwrite=False)
+        paths[name] = path
+    grid = ((-2.0, 1.0, 3.0), (0.5, -1.5, 2.0), (4.0, 0.0, -3.0))
+    expression = _canonical_expression(
+        FrameExpression(
+            str(paths["light"]), subtract_path=str(paths["dark"]), subtract_scale=1.5,
+            divide_path=str(paths["flat"]), scale=0.75, offset=2.5,
+            offset_grid=grid, offset_grid_x=(0.0, 20.0, 40.0), offset_grid_y=(0.0, 18.0, 36.0),
+        )
+    )
+    y_indices = np.asarray([0, 3, 5, 9, 12, 20, 36], dtype=np.int64)
+    with ExitStack() as stack:
+        sources = _open_expression_sources(stack, (expression,))
+        sampled = _expression_sampled_rows(expression, sources, y_indices, division_floor=1e-12)
+        for position, y in enumerate(y_indices):
+            row = _expression_rows(expression, sources, int(y), int(y) + 1, division_floor=1e-12)[0]
+            assert np.array_equal(sampled[position], row, equal_nan=True)
+        # The sampled statistics helper must equal a per-row reference.
+        from openastroflow_engine.calibration import _sample_coordinates
+
+        rows, columns = _sample_coordinates((height, width), 120)
+        expected = []
+        for y in rows:
+            values = _expression_rows(expression, sources, int(y), int(y) + 1, division_floor=1e-12)[0, columns]
+            expected.append(values[np.isfinite(values)])
+        expected_samples = np.concatenate(expected)[:120]
+        actual = _sample_expression(expression, sources, (height, width), max_samples=120, division_floor=1e-12)
+        np.testing.assert_array_equal(actual, expected_samples)
+
+
+def test_nanmedian_frames_matches_numpy_nanmedian() -> None:
+    from openastroflow_engine.robust_statistics import nanmedian_frames
+
+    rng = np.random.default_rng(5)
+    for frames in (1, 2, 3, 4, 7, 12, 13):
+        values = (rng.random((frames, 3000)) ** 6 * 65535.0).astype(np.float32)
+        values[rng.random(values.shape) < 0.2] = np.nan
+        values[:, 11] = np.nan
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            expected = np.nanmedian(values, axis=0)
+        actual = nanmedian_frames(values)
+        assert actual.dtype == np.float32
+        np.testing.assert_array_equal(actual, expected.astype(np.float32))
+        assert np.isnan(actual[11])
+
+
+def test_rejection_sigma_floor_matches_per_row_reference(tmp_path: Path) -> None:
+    from contextlib import ExitStack
+
+    from openastroflow_engine.calibration import (
+        REJECTION_FLOOR_ABSOLUTE,
+        REJECTION_FLOOR_GROUP_FRACTION,
+        REJECTION_FLOOR_MAX_SAMPLES,
+        IntegrationParameters,
+        _canonical_expression,
+        _estimate_rejection_sigma_floor,
+        _expression_rows,
+        _open_expression_sources,
+        _sample_coordinates,
+    )
+
+    rng = np.random.default_rng(23)
+    height, width = 96, 128
+    expressions = []
+    for index in range(6):
+        values = rng.normal(500.0 + 10.0 * index, 8.0, (height, width)).astype(np.float32)
+        values[rng.random(values.shape) < 0.03] = np.nan
+        values[10:14, :] = np.inf if index == 2 else values[10:14, :]
+        values[:, 40:44] = np.nan  # columns with too few finite samples
+        path = tmp_path / f"frame-{index}.fits"
+        fits.writeto(path, values, fits.Header({"IMAGETYP": "LIGHT"}), overwrite=False)
+        expressions.append(_canonical_expression(FrameExpression(str(path))))
+    expressions = tuple(expressions)
+    parameters = IntegrationParameters(max_statistics_samples=5000)
+
+    with ExitStack() as stack:
+        sources = _open_expression_sources(stack, expressions)
+        actual = _estimate_rejection_sigma_floor(expressions, sources, (height, width), parameters)
+        # One-row-at-a-time reference (the previous implementation).
+        sample_limit = min(int(parameters.max_statistics_samples), REJECTION_FLOOR_MAX_SAMPLES)
+        y_indices, x_indices = _sample_coordinates((height, width), sample_limit)
+        chunks = []
+        for y in y_indices:
+            row_values = np.empty((len(expressions), x_indices.size), dtype=np.float32)
+            for frame_index, expression in enumerate(expressions):
+                row = _expression_rows(expression, sources, int(y), int(y) + 1, division_floor=parameters.division_floor)
+                row_values[frame_index] = row[0, x_indices]
+            finite_count = np.count_nonzero(np.isfinite(row_values), axis=0)
+            eligible = finite_count >= parameters.minimum_rejection_frames
+            if not np.any(eligible):
+                continue
+            selected = row_values[:, eligible]
+            selected[~np.isfinite(selected)] = np.nan
+            center = np.nanmedian(selected, axis=0)
+            mad = np.nanmedian(np.abs(selected - center[None, :]), axis=0)
+            robust_sigma = np.asarray(np.float32(1.4826) * mad, dtype=np.float32)
+            usable = np.isfinite(robust_sigma) & (robust_sigma > 0)
+            if np.any(usable):
+                chunks.append(robust_sigma[usable])
+        sampled_sigma = np.concatenate(chunks)
+        expected_median = float(np.median(sampled_sigma))
+    assert actual.applicable
+    assert actual.usable_sigma_count == int(sampled_sigma.size)
+    assert actual.sampled_sigma_median == expected_median
+    assert actual.group_sigma_floor == max(REJECTION_FLOOR_ABSOLUTE, expected_median * REJECTION_FLOOR_GROUP_FRACTION)

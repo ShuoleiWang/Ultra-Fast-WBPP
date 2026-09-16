@@ -1,6 +1,7 @@
 #include "openastroflow/c_api.h"
 
 #include "openastroflow/FusedLnIntegration.h"
+#include "openastroflow/PortableKernels.h"
 #if defined(OAF_WITH_METAL_ABI)
 #include "openastroflow/MetalFusedLnIntegration.h"
 #endif
@@ -490,4 +491,267 @@ extern "C" int oaf_native_metal_masked_weighted_v1(
               "Metal backend was not compiled into this native library" );
    return OAF_NATIVE_BACKEND_UNAVAILABLE;
 #endif
+}
+
+namespace
+{
+
+template <class Function>
+int GuardedKernelCall( Function&& function,
+                       char* error_message,
+                       size_t error_message_capacity,
+                       const char* unknown_failure )
+{
+   try
+   {
+      function();
+      CopyError( error_message, error_message_capacity, {} );
+      return OAF_NATIVE_OK;
+   }
+   catch ( const std::invalid_argument& error )
+   {
+      CopyError( error_message, error_message_capacity, error.what() );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   catch ( const std::exception& error )
+   {
+      CopyError( error_message, error_message_capacity, error.what() );
+      return OAF_NATIVE_EXECUTION_FAILED;
+   }
+   catch ( ... )
+   {
+      CopyError( error_message, error_message_capacity, unknown_failure );
+      return OAF_NATIVE_EXECUTION_FAILED;
+   }
+}
+
+} // namespace
+
+extern "C" int oaf_native_cpu_warp_lanczos3_v1(
+   const OafNativeWarpLanczos3RequestV1* request,
+   float* destination,
+   size_t destination_capacity,
+   char* error_message,
+   size_t error_message_capacity )
+{
+   if ( request == nullptr || destination == nullptr )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "request and destination are required" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   if ( request->struct_size != sizeof( OafNativeWarpLanczos3RequestV1 )
+     || request->source_samples == nullptr )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "warp C ABI structure version or input buffer is invalid" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   const size_t pixels =
+      static_cast<size_t>( request->output_width )*request->row_count;
+   if ( pixels == 0 || destination_capacity < pixels )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "destination capacity is smaller than the requested band" );
+      return OAF_NATIVE_BUFFER_TOO_SMALL;
+   }
+   return GuardedKernelCall(
+      [&]()
+      {
+         using namespace openastroflow::native;
+         WarpLanczos3Request native;
+         native.source = std::span<const float>(
+            request->source_samples, request->source_sample_count );
+         native.sourceWidth = request->source_width;
+         native.sourceHeight = request->source_height;
+         native.inverse = AffineInverse{
+            request->inverse[0], request->inverse[1], request->inverse[2],
+            request->inverse[3], request->inverse[4], request->inverse[5] };
+         native.outputWidth = request->output_width;
+         native.firstRow = request->first_row;
+         native.rowCount = request->row_count;
+         native.domainScale = request->domain_scale;
+         native.threads = request->threads;
+         WarpLanczos3Clamped(
+            native, std::span<float>( destination, destination_capacity ) );
+      },
+      error_message, error_message_capacity,
+      "unknown native warp failure" );
+}
+
+extern "C" int oaf_native_cpu_mad_rejection_v1(
+   const OafNativeMadRejectionRequestV1* request,
+   uint8_t* accepted,
+   size_t accepted_capacity,
+   float* center,
+   size_t center_capacity,
+   char* error_message,
+   size_t error_message_capacity )
+{
+   if ( request == nullptr || accepted == nullptr || center == nullptr )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "request, accepted, and center buffers are required" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   if ( request->struct_size != sizeof( OafNativeMadRejectionRequestV1 )
+     || request->frame_major_samples == nullptr )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "MAD C ABI structure version or input buffer is invalid" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   const size_t pixels =
+      static_cast<size_t>( request->row_count )*request->width;
+   const size_t samples = pixels*request->frame_count;
+   if ( pixels == 0 || accepted_capacity < samples || center_capacity < pixels )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "MAD output capacity is smaller than the requested tile" );
+      return OAF_NATIVE_BUFFER_TOO_SMALL;
+   }
+   return GuardedKernelCall(
+      [&]()
+      {
+         using namespace openastroflow::native;
+         MadRejectionRequest native;
+         native.frameMajorSamples = std::span<const float>(
+            request->frame_major_samples, request->sample_count );
+         native.frameCount = request->frame_count;
+         native.rowCount = request->row_count;
+         native.width = request->width;
+         native.sigmaClip = request->sigma_clip;
+         native.minimumRejectionFrames = request->minimum_rejection_frames;
+         native.groupSigmaFloor = request->group_sigma_floor;
+         native.absoluteFloor = request->absolute_floor;
+         native.epsilonFloor = request->epsilon_floor;
+         native.threads = request->threads;
+         MadRejectionMask(
+            native,
+            std::span<uint8_t>( accepted, accepted_capacity ),
+            std::span<float>( center, center_capacity ) );
+      },
+      error_message, error_message_capacity,
+      "unknown native MAD rejection failure" );
+}
+
+extern "C" int oaf_native_cpu_masked_mean_v1(
+   const OafNativeMaskedMeanRequestV1* request,
+   OafNativeMaskedMeanOutputV1* output,
+   char* error_message,
+   size_t error_message_capacity )
+{
+   if ( request == nullptr || output == nullptr )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "request and output are required" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   if ( request->struct_size != sizeof( OafNativeMaskedMeanRequestV1 )
+     || output->struct_size != sizeof( OafNativeMaskedMeanOutputV1 )
+     || request->frame_major_samples == nullptr
+     || request->frame_major_accepted == nullptr
+     || request->frame_weights == nullptr )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "masked mean C ABI structure version or input buffer is invalid" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   const size_t pixels =
+      static_cast<size_t>( request->row_count )*request->width;
+   if ( pixels == 0 || output->pixel_capacity < pixels
+     || output->integrated == nullptr
+     || output->accepted_samples == nullptr
+     || output->rejected_samples == nullptr )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "masked mean output capacity is smaller than the requested tile" );
+      return OAF_NATIVE_BUFFER_TOO_SMALL;
+   }
+   return GuardedKernelCall(
+      [&]()
+      {
+         using namespace openastroflow::native;
+         MaskedMeanRequest native;
+         native.frameMajorSamples = std::span<const float>(
+            request->frame_major_samples, request->sample_count );
+         native.frameMajorAccepted = std::span<const uint8_t>(
+            request->frame_major_accepted, request->accepted_count );
+         native.frameWeights = std::span<const double>(
+            request->frame_weights, request->weight_count );
+         native.frameCount = request->frame_count;
+         native.rowCount = request->row_count;
+         native.width = request->width;
+         native.threads = request->threads;
+         const MaskedMeanOutput destination{
+            std::span<float>( output->integrated, output->pixel_capacity ),
+            std::span<uint16_t>(
+               output->accepted_samples, output->pixel_capacity ),
+            std::span<uint16_t>(
+               output->rejected_samples, output->pixel_capacity ) };
+         MaskedWeightedMean( native, destination );
+      },
+      error_message, error_message_capacity,
+      "unknown native masked mean failure" );
+}
+
+extern "C" int oaf_native_cpu_tile_offsets_v1(
+   const OafNativeTileOffsetRequestV1* request,
+   OafNativeTileOffsetOutputV1* output,
+   char* error_message,
+   size_t error_message_capacity )
+{
+   if ( request == nullptr || output == nullptr )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "request and output are required" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   if ( request->struct_size != sizeof( OafNativeTileOffsetRequestV1 )
+     || output->struct_size != sizeof( OafNativeTileOffsetOutputV1 )
+     || request->target == nullptr || request->reference == nullptr
+     || request->boundaries == nullptr )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "tile offset C ABI structure version or input buffer is invalid" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   if ( request->tile_count == 0 || output->tile_capacity < request->tile_count
+     || output->offset == nullptr || output->count == nullptr
+     || output->residual_mad == nullptr || output->valid == nullptr )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "tile offset output capacity is smaller than the request" );
+      return OAF_NATIVE_BUFFER_TOO_SMALL;
+   }
+   return GuardedKernelCall(
+      [&]()
+      {
+         using namespace openastroflow::native;
+         TileOffsetRequest native;
+         native.target = std::span<const double>( request->target, request->sample_count );
+         native.reference = std::span<const double>( request->reference, request->sample_count );
+         native.boundaries = std::span<const std::uint64_t>(
+            request->boundaries, request->boundary_count );
+         native.tileCount = request->tile_count;
+         native.scale = request->scale;
+         native.lowerQuantile = request->lower_quantile;
+         native.upperQuantile = request->upper_quantile;
+         native.minimumSamples = request->minimum_samples;
+         native.residualClipSigma = request->residual_clip_sigma;
+         native.threads = request->threads;
+         const TileOffsetOutput destination{
+            std::span<double>( output->offset, output->tile_capacity ),
+            std::span<uint32_t>( output->count, output->tile_capacity ),
+            std::span<double>( output->residual_mad, output->tile_capacity ),
+            std::span<uint8_t>( output->valid, output->tile_capacity ) };
+         TileOffsets( native, destination );
+      },
+      error_message, error_message_capacity,
+      "unknown native tile offset failure" );
+}
+
+extern "C" uint32_t oaf_native_default_kernel_threads_v1(void)
+{
+   return openastroflow::native::DefaultKernelThreads();
 }

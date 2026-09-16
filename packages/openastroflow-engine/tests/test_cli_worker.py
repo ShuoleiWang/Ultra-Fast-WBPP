@@ -381,8 +381,14 @@ def test_cli_inventory_plan_and_canonical_controller_plan(
 
 
 def test_canonical_handshake_plan_execute_emits_real_stage_receipts_and_final_master(
-    nina_project: Path, tmp_path: Path
+    nina_project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The simulated M3 Pro must include its memory, not the CI host's RAM.
+    # Hosts below 24 GiB correctly do not advertise the tuned profile.
+    monkeypatch.setattr(
+        "openastroflow_engine.performance_profile._physical_memory_bytes",
+        lambda: 36 * GIB,
+    )
     inventory = _inventory(nina_project)
     plan = controller_plan_envelope(
         inventory,
@@ -430,7 +436,7 @@ def test_canonical_handshake_plan_execute_emits_real_stage_receipts_and_final_ma
         for line in output_stream.getvalue().splitlines()
     ]
     assert responses[0].message_type == "handshake"
-    assert any(response.message_type == "progress" for response in responses)
+    assert any(response.message_type == "progress" for response in responses), output_stream.getvalue()
     assert responses[-1].message_type == "progress", output_stream.getvalue()
     assert responses[-1].payload["state"] == "succeeded"
     artifacts = [response.payload for response in responses if response.message_type == "artifact"]

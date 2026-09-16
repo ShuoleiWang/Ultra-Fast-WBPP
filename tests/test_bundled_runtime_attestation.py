@@ -417,7 +417,7 @@ def test_macos_deployment_attestation_rejects_misleading_info_plist(
 
 
 def test_runtime_library_attestation_rejects_tampered_package_provenance(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy_path = (
         Path(__file__).resolve().parents[1]
@@ -473,14 +473,21 @@ def test_runtime_library_attestation_rejects_tampered_package_provenance(
         json.dumps(provenance), encoding="utf-8"
     )
     entry_point = runtime / "worker"
-    entry_point.write_text(
-        "#!/bin/sh\n"
-        "printf '%s\\n' "
-        "'{\"libmpdec\":\"4.0.1\",\"openssl\":\"OpenSSL 3.6.4 test\","
-        "\"python\":\"3.12.3\",\"schemaVersion\":1}'\n",
-        encoding="utf-8",
+    entry_point.write_bytes(b"synthetic worker entry point")
+    smoke_calls = []
+
+    def runtime_smoke(command, *, timeout_seconds):
+        # This test checks synthetic macOS provenance on every host. A POSIX
+        # shell fixture is not a Windows executable and is not an ABI test.
+        assert command == [str(entry_point)]
+        assert timeout_seconds == 5.0
+        smoke_calls.append(command)
+        return {"libmpdec": "4.0.1", "openssl": "OpenSSL 3.6.4 test",
+                "python": "3.12.3", "schemaVersion": 1}
+
+    monkeypatch.setattr(
+        "scripts.attest_bundled_runtime.run_runtime_library_smoke", runtime_smoke
     )
-    entry_point.chmod(0o755)
 
     attested, smoke, elapsed = _attest_runtime_libraries(
         runtime, entry_point, 5.0
@@ -488,6 +495,7 @@ def test_runtime_library_attestation_rejects_tampered_package_provenance(
     assert attested["packages"] == list(reversed(package_receipts))
     assert smoke["openssl"] == "OpenSSL 3.6.4 test"
     assert elapsed < 5.0
+    assert len(smoke_calls) == 1
 
     provenance["packages"][0]["sourceRevision"] = "0" * 40
     (internal / "macos-runtime-library-provenance.json").write_text(
@@ -496,3 +504,4 @@ def test_runtime_library_attestation_rejects_tampered_package_provenance(
 
     with pytest.raises(BundleAttestationError, match="differs from pinned policy"):
         _attest_runtime_libraries(runtime, entry_point, 5.0)
+    assert len(smoke_calls) == 1  # Reject altered provenance before launching.

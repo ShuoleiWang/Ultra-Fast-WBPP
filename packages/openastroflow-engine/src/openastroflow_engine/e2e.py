@@ -23,11 +23,12 @@ from enum import StrEnum
 import ctypes
 import errno
 import gc
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePath, PureWindowsPath
 import re
 import shutil
 import stat
@@ -612,12 +613,12 @@ def _stage_e2e_xisf_inputs(
                     )
                 conversions.append({"role": role, **receipt.serializable()})
                 staged_digests[str(staged)] = receipt.converted_sha256
-            elif expected is not None:
-                staged = directory / f"{sequence:06d}_{role.casefold()}.fits"
-                staged_digests[str(staged)] = _copy_fits_source_snapshot(
-                    path, staged, expected
-                )
             else:
+                # FITS sources are consumed in place through read-only handles.
+                # Their captured stat identity is rechecked at every trust
+                # boundary and their content is rehashed once before
+                # publication, so a private byte copy adds no detection that
+                # the final gate does not already provide.
                 staged = path
             staged_paths.append(staged)
             aliases[str(staged)] = path
@@ -625,64 +626,12 @@ def _stage_e2e_xisf_inputs(
     return staged_groups, aliases, conversions, staged_digests
 
 
-def _copy_fits_source_snapshot(
-    source: Path, destination: Path, expected: _SourceIdentity
-) -> str:
-    """Copy and hash one captured FITS identity through a single open handle."""
+def _verify_staged_pixel_inputs(
+    staged_digests: Mapping[str, str],
+    identities: Sequence[_SourceIdentity] = (),
+) -> None:
+    """Recheck private conversions by content and original sources by identity."""
 
-    digest = hashlib.sha256()
-    copied = 0
-    try:
-        with source.open("rb") as input_stream, destination.open("xb") as output_stream:
-            before = os.fstat(input_stream.fileno())
-            before_identity = (
-                before.st_size,
-                before.st_mtime_ns,
-                before.st_dev,
-                before.st_ino,
-            )
-            expected_identity = (
-                expected.size_bytes,
-                expected.mtime_ns,
-                expected.device,
-                expected.inode,
-            )
-            if before_identity != expected_identity:
-                raise E2EError(
-                    "SOURCE_CHANGED",
-                    "FITS source changed before private snapshot",
-                    path=str(source),
-                )
-            while block := input_stream.read(4 * 1024 * 1024):
-                output_stream.write(block)
-                digest.update(block)
-                copied += len(block)
-            output_stream.flush()
-            after = os.fstat(input_stream.fileno())
-            after_identity = (
-                after.st_size,
-                after.st_mtime_ns,
-                after.st_dev,
-                after.st_ino,
-            )
-            actual_digest = "sha256:" + digest.hexdigest()
-            if (
-                after_identity != before_identity
-                or copied != expected.size_bytes
-                or actual_digest != expected.sha256
-            ):
-                raise E2EError(
-                    "SOURCE_CHANGED",
-                    "FITS source changed while creating its private snapshot",
-                    path=str(source),
-                )
-        return actual_digest
-    except Exception:
-        destination.unlink(missing_ok=True)
-        raise
-
-
-def _verify_staged_pixel_inputs(staged_digests: Mapping[str, str]) -> None:
     for value, expected in staged_digests.items():
         path = Path(value)
         try:
@@ -698,6 +647,29 @@ def _verify_staged_pixel_inputs(staged_digests: Mapping[str, str]) -> None:
                 "PRIVATE_PIXEL_STAGING_CHANGED",
                 "private pixel snapshot changed during execution",
                 path=value,
+            )
+    _verify_source_stat_identities(identities)
+
+
+def _verify_source_stat_identities(identities: Sequence[_SourceIdentity]) -> None:
+    for identity in identities:
+        path = Path(identity.path)
+        try:
+            current = path.stat(follow_symlinks=False)
+        except OSError as error:
+            raise E2EError("SOURCE_CHANGED", "source disappeared", path=identity.path) from error
+        actual = (current.st_size, current.st_mtime_ns, current.st_dev, current.st_ino)
+        expected = (
+            identity.size_bytes,
+            identity.mtime_ns,
+            identity.device,
+            identity.inode,
+        )
+        if actual != expected:
+            raise E2EError(
+                "SOURCE_CHANGED",
+                "source identity changed during execution",
+                path=identity.path,
             )
 
 
@@ -727,7 +699,7 @@ _LOCAL_STAT_KEYS = {
 def _share_safe_string(
     value: str,
     *,
-    staging: Path,
+    staging: PurePath,
     source_tokens: Mapping[str, str],
 ) -> str:
     """Redact host paths while retaining an auditable opaque source token."""
@@ -736,9 +708,19 @@ def _share_safe_string(
     for private, public in sorted(source_tokens.items(), key=lambda item: -len(item[0])):
         result = result.replace(private, public)
     staging_text = str(staging)
+    # Artifact identities use forward slashes on every host. Replacing only
+    # the Windows staging prefix leaves backslashes in the suffix and breaks
+    # the exact path/hash/size binding when generated masters are handed off.
+    for prefix in dict.fromkeys((staging_text, staging.as_posix())):
+        if result == prefix:
+            return "artifact/."
+        separator = "\\" if isinstance(staging, PureWindowsPath) and "\\" in prefix else "/"
+        if result.startswith(prefix + separator):
+            relative = result[len(prefix) + 1 :]
+            if isinstance(staging, PureWindowsPath):
+                relative = PureWindowsPath(relative).as_posix()
+            return "artifact/" + relative
     result = result.replace(staging_text + os.sep, "artifact/")
-    if result == staging_text:
-        return "artifact/."
     # Any remaining absolute path is an execution-environment detail (solver
     # executable, temporary catalog path, etc.).  Preserve only the basename;
     # the backend/version/catalog identities remain elsewhere in the receipt.
@@ -1097,6 +1079,20 @@ def _canonical_inputs(values: Iterable[str], role: str, *, required: bool) -> tu
     return tuple(sorted(paths, key=lambda item: os.path.normcase(str(item))))
 
 
+def _capture_sources(
+    flattened: Sequence[tuple[str, Path]], *, workers: int = 1
+) -> tuple[_SourceIdentity, ...]:
+    """Hash every source once, several files at a time; order is preserved."""
+
+    if not flattened:
+        return ()
+    count = max(1, min(int(workers), len(flattened), 8))
+    if count == 1:
+        return tuple(_capture_source(path, role) for role, path in flattened)
+    with ThreadPoolExecutor(max_workers=count, thread_name_prefix="oaf-inventory") as pool:
+        return tuple(pool.map(lambda item: _capture_source(item[1], item[0]), flattened))
+
+
 def _capture_source(path: Path, role: str) -> _SourceIdentity:
     before = path.stat(follow_symlinks=False)
     if not stat.S_ISREG(before.st_mode):
@@ -1171,22 +1167,33 @@ def _trusted_source_identity_bindings(
     return result
 
 
-def _verify_sources(identities: Sequence[_SourceIdentity]) -> None:
-    for identity in identities:
-        path = Path(identity.path)
-        try:
-            current = path.stat(follow_symlinks=False)
-        except OSError as error:
-            raise E2EError("SOURCE_CHANGED", "source disappeared", path=identity.path) from error
-        actual = (current.st_size, current.st_mtime_ns, current.st_dev, current.st_ino)
-        expected = (
-            identity.size_bytes,
-            identity.mtime_ns,
-            identity.device,
-            identity.inode,
-        )
-        if actual != expected or _sha256(path) != identity.sha256:
-            raise E2EError("SOURCE_CHANGED", "source identity changed during execution", path=identity.path)
+def _verify_source(identity: _SourceIdentity) -> None:
+    path = Path(identity.path)
+    try:
+        current = path.stat(follow_symlinks=False)
+    except OSError as error:
+        raise E2EError("SOURCE_CHANGED", "source disappeared", path=identity.path) from error
+    actual = (current.st_size, current.st_mtime_ns, current.st_dev, current.st_ino)
+    expected = (
+        identity.size_bytes,
+        identity.mtime_ns,
+        identity.device,
+        identity.inode,
+    )
+    if actual != expected or _sha256(path) != identity.sha256:
+        raise E2EError("SOURCE_CHANGED", "source identity changed during execution", path=identity.path)
+
+
+def _verify_sources(identities: Sequence[_SourceIdentity], *, workers: int = 4) -> None:
+    """Rehash every original; files are checked concurrently, failures surface as one."""
+
+    count = max(1, min(int(workers), len(identities), 8))
+    if count <= 1:
+        for identity in identities:
+            _verify_source(identity)
+        return
+    with ThreadPoolExecutor(max_workers=count, thread_name_prefix="oaf-verify") as pool:
+        list(pool.map(_verify_source, identities))
 
 
 def _safe_token(value: str) -> str:
@@ -4046,7 +4053,7 @@ def run_e2e(
     # reuse only this path/stat-bound identity; private snapshot creation still
     # re-reads through one open handle and final publication still rehashes the
     # originals, so eliminating duplicate inventory passes weakens no drift gate.
-    identities = tuple(_capture_source(path, role) for role, path in flattened)
+    identities = _capture_sources(flattened, workers=request.workers)
     identity_by_path = {identity.path: identity for identity in identities}
     raw_digests: dict[str, list[Path]] = {}
     for identity in identities:
@@ -4253,7 +4260,7 @@ def run_e2e(
             )
         except CalibrationError as error:
             raise E2EError(error.code, str(error), path=error.path) from error
-        _verify_staged_pixel_inputs(staged_input_digests)
+        _verify_staged_pixel_inputs(staged_input_digests, identities)
         registration_calibration_receipt_path = (
             receipts_dir / "registration-calibration.json"
         )
@@ -4284,7 +4291,13 @@ def run_e2e(
             allow_projective=request.integration_mode is IntegrationMode.DRIZZLE,
             source_aliases=registration_source_aliases,
             source_sha256_by_path={
-                str(path): staged_input_digests[str(path)]
+                str(path): (
+                    staged_input_digests[str(path)]
+                    if str(path) in staged_input_digests
+                    else identity_by_path[
+                        str(registration_source_aliases[str(path)].resolve(strict=True))
+                    ].sha256
+                )
                 for path in staged_inputs["LIGHT"]
             },
         )
@@ -4335,7 +4348,30 @@ def run_e2e(
                 for override in request.pipeline_parameters.raw_frame_metadata_overrides
                 if override.source_sha256 in selected_source_digests
             ),
+            # Ordinary integration consumes calibrated Lights in memory; only
+            # Drizzle reads them back from the pipeline directory.
+            materialize_calibrated_lights=(
+                request.integration_mode is IntegrationMode.DRIZZLE
+            ),
+            # The whole pipeline directory lives in the transient work tree;
+            # the promoted products below are fsynced by this run.
+            durable_intermediates=False,
         )
+        # The inventory already hashed every original through one read; hand
+        # those path/stat-bound digests to the pixel pipeline so it never
+        # rereads a source only to recompute a digest it must then verify.
+        pixel_identity_seed = {
+            str(path.resolve(strict=True)): (
+                identity_by_path[str(path.resolve(strict=True))].sha256,
+                {
+                    "sizeBytes": identity_by_path[str(path.resolve(strict=True))].size_bytes,
+                    "mtimeNs": identity_by_path[str(path.resolve(strict=True))].mtime_ns,
+                    "device": identity_by_path[str(path.resolve(strict=True))].device,
+                    "inode": identity_by_path[str(path.resolve(strict=True))].inode,
+                },
+            )
+            for path in pixel_source_paths
+        }
         if (
             request.integration_mode is IntegrationMode.DRIZZLE
             and request.pipeline_parameters.local_normalization.enabled
@@ -4428,10 +4464,11 @@ def run_e2e(
                 _source_aliases=registration_source_aliases,
                 _xisf_conversions=xisf_conversions,
                 _trusted_generated_calibration=trusted_generated_calibration,
+                _source_identity_seed=pixel_identity_seed,
             )
         except CalibrationError as error:
             raise E2EError(error.code, str(error), path=error.path) from error
-        _verify_staged_pixel_inputs(staged_input_digests)
+        _verify_staged_pixel_inputs(staged_input_digests, identities)
         shutil.copyfile(pipeline_result.receipt_path, receipts_dir / "pixel-pipeline.json")
         pixel_pipeline_receipt = json.loads(
             Path(pipeline_result.receipt_path).read_text(encoding="utf-8")

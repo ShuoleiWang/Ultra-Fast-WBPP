@@ -20,8 +20,6 @@ import hashlib
 import math
 import os
 from pathlib import Path
-import stat
-import sys
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -49,6 +47,10 @@ from .calibration import (
     integrate_expressions,
 )
 from .hardware import HardwareProfile, detect_hardware
+from .native_kernels import (
+    _candidate_library_paths,
+    load_native_kernels,
+)
 from .performance_profile import ExecutionTuning, select_execution_tuning
 
 
@@ -281,60 +283,6 @@ def _metal_memory_plan(
         min(height, target_rows, memory_budget_bytes // bytes_per_row),
     )
     return workers, tile_rows, bytes_per_row
-
-
-def _library_filename() -> str:
-    if sys.platform == "darwin":
-        return "libopenastroflow_native.dylib"
-    if os.name == "nt":
-        return "openastroflow_native.dll"
-    return "libopenastroflow_native.so"
-
-
-def _candidate_library_paths(explicit: str | os.PathLike[str] | None) -> tuple[Path, ...]:
-    candidates: list[Path] = []
-    if explicit:
-        candidates.append(Path(explicit).expanduser())
-    environment = os.environ.get("OPENASTROFLOW_NATIVE_LIBRARY", "").strip()
-    if environment:
-        candidates.append(Path(environment).expanduser())
-    module = Path(__file__).resolve()
-    name = _library_filename()
-    candidates.append(module.parent / "native" / name)
-    try:
-        repository = module.parents[4]
-    except IndexError:
-        repository = module.parent
-    candidates.extend(
-        (
-            repository / "build" / "native-metal" / name,
-            repository / "build" / "native" / name,
-            repository / "engine" / "native" / "build" / name,
-        )
-    )
-    found = ctypes.util.find_library("openastroflow_native")
-    if found and os.path.isabs(found):
-        candidates.append(Path(found))
-    unique: list[Path] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        try:
-            resolved = candidate.resolve(strict=True)
-        except OSError:
-            continue
-        key = os.path.normcase(str(resolved))
-        if not resolved.is_file():
-            continue
-        if os.name != "nt":
-            metadata = resolved.stat(follow_symlinks=False)
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o022:
-                continue
-            if metadata.st_uid not in {0, os.getuid()}:
-                continue
-        if key not in seen:
-            seen.add(key)
-            unique.append(resolved)
-    return tuple(unique)
 
 
 def _sha256(path: Path) -> str:
@@ -941,6 +889,8 @@ def _cpu_with_receipt(
     fallback_reason: str | None,
     quality_weights: Sequence[float] | None,
     map_paths: IntegrationMapPaths | None,
+    durable: bool = True,
+    selection_policy: str = "fallback",
 ) -> IntegrationResult:
     result = integrate_expressions(
         expressions,
@@ -949,6 +899,8 @@ def _cpu_with_receipt(
         parameters=parameters,
         quality_weights=quality_weights,
         map_paths=map_paths,
+        native_threads=max(1, tuning.cpu_workers),
+        durable=durable,
     )
     return replace(
         result,
@@ -956,6 +908,7 @@ def _cpu_with_receipt(
             **dict(result.execution),
             "requestedBackend": requested_backend,
             "selectedBackend": "portable-cpu",
+            "selectionPolicy": selection_policy,
             "acceleratorUsed": False,
             "fallbackReason": fallback_reason,
             "hardware": hardware.serializable(),
@@ -967,6 +920,15 @@ def _cpu_with_receipt(
             "fastMath": False,
         },
     )
+
+
+NATIVE_CPU_AUTO_REASON = (
+    "auto selected the native CPU kernels: per-pixel rejection statistics "
+    "dominate ordinary integration and the multithreaded native reduction "
+    "avoids the Metal path's host-side normalization, buffer copies and "
+    "parity reruns; request generic-apple-metal or m3-pro-tuned explicitly to "
+    "use the Metal reduction"
+)
 
 
 def integrate_registered_group(
@@ -984,8 +946,17 @@ def integrate_registered_group(
     metal_unavailable_reason: str | None = None,
     quality_weights: Sequence[float] | None = None,
     map_paths: IntegrationMapPaths | None = None,
+    durable: bool = True,
 ) -> IntegrationResult:
-    """Integrate one registered Light group with explicit, audited fallback."""
+    """Integrate one registered Light group with explicit, audited fallback.
+
+    ``auto`` prefers the multithreaded native CPU kernels whenever they are
+    loaded: the measured M-series cost of ordinary integration is the
+    per-pixel rejection statistics, which both paths compute on the CPU, and
+    the Metal weighted mean adds host-side normalization, copies and parity
+    reruns that cost more than its GPU time.  Explicit Metal requests still
+    run the audited Metal path.
+    """
 
     integration = parameters or IntegrationParameters()
     integration.validate()
@@ -997,6 +968,8 @@ def integrate_registered_group(
     selected, selection_note = _requested_selection(
         requested_backend, profile, selected_tuning
     )
+    if requested_backend == "auto" and load_native_kernels() is not None:
+        selected, selection_note = "portable-cpu", NATIVE_CPU_AUTO_REASON
     if selected == "portable-cpu":
         return _cpu_with_receipt(
             canonical,
@@ -1009,6 +982,12 @@ def integrate_registered_group(
             fallback_reason=selection_note,
             quality_weights=quality_weights,
             map_paths=map_paths,
+            durable=durable,
+            selection_policy=(
+                "native-cpu-kernels-preferred"
+                if selection_note == NATIVE_CPU_AUTO_REASON
+                else "requested" if requested_backend == "portable-cpu" else "fallback"
+            ),
         )
     if len(canonical) > MAXIMUM_METAL_REJECTION_FRAMES:
         return _cpu_with_receipt(
@@ -1025,6 +1004,7 @@ def integrate_registered_group(
             ),
             quality_weights=quality_weights,
             map_paths=map_paths,
+            durable=durable,
         )
 
     destination = Path(output_path)
@@ -1091,7 +1071,10 @@ def integrate_registered_group(
                 rejection_sigma_floor = _estimate_rejection_sigma_floor(
                     canonical, sources, shape, integration
                 )
-                transient_model = _prepare_transient_rejection(canonical, sources, shape, integration, weights64)
+                transient_model = _prepare_transient_rejection(
+                    canonical, sources, shape, integration, weights64,
+                    workers=max(1, selected_tuning.cpu_workers),
+                )
                 weights = np.ascontiguousarray(weights64, dtype=np.float32)
                 scales = np.ones((len(canonical), 2, 2), dtype=np.float32)
                 offsets = np.zeros((len(canonical), 2, 2), dtype=np.float32)
@@ -1149,6 +1132,9 @@ def integrate_registered_group(
                     row_ranges[-1][0],
                 }
                 cpu_workers_used = min(preparation_worker_limit, len(row_ranges))
+                kernel_threads_per_worker = max(
+                    1, configured_cpu_workers // max(1, cpu_workers_used)
+                )
 
                 map_writers: dict[str, FitsFloatWriter] = {}
 
@@ -1210,12 +1196,16 @@ def integrate_registered_group(
                             division_floor=integration.division_floor,
                         )
                     finite, _, accepted = _ordinary_integration_tile(
-                        values, integration, rejection_sigma_floor, transient_model, first_row)
+                        values, integration, rejection_sigma_floor, transient_model,
+                        first_row, kernel_threads_per_worker,
+                    )
                     return values, np.asarray(finite & ~accepted, dtype=np.uint8)
 
                 with ExitStack() as output_stack:
                     writer = output_stack.enter_context(
-                        FitsFloatWriter(temporary, shape, output_metadata)
+                        FitsFloatWriter(
+                            temporary, shape, output_metadata, durable=durable
+                        )
                     )
                     map_metadata = {
                         "acceptedSampleCount": {
@@ -1238,7 +1228,8 @@ def integrate_registered_group(
                     for name, temporary_map in map_temporaries.items():
                         map_writers[name] = output_stack.enter_context(
                             FitsFloatWriter(
-                                temporary_map, shape, map_metadata[name]
+                                temporary_map, shape, map_metadata[name],
+                                durable=durable,
                             )
                         )
                     with ThreadPoolExecutor(
@@ -1370,6 +1361,12 @@ def integrate_registered_group(
                 map_paths={
                     name: str(path) for name, path in map_destinations.items()
                 },
+                output_sha256=writer.sha256,
+                map_sha256={
+                    name: map_writer.sha256
+                    for name, map_writer in map_writers.items()
+                    if map_writer.sha256 is not None
+                },
                 execution={
                     "requestedBackend": requested_backend,
                     "selectedBackend": selected,
@@ -1413,6 +1410,7 @@ def integrate_registered_group(
                     "peakInflightBuffers": min(inflight, len(row_ranges)),
                     "configuredCpuWorkers": configured_cpu_workers,
                     "cpuWorkersUsed": cpu_workers_used,
+                    "kernelThreadsPerWorker": kernel_threads_per_worker,
                     "tilesSubmitted": math.ceil(height / tile_rows),
                     "gpuWallSecondsSum": gpu_wall,
                     "gpuSecondsSum": gpu_seconds,
@@ -1455,6 +1453,7 @@ def integrate_registered_group(
 
 
 __all__ = [
+    "NATIVE_CPU_AUTO_REASON",
     "MAXIMUM_METAL_REJECTION_FRAMES",
     "MAXIMUM_NATIVE_REJECTION_FRAMES",
     "MetalIntegrationError",
