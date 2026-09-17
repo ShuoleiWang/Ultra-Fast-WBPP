@@ -1505,7 +1505,7 @@ def test_project_shared_calibration_preserves_xisf_master_identity_into_real_pan
     tmp_path: Path,
     synthetic_project: dict[str, tuple[Path, ...]],
 ) -> None:
-    from xisf import XISF
+    from lightframeqc.xisf import XISF
     from openastroflow_engine.inventory import inventory_project
     from openastroflow_engine.project_e2e import ProjectE2ERequest, run_project_e2e
 
@@ -2181,7 +2181,7 @@ def test_standard_public_project_with_pi_masters_and_missing_metadata(
     use_raw_flats: bool,
 ) -> None:
     """Exercise public recipe -> shared masters -> real panel pixels -> fixture solve."""
-    from xisf import XISF
+    from lightframeqc.xisf import XISF
     from openastroflow_engine.inventory import inventory_project
     from openastroflow_engine.recipe import Recipe
     from openastroflow_engine.runtime import build_e2e_request

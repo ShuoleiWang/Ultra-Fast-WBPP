@@ -29,7 +29,6 @@ dependencies = [
   "numpy>=2.0",
   "openastroflow-registration>=0.1.0a1",
   "Pillow>=11",
-  "xisf>=0.9,<1",
   "lz4>=4.4,<5",
   "zstandard>=0.25,<1",
 ]

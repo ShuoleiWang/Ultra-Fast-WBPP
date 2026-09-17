@@ -473,7 +473,8 @@ def _run_doctor(arguments: argparse.Namespace) -> int:
         "sep": "sep",
         "scikit-image": "skimage",
         "astroalign": "astroalign",
-        "xisf": "xisf",
+        "lz4": "lz4",
+        "zstandard": "zstandard",
     }
     missing = False
     for label, module_name in modules.items():

@@ -25,6 +25,7 @@ from astropy.wcs.utils import proj_plane_pixel_scales
 import numpy as np
 
 from . import __version__
+from lightframeqc.content_hash import file_sha256
 from .backends import BackendRegistry, StageKind
 from .e2e import E2EError, E2EResult, ProgressEvent, ProgressStage, run_e2e
 from .hardware import HardwareProfile, detect_hardware
@@ -91,11 +92,7 @@ def _now_ms() -> int:
 
 
 def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(4 * 1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+    return file_sha256(path)
 
 
 def _canonical_digest(value: Mapping[str, Any]) -> str:

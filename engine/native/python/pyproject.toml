@@ -18,7 +18,7 @@ dependencies = [
   "sep>=1.4",
   "scikit-image>=0.25",
   "astroalign>=2.6",
-  "xisf>=0.9",
+  "light-frame-qc>=0.3.0",
 ]
 
 [project.optional-dependencies]

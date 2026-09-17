@@ -29,7 +29,7 @@ from skimage.transform import (
     ProjectiveTransform,
     SimilarityTransform,
 )
-from xisf import XISF
+from lightframeqc.xisf import XISF
 
 from lightframeqc.readers import ImagePreview, read_frame_preview
 
@@ -214,7 +214,6 @@ class RegistrationConfig:
     min_inliers: int = 12
     min_inlier_ratio: float = 0.12
     max_trials: int = 1000
-    crop_margin_px: int = 2
     refine_full_centroids: bool = True
     full_centroid_radius_px: int = 7
     full_residual_threshold_px: float = 1.5
@@ -368,10 +367,8 @@ class RegistrationRun:
     reference_index: int
     analyses: tuple[FrameAnalysis, ...]
     transforms: tuple[FrameTransform, ...]
-    autocrop: tuple[int, int, int, int]
     analysis_wall_seconds: float
     registration_wall_seconds: float
-    autocrop_wall_seconds: float
     total_seconds: float
 
 
@@ -1522,120 +1519,6 @@ def register_analyses(
     return index, tuple(validated)
 
 
-def _transformed_footprint(
-    matrix: Float64Array,
-    width: int,
-    height: int,
-    margin: int,
-) -> Float64Array:
-    x0 = float(margin)
-    y0 = float(margin)
-    x1 = float(width - 1 - margin)
-    y1 = float(height - 1 - margin)
-    if x1 < x0 or y1 < y0:
-        raise ValueError("crop margin consumes the whole frame")
-    corners = np.asarray([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], dtype=np.float64)
-    homogeneous = np.column_stack((corners, np.ones(4, dtype=np.float64)))
-    transformed = (matrix @ homogeneous.T).T
-    return transformed[:, :2] / transformed[:, 2:3]
-
-
-def _polygon_interval(polygon: Float64Array, y: float) -> tuple[float, float] | None:
-    intersections: list[float] = []
-    for index in range(polygon.shape[0]):
-        x0, y0 = polygon[index]
-        x1, y1 = polygon[(index + 1) % polygon.shape[0]]
-        if abs(y1 - y0) < 1.0e-12:
-            if abs(y - y0) < 1.0e-9:
-                intersections.extend((float(x0), float(x1)))
-            continue
-        if y < min(y0, y1) - 1.0e-9 or y > max(y0, y1) + 1.0e-9:
-            continue
-        t = (y - y0) / (y1 - y0)
-        if -1.0e-9 <= t <= 1.0 + 1.0e-9:
-            intersections.append(float(x0 + t * (x1 - x0)))
-    if len(intersections) < 2:
-        return None
-    return min(intersections), max(intersections)
-
-
-def common_autocrop(
-    transforms: Sequence[Float64Array],
-    source_shapes: Sequence[tuple[int, int]],
-    reference_shape: tuple[int, int],
-    *,
-    margin: int = 2,
-    minimum_coverage_fraction: float = 1.0,
-) -> tuple[int, int, int, int]:
-    """Return the largest axis-aligned integer rectangle valid in all frames.
-
-    The return value is ``(x0, y0, x1, y1)`` with exclusive upper bounds.
-    It is computed from transformed source quadrilaterals, not only their
-    bounding boxes, so rotation and meridian-flip footprints remain safe.
-    """
-
-    if not transforms or len(transforms) != len(source_shapes):
-        raise ValueError("transforms/source_shapes must be equal nonempty sequences")
-    if not 0 < minimum_coverage_fraction <= 1:
-        raise ValueError("minimum_coverage_fraction must be in (0, 1]")
-    reference_height, reference_width = reference_shape
-    polygons = [
-        _transformed_footprint(matrix, shape[1], shape[0], margin)
-        for matrix, shape in zip(transforms, source_shapes, strict=True)
-    ]
-    left = np.full(reference_height, np.inf, dtype=np.float64)
-    right = np.full(reference_height, -np.inf, dtype=np.float64)
-    required = int(math.ceil(minimum_coverage_fraction * len(polygons)))
-    for y in range(reference_height):
-        row_left: list[float] = []
-        row_right: list[float] = []
-        for polygon in polygons:
-            interval = _polygon_interval(polygon, float(y))
-            if interval is not None:
-                row_left.append(max(float(margin), interval[0]))
-                row_right.append(min(float(reference_width - 1 - margin), interval[1]))
-        if len(row_left) >= required:
-            combined_left = float(np.partition(row_left, required - 1)[required - 1])
-            combined_right = float(
-                np.partition(row_right, len(row_right) - required)[len(row_right) - required]
-            )
-        else:
-            combined_left = np.inf
-            combined_right = -np.inf
-        if combined_right >= combined_left:
-            left[y] = math.ceil(combined_left - 1.0e-9)
-            right[y] = math.floor(combined_right + 1.0e-9)
-
-    valid_rows = np.flatnonzero(np.isfinite(left) & np.isfinite(right) & (right >= left))
-    if valid_rows.size == 0:
-        raise ValueError("registered frames have no common footprint")
-    y_start, y_stop = int(valid_rows[0]), int(valid_rows[-1]) + 1
-    # The intersection of convex footprints has one contiguous y interval.
-    row_left = left[y_start:y_stop]
-    row_right = right[y_start:y_stop]
-    best_area = -1
-    best = (0, 0, 0, 0)
-    for top in range(row_left.size):
-        suffix_left = np.maximum.accumulate(row_left[top:])
-        suffix_right = np.minimum.accumulate(row_right[top:])
-        widths = np.maximum(0.0, suffix_right - suffix_left + 1.0)
-        heights = np.arange(1, widths.size + 1, dtype=np.float64)
-        areas = widths * heights
-        bottom_offset = int(np.argmax(areas))
-        area = int(areas[bottom_offset])
-        if area > best_area:
-            best_area = area
-            best = (
-                int(suffix_left[bottom_offset]),
-                y_start + top,
-                int(suffix_right[bottom_offset]) + 1,
-                y_start + top + bottom_offset + 1,
-            )
-    if best_area <= 0:
-        raise ValueError("registered frames have no nonempty rectangular common footprint")
-    return best
-
-
 def run_registration(
     paths: Iterable[str],
     *,
@@ -1680,24 +1563,12 @@ def run_registration(
     if len(accepted) != len(transforms):
         failures = [Path(item.path).name for item in transforms if not item.accepted]
         raise RuntimeError(f"registration failed for {len(failures)} frame(s): {failures}")
-    reference = analyses[reference_index]
-    selected_registration = registration or RegistrationConfig()
-    crop_started = time.perf_counter()
-    crop = common_autocrop(
-        [item.full_matrix for item in transforms if item.full_matrix is not None],
-        [(item.source_height, item.source_width) for item in analyses],
-        (reference.source_height, reference.source_width),
-        margin=selected_registration.crop_margin_px,
-    )
-    autocrop_wall_seconds = time.perf_counter() - crop_started
     return RegistrationRun(
         reference_index=reference_index,
         analyses=analyses,
         transforms=transforms,
-        autocrop=crop,
         analysis_wall_seconds=analysis_wall_seconds,
         registration_wall_seconds=registration_wall_seconds,
-        autocrop_wall_seconds=autocrop_wall_seconds,
         total_seconds=time.perf_counter() - started,
     )
 

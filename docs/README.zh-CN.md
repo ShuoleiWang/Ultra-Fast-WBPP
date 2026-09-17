@@ -72,6 +72,6 @@ make desktop-build-macos-prerelease
 
 项目原创代码采用 [MIT 许可证](../LICENSE)。再分发时，包括商用再分发，需保留版权和许可声明。[NOTICE](../NOTICE) 提供建议的来源标注文字。
 
-第三方组件保留各自许可证。当前打包的 worker 包含 GPL-3.0 许可的 `xisf`，不能把整个安装包仅按 MIT 分发；详见[许可说明](licensing.md)和[第三方声明](../THIRD_PARTY_NOTICES.md)。
+第三方组件保留各自许可证；Python 运行时不再引入任何 GPL 许可的库（XISF 容器由项目自带的 MIT 读写模块处理）。详见[许可说明](licensing.md)和[第三方声明](../THIRD_PARTY_NOTICES.md)。
 
 本项目不隶属于 PixInsight、Pleiades Astrophoto、N.I.N.A. 或 Astrometry.net，不包含 PixInsight/PCL 源码或二进制。

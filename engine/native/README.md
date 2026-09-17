@@ -2,7 +2,7 @@
 
 This directory contains the independent C++20 scientific math baseline and the Apple Metal acceleration worker. It has no PixInsight/PCL dependency.
 
-The portable compatibility target `OpenAstroFlow::NativeMath` provides tiled image geometry, calibration math, local-normalization/rejection integration, and TAN fitting/matching primitives for Ultra-Fast WBPP. `OpenAstroFlow::NativeMetal` implements the same integration contracts on Apple GPUs and is tested differentially against the CPU implementation. These internal CMake target names remain unchanged for source compatibility. The POSIX FITS/XISF codec is currently built on macOS/Linux; Windows uses the packaged Python/Astropy codec until the native Windows codec is admitted.
+The portable target `OpenAstroFlow::NativeMath` provides tiled image geometry, the local-normalization/rejection integration and the portable kernels the Python engine calls through the C ABI. `OpenAstroFlow::NativeMetal` implements the same integration contracts on Apple GPUs and is tested differentially against the CPU implementation. Everything in this tree is reachable from the engine: image I/O and astrometric solving live in Python (`openastroflow_engine.fits_io`, `.xisf_io` and the solver backends), and native code that the engine did not call has been removed rather than kept compiled.
 
 ```bash
 cmake -S engine/native -B build/native -DOAF_BUILD_TESTS=ON
@@ -24,8 +24,9 @@ types, evaluation order, `nanmedian` even-count semantics, and NaN policy, so
 `packages/openastroflow-engine/tests/test_native_kernels.py` can require
 value-identical pixels, masks, and counts from both paths (only the sign of an
 exact zero may differ). They are exposed through the C ABI as
-`oaf_native_cpu_warp_lanczos3_v1`, `oaf_native_cpu_mad_rejection_v1`, and
-`oaf_native_cpu_masked_mean_v1`, are compiled with `-fno-fast-math
+`oaf_native_cpu_warp_lanczos3_v2` (v1 keeps the affine-only layout),
+`oaf_native_cpu_mad_rejection_v1`, `oaf_native_cpu_masked_mean_v1` and
+`oaf_native_cpu_tile_offsets_v1`, are compiled with `-fno-fast-math
 -ffp-contract=off`, and are covered by `tests/PortableKernelTests.cpp`.
 
 Ordinary integration uses a two-stage exact full-stack path. CPU code computes the same per-sample median/MAD rejection decision used by the portable integrator; `fused_ln_masked_weighted_integration` then reduces every frame in one Metal request. It never averages partial batches. The product policy admits up to 512 frames; resource/capability failure falls back to CPU with `inputFramesTruncated=false` and a reason in the receipt. The older native linear-fit rejection kernel remains limited to 64 frames because it uses private per-thread sorting storage and is not used for larger ordinary stacks.

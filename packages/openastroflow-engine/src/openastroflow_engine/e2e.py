@@ -14,6 +14,7 @@ rename, so a successful receipt can never describe a partial output tree.
 
 from __future__ import annotations
 
+from lightframeqc.content_hash import file_sha256
 from .calibration_policy import apply_mono_workflow, bias_from_header, MONO_STANDARD, can_omit_bias, conflicting_profile_fields, workflow_receipt
 
 from contextlib import ExitStack
@@ -462,11 +463,7 @@ def _emit(
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(4 * 1024 * 1024):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
+    return "sha256:" + file_sha256(path)
 
 
 def _input_frame_info(
@@ -2443,7 +2440,6 @@ def _register_lights(
                 Path(run.analyses[run.reference_index].path).resolve(strict=True),
             )
         ),
-        "autocrop": list(run.autocrop),
         "qualityWeights": list(weights),
         "qualityWeightsBySource": quality_weights,
         "stellarScaleHints": [
@@ -2453,7 +2449,6 @@ def _register_lights(
         "timingSeconds": {
             "analysisWall": run.analysis_wall_seconds,
             "registrationWall": run.registration_wall_seconds,
-            "autocropWall": run.autocrop_wall_seconds,
             "total": run.total_seconds,
         },
         "transforms": transform_records,

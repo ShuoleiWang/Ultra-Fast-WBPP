@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 from astropy.io import fits
 import numpy as np
 import pytest
-from xisf import XISF
+from lightframeqc.xisf import XISF
 
 from lightframeqc.config import DEFAULT_CONFIG
 from lightframeqc.identity import (

@@ -13,10 +13,8 @@ option(OAF_BUILD_BENCHMARKS "Build opt-in native performance benchmarks" OFF)
 find_package(Threads REQUIRED)
 
 add_library(openastroflow_native_math STATIC
-  src/Calibration.cpp
   src/FusedLnIntegration.cpp
   src/ImageTile.cpp
-  src/OfflineWcsSolver.cpp
   src/PortableKernels.cpp
 )
 add_library(OpenAstroFlow::NativeMath ALIAS openastroflow_native_math)
@@ -56,25 +54,6 @@ else()
   target_compile_options(openastroflow_native_abi PRIVATE
     -Wall -Wextra -Wpedantic -Werror -fno-fast-math -ffp-contract=off
   )
-endif()
-
-# The current memory-mapped FITS/XISF implementation is POSIX. Windows uses
-# the Python/Astropy codec in the first product backend while the native
-# PlatformFs/codec worker is implemented behind the same artifact protocol.
-if(UNIX)
-  add_library(openastroflow_native_io STATIC src/NativeImageIO.cpp)
-  add_library(OpenAstroFlow::NativeIO ALIAS openastroflow_native_io)
-  target_include_directories(openastroflow_native_io PUBLIC include)
-  target_compile_features(openastroflow_native_io PUBLIC cxx_std_20)
-  if(APPLE)
-    target_compile_options(openastroflow_native_io PRIVATE
-      -Wall -Wextra -Wpedantic -Werror -fno-fast-math -ffp-contract=off
-    )
-  else()
-    target_compile_options(openastroflow_native_io PRIVATE
-      -Wall -Wextra -Wpedantic -Werror -fno-fast-math -ffp-contract=off
-    )
-  endif()
 endif()
 
 if(APPLE AND OAF_ENABLE_METAL)
@@ -266,18 +245,4 @@ if(OAF_BUILD_TESTS)
     )
   endif()
   add_test(NAME native-portable-kernels COMMAND openastroflow_portable_kernel_tests)
-
-  if(UNIX)
-    add_executable(openastroflow_calibration_tests tests/CalibrationTests.cpp)
-    target_link_libraries(openastroflow_calibration_tests
-      PRIVATE OpenAstroFlow::NativeMath OpenAstroFlow::NativeIO
-    )
-    target_compile_features(openastroflow_calibration_tests PRIVATE cxx_std_20)
-    add_test(NAME native-calibration COMMAND openastroflow_calibration_tests)
-
-    add_executable(openastroflow_image_io_tests tests/NativeImageIOTests.cpp)
-    target_link_libraries(openastroflow_image_io_tests PRIVATE OpenAstroFlow::NativeIO)
-    target_compile_features(openastroflow_image_io_tests PRIVATE cxx_std_20)
-    add_test(NAME native-image-io COMMAND openastroflow_image_io_tests)
-  endif()
 endif()

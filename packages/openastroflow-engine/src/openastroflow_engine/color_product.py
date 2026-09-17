@@ -39,6 +39,7 @@ import astropy.units as u
 import numpy as np
 from numpy.typing import NDArray
 
+from lightframeqc.content_hash import file_sha256
 from .solver import validate_wcs_header
 
 
@@ -117,11 +118,7 @@ def _canonical_json(value: Mapping[str, Any]) -> bytes:
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(4 * 1024 * 1024):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
+    return "sha256:" + file_sha256(path)
 
 
 def _regular_identity(path: Path) -> dict[str, Any]:

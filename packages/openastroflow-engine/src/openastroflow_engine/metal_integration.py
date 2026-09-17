@@ -16,7 +16,6 @@ from contextlib import nullcontext
 import ctypes
 import ctypes.util
 from dataclasses import dataclass, replace
-import hashlib
 import math
 import os
 from pathlib import Path
@@ -25,6 +24,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 from numpy.typing import NDArray
 
+from lightframeqc.content_hash import file_sha256
 from .calibration import (
     CalibrationError,
     DEFAULT_MEMORY_BUDGET,
@@ -286,11 +286,7 @@ def _metal_memory_plan(
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
+    return "sha256:" + file_sha256(path)
 
 
 class NativeMetalExecutor:

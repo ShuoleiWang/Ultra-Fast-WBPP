@@ -72,6 +72,6 @@ Performance depends on the workload and hardware; CPU and Metal acceleration do 
 
 Original project code is [MIT licensed](LICENSE). Redistribution, including commercial redistribution, must preserve the copyright and license notice. [NOTICE](NOTICE) provides suggested attribution.
 
-Third-party components retain their own licenses. The current bundled worker includes GPL-3.0-licensed `xisf` and cannot be distributed as an MIT-only bundle; see [licensing](docs/licensing.md) and [third-party notices](THIRD_PARTY_NOTICES.md).
+Third-party components retain their own licenses; the Python runtime imports no GPL-licensed library (XISF containers are handled by the project's own MIT reader). See [licensing](docs/licensing.md) and [third-party notices](THIRD_PARTY_NOTICES.md).
 
 The project is not affiliated with PixInsight, Pleiades Astrophoto, N.I.N.A., or Astrometry.net, and contains no PixInsight/PCL source or binaries.

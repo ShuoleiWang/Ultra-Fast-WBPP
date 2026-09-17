@@ -33,7 +33,6 @@ VERSIONS = {
         "openastroflow-registration": "0.1.0a1",
         "reproject": "0.21.0",
         "shapely": "2.1.0",
-        "xisf": "0.9.6",
     },
 }
 HANDSHAKE = {

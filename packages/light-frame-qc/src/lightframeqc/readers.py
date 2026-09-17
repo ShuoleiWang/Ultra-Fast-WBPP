@@ -23,7 +23,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from astropy.io import fits
 import numpy as np
 from numpy.typing import NDArray
-from xisf import XISF
+from .xisf import XISF
 
 from .metadata import normalize_metadata
 from .models import FrameMetadata
