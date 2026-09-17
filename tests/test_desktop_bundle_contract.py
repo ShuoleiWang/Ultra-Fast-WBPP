@@ -78,8 +78,24 @@ def test_desktop_sidecar_uses_one_fresh_release_native_chain_locally_and_in_ci()
     ):
         assert f"$(NATIVE_RUNTIME_DIR)/{library_name}" in install_body
 
-    assert "run: make native-release-install" in workflow
+    # CI builds the same fresh Release chain through the one cross-platform
+    # script (configure -> build -> ctest -> install), never ad-hoc cmake lines.
+    assert "python scripts/build_native_runtime.py" in workflow
+    assert "--build-dir build/native-release" in workflow
     assert "cmake -S engine/native -B build/native-release" not in workflow
+    script = (REPOSITORY / "scripts" / "build_native_runtime.py").read_text(encoding="utf-8")
+    assert '"-DCMAKE_BUILD_TYPE=Release"' in script
+    assert '"--config", "Release"' in script
+    assert '"-C", "Release", "--output-on-failure"' in script
+    assert "remove_stale_libraries()" in script
+    for library_name in (
+        "libopenastroflow_native.dylib",
+        "libopenastroflow_native.so",
+        "openastroflow_native.dll",
+    ):
+        assert f'"{library_name}"' in script
+    ci_workflow = (REPOSITORY / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "python scripts/build_native_runtime.py" in ci_workflow
 
 
 def test_tag_workflow_only_prepares_a_draft_release() -> None:

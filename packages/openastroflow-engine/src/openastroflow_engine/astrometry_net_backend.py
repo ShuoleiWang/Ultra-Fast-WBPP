@@ -16,6 +16,7 @@ from astropy.io import fits
 from astropy.wcs import WCS
 import numpy as np
 
+from . import platform as platform_services
 from .astap_backend import (
     ExecutableProbe,
     SolverExecutionError,
@@ -219,25 +220,7 @@ def discover_astrometry_net(
         candidate = _candidate_path(shutil.which(name, path=env.get("PATH")))
         if candidate:
             return candidate
-    candidates: list[Path] = []
-    if os.name == "nt":
-        for root_key in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
-            root = env.get(root_key)
-            if root:
-                candidates.extend(
-                    (
-                        Path(root) / "Astrometry.net" / "bin" / "solve-field.exe",
-                        Path(root) / "astrometry" / "bin" / "solve-field.exe",
-                    )
-                )
-    else:
-        candidates.extend(
-            (
-                Path("/opt/homebrew/bin/solve-field"),
-                Path("/usr/local/bin/solve-field"),
-                Path("/usr/bin/solve-field"),
-            )
-        )
+    candidates = platform_services.current().well_known_executables("solve-field", environment=env)
     for path in candidates:
         candidate = _candidate_path(path)
         if candidate:

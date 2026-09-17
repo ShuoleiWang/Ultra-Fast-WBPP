@@ -24,6 +24,8 @@ from typing import Any, BinaryIO, Callable, Iterable, Mapping, Protocol, Sequenc
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from . import platform as platform_services
+
 
 _CHUNK_BYTES = 1024 * 1024
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -491,14 +493,7 @@ def default_catalog_root(
     environment: Mapping[str, str] | None = None,
     home: str | os.PathLike[str] | None = None,
 ) -> Path:
-    env = os.environ if environment is None else environment
-    data_root = env.get("OPENASTROFLOW_DATA_DIR")
-    if data_root:
-        base = Path(data_root).expanduser()
-    elif os.name == "nt" and env.get("LOCALAPPDATA"):
-        base = Path(env["LOCALAPPDATA"]) / "OpenAstroFlow"
-    else:
-        base = Path(home).expanduser() if home is not None else Path.home() / ".openastroflow"
+    base = platform_services.current().data_root(environment=environment, home=home)
     return (base / "catalogs" / "astrometry-net").absolute()
 
 

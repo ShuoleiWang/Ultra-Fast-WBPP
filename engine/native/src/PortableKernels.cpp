@@ -1,6 +1,7 @@
 #include "openastroflow/PortableKernels.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <exception>
 #include <limits>
@@ -27,52 +28,70 @@ std::size_t CheckedMultiply( std::size_t left,
    return left*right;
 }
 
-// Splits [0, count) into at most `threads` contiguous chunks and runs
-// function(begin, end) on each. Exceptions are collected and rethrown after
-// every worker has joined so no thread outlives the call.
+// Runs function(begin, end) over [0, count) on up to `threads` threads that
+// claim contiguous chunks of `grain` items from a shared atomic counter, so a
+// slow core (efficiency core, SMT sibling, throttled core) never holds the
+// tail of the range while the others idle.  Every item is processed exactly
+// once and the per-item results never depend on which thread or chunk ran
+// it; the calling thread drains chunks too.  Exceptions stop further claims,
+// are collected, and are rethrown after every worker has joined so no thread
+// outlives the call.
 template <class Function>
 void ParallelRange( std::size_t count,
                     std::uint32_t threads,
+                    std::size_t grain,
                     Function&& function )
 {
    if ( count == 0 )
       return;
+   grain = std::max<std::size_t>( 1, grain );
+   const std::size_t chunks = (count + grain - 1)/grain;
    const std::size_t workers = std::max<std::size_t>(
-      1, std::min<std::size_t>( threads, count ) );
+      1, std::min<std::size_t>( threads, chunks ) );
    if ( workers == 1 )
    {
       function( std::size_t{ 0 }, count );
       return;
    }
-   const std::size_t chunk = (count + workers - 1)/workers;
-   std::vector<std::thread> pool;
+   std::atomic<std::size_t> next{ 0 };
    std::vector<std::exception_ptr> errors( workers );
-   pool.reserve( workers );
-   for ( std::size_t index = 0; index < workers; ++index )
+   auto drain = [&]( std::size_t worker )
    {
-      const std::size_t begin = index*chunk;
-      if ( begin >= count )
-         break;
-      const std::size_t end = std::min( count, begin + chunk );
-      pool.emplace_back(
-         [&function, &errors, index, begin, end]()
+      try
+      {
+         for ( ;; )
          {
-            try
-            {
-               function( begin, end );
-            }
-            catch ( ... )
-            {
-               errors[index] = std::current_exception();
-            }
-         } );
-   }
+            const std::size_t begin =
+               next.fetch_add( grain, std::memory_order_relaxed );
+            if ( begin >= count )
+               return;
+            function( begin, std::min( count, begin + grain ) );
+         }
+      }
+      catch ( ... )
+      {
+         errors[worker] = std::current_exception();
+         next.store( count, std::memory_order_relaxed );
+      }
+   };
+   std::vector<std::thread> pool;
+   pool.reserve( workers - 1 );
+   for ( std::size_t index = 1; index < workers; ++index )
+      pool.emplace_back( [&drain, index]() { drain( index ); } );
+   drain( 0 );
    for ( std::thread& worker : pool )
       worker.join();
    for ( const std::exception_ptr& error : errors )
       if ( error )
          std::rethrow_exception( error );
 }
+
+// Chunk sizes: a few milliseconds of work per claim on one core, so the
+// atomic counter costs nothing and the load balances at the end of a range.
+constexpr std::size_t WarpRowGrain = 8;
+constexpr std::size_t RejectionPixelGrain = 4096;
+constexpr std::size_t MeanPixelGrain = 8192;
+constexpr std::size_t TileGrain = 1;
 
 // Lanczos-3 tap constants for offsets k = -2..3 (see calibration.py):
 //   sin(pi(f-k))   = (-1)^k sin(pi f)
@@ -199,7 +218,7 @@ void WarpLanczos3Clamped( const WarpLanczos3Request& request,
    const float nan = std::numeric_limits<float>::quiet_NaN();
    float* output = destination.data();
 
-   ParallelRange( request.rowCount, request.threads,
+   ParallelRange( request.rowCount, request.threads, WarpRowGrain,
       [&]( std::size_t rowBegin, std::size_t rowEnd )
       {
          float xWeights[6] = {};
@@ -354,7 +373,7 @@ void MadRejectionMask( const MadRejectionRequest& request,
    std::uint8_t* acceptedData = accepted.data();
    float* centerData = center.data();
 
-   ParallelRange( pixels, request.threads,
+   ParallelRange( pixels, request.threads, RejectionPixelGrain,
       [&]( std::size_t begin, std::size_t end )
       {
          constexpr std::size_t Block = 64;
@@ -477,7 +496,7 @@ void MaskedWeightedMean( const MaskedMeanRequest& request,
    std::uint16_t* acceptedSamples = output.acceptedSamples.data();
    std::uint16_t* rejectedSamples = output.rejectedSamples.data();
 
-   ParallelRange( pixels, request.threads,
+   ParallelRange( pixels, request.threads, MeanPixelGrain,
       [&]( std::size_t begin, std::size_t end )
       {
          constexpr std::size_t Block = 256;
@@ -618,7 +637,7 @@ void TileOffsets( const TileOffsetRequest& request, const TileOffsetOutput& outp
    const double nan = std::numeric_limits<double>::quiet_NaN();
    const double epsilon = std::numeric_limits<double>::epsilon();
 
-   ParallelRange( tiles, request.threads,
+   ParallelRange( tiles, request.threads, TileGrain,
       [&]( std::size_t begin, std::size_t end )
       {
          std::vector<double> x;

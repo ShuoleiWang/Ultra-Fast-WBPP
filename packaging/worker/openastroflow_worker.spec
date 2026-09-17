@@ -9,6 +9,7 @@ release manifest.
 from pathlib import Path
 import os
 import runpy
+import sys
 
 from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 
@@ -33,6 +34,17 @@ datas = filter_entries(
         includes=["native/*", "native/**/*", "py.typed"],
     )
 )
+binaries = []
+if sys.platform == "win32":
+    # The native kernel DLL is a real binary on Windows: collecting it as a
+    # binary lets PyInstaller walk its imports and bundle the MSVC runtime
+    # (msvcp140.dll, vcruntime140*.dll) it links dynamically, so the frozen
+    # worker loads the kernels on a machine without a VC++ redistributable.
+    native_dlls = [
+        entry for entry in datas if entry[0].lower().endswith(".dll") and entry[1].replace("\\", "/").startswith("openastroflow_engine/native")
+    ]
+    datas = [entry for entry in datas if entry not in native_dlls]
+    binaries.extend(native_dlls)
 datas.extend(
     filter_entries(
         [
@@ -41,7 +53,6 @@ datas.extend(
         ]
     )
 )
-binaries = []
 # The launcher import graph owns ordinary modules. Keep this list limited to
 # real runtime imports performed through importlib or image-format registries;
 # broad collect_all/collect_submodules calls made the first launch validate

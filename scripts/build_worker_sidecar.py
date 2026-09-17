@@ -1096,6 +1096,55 @@ def source_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
     return environment
 
 
+def run_native_kernel_smoke(
+    command: Sequence[str], *, timeout_seconds: float = 60.0
+) -> dict[str, Any]:
+    """Prove the frozen worker loads the bundled native kernel library.
+
+    Runs ``<worker> doctor --json`` and returns its ``nativeKernels`` facts
+    (library path, SHA-256, ISA features).  A worker that would silently run
+    the NumPy fallback is a packaging error, not a runtime condition.
+    """
+
+    if not command or timeout_seconds <= 0:
+        raise ValueError("native kernel smoke requires a command and positive timeout")
+    try:
+        completed = subprocess.run(
+            [*command, "doctor", "--json"],
+            text=True,
+            capture_output=True,
+            cwd=REPO_ROOT,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SidecarBuildError("NATIVE_KERNEL_SMOKE_FAILED", str(error)) from error
+    if completed.returncode != 0:
+        diagnostic = completed.stderr.strip()[-1000:] or "no stderr"
+        raise SidecarBuildError(
+            "NATIVE_KERNEL_SMOKE_FAILED",
+            f"frozen doctor exited with {completed.returncode}: {diagnostic}",
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise SidecarBuildError(
+            "NATIVE_KERNEL_SMOKE_FAILED", "frozen doctor did not emit JSON"
+        ) from error
+    facts = payload.get("nativeKernels") if isinstance(payload, dict) else None
+    if not isinstance(facts, dict) or "loaded" not in facts:
+        raise SidecarBuildError(
+            "NATIVE_KERNEL_SMOKE_FAILED", "frozen doctor omitted the nativeKernels facts"
+        )
+    if facts["loaded"] is not True:
+        raise SidecarBuildError(
+            "NATIVE_KERNELS_MISSING",
+            "the frozen worker did not load the native kernel library: "
+            + str(facts.get("reason", "unknown reason")),
+        )
+    return facts
+
+
 def run_source_handshake() -> dict[str, Any]:
     return run_worker_handshake(
         [sys.executable, str(WORKER_PACKAGING / "launcher.py")],
@@ -1485,6 +1534,7 @@ def build_sidecar(
     output_dir: Path,
     *,
     macos14_bottle_root: Path | None = None,
+    require_native_kernels: bool = True,
 ) -> tuple[Path, Path, dict[str, Any]]:
     target = normalize_target_triple(target_triple)
     _require_native_target(target)
@@ -1535,6 +1585,13 @@ def build_sidecar(
                 "VERSION_MISMATCH", "source and frozen worker handshakes disagree"
             )
         run_catalog_list_smoke(frozen_command)
+        if require_native_kernels:
+            native_facts = run_native_kernel_smoke(frozen_command)
+            print(
+                "frozen worker loaded native kernels "
+                + str(native_facts.get("sha256", "")),
+                file=sys.stderr,
+            )
         manifest = build_manifest(
             staged,
             target,
@@ -1587,6 +1644,14 @@ def _parser() -> argparse.ArgumentParser:
         help="run source handshake and public-tree gates without requiring PyInstaller",
     )
     parser.add_argument(
+        "--allow-missing-native-kernels",
+        action="store_true",
+        help=(
+            "do not fail when the frozen worker cannot load the native kernel "
+            "library (development builds only; releases must bundle it)"
+        ),
+    )
+    parser.add_argument(
         "--macos14-bottle-root",
         type=Path,
         help=(
@@ -1622,6 +1687,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 target,
                 arguments.output_dir,
                 macos14_bottle_root=arguments.macos14_bottle_root,
+                require_native_kernels=not arguments.allow_missing_native_kernels,
             )
             result = {
                 "ok": True,

@@ -321,6 +321,31 @@ OAF_NATIVE_API int oaf_native_cpu_tile_offsets_v1(
 // Hardware concurrency clamped to [1, 64].
 OAF_NATIVE_API uint32_t oaf_native_default_kernel_threads_v1(void);
 
+enum
+{
+   OAF_NATIVE_CPU_ARCHITECTURE_UNKNOWN = 0,
+   OAF_NATIVE_CPU_ARCHITECTURE_X86_64 = 1,
+   OAF_NATIVE_CPU_ARCHITECTURE_ARM64 = 2
+};
+
+// Report-only processor facts (see CpuFeatures.h): the architecture the
+// library was compiled for, the comma-separated lowercase instruction-set
+// extensions usable by the running OS (cpuid + XSAVE state on x86-64), and
+// the cpuid brand string on x86-64. Receipts record them; no kernel selects
+// code by them.
+typedef struct OafNativeCpuFeaturesV1
+{
+   uint32_t struct_size;
+   uint32_t architecture;
+   char features[256];
+   char brand[64];
+} OafNativeCpuFeaturesV1;
+
+OAF_NATIVE_API int oaf_native_cpu_features_v1(
+   OafNativeCpuFeaturesV1* features,
+   char* error_message,
+   size_t error_message_capacity );
+
 #ifdef __cplusplus
 }
 #endif

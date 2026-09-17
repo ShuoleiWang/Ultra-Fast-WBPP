@@ -15,6 +15,8 @@ rename, so a successful receipt can never describe a partial output tree.
 from __future__ import annotations
 
 from lightframeqc.content_hash import file_sha256
+from . import platform as platform_services
+from .platform import NoReplaceError
 from .calibration_policy import apply_mono_workflow, bias_from_header, MONO_STANDARD, can_omit_bias, conflicting_profile_fields, workflow_receipt
 
 from contextlib import ExitStack
@@ -1207,48 +1209,23 @@ def _safe_token(value: str) -> str:
 
 
 def _rename_directory_no_replace(source: Path, destination: Path) -> None:
-    if os.path.lexists(destination):
-        raise E2EError("OUTPUT_EXISTS", "refusing to replace output directory", path=str(destination))
-    if os.name == "nt":
-        try:
-            os.rename(source, destination)
-        except FileExistsError as error:
-            raise E2EError("OUTPUT_EXISTS", "output appeared during publication", path=str(destination)) from error
-        return
-    library = ctypes.CDLL(None, use_errno=True)
-    encoded_source = os.fsencode(source)
-    encoded_destination = os.fsencode(destination)
-    if sys.platform == "darwin" and hasattr(library, "renamex_np"):
-        result = library.renamex_np(encoded_source, encoded_destination, 0x00000004)
-    elif sys.platform.startswith("linux") and hasattr(library, "renameat2"):
-        result = library.renameat2(-100, encoded_source, -100, encoded_destination, 0x00000001)
-    else:
-        raise E2EError(
-            "ATOMIC_DIRECTORY_PUBLISH_UNSUPPORTED",
-            "platform has no no-replace directory rename primitive",
-        )
-    if result != 0:
-        error_number = ctypes.get_errno()
-        if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
-            raise E2EError("OUTPUT_EXISTS", "output appeared during publication", path=str(destination))
-        raise OSError(error_number, os.strerror(error_number), str(destination))
+    """Create-only directory publication through the platform service layer."""
+
+    try:
+        platform_services.current().rename_directory_no_replace(source, destination)
+    except NoReplaceError as error:
+        if error.code == "OUTPUT_EXISTS":
+            message = (
+                "refusing to replace output directory"
+                if error.precheck
+                else "output appeared during publication"
+            )
+            raise E2EError("OUTPUT_EXISTS", message, path=str(destination)) from error
+        raise E2EError(error.code, error.message) from error
 
 
 def _fsync_directory(path: Path) -> None:
-    if os.name == "nt":
-        return
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    try:
-        descriptor = os.open(path, flags)
-    except OSError:
-        return
-    try:
-        os.fsync(descriptor)
-    except OSError as error:
-        if error.errno not in {errno.EINVAL, errno.ENOTSUP}:
-            raise
-    finally:
-        os.close(descriptor)
+    platform_services.current().fsync_directory(path)
 
 
 def _validate_request(request: E2ERequest) -> None:

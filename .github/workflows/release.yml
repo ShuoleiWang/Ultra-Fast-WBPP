@@ -61,9 +61,12 @@ jobs:
       - name: Check installed dependency consistency
         run: python -m pip check
 
-      - name: Build and install native CPU/Metal runtime
+      - name: Build, test and install the native CPU/Metal runtime
         shell: bash
-        run: make native-release-install
+        run: >-
+          python scripts/build_native_runtime.py
+          --build-dir build/native-release
+          --report build/native-release/native-build-report.json
 
       - name: Test source tree and release gates
         shell: bash

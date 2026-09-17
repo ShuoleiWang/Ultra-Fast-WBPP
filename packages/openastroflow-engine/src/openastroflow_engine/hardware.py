@@ -1,19 +1,34 @@
+"""Hardware detection: what the machine is, kept separate from execution readiness."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
+import os
 import platform
 import re
-import subprocess
 from typing import Callable
 
 from .backends import DeviceKind
+from .platform import (
+    CpuTopology,
+    GpuAdapter,
+    MemoryStatus,
+    PlatformId,
+    fallback_topology,
+    platform_id_for,
+    services_for,
+)
 
 
 class CpuFamily(StrEnum):
     APPLE_M = "APPLE_M"
-    WINDOWS = "WINDOWS"
+    X86_64 = "X86_64"
     GENERIC = "GENERIC"
+
+
+_X86_64_MACHINES = {"x86_64", "amd64", "x64"}
+_ARM64_MACHINES = {"arm64", "aarch64"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +42,17 @@ class HardwareProfile:
     accelerator_backend: str | None
     optimization_profile: str
     warnings: tuple[str, ...] = ()
+    platform_id: PlatformId = "linux"
+    logical_cores: int = 1
+    physical_cores: int = 0
+    performance_cores: int = 0
+    efficiency_cores: int = 0
+    smt: bool = False
+    isa_features: tuple[str, ...] = ()
+    memory_bytes: int = 0
+    memory_source: str = "unavailable"
+    topology_source: str = "unavailable"
+    gpus: tuple[GpuAdapter, ...] = field(default_factory=tuple)
 
     @property
     def apple_silicon(self) -> bool:
@@ -49,37 +75,44 @@ class HardwareProfile:
             "appleSilicon": self.apple_silicon,
             "m3ProTuned": self.m3_pro_tuned,
             "warnings": list(self.warnings),
+            "platformId": self.platform_id,
+            "logicalCores": self.logical_cores,
+            "physicalCores": self.physical_cores,
+            "performanceCores": self.performance_cores,
+            "efficiencyCores": self.efficiency_cores,
+            "smt": self.smt,
+            "isaFeatures": list(self.isa_features),
+            "memoryBytes": self.memory_bytes,
+            "memorySource": self.memory_source,
+            "topologySource": self.topology_source,
+            "gpus": [adapter.serializable() for adapter in self.gpus],
         }
 
 
-def _mac_cpu_brand() -> str:
-    for command, pattern in (
-        (["sysctl", "-n", "machdep.cpu.brand_string"], None),
-        (
-            ["system_profiler", "SPHardwareDataType", "-detailLevel", "mini"],
-            re.compile(r"^\s*Chip:\s*(.+?)\s*$", re.MULTILINE),
-        ),
-    ):
-        try:
-            result = subprocess.run(
-                command,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=4,
-            )
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if result.returncode != 0:
-            continue
-        output = result.stdout.strip()
-        if pattern is None and output:
-            return output
-        if pattern is not None:
-            match = pattern.search(output)
-            if match:
-                return match.group(1).strip()
-    return ""
+def _native_isa_features() -> tuple[str, ...]:
+    """ISA extensions from the native library's cpuid probe, if it is loaded."""
+
+    try:
+        from .native_kernels import load_native_kernels
+
+        kernels = load_native_kernels()
+    except Exception:  # pragma: no cover - defensive: a probe never blocks detection
+        return ()
+    if kernels is None:
+        return ()
+    try:
+        return kernels.cpu_features()
+    except Exception:  # pragma: no cover - defensive
+        return ()
+
+
+def _platform_id_for_system(system: str) -> PlatformId:
+    lowered = system.casefold()
+    if lowered == "darwin":
+        return "darwin"
+    if lowered == "windows":
+        return "windows"
+    return "linux"
 
 
 def detect_hardware(
@@ -87,25 +120,69 @@ def detect_hardware(
     system: str | None = None,
     machine: str | None = None,
     cpu_brand: str | None = None,
-    cpu_brand_probe: Callable[[], str] = _mac_cpu_brand,
+    cpu_brand_probe: Callable[[], str] | None = None,
+    topology: CpuTopology | None = None,
+    memory: MemoryStatus | None = None,
+    isa_probe: Callable[[], tuple[str, ...]] = _native_isa_features,
 ) -> HardwareProfile:
     """Detect compatibility, keeping execution readiness a separate concern.
 
-    All Apple-silicon generations intentionally share a generic CPU + Metal
-    path. Only an exact M3 Pro brand match selects the tuned profile. Unknown
-    future M chips therefore remain supported without inheriting unsafe tuning.
+    Facts come from the platform service layer of the *running* host; every
+    parameter can be injected so any platform's profile can be built in tests
+    on any other platform (an injected ``system`` never probes the real host's
+    topology or memory).  All Apple-silicon generations intentionally share a
+    generic CPU + Metal path; only an exact M3 Pro brand match selects the
+    tuned profile.  x86-64 hosts (Windows, Linux) share one CPU family and are
+    tuned by core count and memory, never by product name.
     """
 
+    injected_host = system is not None or machine is not None
     os_name = (system or platform.system() or "Unknown").strip()
     architecture = (machine or platform.machine() or "unknown").strip().lower()
-    brand = cpu_brand
-    if brand is None:
-        if os_name.casefold() == "darwin":
-            brand = cpu_brand_probe()
-        brand = brand or platform.processor() or architecture
-    brand = brand.strip()
+    platform_id = _platform_id_for_system(os_name)
+    services = None if injected_host else services_for(platform_id_for())
 
-    if os_name.casefold() == "darwin" and architecture in {"arm64", "aarch64"}:
+    if topology is None:
+        if services is not None:
+            topology = services.cpu_topology()
+        else:
+            topology = fallback_topology(cpu_brand or "")
+    if memory is None:
+        # An injected host never claims a memory size it did not measure; the
+        # tuning layer then asks the running platform (or its fallback) itself.
+        memory = (
+            services.memory_status()
+            if services is not None
+            else MemoryStatus(0, None, "unavailable")
+        )
+
+    brand = cpu_brand
+    if brand is None and cpu_brand_probe is not None:
+        brand = cpu_brand_probe()
+    if brand is None:
+        brand = topology.brand
+    brand = (brand or platform.processor() or architecture).strip()
+
+    isa_features = topology.isa_features
+    if not isa_features and services is not None:
+        isa_features = tuple(isa_probe())
+
+    common = {
+        "architecture": architecture,
+        "cpu_brand": brand,
+        "platform_id": platform_id,
+        "logical_cores": max(1, int(topology.logical_cores or os.cpu_count() or 1)),
+        "physical_cores": int(topology.physical_cores),
+        "performance_cores": int(topology.performance_cores),
+        "efficiency_cores": int(topology.efficiency_cores),
+        "smt": bool(topology.smt),
+        "isa_features": tuple(isa_features),
+        "memory_bytes": int(memory.total_bytes),
+        "memory_source": memory.source,
+        "topology_source": topology.source,
+    }
+
+    if platform_id == "darwin" and architecture in _ARM64_MACHINES:
         optimization = (
             "apple-m3-pro-tuned-v1"
             if re.search(r"\bapple\s+m3\s+pro\b", brand, re.IGNORECASE)
@@ -118,40 +195,48 @@ def detect_hardware(
             )
         return HardwareProfile(
             operating_system="macOS",
-            architecture=architecture,
-            cpu_brand=brand,
             cpu_family=CpuFamily.APPLE_M,
             devices=(DeviceKind.CPU, DeviceKind.METAL),
             cpu_backend="apple-silicon-cpu-v1",
             accelerator_backend="metal-generic-v1",
             optimization_profile=optimization,
             warnings=warnings,
+            **common,
         )
 
-    if os_name.casefold() == "windows":
+    if platform_id == "windows":
+        x86 = architecture in _X86_64_MACHINES
+        warnings = (
+            (
+                "Windows accelerator execution is an extension seam; this release advertises CPU compatibility only.",
+            )
+            if x86
+            else (
+                f"Windows on {architecture} is outside the supported x86-64 boundary; the portable CPU path runs without tuning evidence.",
+            )
+        )
         return HardwareProfile(
             operating_system="Windows",
-            architecture=architecture,
-            cpu_brand=brand,
-            cpu_family=CpuFamily.WINDOWS,
+            cpu_family=CpuFamily.X86_64 if x86 else CpuFamily.GENERIC,
             devices=(DeviceKind.CPU,),
             cpu_backend="windows-cpu-v1",
             accelerator_backend=None,
-            optimization_profile="windows-cpu-generic-v1",
-            warnings=(
-                "Windows accelerator execution is an extension seam; this release advertises CPU compatibility only.",
-            ),
+            optimization_profile="windows-x86-64-cpu-v1" if x86 else "portable-cpu-generic-v1",
+            warnings=warnings,
+            **common,
         )
 
+    x86 = architecture in _X86_64_MACHINES
     return HardwareProfile(
         operating_system=os_name,
-        architecture=architecture,
-        cpu_brand=brand,
-        cpu_family=CpuFamily.GENERIC,
+        cpu_family=CpuFamily.X86_64 if x86 else CpuFamily.GENERIC,
         devices=(DeviceKind.CPU,),
         cpu_backend="portable-cpu-v1",
         accelerator_backend=None,
-        optimization_profile="portable-cpu-generic-v1",
+        optimization_profile=(
+            "linux-x86-64-cpu-v1" if x86 and platform_id == "linux" else "portable-cpu-generic-v1"
+        ),
+        **common,
     )
 
 

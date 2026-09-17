@@ -38,6 +38,7 @@ from typing import Any, Mapping, Sequence
 
 from astropy.io import fits
 
+from . import platform as platform_services
 from .astap_backend import (
     ExecutableProbe,
     SolverExecutionError,
@@ -179,28 +180,7 @@ def discover_siril_cli(
         if candidate:
             return candidate
 
-    candidates: list[Path] = []
-    if os.name == "nt":
-        for root_key in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
-            root = env.get(root_key)
-            if root:
-                candidates.extend(
-                    (
-                        Path(root) / "Siril" / "bin" / "siril-cli.exe",
-                        Path(root) / "Siril" / "siril-cli.exe",
-                        Path(root) / "Programs" / "Siril" / "bin" / "siril-cli.exe",
-                    )
-                )
-    elif _sys_platform() == "darwin":
-        candidates.extend(
-            (
-                Path("/Applications/Siril.app/Contents/MacOS/siril-cli"),
-                Path("/opt/homebrew/bin/siril-cli"),
-                Path("/usr/local/bin/siril-cli"),
-            )
-        )
-    else:
-        candidates.extend((Path("/usr/bin/siril-cli"), Path("/usr/local/bin/siril-cli")))
+    candidates = platform_services.current().well_known_executables("siril-cli", environment=env)
     for path in candidates:
         candidate = _candidate_path(path)
         if candidate:

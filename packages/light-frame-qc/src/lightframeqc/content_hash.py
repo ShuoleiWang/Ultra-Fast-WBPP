@@ -78,9 +78,12 @@ def file_sha256(path: str | os.PathLike[str], *, chunk_size: int = DEFAULT_CHUNK
         closing = stat_identity(os.fstat(stream.fileno()))
     after = stat_identity(source.stat())
     value = digest.hexdigest()
-    # Windows reports device/inode differently for pathname and descriptor
-    # stats; size and timestamps are comparable across both.
-    comparable = (lambda item: item[2:]) if os.name == "nt" else (lambda item: item)
+    # On Windows the pathname stat reports the creation time as st_ctime
+    # while the descriptor stat reports the change time, and CPython may also
+    # synthesize different device/inode coordinates for the two; only size
+    # and mtime are comparable across the pathname/descriptor boundary (the
+    # same rule as lightframeqc.identity).  POSIX compares everything.
+    comparable = (lambda item: item[2:4]) if os.name == "nt" else (lambda item: item)
     if comparable(opened) == comparable(closing) == comparable(identity) == comparable(after):
         record_sha256(after, value)
     return value
