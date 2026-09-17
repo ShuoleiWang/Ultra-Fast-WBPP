@@ -21,24 +21,22 @@ appreciated, not an additional condition of the MIT license.
 
 The local continuation review found one author and committer across the eight visible commits and no additional co-author trailers. The identified Astroalign adaptation retains its upstream MIT notice. This supports the recorded provenance but does not independently prove ownership of initial imports or every uncommitted change. Before publishing the relicensed candidate, the copyright holder must confirm authority to relicense all project-owned portions; third-party code and documents retain their original terms.
 
-## The current bundled worker is not MIT-only
+## No GPL library in the bundled worker
 
-The Python packages currently require [`xisf`](https://github.com/sergio-dr/xisf),
-whose upstream license is GPL-3.0. The frozen scientific worker imports and
-bundles that library. The project's MIT license does not relicense `xisf` or
-remove the obligations of distributing that combined worker.
+Earlier versions imported the GPL-3.0 [`xisf`](https://github.com/sergio-dr/xisf)
+package to read XISF containers, which made the combined worker a GPLv3
+distribution. XISF files are now read and written by the project's own
+`lightframeqc.xisf` module (MIT; validated value-for-value against the
+previous reader on PixInsight-written masters, calibrated and registered
+frames and on every codec/shuffle/sample-format combination), so the Python
+runtime imports no GPL-licensed code.
 
-Treat redistribution of the current combined worker as GPLv3 distribution:
-preserve applicable notices and provide the complete corresponding source and
-build instructions for the distributed version. MIT portions remain available
-under MIT, while the combined program must satisfy the GPL. Do not advertise
-the current installer or scientific stack as an exclusively permissive product.
-A permissive-only distribution would require replacing GPL dependencies and
-auditing the resulting dependency tree; that work has not been completed.
-
-SEP also carries LGPL-3.0-or-later requirements. Separately installed solvers
-and catalog data retain their own terms. See [third-party notices](../THIRD_PARTY_NOTICES.md).
-The repository includes the [GPLv3 text](../LICENSES/GPL-3.0.txt) and the
+SEP carries LGPL-3.0-or-later requirements, which the frozen worker satisfies as
+a separately replaceable shared library with its notices preserved; the LGPLv3
+refers to the GPLv3 text, which the repository keeps for that reason. Separately
+installed solvers and catalog data retain their own terms. See
+[third-party notices](../THIRD_PARTY_NOTICES.md). The repository includes the
+[GPLv3 text](../LICENSES/GPL-3.0.txt) and the
 [Astroalign MIT notice](../LICENSES/astroalign-MIT.txt); these are not a complete
 license bundle for every transitive binary dependency.
 
@@ -50,4 +48,4 @@ See the [release checklist](release-process.md).
 
 Authoritative references: [OSI MIT text](https://opensource.org/license/mit),
 [GNU license compatibility guidance](https://www.gnu.org/licenses/license-compatibility.en.html),
-and [upstream XISF](https://github.com/sergio-dr/xisf).
+and the [XISF 1.0 specification](https://pixinsight.com/doc/docs/XISF-1.0-spec/XISF-1.0-spec.html).

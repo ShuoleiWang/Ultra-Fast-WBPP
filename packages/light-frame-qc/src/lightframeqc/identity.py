@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import stat
 
+from .content_hash import record_sha256, stat_identity
 from .models import FileIdentity
 
 
@@ -48,6 +49,14 @@ def _content_stat_signature(value: os.stat_result) -> tuple[int, int]:
     return (int(value.st_size), int(value.st_mtime_ns))
 
 
+def _cached_digest(value: os.stat_result) -> str | None:
+    """A digest already computed for exactly this stat identity."""
+
+    from .content_hash import _lookup
+
+    return _lookup(stat_identity(value))
+
+
 def compute_file_identity(
     path: str | os.PathLike[str],
     *,
@@ -61,6 +70,15 @@ def compute_file_identity(
     before = source.stat()
     if not stat.S_ISREG(before.st_mode):
         raise FileIdentityError("INPUT_NOT_FILE", source, "path is not a regular file")
+    known = _cached_digest(before)
+    if known is not None:
+        return FileIdentity(
+            sha256=known,
+            size_bytes=int(before.st_size),
+            mtime_ns=int(before.st_mtime_ns),
+            device=int(before.st_dev),
+            inode=int(before.st_ino),
+        )
 
     digest = hashlib.sha256()
     with source.open("rb") as stream:
@@ -111,8 +129,10 @@ def compute_file_identity(
             "device, inode, size, mtime, or ctime changed while hashing",
         )
 
+    value = digest.hexdigest()
+    record_sha256(stat_identity(after), value)
     return FileIdentity(
-        sha256=digest.hexdigest(),
+        sha256=value,
         size_bytes=int(after.st_size),
         mtime_ns=int(after.st_mtime_ns),
         device=int(after.st_dev),

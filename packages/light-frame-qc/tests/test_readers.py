@@ -6,7 +6,7 @@ from pathlib import Path
 from astropy.io import fits
 import numpy as np
 import pytest
-from xisf import XISF
+from lightframeqc.xisf import XISF
 
 from lightframeqc.readers import (
     FrameDiscoveryError,

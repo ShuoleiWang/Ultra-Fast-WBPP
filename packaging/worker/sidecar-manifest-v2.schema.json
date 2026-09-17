@@ -144,8 +144,7 @@
             "shapely",
             "light-frame-qc",
             "openastroflow-engine",
-            "openastroflow-registration",
-            "xisf"
+            "openastroflow-registration"
           ],
           "properties": {
             "astropy": { "type": "string", "minLength": 1 },
@@ -154,8 +153,7 @@
             "shapely": { "type": "string", "minLength": 1 },
             "light-frame-qc": { "type": "string", "minLength": 1 },
             "openastroflow-engine": { "type": "string", "minLength": 1 },
-            "openastroflow-registration": { "type": "string", "minLength": 1 },
-            "xisf": { "type": "string", "minLength": 1 }
+            "openastroflow-registration": { "type": "string", "minLength": 1 }
           }
         }
       }

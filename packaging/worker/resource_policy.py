@@ -29,11 +29,9 @@ DISTRIBUTION_NAMES = {
     "reproject": "reproject",
     "shapely": "shapely",
 }
-REQUIRED_METADATA_DISTRIBUTIONS = (
-    # xisf.py queries its distribution version at import time. PyInstaller
-    # cannot infer that metadata lookup from the import graph.
-    "xisf",
-)
+# Distributions whose metadata must ship because a module reads its own
+# version at import time; none of the current dependencies do.
+REQUIRED_METADATA_DISTRIBUTIONS: tuple[str, ...] = ()
 CHECKED_CATALOG_RESOURCES = (
     "astap-external-v1.json",
     "astrometry-net-4107-4112-v1.json",

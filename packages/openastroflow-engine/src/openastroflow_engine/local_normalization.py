@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 from dataclasses import dataclass
-import hashlib
 import json
 import math
 import os
@@ -29,6 +28,7 @@ from typing import Any, Sequence
 import numpy as np
 from numpy.typing import NDArray
 
+from lightframeqc.content_hash import file_sha256
 from .calibration import CalibrationError, FitsFloatWriter, FitsFrame, PixelStatistics
 
 
@@ -126,11 +126,7 @@ class LocalNormalizationResult:
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(4 * 1024 * 1024):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
+    return "sha256:" + file_sha256(path)
 
 
 def _canonical_matrix(value: Sequence[Sequence[float]] | None) -> NDArray[np.float64]:

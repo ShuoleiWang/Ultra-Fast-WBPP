@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 from astropy.io import fits
 import numpy as np
 import pytest
-from xisf import XISF
+from lightframeqc.xisf import XISF
 
 from openastroflow_engine.calibration import CalibrationError, read_frame_info
 from openastroflow_engine.global_normalization import GlobalNormalizationParameters

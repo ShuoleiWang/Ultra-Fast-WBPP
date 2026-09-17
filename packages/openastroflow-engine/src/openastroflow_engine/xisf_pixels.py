@@ -15,7 +15,6 @@ fail-closed; header-only inventory support must never imply pixel support.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 import math
 import os
 from pathlib import Path
@@ -26,8 +25,9 @@ import zlib
 import lz4.block
 import numpy as np
 import zstandard
-from xisf import XISF
+from lightframeqc.xisf import XISF
 
+from lightframeqc.content_hash import file_sha256
 from .calibration import CalibrationError, FitsFloatWriter
 
 
@@ -127,11 +127,7 @@ class XisfConversionReceipt:
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(4 * 1024 * 1024):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
+    return "sha256:" + file_sha256(path)
 
 
 def _stat_identity(path: Path) -> tuple[int, int, int, int]:

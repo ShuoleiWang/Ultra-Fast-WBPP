@@ -41,7 +41,7 @@ BOOTSTRAP = 300
 def load_image(path: str) -> np.ndarray:
     lower = path.lower()
     if lower.endswith(".xisf"):
-        from xisf import XISF
+        from lightframeqc.xisf import XISF
 
         data = np.squeeze(XISF(path).read_image(0)).astype(np.float32)
     else:

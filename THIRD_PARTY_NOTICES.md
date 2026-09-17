@@ -1,20 +1,19 @@
 # Third-party notices
 
-Original Ultra-Fast WBPP code is licensed under MIT. The current frozen worker includes GPL-3.0 `xisf` and cannot be redistributed under MIT alone; see [licensing and attribution](docs/licensing.md). Binary distributions must reproduce the complete notices and license texts for the exact dependency lockfiles and bundled artifacts used by that release; this source-level summary is not a substitute for the generated release notice bundle. No signed stable binary release exists yet, and the final onedir bundle/SBOM/license evidence remains a pre-release gate.
+Original Ultra-Fast WBPP code is licensed under MIT. The Python runtime no longer imports any GPL-licensed library: XISF containers are read and written by the project's own `lightframeqc.xisf` module (MIT). See [licensing and attribution](docs/licensing.md). Binary distributions must reproduce the complete notices and license texts for the exact dependency lockfiles and bundled artifacts used by that release; this source-level summary is not a substitute for the generated release notice bundle. No signed stable binary release exists yet, and the final onedir bundle/SBOM/license evidence remains a pre-release gate.
 
 ## Python scientific stack
 
 - NumPy — BSD-3-Clause and bundled component notices.
 - SciPy — BSD-3-Clause and bundled component notices.
 - Astropy — BSD-3-Clause.
-- SEP — LGPL-3.0-or-later.
+- SEP — LGPL-3.0-or-later. The LGPLv3 incorporates the GPLv3 by reference; the repository therefore keeps [LICENSES/GPL-3.0.txt](LICENSES/GPL-3.0.txt) for that notice.
 - scikit-image — BSD family and MIT component notices.
 - Astroalign — MIT. The adapted triangle bootstrap retains its upstream copyright and permission notice; a complete copy is in [LICENSES/astroalign-MIT.txt](LICENSES/astroalign-MIT.txt).
 - Pillow — MIT-CMU.
-- `xisf` — GPL-3.0. Imported into the Python runtime; required by the current packages, not an optional external executable. See [LICENSES/GPL-3.0.txt](LICENSES/GPL-3.0.txt).
 - STScI `drizzle` — BSD-3-Clause when enabled.
 - `reproject`, Dask, and Shapely — BSD-3-Clause; Zarr — MIT. Shapely wheels also bundle GEOS under LGPL-2.1. These optional mosaic components and their transitive dependencies retain their own terms; inventory the exact distributed artifacts and include their complete notices rather than treating the whole dependency closure as BSD-licensed.
-- PyInstaller bootloader and build tooling — GPL-2.0-or-later with the PyInstaller bootloader exception; the exception does not remove the separate GPL obligations of `xisf` in the combined worker.
+- PyInstaller bootloader and build tooling — GPL-2.0-or-later with the PyInstaller bootloader exception, which allows the frozen worker to be distributed under the project's own terms.
 - OpenSSL 3 — Apache-2.0. The macOS 14 arm64 compatibility overlay is bound to an exact official Homebrew bottle manifest and blob digest.
 - mpdecimal — BSD-2-Clause. The macOS 14 arm64 compatibility overlay is bound to an exact official Homebrew bottle manifest and blob digest.
 

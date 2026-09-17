@@ -29,6 +29,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 from numpy.typing import NDArray
 
+from lightframeqc.content_hash import file_sha256
 from .calibration_policy import (STRICT, MONO_STANDARD, WORKFLOWS, apply_mono_workflow, metadata_changes, same_metadata, cfa_for_workflow, resolve_dark_bias, workflow_receipt, can_omit_bias, conflicting_profile_fields, acquisition_receipt)
 from .calibration import (
     CalibrationError,
@@ -905,11 +906,7 @@ def _exposure_token(value: float) -> str:
 
 
 def _hash_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(4 * 1024 * 1024):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
+    return "sha256:" + file_sha256(path)
 
 
 def _stat_identity(path: Path) -> dict[str, int]:

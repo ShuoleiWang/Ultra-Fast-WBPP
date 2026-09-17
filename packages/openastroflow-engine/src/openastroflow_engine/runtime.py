@@ -8,6 +8,7 @@ runtime probes.  Unsupported recipe semantics fail before any pixel work.
 
 from __future__ import annotations
 
+from lightframeqc.content_hash import file_sha256
 from .calibration_policy import MONO_STANDARD
 
 from dataclasses import replace
@@ -120,11 +121,7 @@ def _ready_assets(inventory: ProjectInventory, role: AssetRole) -> tuple[str, ..
 
 
 def _file_sha256(path: str) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        while chunk := stream.read(4 * 1024 * 1024):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
+    return "sha256:" + file_sha256(path)
 
 
 def validate_e2e_inventory(inventory: ProjectInventory, recipe: Recipe) -> None:

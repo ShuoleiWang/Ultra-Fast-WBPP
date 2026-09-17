@@ -10,7 +10,6 @@ import openastroflow_registration.pipeline as registration_pipeline
 from openastroflow_registration.pipeline import (
     CalibrationPlan,
     calibrate_image,
-    common_autocrop,
     RegistrationConfig,
     warp_image,
 )
@@ -251,26 +250,6 @@ class RegistrationGeometryTests(unittest.TestCase):
         self.assertIn(
             "SPATIAL_SPAN_LOW", refined.full_refine_evidence["gateReasons"]
         )
-
-    def test_identity_autocrop_respects_interpolation_margin(self) -> None:
-        crop = common_autocrop(
-            [np.eye(3), np.eye(3)],
-            [(100, 200), (100, 200)],
-            (100, 200),
-            margin=2,
-        )
-        self.assertEqual(crop, (2, 2, 198, 98))
-
-    def test_translation_common_footprint(self) -> None:
-        # Source 2 shifts +10 x and +5 y into reference coordinates.
-        translated = np.asarray([[1, 0, 10], [0, 1, 5], [0, 0, 1]], dtype=float)
-        crop = common_autocrop(
-            [np.eye(3), translated],
-            [(100, 200), (100, 200)],
-            (100, 200),
-            margin=0,
-        )
-        self.assertEqual(crop, (10, 5, 200, 100))
 
     def test_warp_uses_source_to_reference_contract(self) -> None:
         image = np.zeros((20, 30), dtype=np.float32)

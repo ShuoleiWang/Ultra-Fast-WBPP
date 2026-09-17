@@ -39,6 +39,8 @@ from typing import (
 from astropy.io import fits
 import numpy as np
 
+from lightframeqc.content_hash import file_sha256
+
 
 _SUPPORTED_SCALES = (1, 2, 3)
 _SUPPORTED_KERNELS = (
@@ -597,11 +599,7 @@ def validate_drizzle_request(request: DrizzleExecutionRequest) -> None:
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+    return file_sha256(path)
 
 
 def _source_identity(path_value: str, label: str) -> _SourceIdentity:
