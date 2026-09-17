@@ -369,3 +369,255 @@ def test_insufficient_global_samples_do_not_use_grid_rejection_fallback(
     with pytest.raises(CalibrationError) as captured:
         fit_registered_group_global_normalization(paths, reference_index=0)
     assert captured.value.code == "GLOBAL_NORMALIZATION_SAMPLES_INSUFFICIENT"
+
+
+def _sky_response_group(
+    tmp_path: Path, *, sky_levels: tuple[float, ...], response_depth: float = 0.03
+) -> tuple[list[Path], np.ndarray, np.ndarray]:
+    """Frames sharing an object and a sky-proportional edge roll-off."""
+
+    shape = (1024, 640)
+    y, x = np.indices(shape, dtype=np.float64)
+    # Residual flat error: a roll-off over the bottom 12% and a mild
+    # left-right slope, both proportional to the sky.
+    response = -response_depth * np.clip((y - 0.88 * shape[0]) / (0.12 * shape[0]), 0.0, 1.0)
+    response += 0.004 * (x / (shape[1] - 1) - 0.5)
+    galaxy = 120.0 * np.exp(-((x - 300.0) ** 2 + (y - 400.0) ** 2) / (2.0 * 45.0**2))
+    rng = np.random.default_rng(7)
+    stars = np.zeros(shape)
+    for _ in range(120):
+        sx, sy = rng.uniform(8, shape[1] - 8), rng.uniform(8, shape[0] - 8)
+        stars += rng.uniform(300, 4000) * np.exp(-((x - sx) ** 2 + (y - sy) ** 2) / (2 * 1.4**2))
+    paths = []
+    for index, sky in enumerate(sky_levels):
+        frame = (sky * (1.0 + response) + galaxy + stars + rng.normal(0.0, 4.0, shape)).astype(np.float32)
+        paths.append(_write(tmp_path / f"frame-{index}.fits", frame))
+    return paths, response, galaxy
+
+
+def test_sky_proportional_response_is_removed_from_every_frame(tmp_path: Path) -> None:
+    skies = (720.0, 680.0, 640.0, 590.0, 540.0, 490.0, 440.0, 390.0, 350.0, 320.0)
+    paths, response, _galaxy = _sky_response_group(tmp_path, sky_levels=skies)
+    reference_index = len(skies) - 1  # lowest sky, as registration chooses it
+    parameters = GlobalNormalizationParameters(
+        offset_tile_size_pixels=64, offset_smoothing_sigma_nodes=3.0
+    )
+
+    result = fit_registered_group_global_normalization(
+        paths, reference_index=reference_index, parameters=parameters, workers=2
+    )
+
+    evidence = result.receipt["skyResponse"]
+    assert evidence["status"] == "APPLIED"
+    assert evidence["skyRatio"] == pytest.approx(720.0 / 320.0, rel=0.05)
+    assert evidence["halvesCorrelation"] > 0.85
+    rows = evidence["rowMedianFractions"]
+    # The roll-off occupies the bottom quarter; the response keeps only what
+    # the additive grid's smoothing cannot follow, so compare the last row
+    # band with the middle of the frame.
+    assert rows[-1] < rows[len(rows) // 2] - 0.008
+    assert result.coefficients[reference_index].mode.startswith("REFERENCE_IDENTITY+SKY_RESPONSE")
+    assert all("+SKY_RESPONSE" in item.mode for item in result.coefficients)
+
+    # Integrate (plain mean) with and without the coefficients and compare
+    # the bottom band of the master against its centre.
+    shape = (1024, 640)
+    plain = np.zeros(shape)
+    corrected = np.zeros(shape)
+    for path, coefficient in zip(paths, result.coefficients, strict=True):
+        out = tmp_path / f"{path.stem}-normalized.fits"
+        write_expression(
+            FrameExpression(
+                str(path),
+                scale=coefficient.scale,
+                offset=coefficient.offset,
+                offset_grid=coefficient.offset_grid,
+                offset_grid_x=coefficient.offset_grid_x,
+                offset_grid_y=coefficient.offset_grid_y,
+            ),
+            out,
+            max_memory_bytes=4 * 1024 * 1024,
+        )
+        with fits.open(out, memmap=False) as hdul:
+            corrected += np.asarray(hdul[0].data, dtype=np.float64)
+        with fits.open(path, memmap=False) as hdul:
+            plain += np.asarray(hdul[0].data, dtype=np.float64)
+    plain /= len(paths)
+    corrected /= len(paths)
+    band = slice(int(0.93 * shape[0]), int(0.99 * shape[0]))
+    centre = slice(int(0.45 * shape[0]), int(0.55 * shape[0]))
+    columns = slice(0, 200)  # away from the galaxy
+    plain_band = np.median(plain[band, columns]) - np.median(plain[centre, columns])
+    corrected_band = np.median(corrected[band, columns]) - np.median(corrected[centre, columns])
+    assert plain_band < -6.0  # the mean of the frames keeps the roll-off
+    # The sky-proportional part of the roll-off is gone; what remains is the
+    # low-order part left to the additive grid and the reference frame.
+    assert abs(corrected_band) < 0.4 * abs(plain_band)
+    # The object is untouched: the galaxy peak above its surroundings agrees.
+    plain_peak = plain[400, 300] - np.median(plain[350:370, 300:320])
+    corrected_peak = corrected[400, 300] - np.median(corrected[350:370, 300:320])
+    assert corrected_peak == pytest.approx(plain_peak, rel=0.05, abs=3.0)
+
+
+def test_sky_response_needs_enough_sky_variation(tmp_path: Path) -> None:
+    skies = (500.0, 505.0, 495.0, 502.0, 498.0, 501.0)
+    paths, _response, _galaxy = _sky_response_group(tmp_path, sky_levels=skies)
+    result = fit_registered_group_global_normalization(
+        paths,
+        reference_index=0,
+        parameters=GlobalNormalizationParameters(offset_tile_size_pixels=64),
+    )
+    assert result.receipt["skyResponse"]["status"] == "NOT_APPLICABLE"
+    assert result.coefficients[0].mode.startswith("REFERENCE_IDENTITY")
+    assert all("SKY_RESPONSE" not in item.mode for item in result.coefficients)
+    # Six frames still receive the group's flattest low-order target.
+    assert result.receipt["lowOrderTarget"]["status"] == "APPLIED"
+
+
+def _tilted_levels(gradients: list[tuple[float, float]], sky: float = 500.0) -> np.ndarray:
+    """Tile-level maps of frames whose backgrounds are planes with the given
+    (x, y) spans in ADU across the frame, plus a common roll-off at the edges."""
+
+    y, x = np.indices((17, 25), dtype=np.float64)
+    x = x / 24.0 - 0.5
+    y = y / 16.0 - 0.5
+    roll_off = -3.0 * np.clip(np.hypot(x, y) - 0.4, 0.0, None)
+    return np.stack([sky + gx * x + gy * y + roll_off for gx, gy in gradients])
+
+
+def test_low_order_target_cancels_opposing_night_gradients() -> None:
+    from openastroflow_engine.global_normalization import _fit_low_order_target
+
+    # Two nights, one of them observed after a meridian flip: opposite tilts.
+    gradients = [(-3.0, -0.6)] * 4 + [(-2.4, 0.6)] * 3 + [(2.6, -0.4)] * 3
+    levels = _tilted_levels(gradients)
+    skies = np.median(levels.reshape(len(gradients), -1), axis=1)
+    result = _fit_low_order_target(levels, skies, [1.0] * len(gradients), 0, 6)
+    evidence = result.evidence
+    assert evidence["status"] == "APPLIED"
+    assert evidence["rule"] == "flattest-convex-combination-of-frame-tilts-v1"
+    # A mix of both nights is flatter than any single frame and than the mean.
+    assert evidence["targetPlaneAmplitude"] < 0.15
+    assert evidence["flattestFramePlaneAmplitude"] > 2.0
+    assert evidence["groupMeanPlaneAmplitude"] > 0.5
+    assert all(index in range(len(gradients)) for index in evidence["supportFrames"])
+    assert sum(evidence["weights"]) == pytest.approx(1.0, abs=1e-3)
+    # The correction removes the reference's own tilt: reference plus
+    # correction is flat to first order, while the common roll-off is not
+    # touched (it is not a plane).
+    y, x = np.indices(levels.shape[1:], dtype=np.float64)
+    x = x / 24.0 - 0.5
+    y = y / 16.0 - 0.5
+    corrected = levels[0] + result.correction
+    design = np.column_stack((np.ones(x.size), x.ravel(), y.ravel()))
+    coefficients, *_ = np.linalg.lstsq(design, corrected.ravel(), rcond=None)
+    assert abs(coefficients[1]) < 0.2 and abs(coefficients[2]) < 0.2
+
+
+def test_low_order_target_keeps_a_single_night_common_tilt() -> None:
+    from openastroflow_engine.global_normalization import _fit_low_order_target
+
+    gradients = [(-3.0, -0.6), (-2.8, -0.5), (-3.1, -0.7), (-2.9, -0.4), (-3.0, -0.6), (-2.7, -0.5)]
+    levels = _tilted_levels(gradients)
+    skies = np.median(levels.reshape(len(gradients), -1), axis=1)
+    result = _fit_low_order_target(levels, skies, [1.0] * len(gradients), 2, 6)
+    evidence = result.evidence
+    assert evidence["status"] == "APPLIED"
+    # All frames tilt the same way: the flattest mix is essentially the
+    # flattest frame; the master keeps the night's tilt and is not flattened.
+    assert evidence["targetPlaneAmplitude"] >= evidence["flattestFramePlaneAmplitude"] - 1e-6
+    assert evidence["targetPlaneAmplitude"] > 2.5
+    # The correction only moves the reference to the flattest frame of the night.
+    assert evidence["correctionAmplitude"] < 1.0
+
+
+def _flipped_sky_response_group(
+    tmp_path: Path, *, sky_levels: tuple[float, ...], flipped: tuple[bool, ...]
+) -> tuple[list[Path], list[np.ndarray]]:
+    """Registered frames of two nights sharing a sensor-fixed roll-off; the
+    second night was taken after a meridian flip, so its registered frames
+    are the sensor image rotated by a half-turn and the roll-off sits on the
+    opposite edge of the registered geometry."""
+
+    shape = (1024, 640)
+    y, x = np.indices(shape, dtype=np.float64)
+    # Roll-off over the bottom 12% of the sensor, as a flat-field residual.
+    response = -0.03 * np.clip((y - 0.88 * shape[0]) / (0.12 * shape[0]), 0.0, 1.0)
+    galaxy = 120.0 * np.exp(-((x - 300.0) ** 2 + (y - 400.0) ** 2) / (2.0 * 45.0**2))
+    rng = np.random.default_rng(11)
+    stars = np.zeros(shape)
+    for _ in range(120):
+        sx, sy = rng.uniform(8, shape[1] - 8), rng.uniform(8, shape[0] - 8)
+        stars += rng.uniform(300, 4000) * np.exp(-((x - sx) ** 2 + (y - sy) ** 2) / (2 * 1.4**2))
+    half_turn = np.array(
+        [[-1.0, 0.0, shape[1] - 1.0], [0.0, -1.0, shape[0] - 1.0], [0.0, 0.0, 1.0]]
+    )
+    paths, transforms = [], []
+    for index, (sky, flip) in enumerate(zip(sky_levels, flipped, strict=True)):
+        # The object is fixed on the sky; the flat error is fixed on the sensor.
+        sensor_response = response[::-1, ::-1] if flip else response
+        frame = sky * (1.0 + sensor_response) + galaxy + stars + rng.normal(0.0, 4.0, shape)
+        paths.append(_write(tmp_path / f"frame-{index}.fits", frame.astype(np.float32)))
+        transforms.append(half_turn if flip else np.eye(3))
+    return paths, transforms
+
+
+def test_sky_response_is_regressed_in_the_sensor_frame_across_a_meridian_flip(tmp_path: Path) -> None:
+    skies = (720.0, 660.0, 600.0, 540.0, 480.0, 430.0, 390.0, 350.0, 320.0, 300.0)
+    flipped = (False, True, False, True, False, True, False, True, False, True)
+    paths, transforms = _flipped_sky_response_group(tmp_path, sky_levels=skies, flipped=flipped)
+    parameters = GlobalNormalizationParameters(offset_tile_size_pixels=64, offset_smoothing_sigma_nodes=3.0)
+
+    # In registered coordinates the roll-off changes edges from frame to
+    # frame; the halves of the group do not agree and nothing is applied.
+    plain = fit_registered_group_global_normalization(
+        paths, reference_index=len(skies) - 1, parameters=parameters, workers=2
+    )
+    assert plain.receipt["skyResponse"]["status"] != "APPLIED"
+
+    result = fit_registered_group_global_normalization(
+        paths, reference_index=len(skies) - 1, parameters=parameters, workers=2, transforms=transforms
+    )
+    evidence = result.receipt["skyResponse"]
+    assert evidence["status"] == "APPLIED", evidence
+    assert evidence["regressionFrame"] == "sensor"
+    assert evidence["halvesCorrelation"] > 0.85
+    rows = evidence["rowMedianFractions"]  # sensor frame: roll-off at the bottom only
+    assert rows[-1] < rows[len(rows) // 2] - 0.008
+    assert abs(rows[0] - rows[len(rows) // 2]) < 0.5 * abs(rows[-1] - rows[len(rows) // 2])
+
+    shape = (1024, 640)
+    corrected = np.zeros(shape)
+    plain_mean = np.zeros(shape)
+    for path, coefficient in zip(paths, result.coefficients, strict=True):
+        out = tmp_path / f"{path.stem}-normalized.fits"
+        write_expression(
+            FrameExpression(
+                str(path),
+                scale=coefficient.scale,
+                offset=coefficient.offset,
+                offset_grid=coefficient.offset_grid,
+                offset_grid_x=coefficient.offset_grid_x,
+                offset_grid_y=coefficient.offset_grid_y,
+            ),
+            out,
+            max_memory_bytes=4 * 1024 * 1024,
+        )
+        with fits.open(out, memmap=False) as hdul:
+            corrected += np.asarray(hdul[0].data, dtype=np.float64)
+        with fits.open(path, memmap=False) as hdul:
+            plain_mean += np.asarray(hdul[0].data, dtype=np.float64)
+    corrected /= len(paths)
+    plain_mean /= len(paths)
+    columns = slice(0, 200)
+    band = slice(int(0.93 * shape[0]), int(0.99 * shape[0]))
+    centre = np.median(corrected[int(0.45 * shape[0]) : int(0.55 * shape[0]), columns])
+    top = np.median(corrected[int(0.01 * shape[0]) : int(0.07 * shape[0]), columns])
+    bottom = np.median(corrected[band, columns])
+    plain_centre = np.median(plain_mean[int(0.45 * shape[0]) : int(0.55 * shape[0]), columns])
+    plain_bottom = np.median(plain_mean[band, columns])
+    # A plain mean keeps half of the roll-off on each edge; the corrected
+    # master is flat on both edges.
+    assert plain_bottom - plain_centre < -4.0
+    assert abs(bottom - centre) < 0.35 * abs(plain_bottom - plain_centre)
+    assert abs(top - centre) < 0.35 * abs(plain_bottom - plain_centre)

@@ -28,8 +28,9 @@ Rust validates returned files and sky-coordinate evidence → GUI completion
   progress, and validates completion. Native filesystem access is in Rust; the
   web view does not read astronomical files itself.
 - [`project_e2e.py`](../packages/openastroflow-engine/src/openastroflow_engine/project_e2e.py)
-  groups channels, shares calibration masters, runs panels, aligns final
-  channels, crops their common support, and creates color products.
+  groups channels, shares calibration masters, runs one multi-filter E2E run
+  per target, aligns final channels, crops their common support, and creates
+  color products.
 - [`e2e.py`](../packages/openastroflow-engine/src/openastroflow_engine/e2e.py) and
   [`pixel_pipeline.py`](../packages/openastroflow-engine/src/openastroflow_engine/pixel_pipeline.py)
   orchestrate the scientific work. Python owns most scheduling, image I/O and
@@ -62,12 +63,29 @@ contracts; it is not the transport used for every desktop operation. See
 1. Inventory frames and interpret calibration metadata.
 2. Measure Light quality and exclude `HARD_FAIL` and unapproved `REVIEW` frames.
 3. Build raw calibration masters or validate supplied masters; calibrate Lights.
-4. Estimate transforms and register accepted frames. Exact identity/integer
-   half-turns copy pixels; general rotations and dithers use one Lanczos warp.
+4. Estimate transforms and register accepted frames. Every filter of a
+   target registers onto one reference frame with a projective model fitted
+   to core-weighted star centroids, so frames of other nights or hour angles
+   (tilt, differential refraction) and asymmetric PSFs do not leave
+   filter-dependent offsets. Exact identity/integer half-turns copy pixels;
+   general rotations and dithers use one Lanczos warp.
 5. Normalize, reject inconsistent samples and detected transient trails, and
-   integrate. Drizzle follows a separate coverage/rejection contract.
-6. Solve channel products, align them onto a common sky grid, and crop the
-   actual common finite footprint before RGB/LRGB and previews.
+   integrate. Frames are matched to the frame with the flattest large-scale
+   background of acceptable quality; when the sky level varies enough across
+   the group, the sky-proportional part of each frame's background (residual
+   flat-field structure) is separated from the object by regression in the
+   sensor frame (through each frame's registration transform, so a meridian
+   flip does not move it) and removed before matching, and the master's
+   background tilt is moved to the flattest non-negative mix of the frames'
+   own tilts, so gradients of different nights cancel where they disagree.
+   The filter masters of one run are cropped to one common rectangle so
+   they share their pixel grid. Drizzle follows a separate
+   coverage/rejection contract.
+6. Solve every channel product independently; masters that share a grid
+   verify each other's solutions at solver precision and then carry one of
+   them, so the project copies them onto the reference grid without any
+   resampling. Only mosaics of separately solved panels are reprojected. The
+   actual common finite footprint is cropped before RGB/LRGB and previews.
 7. Record input, algorithm, output and solve evidence; validate the result.
 
 Quality screening, relative normalization and background-gradient removal are

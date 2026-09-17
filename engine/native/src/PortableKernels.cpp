@@ -163,11 +163,12 @@ void WarpLanczos3Request::Validate() const
          "Lanczos-3 warp requires a finite positive numeric domain scale" );
    const double coefficients[] = {
       inverse.m00, inverse.m01, inverse.m02,
-      inverse.m10, inverse.m11, inverse.m12 };
+      inverse.m10, inverse.m11, inverse.m12,
+      inverse.m20, inverse.m21, inverse.m22 };
    for ( double value : coefficients )
       if ( !std::isfinite( value ) )
          throw std::invalid_argument(
-            "Lanczos-3 warp inverse affine matrix must be finite" );
+            "Lanczos-3 warp inverse matrix must be finite" );
 }
 
 std::size_t WarpLanczos3Request::OutputPixels() const
@@ -186,6 +187,7 @@ void WarpLanczos3Clamped( const WarpLanczos3Request& request,
          "Lanczos-3 warp destination is smaller than the output band" );
 
    const AffineInverse inverse = request.inverse;
+   const bool projective = !inverse.IsAffine();
    const std::uint32_t width = request.sourceWidth;
    const std::uint32_t height = request.sourceHeight;
    // Python: width - 3.0 (exact Float64 for every practical image size).
@@ -212,6 +214,7 @@ void WarpLanczos3Clamped( const WarpLanczos3Request& request,
                request.firstRow + localRow );
             const double xRowTerm = inverse.m01*outputY;
             const double yRowTerm = inverse.m11*outputY;
+            const double wRowTerm = inverse.m21*outputY;
             float* row = output + localRow*outputWidth;
             for ( std::size_t column = 0; column < outputWidth; ++column )
             {
@@ -222,6 +225,14 @@ void WarpLanczos3Clamped( const WarpLanczos3Request& request,
                double inputY = inverse.m10*outputX;
                inputY = inputY + yRowTerm;
                inputY = inputY + inverse.m12;
+               if ( projective )
+               {
+                  double w = inverse.m20*outputX;
+                  w = w + wRowTerm;
+                  w = w + inverse.m22;
+                  inputX = inputX/w;
+                  inputY = inputY/w;
+               }
                if ( !( std::isfinite( inputX ) && std::isfinite( inputY )
                     && inputX >= 2.0 && inputX <= xLimit
                     && inputY >= 2.0 && inputY <= yLimit ) )

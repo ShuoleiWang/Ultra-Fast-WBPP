@@ -227,6 +227,15 @@ def _warp_transforms(shape: tuple[int, int]) -> dict[str, AffineTransform]:
         "integer-translation": AffineTransform.from_value(
             ((1.0, 0.0, 4.0), (0.0, 1.0, -3.0), (0.0, 0.0, 1.0))
         ),
+        # Perspective terms of the size a tilt or differential refraction
+        # leaves between nights: a few tenths of a pixel across the field.
+        "projective": AffineTransform.from_value(
+            (
+                (1.0004, -0.0005, 1.7),
+                (0.0006, 1.0003, -2.2),
+                (3.0e-6, -2.0e-6, 1.0),
+            )
+        ),
     }
 
 
@@ -279,6 +288,47 @@ def test_native_lanczos_warp_matches_numpy_resampler_bitwise(
     # Streaming digest equals the published file's digest.
     assert native_execution["sha256"] == pipeline._hash_file(native_destination)
     assert fits.getheader(native_destination)["OAFRSAMP"] == "LANCZOS-3-CLAMPED"
+
+
+@requires_native
+def test_native_projective_warp_places_stars_where_the_homography_says() -> None:
+    kernels = native_kernels.load_native_kernels()
+    assert kernels is not None
+    height, width = 160, 240
+    rng = np.random.default_rng(11)
+    yy, xx = np.indices((height, width), dtype=np.float64)
+    # Isolated stars on a jittered grid so the box centroids never blend.
+    grid_y, grid_x = np.mgrid[24:height - 24:24, 24:width - 24:24]
+    truth = np.column_stack((grid_x.ravel(), grid_y.ravel())) + rng.uniform(-3.0, 3.0, (grid_x.size, 2))
+    image = np.full((height, width), 100.0)
+    for x, y in truth:
+        image += 3000.0 * np.exp(-((xx - x) ** 2 + (yy - y) ** 2) / (2 * 1.5**2))
+    forward = np.asarray(
+        [[1.0006, -0.0008, 2.3], [0.0007, 0.9995, -1.6], [4.0e-5, -3.0e-5, 1.0]]
+    )
+    inverse = np.linalg.inv(forward)
+    warped = kernels.warp_lanczos3(
+        image.astype(np.float32), inverse, first_row=0, row_count=height,
+        output_width=width, domain_scale=65535.0, threads=2,
+    )
+    warped = np.nan_to_num(warped, nan=100.0).astype(np.float64)
+    expected = (forward @ np.column_stack((truth, np.ones(len(truth)))).T).T
+    expected = expected[:, :2] / expected[:, 2:3]
+    inside = (expected[:, 0] > 8) & (expected[:, 0] < width - 8) & (expected[:, 1] > 8) & (expected[:, 1] < height - 8)
+    assert np.count_nonzero(inside) > 25
+    errors = []
+    for x, y in expected[inside]:
+        cx, cy = int(round(x)), int(round(y))
+        patch = warped[cy - 4 : cy + 5, cx - 4 : cx + 5] - 100.0
+        py, px = np.indices(patch.shape, dtype=np.float64)
+        total = patch.sum()
+        errors.append(((patch * px).sum() / total + cx - 4 - x, (patch * py).sum() / total + cy - 4 - y))
+    errors = np.asarray(errors)
+    # Perspective terms move the far corner by more than a pixel; the warp
+    # must follow the homography, not its affine part.
+    affine_only = (forward[:2] @ np.column_stack((truth, np.ones(len(truth)))).T).T
+    assert np.max(np.abs(affine_only[inside] - expected[inside])) > 0.8
+    assert np.max(np.abs(errors)) < 0.05
 
 
 @requires_native

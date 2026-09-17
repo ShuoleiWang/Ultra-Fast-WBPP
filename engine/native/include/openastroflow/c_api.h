@@ -195,6 +195,34 @@ OAF_NATIVE_API int oaf_native_cpu_warp_lanczos3_v1(
    char* error_message,
    size_t error_message_capacity );
 
+// Version 2 carries the complete row-major 3x3 homogeneous output-to-input
+// map (m00 m01 m02 m10 m11 m12 m20 m21 m22). A last row of 0 0 1 is the
+// affine map of version 1 with identical arithmetic; any other last row is a
+// projective map whose coordinates are divided by w = m20*x + m21*y + m22.
+typedef struct OafNativeWarpLanczos3RequestV2
+{
+   uint32_t struct_size;
+   uint32_t source_width;
+   uint32_t source_height;
+   uint32_t output_width;
+   uint32_t first_row;
+   uint32_t row_count;
+   uint32_t threads;
+   uint32_t reserved;
+   const float* source_samples;
+   size_t source_sample_count;
+   double inverse[9];
+   float domain_scale;
+   float reserved_scale;
+} OafNativeWarpLanczos3RequestV2;
+
+OAF_NATIVE_API int oaf_native_cpu_warp_lanczos3_v2(
+   const OafNativeWarpLanczos3RequestV2* request,
+   float* destination,
+   size_t destination_capacity,
+   char* error_message,
+   size_t error_message_capacity );
+
 typedef struct OafNativeMadRejectionRequestV1
 {
    uint32_t struct_size;

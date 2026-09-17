@@ -954,6 +954,71 @@ def test_affine_translation_uses_common_autocrop(tmp_path: Path) -> None:
     assert all(not item["identity"] for item in receipt["registration"].values())
 
 
+def test_filters_of_one_run_share_one_autocrop_rectangle(tmp_path: Path) -> None:
+    """Different dithers per filter must not leave the masters on different grids."""
+
+    biases, darks, flats, lights, signal_r, _ = _dataset(tmp_path / "raw")
+    height, width = signal_r.shape
+    for index in range(3):
+        flats.append(
+            _write_frame(
+                tmp_path / "raw" / "flat_g" / f"flat_g_{index}.fits",
+                "Flat",
+                100.0 + 1000.0 * np.ones((height, width), dtype=np.float32),
+                filter_name="G",
+                exposure=2.0,
+            )
+        )
+    green_lights = [
+        _write_frame(
+            tmp_path / "raw" / "light_g" / f"light_g_{index}.fits",
+            "Light",
+            120.0 + signal_r * 0.6,
+            filter_name="G",
+        )
+        for index in range(5)
+    ]
+    # R Lights are shifted by +2 columns, G Lights by +2 rows: the per-filter
+    # valid rectangles differ, but every master must land on their intersection.
+    transforms = {
+        path.name: AffineTransform(((1.0, 0.0, 2.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)))
+        for path in lights
+    }
+    transforms.update(
+        {
+            path.name: AffineTransform(((1.0, 0.0, 0.0), (0.0, 1.0, 2.0), (0.0, 0.0, 1.0)))
+            for path in green_lights
+        }
+    )
+    output = tmp_path / "shared-crop"
+
+    run_portable_pipeline(
+        bias_files=biases,
+        dark_files=darks,
+        flat_files=flats,
+        light_files=lights + green_lights,
+        output_directory=output,
+        transforms=transforms,
+        parameters=_parameters(),
+    )
+
+    receipt = json.loads((output / "receipt.json").read_text(encoding="utf-8"))
+    groups = receipt["statistics"]["integrationGroups"]
+    assert groups["R"]["groupCrop"] == [2, 4, height - 2, width]
+    assert groups["G"]["groupCrop"] == [4, 2, height, width - 2]
+    shared = [4, 4, height - 2, width - 2]
+    assert groups["R"]["crop"] == shared and groups["G"]["crop"] == shared
+    assert groups["R"]["cropSharedAcrossFilters"] is True
+    with fits.open(output / "masters" / "master_light_R.fits", memmap=False) as red:
+        with fits.open(output / "masters" / "master_light_G.fits", memmap=False) as green:
+            assert red[0].data.shape == green[0].data.shape == (height - 6, width - 6)
+            # Output pixel (r, c) holds signal (r, c-2) for R and (r-2, c) for G.
+            np.testing.assert_allclose(red[0].data, signal_r[4:-2, 2:-4], atol=3e-3)
+            # The G Lights are stored as integers with a flat of exactly one,
+            # so their master equals the rounded synthetic signal.
+            np.testing.assert_allclose(green[0].data, 0.6 * signal_r[2:-4, 4:-2], atol=0.5)
+
+
 def test_flats_and_linear_masters_are_built_per_filter(tmp_path: Path) -> None:
     biases, darks, flats, lights, signal_r, _ = _dataset(tmp_path / "raw")
     height, width = signal_r.shape
@@ -1060,3 +1125,62 @@ def test_calibration_mismatch_fails_before_publication(
         )
     assert captured.value.code in {"MASTER_FLAT_MISSING", "DARK_EXPOSURE_MISMATCH"}
     assert not output.exists()
+
+
+def test_master_dark_hot_pixels_are_replaced_before_registration(tmp_path: Path) -> None:
+    from openastroflow_engine.pixel_pipeline import _hot_pixel_map, _replace_hot_pixels
+
+    rng = np.random.default_rng(3)
+    dark = rng.normal(120.0, 1.0, (64, 80)).astype(np.float32)
+    dark[10, 20] = 900.0   # hot
+    dark[40, 60] = 135.0   # warm, still > 3 sigma
+    dark[0, 0] = 500.0     # hot on the border
+    rows, columns, evidence = _hot_pixel_map(dark, 3.0)
+    assert evidence["count"] >= 3
+    assert {(10, 20), (40, 60), (0, 0)} <= set(zip(rows.tolist(), columns.tolist()))
+    light = np.full((64, 80), 500.0, dtype=np.float32)
+    light[10, 20] = 5000.0
+    light[40, 60] = 640.0
+    light[0, 0] = 2000.0
+    star = light.copy()
+    _replace_hot_pixels(light, rows, columns)
+    assert light[10, 20] == 500.0 and light[40, 60] == 500.0 and light[0, 0] == 500.0
+    # Untouched pixels are exactly preserved.
+    untouched = np.ones(light.shape, dtype=bool)
+    untouched[rows, columns] = False
+    np.testing.assert_array_equal(light[untouched], star[untouched])
+    # A dark without dispersion carries no hot-pixel evidence.
+    rows, columns, evidence = _hot_pixel_map(np.full((8, 8), 120.0, dtype=np.float32), 3.0)
+    assert rows.size == 0 and evidence["count"] == 0
+
+
+def test_integration_noise_weights_ignore_sky_gradients(tmp_path: Path) -> None:
+    from openastroflow_engine.calibration import (
+        FrameExpression,
+        IntegrationParameters,
+        _normalized_noise_weights,
+        _open_expression_sources,
+        _validate_expression_shapes,
+    )
+    from contextlib import ExitStack
+
+    rng = np.random.default_rng(5)
+    shape = (256, 320)
+    y, x = np.indices(shape, dtype=np.float64)
+    flat_frame = (500.0 + rng.normal(0.0, 4.0, shape)).astype(np.float32)
+    # Same pixel noise, but a strong moonlit gradient across the frame.
+    gradient_frame = (500.0 + 120.0 * x / shape[1] + 80.0 * y / shape[0] + rng.normal(0.0, 4.0, shape)).astype(np.float32)
+    paths = []
+    for name, data in (("flat", flat_frame), ("gradient", gradient_frame)):
+        path = tmp_path / f"{name}.fits"
+        fits.writeto(path, data)
+        paths.append(path)
+    expressions = tuple(FrameExpression(str(path)) for path in paths)
+    with ExitStack() as stack:
+        sources = _open_expression_sources(stack, expressions)
+        shape_ = _validate_expression_shapes(expressions, sources)
+        weights, _ = _normalized_noise_weights(
+            expressions, sources, shape_, IntegrationParameters(max_statistics_samples=20_000)
+        )
+    # Equal noise must give (nearly) equal weights despite the gradient.
+    assert abs(weights[0] / weights[1] - 1.0) < 0.15

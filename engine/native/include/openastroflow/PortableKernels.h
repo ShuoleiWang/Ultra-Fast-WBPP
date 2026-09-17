@@ -18,11 +18,16 @@ namespace openastroflow::native
 // kernels never change scientific parameters; they only change where the
 // work runs.
 
-// Output-to-input affine map in pixel coordinates. The parenthesized
+// Output-to-input homogeneous map in pixel coordinates. The parenthesized
 // evaluation order is part of the contract because it reproduces the NumPy
 // broadcast expression used by the reference resampler:
 //   xIn = ((m00*xOut) + (m01*yOut)) + m02
 //   yIn = ((m10*xOut) + (m11*yOut)) + m12
+// The map is affine when m20 = m21 = 0 and m22 = 1 (the default). Otherwise
+// it is projective and both coordinates are divided by the same denominator,
+// again in the reference order:
+//   w   = ((m20*xOut) + (m21*yOut)) + m22
+//   xIn = xIn/w, yIn = yIn/w
 struct AffineInverse
 {
    double m00 = 1;
@@ -31,6 +36,14 @@ struct AffineInverse
    double m10 = 0;
    double m11 = 1;
    double m12 = 0;
+   double m20 = 0;
+   double m21 = 0;
+   double m22 = 1;
+
+   bool IsAffine() const noexcept
+   {
+      return m20 == 0.0 && m21 == 0.0 && m22 == 1.0;
+   }
 };
 
 struct WarpLanczos3Request

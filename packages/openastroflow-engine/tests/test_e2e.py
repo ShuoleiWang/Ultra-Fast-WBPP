@@ -50,6 +50,7 @@ from openastroflow_engine.e2e import (
     _share_safe_string,
     _solve_one,
     _SourceIdentity,
+    _unify_same_grid_solutions,
     _validate_cross_filter_wcs,
 )
 from openastroflow_engine.solver import (
@@ -1743,6 +1744,98 @@ def test_cross_filter_wcs_mismatch_is_rejected(tmp_path: Path) -> None:
 
     assert validation.valid is False
     assert validation.code == "CROSS_FILTER_WCS_MISMATCH"
+
+
+def _same_grid_products(
+    tmp_path: Path, *, blue_offset_pixels: float, same_crop: bool = True
+) -> tuple[dict[str, Path], dict[str, Any], dict[str, Any]]:
+    """Two solved masters of one registered grid whose fresh solves disagree slightly."""
+
+    products: dict[str, Path] = {}
+    records: dict[str, Any] = {}
+    field_width = 0.5
+    pixel_scale_degrees = field_width / 127
+    for filter_name, offset in (("R", 0.0), ("B", blue_offset_pixels)):
+        source = _write(
+            tmp_path / f"{filter_name}-unsolved.fits",
+            np.ones((128, 128), dtype=np.uint16) * (10 if filter_name == "R" else 20),
+            _header("Light", exposure=60.0, observed_at="2026-01-01T20:00:00Z", filter_name=filter_name),
+        )
+        output = tmp_path / f"{filter_name}-solved.fits"
+        solver = FakeSolver(center_ra_degrees=150.0 + offset * pixel_scale_degrees)
+        solver.field_width_degrees = field_width
+        solver.solve(SimpleNamespace(input_path=str(source), output_path=str(output)))
+        with fits.open(output, mode="update", memmap=False) as hdul:
+            hdul[0].header["OAFWCS"] = "SOLVED"
+            hdul.flush(output_verify="exception")
+        products[filter_name] = output
+        records[filter_name] = {
+            "attempts": [
+                {"accepted": True, "result": {"astrometricQuality": {"rmsPixels": 0.2}}}
+            ]
+        }
+    crop_r = [3, 5, 131, 133]
+    receipt = {
+        "statistics": {
+            "integrationGroups": {
+                "R": {"crop": crop_r},
+                "B": {"crop": crop_r if same_crop else [4, 5, 132, 133]},
+            }
+        }
+    }
+    return products, records, receipt
+
+
+def test_same_grid_solutions_are_verified_then_unified_without_touching_pixels(
+    tmp_path: Path,
+) -> None:
+    products, records, receipt = _same_grid_products(tmp_path, blue_offset_pixels=0.3)
+    before_red = np.asarray(fits.getdata(products["R"]))
+    assert _validate_cross_filter_wcs(products).valid is False
+
+    record = _unify_same_grid_solutions(
+        products, pixel_pipeline_receipt=receipt, solver_records=records, tolerance_pixels=1.0
+    )
+
+    assert record["status"] == "APPLIED"
+    assert record["adoptedFilter"] == "B"  # equal RMS and no luminance: alphabetical
+    red = record["filters"]["R"]
+    assert red["rewritten"] is True
+    assert 0.25 < red["ownVersusAdoptedMaximumPixels"] < 0.35
+    assert red["sha256Before"] != red["sha256After"]
+    assert record["filters"]["B"]["rewritten"] is False
+    np.testing.assert_array_equal(np.asarray(fits.getdata(products["R"])), before_red)
+    header = fits.getheader(products["R"])
+    assert header["OAFWCSSG"] == "B"
+    assert header["OAFSTATE"] == "SOLVED" and header["OAFWCS"] == "SOLVED"
+    assert _validate_cross_filter_wcs(products).valid is True
+
+
+def test_same_grid_solutions_that_disagree_beyond_solver_precision_are_rejected(
+    tmp_path: Path,
+) -> None:
+    products, records, receipt = _same_grid_products(tmp_path, blue_offset_pixels=6.0)
+    before_sha = hashlib.sha256(products["B"].read_bytes()).hexdigest()
+
+    record = _unify_same_grid_solutions(
+        products, pixel_pipeline_receipt=receipt, solver_records=records, tolerance_pixels=1.0
+    )
+
+    assert record["status"] == "MISMATCH"
+    assert record["code"] == "SAME_GRID_WCS_MISMATCH"
+    assert record["filters"]["R"]["effectiveTolerancePixels"] == 1.0
+    assert hashlib.sha256(products["B"].read_bytes()).hexdigest() == before_sha
+
+
+def test_masters_with_different_crops_are_not_unified(tmp_path: Path) -> None:
+    products, records, receipt = _same_grid_products(
+        tmp_path, blue_offset_pixels=0.3, same_crop=False
+    )
+    record = _unify_same_grid_solutions(
+        products, pixel_pipeline_receipt=receipt, solver_records=records, tolerance_pixels=1.0
+    )
+    assert record["status"] == "NOT_APPLICABLE"
+    assert _validate_cross_filter_wcs(products).valid is False
 
 
 @pytest.mark.parametrize("mutation", ("rotate90", "mirror", "sip-edge"))

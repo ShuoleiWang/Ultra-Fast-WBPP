@@ -118,6 +118,24 @@ class _WarpRequestV1(ctypes.Structure):
     ]
 
 
+class _WarpRequestV2(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32),
+        ("source_width", ctypes.c_uint32),
+        ("source_height", ctypes.c_uint32),
+        ("output_width", ctypes.c_uint32),
+        ("first_row", ctypes.c_uint32),
+        ("row_count", ctypes.c_uint32),
+        ("threads", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32),
+        ("source_samples", ctypes.POINTER(ctypes.c_float)),
+        ("source_sample_count", ctypes.c_size_t),
+        ("inverse", ctypes.c_double * 9),
+        ("domain_scale", ctypes.c_float),
+        ("reserved_scale", ctypes.c_float),
+    ]
+
+
 class _MadRequestV1(ctypes.Structure):
     _fields_ = [
         ("struct_size", ctypes.c_uint32),
@@ -197,6 +215,7 @@ _ERROR_BYTES = 1024
 _REQUIRED_SYMBOLS = (
     "oaf_native_abi_version",
     "oaf_native_cpu_warp_lanczos3_v1",
+    "oaf_native_cpu_warp_lanczos3_v2",
     "oaf_native_cpu_mad_rejection_v1",
     "oaf_native_cpu_masked_mean_v1",
     "oaf_native_cpu_tile_offsets_v1",
@@ -244,6 +263,13 @@ class NativeKernels:
             *error_arguments,
         ]
         library.oaf_native_cpu_warp_lanczos3_v1.restype = ctypes.c_int
+        library.oaf_native_cpu_warp_lanczos3_v2.argtypes = [
+            ctypes.POINTER(_WarpRequestV2),
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.c_size_t,
+            *error_arguments,
+        ]
+        library.oaf_native_cpu_warp_lanczos3_v2.restype = ctypes.c_int
         library.oaf_native_cpu_mad_rejection_v1.argtypes = [
             ctypes.POINTER(_MadRequestV1),
             ctypes.POINTER(ctypes.c_uint8),
@@ -287,23 +313,25 @@ class NativeKernels:
         domain_scale: float,
         threads: int | None = None,
     ) -> NDArray[np.float32]:
-        """Warp one band of output rows from a native Float32 source image."""
+        """Warp one band of output rows from a native Float32 source image.
+
+        ``inverse`` is the output-to-input map: a 2x3 or 3x3 affine matrix, or
+        a 3x3 projective matrix whose last row divides both coordinates.
+        """
 
         source_values = np.ascontiguousarray(source, dtype=np.float32)
         if source_values.ndim != 2:
             raise ValueError("warp source must be a two-dimensional image")
         matrix = np.ascontiguousarray(inverse, dtype=np.float64)
-        if matrix.shape == (3, 3):
-            if not np.allclose(matrix[2], (0.0, 0.0, 1.0), rtol=0.0, atol=0.0):
-                raise ValueError("warp inverse must be affine")
-            matrix = matrix[:2]
-        if matrix.shape != (2, 3):
-            raise ValueError("warp inverse must be a 2x3 or affine 3x3 matrix")
+        if matrix.shape == (2, 3):
+            matrix = np.vstack((matrix, np.asarray([[0.0, 0.0, 1.0]])))
+        if matrix.shape != (3, 3) or not np.all(np.isfinite(matrix)):
+            raise ValueError("warp inverse must be a finite 2x3 or 3x3 matrix")
         if row_count < 1 or output_width < 1 or first_row < 0:
             raise ValueError("warp band geometry must be positive")
         height, width = source_values.shape
-        request = _WarpRequestV1()
-        request.struct_size = ctypes.sizeof(_WarpRequestV1)
+        request = _WarpRequestV2()
+        request.struct_size = ctypes.sizeof(_WarpRequestV2)
         request.source_width = int(width)
         request.source_height = int(height)
         request.output_width = int(output_width)
@@ -314,12 +342,12 @@ class NativeKernels:
             ctypes.POINTER(ctypes.c_float)
         )
         request.source_sample_count = source_values.size
-        request.inverse = (ctypes.c_double * 6)(*(float(value) for value in matrix.ravel()))
+        request.inverse = (ctypes.c_double * 9)(*(float(value) for value in matrix.ravel()))
         request.domain_scale = float(domain_scale)
         destination = np.empty((int(row_count), int(output_width)), dtype=np.float32)
         error = ctypes.create_string_buffer(_ERROR_BYTES)
         status = int(
-            self._library.oaf_native_cpu_warp_lanczos3_v1(
+            self._library.oaf_native_cpu_warp_lanczos3_v2(
                 ctypes.byref(request),
                 destination.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
                 destination.size,
