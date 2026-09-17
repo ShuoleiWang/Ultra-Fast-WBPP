@@ -1862,17 +1862,25 @@ def _normalized_noise_weights(
     parameters: IntegrationParameters,
 ) -> tuple[NDArray[np.float64], tuple[float, ...]]:
     estimates: list[float] = []
+    y_indices, x_indices = _sample_coordinates(shape, parameters.max_statistics_samples)
     for expression in expressions:
-        sample = _sample_expression(
-            expression,
-            sources,
-            shape,
-            max_samples=parameters.max_statistics_samples,
-            division_floor=parameters.division_floor,
-        ).astype(np.float64, copy=False)
-        median = float(np.median(sample))
-        mad = float(np.median(np.abs(sample - median)))
-        sigma = 1.4826 * mad
+        sampled = _expression_sampled_rows(
+            expression, sources, y_indices, division_floor=parameters.division_floor
+        )[:, x_indices].astype(np.float64, copy=False)
+        # Pixel noise from the dispersion of neighbouring lattice samples along
+        # each row: a sky gradient or a moonlit night changes the sample
+        # values across the frame by far more than the noise, and the plain
+        # MAD of all samples would then weight such frames down several
+        # times too much.  Adjacent lattice samples share the same sky to
+        # well below the noise, so their difference is sqrt(2) times the noise.
+        differences = np.diff(sampled, axis=1)
+        differences = differences[np.isfinite(differences)]
+        if differences.size >= 64:
+            sigma = 1.4826 * float(np.median(np.abs(differences - np.median(differences)))) / math.sqrt(2.0)
+        else:
+            sample = sampled[np.isfinite(sampled)]
+            median = float(np.median(sample)) if sample.size else 0.0
+            sigma = 1.4826 * float(np.median(np.abs(sample - median))) if sample.size else 1.0
         if not math.isfinite(sigma) or sigma <= 1e-12:
             sigma = 1.0
         estimates.append(sigma)

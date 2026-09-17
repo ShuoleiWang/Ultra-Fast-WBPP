@@ -224,12 +224,21 @@ class RegistrationConfig:
     full_max_scale_deviation: float = 0.05
     full_max_anisotropy: float = 1.05
     full_max_corner_delta_px: float = 32.0
+    # Gaussian window (sigma, full-resolution pixels) of the core-weighted
+    # centroid used by the full-resolution refinement.  ``None`` selects the
+    # default window; ``0`` selects the plain (wing-weighted) centre of mass.
+    full_centroid_window_sigma_px: float | None = None
 
     def __post_init__(self) -> None:
         if self.full_transform_model not in {"affine", "projective"}:
             raise ValueError("full_transform_model must be affine or projective")
         if self.full_centroid_radius_px < 2:
             raise ValueError("full_centroid_radius_px must be at least 2")
+        if self.full_centroid_window_sigma_px is not None and (
+            not math.isfinite(self.full_centroid_window_sigma_px)
+            or self.full_centroid_window_sigma_px < 0
+        ):
+            raise ValueError("full_centroid_window_sigma_px must be finite and nonnegative")
         if (
             not math.isfinite(self.full_residual_threshold_px)
             or self.full_residual_threshold_px <= 0
@@ -838,12 +847,32 @@ def _apply_homography(matrix: Float64Array, points: Float64Array) -> Float64Arra
     return transformed[:, :2] / transformed[:, 2:3]
 
 
+CENTROID_WINDOW_ITERATIONS = 12
+CENTROID_WINDOW_CONVERGENCE_PX = 1.0e-4
+# Window of the core-weighted centroid: the sigma that SExtractor XWIN/YWIN
+# and sep.winpos use for typical seeing (FWHM 3-5 px).  A fixed window keeps
+# one position definition for every frame, filter and night of a run; the
+# preview moment FWHM is not used because block averaging inflates it.
+DEFAULT_CENTROID_WINDOW_SIGMA_PX = 2.0
+
+
 def _local_centroids(
     image: FloatImage,
     approximate: Float64Array,
     radius: int,
+    *,
+    window_sigma: float | None = None,
 ) -> tuple[Float64Array, NDArray[np.int64]]:
-    """Refine approximate star positions with small raw-image patches."""
+    """Refine approximate star positions with small raw-image patches.
+
+    The plain centre of mass of a patch is wing-weighted: on an asymmetric
+    PSF (coma, tilt, tracking) it sits a night- and filter-dependent fraction
+    of a pixel away from the star core, so filters imaged under different
+    PSF shapes register their cores against each other with that offset.
+    With ``window_sigma`` the centre of mass only seeds a Gaussian-windowed
+    centroid (SExtractor XWIN/YWIN) whose window is re-centred on every
+    iteration, which converges on the core.
+    """
 
     height, width = image.shape
     size = 2 * radius + 1
@@ -890,8 +919,12 @@ def _local_centroids(
     signal = signal[positive]
     total = total[positive]
     yy, xx = np.indices((size, size), dtype=np.float64)
-    centroid_x = x0[candidates] + np.sum((signal * xx).reshape(candidates.size, -1), axis=1) / total
-    centroid_y = y0[candidates] + np.sum((signal * yy).reshape(candidates.size, -1), axis=1) / total
+    local_x = np.sum((signal * xx).reshape(candidates.size, -1), axis=1) / total
+    local_y = np.sum((signal * yy).reshape(candidates.size, -1), axis=1) / total
+    if window_sigma is not None and window_sigma > 0.0:
+        local_x, local_y = _windowed_centroids(signal, xx, yy, local_x, local_y, window_sigma)
+    centroid_x = x0[candidates] + local_x
+    centroid_y = y0[candidates] + local_y
     limit = radius * 0.5
     close = np.fromiter(
         (
@@ -906,6 +939,57 @@ def _local_centroids(
         np.asarray(refined, dtype=np.float64).reshape((-1, 2)),
         np.asarray(candidates[close], dtype=np.int64),
     )
+
+
+def _windowed_centroids(
+    signal: Float64Array,
+    xx: Float64Array,
+    yy: Float64Array,
+    start_x: Float64Array,
+    start_y: Float64Array,
+    window_sigma: float,
+) -> tuple[Float64Array, Float64Array]:
+    """Iterate Gaussian-windowed centroids of background-subtracted patches."""
+
+    count = signal.shape[0]
+    flat_signal = signal.reshape(count, -1)
+    flat_x = xx.reshape(-1)
+    flat_y = yy.reshape(-1)
+    current_x = np.array(start_x, dtype=np.float64)
+    current_y = np.array(start_y, dtype=np.float64)
+    denominator = 2.0 * float(window_sigma) ** 2
+    limit_x = float(xx.shape[1] - 1)
+    limit_y = float(yy.shape[0] - 1)
+    for _ in range(CENTROID_WINDOW_ITERATIONS):
+        weight = np.exp(
+            -(
+                (flat_x[None, :] - current_x[:, None]) ** 2
+                + (flat_y[None, :] - current_y[:, None]) ** 2
+            )
+            / denominator
+        )
+        weighted = flat_signal * weight
+        weighted_total = np.sum(weighted, axis=1)
+        movable = np.isfinite(weighted_total) & (weighted_total > 0.0)
+        safe_total = np.where(movable, weighted_total, 1.0)
+        next_x = np.where(movable, np.sum(weighted * flat_x[None, :], axis=1) / safe_total, current_x)
+        next_y = np.where(movable, np.sum(weighted * flat_y[None, :], axis=1) / safe_total, current_y)
+        # The window never leaves the gathered patch.
+        next_x = np.clip(next_x, 0.0, limit_x)
+        next_y = np.clip(next_y, 0.0, limit_y)
+        shift = np.maximum(np.abs(next_x - current_x), np.abs(next_y - current_y))
+        current_x, current_y = next_x, next_y
+        if not np.any(shift > CENTROID_WINDOW_CONVERGENCE_PX):
+            break
+    return current_x, current_y
+
+
+def _core_window_sigma(config: RegistrationConfig) -> float:
+    """Window sigma of the core-weighted centroid; one value for a whole run."""
+
+    if config.full_centroid_window_sigma_px is not None:
+        return float(config.full_centroid_window_sigma_px)
+    return DEFAULT_CENTROID_WINDOW_SIGMA_PX
 
 
 def _refine_full_resolution(
@@ -947,11 +1031,18 @@ def _refine_full_resolution(
     reference_scale = _preview_to_full_matrix(reference.scale_x, reference.scale_y)
     source_approximate = _apply_homography(source_scale, source_preview)
     reference_approximate = _apply_homography(reference_scale, reference_preview)
+    window_sigma = _core_window_sigma(config)
     source_centroids, source_indices = _local_centroids(
-        source_image, source_approximate, config.full_centroid_radius_px
+        source_image,
+        source_approximate,
+        config.full_centroid_radius_px,
+        window_sigma=window_sigma,
     )
     reference_centroids, reference_indices = _local_centroids(
-        reference_image, reference_approximate, config.full_centroid_radius_px
+        reference_image,
+        reference_approximate,
+        config.full_centroid_radius_px,
+        window_sigma=window_sigma,
     )
     common = np.intersect1d(source_indices, reference_indices, assume_unique=True)
     if common.size < 12:
@@ -1055,6 +1146,8 @@ def _refine_full_resolution(
     )
     gate_evidence = {
         "status": "ACCEPTED",
+        "centroid": "gaussian-window-core-v1" if window_sigma > 0.0 else "plain-centre-of-mass-v1",
+        "centroidWindowSigmaPixels": window_sigma,
         "commonCentroidCount": int(common.size),
         "finalInlierCount": inlier_count,
         "finalInlierRatio": inlier_ratio,

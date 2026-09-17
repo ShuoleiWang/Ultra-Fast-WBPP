@@ -5,11 +5,14 @@ raw-frame science path.  This module composes it without weakening any gate:
 
 * READY Light frames are partitioned by acquisition target and filter;
 * raw calibration frames are integrated once into a shared master library;
-* every target/filter panel independently completes QC through a fresh solve;
+* every target runs once with all of its filters, so the filters of one
+  target are registered onto one reference frame, cropped to one common
+  rectangle, and each master still completes QC through a fresh solve;
 * multi-panel filters are reprojected only from SOLVED panels, pass exact
   coverage/overlap/seam gates, and then receive a new final plate solution;
-* independently solved filters are aligned onto one solved reference grid
-  before optional RGB/LRGB construction; and
+* filters that already share their pixel grid are copied unchanged onto the
+  reference grid (no resampling), while independently solved mosaics are
+  reprojected onto it, before optional RGB/LRGB construction; and
 * one outer create-only directory rename is the only success commit.
 
 The reprojection WCS of a working mosaic is explicitly never treated as a
@@ -141,6 +144,29 @@ class ProjectLayout:
         # ``run-project`` still creates RGB for a one-target multi-filter set.
         return len(self.target_keys) > 1
 
+    @property
+    def target_runs(self) -> tuple[tuple[SciencePanel, tuple[SciencePanel, ...]], ...]:
+        """Panels grouped per target: one multi-filter E2E run each.
+
+        Every filter of a target is registered onto the same reference frame
+        inside one run, so the filter masters share their pixel grid exactly
+        and LRGB composition never has to resample them.  The group descriptor
+        is a synthetic panel that carries every Light of the target.
+        """
+
+        groups: list[tuple[SciencePanel, tuple[SciencePanel, ...]]] = []
+        for target_key in self.target_keys:
+            panels = tuple(panel for panel in self.panels if panel.target_key == target_key)
+            descriptor = SciencePanel(
+                target=panels[0].target,
+                target_key=target_key,
+                filter_name="+".join(panel.filter_name for panel in panels),
+                filter_key="+".join(panel.filter_key for panel in panels),
+                light_files=tuple(path for panel in panels for path in panel.light_files),
+            )
+            groups.append((descriptor, panels))
+        return tuple(groups)
+
     def serializable(self) -> dict[str, Any]:
         return {
             "panelCount": len(self.panels),
@@ -191,6 +217,7 @@ class _ProjectProgress:
         ) if stage is not ProgressStage.DRIZZLE or request.integration_mode.value == "drizzle")
         lights = sum(len(panel.light_files) for panel in layout.panels)
         image_unit = lights / len(layout.panels)
+        self.run_count = len(layout.target_runs)
         mosaics = sum(sum(panel.filter_key == key for panel in layout.panels) > 1 for key in layout.filter_keys)
         self.phase_units = {
             "prepare": max(1, len(request.bias_files) + len(request.dark_files) + len(request.flat_files)),
@@ -210,7 +237,7 @@ class _ProjectProgress:
         if self.callback is not None:
             self.callback(ProjectProgressEvent(
                 event.stage, event.status, event.current, event.total, event.message,
-                overall_fraction=self.last_fraction, panel_count=len(self.layout.panels), **context,
+                overall_fraction=self.last_fraction, panel_count=self.run_count, **context,
             ))
 
     def phase(self, name: str, current: int, total: int, message: str) -> None:
@@ -791,38 +818,44 @@ def _build_shared_calibration(
     return master_biases, master_darks, master_flats, tuple(trusted_generated), receipt
 
 
-def _find_only_product(result: E2EResult, expected_filter: str) -> Path:
+def _find_filter_products(result: E2EResult, expected_filters: Sequence[str]) -> dict[str, Path]:
+    """Bind one solved master to each expected filter of a target run."""
+
     if not result.success or result.state is not E2EState.SOLVED:
         raise ProjectE2EError(
             result.code,
-            "panel subrun did not publish a solved product",
+            "target subrun did not publish solved products",
             path=result.evidence_directory,
         )
     paths = [Path(path).resolve(strict=True) for path in result.product_paths]
-    if len(paths) != 1:
+    if len(paths) != len(expected_filters):
         raise ProjectE2EError(
             "PANEL_PRODUCT_MULTIPLICITY_INVALID",
-            f"one target/filter panel must produce exactly one master, found {len(paths)}",
+            f"one target must produce exactly one master per filter "
+            f"({len(expected_filters)}), found {len(paths)}",
         )
-    header, shape = _read_image_header(paths[0])
-    validation = validate_wcs_header(header, image_shape=shape)
-    if not validation.valid or header.get("OAFSTATE") != "SOLVED" or header.get("OAFWCS") != "SOLVED":
-        raise ProjectE2EError(
-            "PANEL_PRODUCT_NOT_SOLVED",
-            f"{validation.code}: {validation.message}",
-            path=str(paths[0]),
+    products: dict[str, Path] = {}
+    for path in paths:
+        header, shape = _read_image_header(path)
+        validation = validate_wcs_header(header, image_shape=shape)
+        if not validation.valid or header.get("OAFSTATE") != "SOLVED" or header.get("OAFWCS") != "SOLVED":
+            raise ProjectE2EError(
+                "PANEL_PRODUCT_NOT_SOLVED",
+                f"{validation.code}: {validation.message}",
+                path=str(path),
+            )
+        observed = _FILTER_ALIASES.get(
+            _normalized_token(str(header.get("FILTER", ""))),
+            str(header.get("FILTER", "")).upper(),
         )
-    observed = _FILTER_ALIASES.get(
-        _normalized_token(str(header.get("FILTER", ""))),
-        str(header.get("FILTER", "")).upper(),
-    )
-    if observed != expected_filter:
-        raise ProjectE2EError(
-            "PANEL_PRODUCT_FILTER_MISMATCH",
-            f"expected {expected_filter}, found {header.get('FILTER')!r}",
-            path=str(paths[0]),
-        )
-    return paths[0]
+        if observed not in expected_filters or observed in products:
+            raise ProjectE2EError(
+                "PANEL_PRODUCT_FILTER_MISMATCH",
+                f"expected one master for each of {list(expected_filters)}, found {header.get('FILTER')!r}",
+                path=str(path),
+            )
+        products[observed] = path
+    return products
 
 
 def _final_mosaic_hints(path: Path, base: E2ERequest) -> _SolverHints:
@@ -1347,16 +1380,19 @@ def run_project_e2e(
         panel_quality_by_path: dict[str, dict[str, Any]] = {}
         runs_root = staging / "runs"
         runs_root.mkdir()
-        for index, panel in enumerate(layout.panels, start=1):
-            panel_progress = project_progress.panel_callback(index, panel)
+        # One run per target carries every filter of that target: the run
+        # registers all Lights onto one reference frame and crops the filter
+        # masters to one common rectangle, so they share their pixel grid.
+        for index, (group, panels) in enumerate(layout.target_runs, start=1):
+            panel_progress = project_progress.panel_callback(index, group)
             panel_progress(ProgressEvent(ProgressStage.INVENTORY, "started",
-                                         message=f"panel {panel.target}/{panel.filter_name}"))
-            sub_output = runs_root / panel.panel_id
-            panel_digests = {_sha256(Path(path).resolve(strict=True)) for path in panel.light_files}
+                                         message=f"target {group.target} ({group.filter_name})"))
+            sub_output = runs_root / _safe_token(group.target_key)
+            panel_digests = {_sha256(Path(path).resolve(strict=True)) for path in group.light_files}
             if direct_approved_panel:
                 sub_request = replace(
                     request.e2e_request,
-                    light_files=panel.light_files,
+                    light_files=group.light_files,
                     output_directory=str(sub_output),
                 )
             else:
@@ -1374,7 +1410,7 @@ def run_project_e2e(
                 )
                 sub_request = replace(
                     request.e2e_request,
-                    light_files=panel.light_files,
+                    light_files=group.light_files,
                     flat_files=(),
                     dark_files=(),
                     bias_files=(),
@@ -1394,7 +1430,9 @@ def run_project_e2e(
             passed.extend(sub_result.passed_light_paths)
             excluded.extend(sub_result.excluded_light_paths)
             record = {
-                "panel": panel.serializable(),
+                "target": group.target,
+                "targetKey": group.target_key,
+                "panels": [panel.serializable() for panel in panels],
                 "success": sub_result.success,
                 "code": sub_result.code,
                 "receipt": str(Path(sub_result.receipt_path).relative_to(staging)),
@@ -1402,7 +1440,7 @@ def run_project_e2e(
             }
             records["subruns"].append(record)
             if not sub_result.success:
-                sub_message = sub_result.message or f"{panel.target}/{panel.filter_name}: {sub_result.code}"
+                sub_message = sub_result.message or f"{group.target}/{group.filter_name}: {sub_result.code}"
                 _verify_sources(sources)
                 return _failure_result(
                     staging=staging,
@@ -1415,14 +1453,21 @@ def run_project_e2e(
                     passed=passed,
                     excluded=excluded,
                 )
-            product = _find_only_product(sub_result, panel.filter_name)
-            panel_quality_by_path[str(product)] = _accepted_quality(
-                Path(sub_result.receipt_path), panel.filter_name
+            products_by_filter = _find_filter_products(
+                sub_result, [panel.filter_name for panel in panels]
             )
-            panels_by_filter.setdefault(panel.filter_key, []).append((panel, product))
-            record["solvedProduct"] = str(product.relative_to(staging))
-            record["solvedProductSha256"] = _sha256(product)
-            project_progress.panel_done(index, panel)
+            record["solvedProducts"] = {}
+            for panel in panels:
+                product = products_by_filter[panel.filter_name]
+                panel_quality_by_path[str(product)] = _accepted_quality(
+                    Path(sub_result.receipt_path), panel.filter_name
+                )
+                panels_by_filter.setdefault(panel.filter_key, []).append((panel, product))
+                record["solvedProducts"][panel.filter_name] = {
+                    "path": str(product.relative_to(staging)),
+                    "sha256": _sha256(product),
+                }
+            project_progress.panel_done(index, group)
 
         final_sources: dict[str, tuple[str, Path]] = {}
         final_quality: dict[str, dict[str, Any]] = {}
@@ -1522,8 +1567,10 @@ def run_project_e2e(
         products = staging / "products"
         mono_root = products / "mono"
         mono_root.mkdir(parents=True)
+        # Luminance carries the detail of an LRGB product, so when channels do
+        # not already share their grid it is the one that stays unresampled.
         reference_key = next(
-            (key for key in ("r", "g", "b", "l") if key in final_sources),
+            (key for key in ("l", "r", "g", "b") if key in final_sources),
             sorted(final_sources)[0],
         )
         reference_filter, reference_path = final_sources[reference_key]

@@ -150,6 +150,88 @@ def _robust_ratio(
     return scale, sigma, int(selected.size)
 
 
+NORMALIZATION_REFERENCE_RULE = "flattest-background-among-top-quality-v1"
+NORMALIZATION_REFERENCE_QUALITY_FRACTION = 0.75
+NORMALIZATION_REFERENCE_SKY_WEIGHT = 0.02
+NORMALIZATION_REFERENCE_TILE_PREVIEW_PIXELS = 32
+
+
+def background_flatness(analysis: FrameAnalysis) -> dict[str, float]:
+    """Large-scale background amplitude of one calibrated preview.
+
+    Tile medians (over the darker 70% of each tile, which excludes stars) on
+    the calibrated preview; the p05-p95 span of those medians is the
+    gradient the master would inherit from this frame, in frame units.
+    """
+
+    preview = np.asarray(analysis.preview, dtype=np.float64)
+    tile = NORMALIZATION_REFERENCE_TILE_PREVIEW_PIXELS
+    height, width = preview.shape
+    rows, columns = max(1, height // tile), max(1, width // tile)
+    levels = np.full((rows, columns), np.nan)
+    for i in range(rows):
+        for j in range(columns):
+            block = preview[i * tile : min(height, (i + 1) * tile), j * tile : min(width, (j + 1) * tile)]
+            block = block[np.isfinite(block)]
+            if block.size < 16:
+                continue
+            cut = np.quantile(block, 0.70)
+            levels[i, j] = float(np.median(block[block <= cut]))
+    finite = levels[np.isfinite(levels)]
+    if finite.size < 4:
+        return {"gradientSpan": float("nan"), "sky": float(analysis.catalog.background)}
+    low, high = np.quantile(finite, (0.05, 0.95))
+    return {"gradientSpan": float(high - low), "sky": float(np.median(finite))}
+
+
+def select_normalization_reference(
+    indices: Sequence[int],
+    analyses: Sequence[FrameAnalysis],
+    quality_weights: Sequence[float],
+) -> tuple[int, dict[str, Any]]:
+    """Pick the normalization reference of one filter group.
+
+    The integrated master inherits the large-scale background of the frame
+    every other frame is matched to.  The frame with the smallest
+    large-scale background span wins, with a small preference for a low sky
+    (residual flat-field structure is proportional to the sky level, and a
+    lower sky also means less noise around the reference's own gradient);
+    the worst quarter by quality is excluded first so a poor frame never
+    anchors the group.
+    """
+
+    ordered = sorted(indices, key=lambda index: (-float(quality_weights[index]), index))
+    keep = max(1, math.ceil(NORMALIZATION_REFERENCE_QUALITY_FRACTION * len(ordered)))
+    candidates = ordered[:keep]
+    flatness = {index: background_flatness(analyses[index]) for index in candidates}
+
+    def score(index: int) -> float:
+        value = flatness[index]
+        span = value["gradientSpan"]
+        if not math.isfinite(span):
+            span = float("inf")
+        return span + NORMALIZATION_REFERENCE_SKY_WEIGHT * value["sky"]
+
+    reference_index = min(candidates, key=lambda index: (score(index), index))
+    return reference_index, {
+        "rule": NORMALIZATION_REFERENCE_RULE,
+        "qualityFractionConsidered": NORMALIZATION_REFERENCE_QUALITY_FRACTION,
+        "skyWeight": NORMALIZATION_REFERENCE_SKY_WEIGHT,
+        "candidateCount": len(candidates),
+        "referenceSky": flatness[reference_index]["sky"],
+        "referenceGradientSpan": flatness[reference_index]["gradientSpan"],
+        "referenceScore": score(reference_index),
+        "candidateScores": {
+            str(index): {"score": score(index), **flatness[index]} for index in candidates
+        },
+        "groupSkyRange": [
+            float(min(analyses[index].catalog.background for index in indices)),
+            float(max(analyses[index].catalog.background for index in indices)),
+        ],
+        "referenceQualityWeight": float(quality_weights[reference_index]),
+    }
+
+
 def estimate_stellar_scale_hints(
     analyses: Sequence[FrameAnalysis],
     transforms: Sequence[FrameTransform],
@@ -167,9 +249,8 @@ def estimate_stellar_scale_hints(
         groups[analysis.filter_name].append(index)
     estimates: list[StellarScaleEstimate | None] = [None] * len(analyses)
     for filter_name, indices in groups.items():
-        reference_index = max(
-            indices,
-            key=lambda index: (float(quality_weights[index]), -index),
+        reference_index, reference_selection = select_normalization_reference(
+            indices, analyses, quality_weights
         )
         reference = analyses[reference_index]
         reference_transform = transforms[reference_index].preview_matrix
@@ -190,6 +271,7 @@ def estimate_stellar_scale_hints(
                 "referenceExposureSeconds": reference.exposure_seconds,
                 "exposureCorrection": 1.0,
                 "scaleDomain": "post-linear-exposure-normalization",
+                "referenceSelection": reference_selection,
             },
         )
         reference_global = _transform_points(

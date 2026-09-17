@@ -12,6 +12,14 @@ Benchmarks are performance evidence with an explicit scientific and I/O boundary
 
 The two checked-in `openastroflow-metal-integration-benchmark-v1` kernel reports below are historical one-shot observations. They do not record build configuration, compiler/source provenance, warmup, or repeated samples, and their 40-frame versus 96-frame throughput differs by almost 10×. Do not compare or cite them as a current release baseline.
 
+## Master evaluation against PixInsight WBPP
+
+[`evaluate_masters.py`](evaluate_masters.py) implements [`docs/master-evaluation-standard.md`](../docs/master-evaluation-standard.md): given our master and the PixInsight master of the same data (FITS or XISF), it matches stars on both native grids, fits the photometric model, and writes `<out>/<filter>.json` plus `<out>/summary.md` with every metric, its tolerance, confidence interval and status, and the per-filter verdict. About two minutes per 26 MP filter pair on the M3 Pro.
+
+    .venv/bin/python benchmarks/evaluate_masters.py \
+        --pair L ours/master_light_L_solved.fits pi/masterLight_..._FILTER-L_mono.xisf \
+        --pair R ... --cross-channel --out build/eval-report
+
 ## Native kernel and fused-pipeline measurements (2026-09-16)
 
 The two scripts below write JSON reports that are local evidence and are not checked in; the figures here were measured on the 36 GiB, 12-core M3 Pro from an uncommitted worktree and are reproduced by rerunning the scripts on the same machine.

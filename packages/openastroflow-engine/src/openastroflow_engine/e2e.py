@@ -338,6 +338,12 @@ class E2ERequest:
     search_radius_degrees: float | None = None
     min_matches: int = 12
     max_rms_arcsec: float = 2.0
+    # Filters of one run are registered onto one reference grid and cropped
+    # identically, so their masters share every pixel.  Each master is still
+    # solved on its own; the fresh solves must agree within this many pixels
+    # (solver precision, not the 0.05 px grid-identity gate) before the best
+    # one is written to every same-grid master.
+    same_grid_wcs_tolerance_pixels: float = 1.0
     registration_detection: Any = field(default=None, repr=False, compare=False)
     registration_config: Any = field(default=None, repr=False, compare=False)
 
@@ -1317,6 +1323,18 @@ def _validate_request(request: E2ERequest) -> None:
             "SOLVER_QUALITY_POLICY_INVALID",
             "max_rms_arcsec must be finite, positive, and no greater than 2.0",
         )
+    tolerance = request.same_grid_wcs_tolerance_pixels
+    if (
+        isinstance(tolerance, bool)
+        or not isinstance(tolerance, (int, float))
+        or not math.isfinite(float(tolerance))
+        or float(tolerance) <= 0
+        or float(tolerance) > 5.0
+    ):
+        raise E2EError(
+            "SOLVER_QUALITY_POLICY_INVALID",
+            "same_grid_wcs_tolerance_pixels must be finite, positive, and no greater than 5.0",
+        )
 
 
 def _qc_manifest(
@@ -2279,9 +2297,11 @@ def _register_lights(
     except ImportError as error:
         raise E2EError("REGISTRATION_BACKEND_UNAVAILABLE", str(error)) from error
     try:
-        # Refine the preview bootstrap against full-resolution centroids.  The
-        # ordinary pixel pipeline consumes affine source->reference matrices;
-        # Drizzle can retain the more general projective model.
+        # Refine the preview bootstrap against full-resolution centroids with
+        # the projective model: frames of another night or hour angle differ
+        # from the reference by perspective terms (tilt, differential
+        # refraction) that an affine fit leaves as a field-dependent
+        # misregistration of several tenths of a pixel.
         selected_registration = registration or RegistrationConfig(
             refine_full_centroids=True,
             full_transform_model="projective" if allow_projective else "affine",
@@ -2367,7 +2387,15 @@ def _register_lights(
                 "warpValidFraction": item.warp_valid_fraction,
             }
         )
+    # Registration contributes the PSF-coherence quality weight only; the
+    # integration multiplies it by its own inverse-variance noise weight
+    # measured on the normalized frames, so noise must not be weighted here.
     weights = normalize_quality_weights(run.analyses)
+    scale_estimates = estimate_stellar_scale_hints(
+        run.analyses,
+        run.transforms,
+        weights,
+    )
     quality_weights = {
         str(
             (source_aliases or {}).get(
@@ -2377,11 +2405,6 @@ def _register_lights(
         ): float(weight)
         for analysis, weight in zip(run.analyses, weights, strict=True)
     }
-    scale_estimates = estimate_stellar_scale_hints(
-        run.analyses,
-        run.transforms,
-        weights,
-    )
 
     def displayed_and_digest(index: int) -> tuple[str, str]:
         actual = str(Path(run.analyses[index].path).resolve(strict=True))
@@ -3430,6 +3453,229 @@ def _validate_solution_against_hints(
     )
 
 
+_WCS_CARD_PATTERN = re.compile(
+    r"^(WCSAXES|CRPIX\d+|CRVAL\d+|CDELT\d+|CUNIT\d+|CTYPE\d+|CD\d+_\d+|PC\d+_\d+"
+    r"|CROTA\d+|LONPOLE|LATPOLE|RADESYS|EQUINOX|MJDREF|MJDREFI|MJDREFF"
+    r"|A_ORDER|B_ORDER|AP_ORDER|BP_ORDER|A_\d+_\d+|B_\d+_\d+|AP_\d+_\d+|BP_\d+_\d+)$"
+)
+
+
+def _grid_sample_points(shape: tuple[int, int]) -> np.ndarray:
+    height, width = shape
+    return np.asarray(
+        [
+            [0.0, 0.0],
+            [width - 1.0, 0.0],
+            [0.0, height - 1.0],
+            [width - 1.0, height - 1.0],
+            [(width - 1.0) / 2.0, 0.0],
+            [(width - 1.0) / 2.0, height - 1.0],
+            [0.0, (height - 1.0) / 2.0],
+            [width - 1.0, (height - 1.0) / 2.0],
+            [(width - 1.0) / 2.0, (height - 1.0) / 2.0],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _wcs_grid_disagreement(
+    left: fits.Header, right: fits.Header, shape: tuple[int, int]
+) -> float | None:
+    """Maximum pixel disagreement of two solutions of one grid, both ways."""
+
+    try:
+        left_wcs = WCS(left, relax=False).celestial
+        right_wcs = WCS(right, relax=False).celestial
+    except Exception:
+        return None
+    samples = _grid_sample_points(shape)
+    in_right = right_wcs.all_world2pix(left_wcs.all_pix2world(samples, 0), 0)
+    in_left = left_wcs.all_world2pix(right_wcs.all_pix2world(samples, 0), 0)
+    if not (np.all(np.isfinite(in_right)) and np.all(np.isfinite(in_left))):
+        return None
+    return float(
+        max(np.max(np.abs(in_right - samples)), np.max(np.abs(in_left - samples)))
+    )
+
+
+def _accepted_solve_rms_pixels(record: Mapping[str, Any]) -> float:
+    attempts = record.get("attempts")
+    if not isinstance(attempts, list):
+        return math.inf
+    for attempt in reversed(attempts):
+        if isinstance(attempt, Mapping) and attempt.get("accepted") is True:
+            quality = attempt.get("result", {}).get("astrometricQuality", {})
+            value = quality.get("rmsPixels") if isinstance(quality, Mapping) else None
+            try:
+                rms = float(value)
+            except (TypeError, ValueError):
+                return math.inf
+            return rms if math.isfinite(rms) else math.inf
+    return math.inf
+
+
+def _unify_same_grid_solutions(
+    products: Mapping[str, Path],
+    *,
+    pixel_pipeline_receipt: Mapping[str, Any],
+    solver_records: Mapping[str, Any],
+    tolerance_pixels: float,
+) -> dict[str, Any]:
+    """Share one fresh solve between masters that occupy one pixel grid.
+
+    The ordinary pixel pipeline registers every filter of a run onto the same
+    reference frame and crops all masters to one common rectangle, so the
+    masters are the same grid by construction.  Each still received its own
+    fresh solve; those independent solutions verify the shared grid at solver
+    precision, and the lowest-RMS solution is then written to every master so
+    the products describe one sky mapping exactly.  Pixel values are untouched.
+    Runs whose masters do not share their grid are left unchanged.
+    """
+
+    groups = pixel_pipeline_receipt.get("statistics", {}).get("integrationGroups", {})
+    crops: dict[str, tuple[int, ...]] = {}
+    headers: dict[str, fits.Header] = {}
+    shapes: dict[str, tuple[int, int]] = {}
+    for filter_name, path in sorted(products.items()):
+        crop = groups.get(filter_name, {}).get("crop") if isinstance(groups, Mapping) else None
+        if not isinstance(crop, list) or len(crop) != 4:
+            return {"status": "NOT_APPLICABLE", "reason": f"{filter_name} has no crop evidence"}
+        crops[filter_name] = tuple(int(value) for value in crop)
+        header, shape = _read_image_header(path)
+        headers[filter_name] = header
+        shapes[filter_name] = shape
+    if len(set(crops.values())) != 1 or len(set(shapes.values())) != 1:
+        return {
+            "status": "NOT_APPLICABLE",
+            "reason": "filter masters do not share one registration crop",
+            "crops": {name: list(value) for name, value in crops.items()},
+            "shapes": {name: list(value) for name, value in shapes.items()},
+        }
+    shape = next(iter(shapes.values()))
+    adopted = min(
+        sorted(products),
+        key=lambda name: (
+            _accepted_solve_rms_pixels(solver_records.get(name, {})),
+            name != "L",
+            name,
+        ),
+    )
+    adopted_header = headers[adopted]
+    adopted_cards = [card for card in adopted_header.cards if _WCS_CARD_PATTERN.match(card.keyword)]
+    adopted_rms = _accepted_solve_rms_pixels(solver_records.get(adopted, {}))
+    record: dict[str, Any] = {
+        "status": "APPLIED",
+        "adoptedFilter": adopted,
+        "adoptedRmsPixels": adopted_rms,
+        "tolerancePixels": tolerance_pixels,
+        "crop": list(crops[adopted]),
+        "imageShape": list(shape),
+        "filters": {},
+    }
+    for filter_name, path in sorted(products.items()):
+        own_header = headers[filter_name]
+        disagreement = _wcs_grid_disagreement(own_header, adopted_header, shape)
+        own_rms = _accepted_solve_rms_pixels(solver_records.get(filter_name, {}))
+        # Two fresh solves of one grid differ by a fraction of their own
+        # catalogue RMS; the gate only has to reject a genuinely different
+        # grid (dither-scale offsets, rotations, mirrored axes).
+        effective_tolerance = max(
+            tolerance_pixels,
+            2.0 * max(
+                rms for rms in (own_rms, adopted_rms) if math.isfinite(rms)
+            ) if any(math.isfinite(rms) for rms in (own_rms, adopted_rms)) else tolerance_pixels,
+        )
+        entry: dict[str, Any] = {
+            "ownRmsPixels": own_rms,
+            "ownVersusAdoptedMaximumPixels": disagreement,
+            "effectiveTolerancePixels": effective_tolerance,
+            "rewritten": False,
+        }
+        record["filters"][filter_name] = entry
+        if disagreement is None or disagreement > effective_tolerance:
+            record["status"] = "MISMATCH"
+            record["code"] = "SAME_GRID_WCS_MISMATCH"
+            record["message"] = (
+                f"{filter_name} solved {disagreement} px away from {adopted} on a shared grid"
+                if disagreement is not None
+                else f"{filter_name} and {adopted} solutions do not map the shared grid"
+            )
+            return record
+    for filter_name, path in sorted(products.items()):
+        if filter_name == adopted:
+            continue
+        entry = record["filters"][filter_name]
+        before_sha256 = _sha256(path)
+        try:
+            with fits.open(
+                path,
+                mode="update",
+                memmap=True,
+                do_not_scale_image_data=True,
+                uint=False,
+                checksum=False,
+            ) as hdul:
+                header = hdul[0].header
+                for keyword in [card.keyword for card in header.cards if _WCS_CARD_PATTERN.match(card.keyword)]:
+                    del header[keyword]
+                # Insert after the mandatory cards so the layout stays FITS-legal.
+                insert_at = header.index("EXTEND") + 1 if "EXTEND" in header else 5
+                for offset, card in enumerate(adopted_cards):
+                    header.insert(insert_at + offset, card)
+                header["OAFWCSSG"] = (adopted, "Filter whose same-grid solve is shared")
+                header["OAFWCSVP"] = (
+                    float(entry["ownVersusAdoptedMaximumPixels"]),
+                    "Own solve vs shared solve, max px",
+                )
+                header.add_history(
+                    f"Ultra-Fast WBPP: same-grid {adopted} solve adopted; own solve agreed within "
+                    f"{entry['ownVersusAdoptedMaximumPixels']:.4f} px"
+                )
+                for hdu in hdul:
+                    if "CHECKSUM" in hdu.header or "DATASUM" in hdu.header:
+                        hdu.add_checksum(override_datasum=True)
+                hdul.flush(output_verify="exception")
+            with path.open("r+b") as stream:
+                os.fsync(stream.fileno())
+        except Exception as error:
+            raise E2EError("SAME_GRID_WCS_REWRITE_FAILED", str(error), path=str(path)) from error
+        after_header, after_shape = _read_image_header(path)
+        validation = validate_wcs_header(after_header, image_shape=after_shape)
+        residual = _wcs_grid_disagreement(adopted_header, after_header, shape)
+        if (
+            not validation.valid
+            or after_shape != shape
+            or residual is None
+            or residual > 1e-6
+            or after_header.get("OAFSTATE") != "SOLVED"
+            or after_header.get("OAFWCS") != "SOLVED"
+        ):
+            raise E2EError(
+                "SAME_GRID_WCS_REWRITE_INVALID",
+                "rewritten master does not carry the adopted solution exactly",
+                path=str(path),
+            )
+        entry.update(
+            rewritten=True,
+            sha256Before=before_sha256,
+            sha256After=_sha256(path),
+            wcsValidation=validation.serializable(),
+        )
+        accepted = next(
+            (
+                item
+                for item in reversed(solver_records.get(filter_name, {}).get("attempts", []))
+                if isinstance(item, Mapping) and item.get("accepted") is True
+            ),
+            None,
+        )
+        if isinstance(accepted, dict) and isinstance(accepted.get("artifact"), dict):
+            accepted["artifact"]["sha256"] = entry["sha256After"]
+            accepted["artifact"]["sizeBytes"] = path.stat().st_size
+            accepted["sameGridSolveAdopted"] = adopted
+    return record
+
+
 def _validate_cross_filter_wcs(
     products: Mapping[str, Path], *, tolerance_pixels: float = 0.05
 ) -> WcsValidation:
@@ -4288,7 +4534,7 @@ def run_e2e(
             detection=request.registration_detection,
             registration=request.registration_config,
             workers=request.workers,
-            allow_projective=request.integration_mode is IntegrationMode.DRIZZLE,
+            allow_projective=True,
             source_aliases=registration_source_aliases,
             source_sha256_by_path={
                 str(path): (
@@ -4559,13 +4805,34 @@ def run_e2e(
                 total=len(candidates),
             )
 
+        same_grid_unification: dict[str, Any] = {
+            "status": "NOT_APPLICABLE",
+            "reason": "single filter or drizzle geometry",
+        }
+        if (
+            all_solved
+            and len(solved_products) > 1
+            and request.integration_mode is IntegrationMode.ORDINARY
+        ):
+            same_grid_unification = _unify_same_grid_solutions(
+                solved_products,
+                pixel_pipeline_receipt=pixel_pipeline_receipt,
+                solver_records=solver_records,
+                tolerance_pixels=float(request.same_grid_wcs_tolerance_pixels),
+            )
+            if same_grid_unification["status"] == "MISMATCH":
+                all_solved = False
         cross_filter_validation = (
             _validate_cross_filter_wcs(solved_products)
             if all_solved
             else WcsValidation(
                 False,
-                "CROSS_FILTER_WCS_SKIPPED",
-                "one or more filter solutions failed their individual gates",
+                str(same_grid_unification.get("code") or "CROSS_FILTER_WCS_SKIPPED"),
+                str(
+                    same_grid_unification.get("message")
+                    or "one or more filter solutions failed their individual gates"
+                ),
+                {"sameGridUnification": same_grid_unification},
             )
         )
         all_solved = all_solved and cross_filter_validation.valid
@@ -4586,6 +4853,7 @@ def run_e2e(
                         "maxRmsArcsec": request.max_rms_arcsec,
                     },
                     "crossFilterValidation": cross_filter_validation.serializable(),
+                    "sameGridUnification": same_grid_unification,
                     "filters": solver_records,
                 },
                 sources=identities,
@@ -4650,6 +4918,7 @@ def run_e2e(
                     "maxRmsArcsec": request.max_rms_arcsec,
                 },
                 "crossFilterValidation": cross_filter_validation.serializable(),
+                "sameGridUnification": same_grid_unification,
                 "filters": solver_records,
             },
             "artifacts": artifacts,

@@ -579,6 +579,59 @@ extern "C" int oaf_native_cpu_warp_lanczos3_v1(
       "unknown native warp failure" );
 }
 
+extern "C" int oaf_native_cpu_warp_lanczos3_v2(
+   const OafNativeWarpLanczos3RequestV2* request,
+   float* destination,
+   size_t destination_capacity,
+   char* error_message,
+   size_t error_message_capacity )
+{
+   if ( request == nullptr || destination == nullptr )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "request and destination are required" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   if ( request->struct_size != sizeof( OafNativeWarpLanczos3RequestV2 )
+     || request->source_samples == nullptr )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "warp C ABI structure version or input buffer is invalid" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   const size_t pixels =
+      static_cast<size_t>( request->output_width )*request->row_count;
+   if ( pixels == 0 || destination_capacity < pixels )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "destination capacity is smaller than the requested band" );
+      return OAF_NATIVE_BUFFER_TOO_SMALL;
+   }
+   return GuardedKernelCall(
+      [&]()
+      {
+         using namespace openastroflow::native;
+         WarpLanczos3Request native;
+         native.source = std::span<const float>(
+            request->source_samples, request->source_sample_count );
+         native.sourceWidth = request->source_width;
+         native.sourceHeight = request->source_height;
+         native.inverse = AffineInverse{
+            request->inverse[0], request->inverse[1], request->inverse[2],
+            request->inverse[3], request->inverse[4], request->inverse[5],
+            request->inverse[6], request->inverse[7], request->inverse[8] };
+         native.outputWidth = request->output_width;
+         native.firstRow = request->first_row;
+         native.rowCount = request->row_count;
+         native.domainScale = request->domain_scale;
+         native.threads = request->threads;
+         WarpLanczos3Clamped(
+            native, std::span<float>( destination, destination_capacity ) );
+      },
+      error_message, error_message_capacity,
+      "unknown native warp failure" );
+}
+
 extern "C" int oaf_native_cpu_mad_rejection_v1(
    const OafNativeMadRejectionRequestV1* request,
    uint8_t* accepted,

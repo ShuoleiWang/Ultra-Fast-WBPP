@@ -193,7 +193,14 @@ class RawFrameMetadataOverride:
 
 @dataclass(frozen=True, slots=True)
 class AffineTransform:
-    """Input-pixel to output-pixel homogeneous affine transform."""
+    """Input-pixel to output-pixel homogeneous transform.
+
+    The last row is ``(0, 0, 1)`` for an affine map.  A projective map (any
+    other finite last row) is accepted as well: registration against frames
+    of another night or hour angle needs the two perspective terms that a
+    tilt or differential refraction adds, which an affine fit leaves as a
+    field-dependent misregistration of several tenths of a pixel.
+    """
 
     matrix: tuple[tuple[float, float, float], ...]
 
@@ -225,15 +232,25 @@ class AffineTransform:
             raise CalibrationError(
                 "TRANSFORM_INVALID", "transform must be a finite 3x3 matrix"
             )
-        if not np.allclose(matrix[2], (0.0, 0.0, 1.0), rtol=0.0, atol=1e-12):
+        if matrix[2, 2] == 0.0:
             raise CalibrationError(
-                "TRANSFORM_PROJECTIVE_UNSUPPORTED",
-                "portable registration currently accepts affine transforms only",
+                "TRANSFORM_INVALID", "homogeneous transform must be normalized (m22 != 0)"
             )
-        determinant = float(np.linalg.det(matrix[:2, :2]))
-        if not math.isfinite(determinant) or abs(determinant) < 1e-12:
-            raise CalibrationError("TRANSFORM_SINGULAR", "affine transform is singular")
+        determinant = float(np.linalg.det(matrix))
+        linear_determinant = float(np.linalg.det(matrix[:2, :2]))
+        if (
+            not math.isfinite(determinant)
+            or abs(determinant) < 1e-12
+            or not math.isfinite(linear_determinant)
+            or abs(linear_determinant) < 1e-12
+        ):
+            raise CalibrationError("TRANSFORM_SINGULAR", "transform is singular")
         return matrix
+
+    @property
+    def is_projective(self) -> bool:
+        matrix = self.validated_matrix()
+        return not bool(np.array_equal(matrix[2], (0.0, 0.0, 1.0)))
 
     @property
     def is_identity(self) -> bool:
@@ -273,6 +290,13 @@ class PipelineParameters:
     # are written to disk only when a consumer (Drizzle, the public portable
     # pipeline) needs them; the ordinary E2E path keeps them transient.
     materialize_calibrated_lights: bool = True
+    # Cosmetic correction of hot pixels: pixels of the subtracted master dark
+    # that lie more than this many robust sigmas above its median are
+    # replaced in every calibrated Light by the median of their eight
+    # neighbours before registration.  Unstable hot pixels leave residuals
+    # after dark subtraction that pixel rejection cannot always remove when
+    # several frames share one pointing.  ``None`` disables the correction.
+    cosmetic_hot_pixel_sigma: float | None = 3.0
     # Published pipeline outputs are fsynced.  An enclosing run whose whole
     # pipeline directory is transient (the E2E work tree) turns this off and
     # relies on its own fsynced promotion of the final products.
@@ -281,6 +305,12 @@ class PipelineParameters:
     def validate(self) -> None:
         if self.calibration_workflow not in WORKFLOWS:
             raise ValueError("unsupported calibration_workflow")
+        if self.cosmetic_hot_pixel_sigma is not None and (
+            isinstance(self.cosmetic_hot_pixel_sigma, bool)
+            or not math.isfinite(self.cosmetic_hot_pixel_sigma)
+            or self.cosmetic_hot_pixel_sigma < 1.0
+        ):
+            raise ValueError("cosmetic_hot_pixel_sigma must be None or a finite value >= 1")
         if not isinstance(self.materialize_calibrated_lights, bool):
             raise ValueError("materialize_calibrated_lights must be a boolean")
         if not isinstance(self.durable_intermediates, bool):
@@ -350,6 +380,7 @@ class PipelineParameters:
                 item.serializable() for item in self.raw_frame_metadata_overrides
             ],
             "materializeCalibratedLights": self.materialize_calibrated_lights,
+            "cosmeticHotPixelSigma": self.cosmetic_hot_pixel_sigma,
             "durableIntermediates": self.durable_intermediates,
         }
 
@@ -1794,6 +1825,27 @@ def _resolve_stellar_scale_hints(
     return result
 
 
+def _inverse_coordinates(
+    inverse: NDArray[np.float64],
+    output_x: NDArray[np.float64],
+    output_y: NDArray[np.float64],
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Map output pixel coordinates to input coordinates.
+
+    The evaluation order ``((m00*x) + (m01*y)) + m02`` and, for a projective
+    map, the division by ``((m20*x) + (m21*y)) + m22`` are the arithmetic
+    contract the native warp kernel reproduces value for value.
+    """
+
+    input_x = inverse[0, 0] * output_x + inverse[0, 1] * output_y + inverse[0, 2]
+    input_y = inverse[1, 0] * output_x + inverse[1, 1] * output_y + inverse[1, 2]
+    if not (inverse[2, 0] == 0.0 and inverse[2, 1] == 0.0 and inverse[2, 2] == 1.0):
+        denominator = inverse[2, 0] * output_x + inverse[2, 1] * output_y + inverse[2, 2]
+        input_x = input_x / denominator
+        input_y = input_y / denominator
+    return input_x, input_y
+
+
 def _exact_half_turn_translation(
     transform: AffineTransform, shape: tuple[int, int]
 ) -> tuple[int, int] | None:
@@ -1863,7 +1915,11 @@ def _registration_metadata(
         "OBJECT": info.target,
         "EXPTIME": info.exposure_seconds,
         "OAFSTATE": OUTPUT_STATE,
-        "OAFREG": "IDENTITY" if transform.is_identity else "AFFINE",
+        "OAFREG": (
+            "IDENTITY"
+            if transform.is_identity
+            else "PROJECTIVE" if transform.is_projective else "AFFINE"
+        ),
         "OAFRSAMP": actual_resampler.upper(),
         "OAFRCLMP": "DOMAIN_UNION_SUPPORT" if uses_lanczos else None,
         "OAFRMARG": 2 if uses_lanczos else 0,
@@ -2089,7 +2145,7 @@ def _register_frame(
                         assert kernels is not None and source_values is not None
                         values = kernels.warp_lanczos3(
                             source_values,
-                            inverse[:2],
+                            inverse,
                             first_row=y0,
                             row_count=y1 - y0,
                             output_width=width,
@@ -2099,16 +2155,7 @@ def _register_frame(
                     else:
                         output_y = np.arange(y0, y1, dtype=np.float64)[:, None]
                         output_x = np.arange(width, dtype=np.float64)[None, :]
-                        input_x = (
-                            inverse[0, 0] * output_x
-                            + inverse[0, 1] * output_y
-                            + inverse[0, 2]
-                        )
-                        input_y = (
-                            inverse[1, 0] * output_x
-                            + inverse[1, 1] * output_y
-                            + inverse[1, 2]
-                        )
+                        input_x, input_y = _inverse_coordinates(inverse, output_x, output_y)
                         input_x = np.broadcast_to(input_x, (y1 - y0, width))
                         input_y = np.broadcast_to(input_y, (y1 - y0, width))
                         if resampler == "lanczos-3-clamped":
@@ -2175,6 +2222,10 @@ class _LightJob:
     transform: AffineTransform
     info: FrameInfo
     source_exposure_seconds: float | None
+    # Master dark whose hot-pixel map drives the cosmetic correction, and the
+    # detection threshold; ``None`` leaves the calibrated pixels untouched.
+    hot_pixel_master: str | None = None
+    hot_pixel_sigma: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2184,6 +2235,7 @@ class _LightJobResult:
     registered_statistics: PixelStatistics
     registered_sha256: str | None
     execution: dict[str, Any]
+    cosmetic: dict[str, Any] | None = None
 
 
 class _MasterCache:
@@ -2195,6 +2247,7 @@ class _MasterCache:
 
     def __init__(self) -> None:
         self._frames: dict[str, _MemoryFrame] = {}
+        self._hot_pixels: dict[tuple[str, float], tuple[NDArray[np.int64], NDArray[np.int64], dict[str, Any]]] = {}
         self._lock = threading.Lock()
 
     def frame(self, path: str) -> _MemoryFrame:
@@ -2211,6 +2264,67 @@ class _MasterCache:
     def decoded_bytes(self) -> int:
         with self._lock:
             return sum(frame.values.nbytes for frame in self._frames.values())
+
+    def hot_pixels(self, path: str, sigma: float) -> tuple[NDArray[np.int64], NDArray[np.int64], dict[str, Any]]:
+        """Row/column indices of the master dark's hot pixels (cached per dark)."""
+
+        master = self.frame(path)
+        key = (str(master.path), float(sigma))
+        with self._lock:
+            cached = self._hot_pixels.get(key)
+        if cached is None:
+            cached = _hot_pixel_map(master.values, sigma)
+            with self._lock:
+                self._hot_pixels[key] = cached
+        return cached
+
+
+def _hot_pixel_map(
+    values: NDArray[np.float32], sigma: float
+) -> tuple[NDArray[np.int64], NDArray[np.int64], dict[str, Any]]:
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return np.empty(0, np.int64), np.empty(0, np.int64), {"count": 0, "threshold": None}
+    median = float(np.median(finite))
+    dispersion = 1.4826 * float(np.median(np.abs(finite - median)))
+    if not math.isfinite(dispersion) or dispersion <= 0.0:
+        # A dark without measurable dispersion (synthetic or degenerate)
+        # carries no hot-pixel evidence.
+        return np.empty(0, np.int64), np.empty(0, np.int64), {
+            "count": 0, "fraction": 0.0, "darkMedian": median, "darkRobustSigma": dispersion,
+            "threshold": None, "sigma": float(sigma),
+        }
+    threshold = float(median + sigma * dispersion)
+    rows, columns = np.nonzero(values > np.float32(threshold))
+    return rows.astype(np.int64), columns.astype(np.int64), {
+        "count": int(rows.size),
+        "fraction": float(rows.size / values.size),
+        "darkMedian": median,
+        "darkRobustSigma": dispersion,
+        "threshold": threshold,
+        "sigma": float(sigma),
+    }
+
+
+def _replace_hot_pixels(
+    image: NDArray[np.float32], rows: NDArray[np.int64], columns: NDArray[np.int64]
+) -> None:
+    """Replace the listed pixels in place by the median of their eight neighbours."""
+
+    if rows.size == 0:
+        return
+    height, width = image.shape
+    neighbours = np.empty((8, rows.size), dtype=np.float32)
+    index = 0
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            if dy == 0 and dx == 0:
+                continue
+            neighbours[index] = image[
+                np.clip(rows + dy, 0, height - 1), np.clip(columns + dx, 0, width - 1)
+            ]
+            index += 1
+    image[rows, columns] = np.nanmedian(neighbours, axis=0)
 
 
 def _write_float_fits(
@@ -2264,6 +2378,15 @@ def _process_light_job(
         calibrated = _expression_rows(
             expression, sources, 0, height, division_floor=division_floor
         )
+    cosmetic: dict[str, Any] | None = None
+    if job.hot_pixel_master is not None and job.hot_pixel_sigma is not None:
+        rows, columns, evidence = master_cache.hot_pixels(job.hot_pixel_master, job.hot_pixel_sigma)
+        _replace_hot_pixels(calibrated, rows, columns)
+        cosmetic = {
+            "algorithm": "master-dark-hot-pixel-neighbour-median-v1",
+            "replacedPixels": int(rows.size),
+            **evidence,
+        }
     statistics = _StatsAccumulator()
     statistics.update(calibrated)
     calibrated_statistics = statistics.result()
@@ -2307,6 +2430,7 @@ def _process_light_job(
         registered_statistics=registered_statistics,
         registered_sha256=registered_sha256,
         execution=execution,
+        cosmetic=cosmetic,
     )
 
 
@@ -2436,6 +2560,82 @@ def _histogram_rectangle(
     return best
 
 
+def _normalization_reference_index(
+    paths: Sequence[Path],
+    hints: Mapping[Path, StellarScaleHint | None],
+    quality_weights: Mapping[Path, float],
+) -> tuple[int, dict[str, Any]]:
+    """Normalization reference of one filter group.
+
+    Registration chose the group's stellar-scale reference (the lowest-sky
+    frame of acceptable quality) and bound every hint to it; the same frame
+    is the additive reference so the master inherits its background.  Without
+    hints the highest-quality frame is used, as before.
+    """
+
+    hinted = {
+        Path(hint.reference_path).expanduser().resolve(strict=True)
+        for path in paths
+        if (hint := hints.get(path)) is not None
+    }
+    if len(hinted) == 1:
+        reference = next(iter(hinted))
+        for index, path in enumerate(paths):
+            if path == reference:
+                return index, {"rule": "stellar-scale-hint-reference", "reference": str(path)}
+    index = max(range(len(paths)), key=lambda item: quality_weights[paths[item]])
+    return index, {"rule": "highest-quality-weight", "reference": str(paths[index])}
+
+
+def _shared_auto_crop(
+    light_groups: Mapping[str, Sequence[Path]],
+    light_info: Mapping[Path, FrameInfo],
+    transforms: Mapping[Path, AffineTransform],
+    *,
+    enabled: bool,
+    max_memory_bytes: int,
+    resampler: str,
+) -> tuple[tuple[int, int, int, int] | None, dict[str, tuple[int, int, int, int]]]:
+    """Intersect the per-filter valid crops of one registration run.
+
+    Returns ``(shared_crop, crop_by_filter)``; ``shared_crop`` is ``None`` when
+    auto-crop is disabled.  All groups must share the registered geometry,
+    which is the source frame shape of every Light of the run.
+    """
+
+    if not enabled or not light_groups:
+        return None, {}
+    shapes = {
+        filter_name: light_info[paths[0]].shape for filter_name, paths in light_groups.items()
+    }
+    if len(set(shapes.values())) != 1:
+        raise CalibrationError(
+            "REGISTRATION_GEOMETRY_MISMATCH",
+            "filter groups of one run must share the registered frame geometry: "
+            + ", ".join(f"{name}={shape}" for name, shape in sorted(shapes.items())),
+        )
+    crops: dict[str, tuple[int, int, int, int]] = {}
+    for filter_name, paths in sorted(light_groups.items()):
+        crops[filter_name] = _common_valid_crop(
+            shapes[filter_name],
+            [transforms[path] for path in paths],
+            max_memory_bytes=max_memory_bytes,
+            resampler=resampler,
+        )
+    shared = (
+        max(crop[0] for crop in crops.values()),
+        max(crop[1] for crop in crops.values()),
+        min(crop[2] for crop in crops.values()),
+        min(crop[3] for crop in crops.values()),
+    )
+    if shared[2] <= shared[0] or shared[3] <= shared[1]:
+        raise CalibrationError(
+            "AUTOCROP_TOO_SMALL",
+            "the filter groups of this run have no common fully covered rectangle",
+        )
+    return shared, crops
+
+
 def _common_valid_crop(
     shape: tuple[int, int],
     transforms: Sequence[AffineTransform],
@@ -2481,16 +2681,7 @@ def _common_valid_crop(
         output_x = np.arange(width, dtype=np.float64)[None, :]
         common = np.ones((y1 - y0, width), dtype=bool)
         for inverse, interpolation_margin in zip(inverses, margins, strict=True):
-            input_x = (
-                inverse[0, 0] * output_x
-                + inverse[0, 1] * output_y
-                + inverse[0, 2]
-            )
-            input_y = (
-                inverse[1, 0] * output_x
-                + inverse[1, 1] * output_y
-                + inverse[1, 2]
-            )
+            input_x, input_y = _inverse_coordinates(inverse, output_x, output_y)
             common &= (
                 (input_x >= interpolation_margin)
                 & (input_x <= width - 1 - interpolation_margin)
@@ -3572,6 +3763,13 @@ def _run_portable_pipeline_fits(
                         normalized_unit_scale=light_output_domain.normalized_unit_scale,
                     ),
                     source_exposure_seconds=info.exposure_seconds,
+                    hot_pixel_master=(
+                        str(subtract_path)
+                        if dark_match is not None
+                        and parameters.cosmetic_hot_pixel_sigma is not None
+                        else None
+                    ),
+                    hot_pixel_sigma=parameters.cosmetic_hot_pixel_sigma,
                 )
             )
 
@@ -3633,6 +3831,7 @@ def _run_portable_pipeline_fits(
                 "calibration": {
                     "materialized": job.calibrated_path is not None,
                     "statistics": result.calibrated_statistics.serializable(),
+                    "cosmetic": result.cosmetic or {"algorithm": None, "replacedPixels": 0},
                     **details,
                 },
                 "execution": dict(result.execution),
@@ -3674,6 +3873,19 @@ def _run_portable_pipeline_fits(
         master_lights: list[Path] = []
         previews: list[Path] = []
         integration_groups: dict[str, Any] = {}
+        # Every group of this run was registered onto the same reference grid.
+        # Cropping each master to the rectangle that is valid in all groups
+        # keeps the masters of different filters on one identical pixel grid,
+        # as WBPP's autocrop does, so LRGB composition never resamples them.
+        # A single-filter run keeps exactly its own crop.
+        shared_crop, group_crops = _shared_auto_crop(
+            light_groups,
+            light_info,
+            resolved_transforms,
+            enabled=parameters.auto_crop,
+            max_memory_bytes=parameters.registration_memory_bytes,
+            resampler=parameters.registration_resampler,
+        )
         for filter_name, paths in sorted(light_groups.items()):
             exposures = {
                 info.exposure_seconds for path, info in light_info.items() if path in paths
@@ -3683,9 +3895,8 @@ def _run_portable_pipeline_fits(
                 float(light_info[path].exposure_seconds) for path in paths
             )
             registered_paths = [registered[path] for path in paths]
-            reference_index = max(
-                range(len(paths)),
-                key=lambda item: resolved_quality_weights[paths[item]],
+            reference_index, reference_selection = _normalization_reference_index(
+                paths, resolved_stellar_scale_hints, resolved_quality_weights
             )
             integration_expressions = [
                 FrameExpression(str(path)) for path in registered_paths
@@ -3779,6 +3990,9 @@ def _run_portable_pipeline_fits(
                     parameters=parameters.global_normalization,
                     stellar_scale_hints=group_hints,
                     workers=execution_tuning.cpu_workers,
+                    transforms=[
+                        resolved_transforms[path].validated_matrix() for path in paths
+                    ],
                 )
                 integration_expressions = [
                     FrameExpression(
@@ -3816,6 +4030,7 @@ def _run_portable_pipeline_fits(
                 global_normalization_record = {
                     "status": "APPLIED",
                     "referenceInput": str(display_path(paths[reference_index])),
+                    "referenceSelection": reference_selection,
                     "evidence": public_evidence,
                 }
                 normalization_method = "GLOBAL_STELLAR"
@@ -3862,13 +4077,14 @@ def _run_portable_pipeline_fits(
                 metal_executor.close()
                 metal_executor = None
                 metal_unavailable_reason = fallback_reason
-            if parameters.auto_crop:
-                crop = _common_valid_crop(
-                    integration.shape,
-                    [resolved_transforms[path] for path in paths],
-                    max_memory_bytes=parameters.registration_memory_bytes,
-                    resampler=parameters.registration_resampler,
-                )
+            if shared_crop is not None:
+                if integration.shape != light_info[paths[0]].shape:
+                    raise CalibrationError(
+                        "REGISTRATION_GEOMETRY_MISMATCH",
+                        f"{filter_name} integrated {integration.shape} but its "
+                        f"Lights were registered as {light_info[paths[0]].shape}",
+                    )
+                crop = shared_crop
             else:
                 height, width = integration.shape
                 crop = (0, 0, height, width)
@@ -4009,6 +4225,8 @@ def _run_portable_pipeline_fits(
                     "method": "LINEAR_REFERENCE_EXPOSURE",
                 },
                 "crop": [top, left, bottom, right],
+                "groupCrop": list(group_crops.get(filter_name, crop)),
+                "cropSharedAcrossFilters": len(light_groups) > 1,
                 "masterStatistics": master_stats.serializable(),
                 "mapStatistics": map_statistics,
             }

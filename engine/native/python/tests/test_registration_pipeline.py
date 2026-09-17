@@ -423,6 +423,57 @@ class LocalCentroidReferenceTests(unittest.TestCase):
                 self.assertGreater(indices.size, 30)
                 self.assertLess(indices.size, approximate.shape[0])
 
+    def test_core_window_follows_the_star_core_not_its_wings(self) -> None:
+        """An asymmetric PSF must not pull the registration centroid off the core."""
+
+        height, width = 64, 64
+        yy, xx = np.indices((height, width), dtype=np.float64)
+        core_x, core_y = 31.3, 30.6
+        core = 4000.0 * np.exp(-((xx - core_x) ** 2 + (yy - core_y) ** 2) / (2 * 1.6**2))
+        # A coma-like wing: a broad, fainter lobe displaced to the left.
+        wing = 200.0 * np.exp(-((xx - (core_x - 5.0)) ** 2 + (yy - core_y) ** 2) / (2 * 4.0**2))
+        symmetric = (100.0 + core).astype(np.float32)
+        asymmetric = (100.0 + core + wing).astype(np.float32)
+        approximate = np.asarray([[31.0, 31.0]], dtype=np.float64)
+
+        plain_symmetric, _ = registration_pipeline._local_centroids(symmetric, approximate, 7)
+        windowed_symmetric, _ = registration_pipeline._local_centroids(
+            symmetric, approximate, 7, window_sigma=2.0
+        )
+        np.testing.assert_allclose(plain_symmetric, [[core_x, core_y]], atol=2e-3)
+        np.testing.assert_allclose(windowed_symmetric, [[core_x, core_y]], atol=2e-3)
+
+        plain_asymmetric, _ = registration_pipeline._local_centroids(asymmetric, approximate, 7)
+        windowed_asymmetric, _ = registration_pipeline._local_centroids(
+            asymmetric, approximate, 7, window_sigma=2.0
+        )
+        self.assertLess(plain_asymmetric[0, 0], core_x - 0.5)  # pulled into the wing
+        self.assertAlmostEqual(windowed_asymmetric[0, 0], core_x, delta=0.12)
+        self.assertAlmostEqual(windowed_asymmetric[0, 1], core_y, delta=0.02)
+        self.assertLess(
+            abs(windowed_asymmetric[0, 0] - core_x), 0.25 * abs(plain_asymmetric[0, 0] - core_x)
+        )
+        # A zero window is exactly the plain centre of mass.
+        zero_window, _ = registration_pipeline._local_centroids(
+            asymmetric, approximate, 7, window_sigma=0.0
+        )
+        np.testing.assert_array_equal(zero_window, plain_asymmetric)
+
+    def test_full_refinement_uses_the_core_window_by_default(self) -> None:
+        config = registration_pipeline.RegistrationConfig()
+        self.assertEqual(
+            registration_pipeline._core_window_sigma(config),
+            registration_pipeline.DEFAULT_CENTROID_WINDOW_SIGMA_PX,
+        )
+        self.assertEqual(
+            registration_pipeline._core_window_sigma(
+                registration_pipeline.RegistrationConfig(full_centroid_window_sigma_px=1.5)
+            ),
+            1.5,
+        )
+        with self.assertRaises(ValueError):
+            registration_pipeline.RegistrationConfig(full_centroid_window_sigma_px=-1.0)
+
     def test_empty_and_nonfinite_positions(self) -> None:
         image = np.ones((20, 20), dtype=np.float32)
         points, indices = registration_pipeline._local_centroids(image, np.empty((0, 2)), 3)

@@ -202,60 +202,60 @@ class FakePanelRunner:
         self.drift_source = drift_source
 
     def __call__(self, request: E2ERequest, **_kwargs: Any) -> E2EResult:
+        # One run carries every filter of one target; every filter master of
+        # the run shares the target's pixel grid, as the real pipeline does.
         self.calls += 1
-        source = Path(request.light_files[0])
-        header = fits.getheader(source)
-        target = str(header["OBJECT"])
-        filter_name = str(header["FILTER"])
+        filters: dict[str, str] = {}
+        target = ""
+        for path in request.light_files:
+            header = fits.getheader(Path(path))
+            target = str(header["OBJECT"])
+            filters.setdefault(str(header["FILTER"]), target)
         target_index = int(target[-1]) - 1
         starts = ((0, 0), (6, 0), (0, 6), (6, 6))
         start_x, start_y = starts[target_index]
-        solved_header = _output_wcs(crpix=(7.5 - start_x, 7.5 - start_y)).to_header(relax=True)
-        solved_header["IMAGETYP"] = "Master Light"
-        solved_header["OBJECT"] = target
-        solved_header["FILTER"] = filter_name
-        solved_header["OAFSTATE"] = "SOLVED"
-        solved_header["OAFWCS"] = "SOLVED"
         output = Path(request.output_directory)
-        product = output / "products" / filter_name / f"master_light_{filter_name}_wcs.fits"
-        product.parent.mkdir(parents=True)
-        value = {"R": 10.0, "G": 8.0, "B": 6.0, "L": 12.0}.get(filter_name, 5.0)
-        local_y, local_x = np.indices((8, 8), dtype=np.float32)
-        sky_signal = (
-            value
-            + 0.15 * (local_x + start_x)
-            + 0.10 * (local_y + start_y)
-        )
-        panel_gain = 1.0 + 0.10 * target_index
-        panel_offset = 2.0 * target_index
-        fits.writeto(
-            product,
-            (sky_signal * panel_gain + panel_offset).astype(np.float32),
-            solved_header,
-            checksum=True,
-        )
         quality = _managed_quality().serializable()
+        products: list[Path] = []
+        astrometry: dict[str, Any] = {}
+        for filter_name in sorted(filters):
+            solved_header = _output_wcs(crpix=(7.5 - start_x, 7.5 - start_y)).to_header(relax=True)
+            solved_header["IMAGETYP"] = "Master Light"
+            solved_header["OBJECT"] = target
+            solved_header["FILTER"] = filter_name
+            solved_header["OAFSTATE"] = "SOLVED"
+            solved_header["OAFWCS"] = "SOLVED"
+            product = output / "products" / filter_name / f"master_light_{filter_name}_wcs.fits"
+            product.parent.mkdir(parents=True)
+            value = {"R": 10.0, "G": 8.0, "B": 6.0, "L": 12.0}.get(filter_name, 5.0)
+            local_y, local_x = np.indices((8, 8), dtype=np.float32)
+            sky_signal = (
+                value
+                + 0.15 * (local_x + start_x)
+                + 0.10 * (local_y + start_y)
+            )
+            panel_gain = 1.0 + 0.10 * target_index
+            panel_offset = 2.0 * target_index
+            fits.writeto(
+                product,
+                (sky_signal * panel_gain + panel_offset).astype(np.float32),
+                solved_header,
+                checksum=True,
+            )
+            products.append(product)
+            astrometry[filter_name] = {
+                "status": "SOLVED",
+                "output": str(product.relative_to(output)),
+                "attempts": [
+                    {
+                        "accepted": True,
+                        "result": {"astrometricQuality": quality},
+                    }
+                ],
+            }
         receipt = output / "receipt.json"
         receipt.write_text(
-            json.dumps(
-                {
-                    "pipelineVersion": "fake-panel-e2e",
-                    "astrometry": {
-                        "filters": {
-                            filter_name: {
-                                "status": "SOLVED",
-                                "output": str(product.relative_to(output)),
-                                "attempts": [
-                                    {
-                                        "accepted": True,
-                                        "result": {"astrometricQuality": quality},
-                                    }
-                                ],
-                            }
-                        }
-                    },
-                }
-            ),
+            json.dumps({"pipelineVersion": "fake-panel-e2e", "astrometry": {"filters": astrometry}}),
             encoding="utf-8",
         )
         if self.drift_source is not None and self.calls == 1:
@@ -268,7 +268,7 @@ class FakePanelRunner:
             output_directory=str(output),
             evidence_directory=None,
             receipt_path=str(receipt),
-            product_paths=(str(product),),
+            product_paths=tuple(str(product) for product in products),
             preview_paths=(),
             passed_light_paths=request.light_files,
             excluded_light_paths=(),
@@ -441,14 +441,17 @@ def test_four_panel_rgb_project_runs_mosaics_fresh_solves_and_color(tmp_path: Pa
     assert result.success is True
     assert result.code == "PROJECT_COLOR_SUCCEEDED"
     assert result.mono_filters == ("B", "G", "R")
-    assert runner.calls == 12
+    # One multi-filter run per target keeps every filter master of a target
+    # on one pixel grid.
+    assert runner.calls == 4
     fractions = [event.overall_fraction for event in events]
     assert fractions == sorted(fractions)
     assert all(0 <= value < 1 for value in fractions)
     assert fractions[-1] == 0.99  # Desktop receipt verification owns completion.
     panels = [event for event in events if event.scope == "panel"]
-    assert {event.panel_index for event in panels} == set(range(1, 13))
-    assert all(event.panel_count == 12 and event.panel is not None for event in panels)
+    assert {event.panel_index for event in panels} == set(range(1, 5))
+    assert all(event.panel_count == 4 and event.panel is not None for event in panels)
+    assert {event.panel.filter_name for event in panels} == {"B+G+R"}
     assert all(event.stage is not ProgressStage.COMPLETE for event in panels)
     assert max(event.overall_fraction for event in panels) < fractions[-1]
     phases = {event.project_stage for event in events if event.scope == "project"}
@@ -889,7 +892,7 @@ def test_unexpected_final_metadata_error_preserves_completed_products_and_diagno
     assert not Path(base.output_directory).exists()
     evidence = Path(result.evidence_directory)
     assert (evidence / "products/color/linear-rgb.fits").is_file()
-    assert len(list((evidence / "runs").glob("*/receipt.json"))) == 12
+    assert len(list((evidence / "runs").glob("*/receipt.json"))) == 4
     receipt = json.loads(Path(result.receipt_path).read_text())
     diagnostic = json.loads((evidence / receipt["execution"]["unexpectedFailure"]["diagnostic"]).read_text())
     assert diagnostic["exceptionType"] == "ValueError"
