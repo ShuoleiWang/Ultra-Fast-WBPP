@@ -156,7 +156,6 @@ class Analysis:
         # Star mask for background/noise work: segmentation plus bright halos.
         snr4 = self.flux[4.0] / np.maximum(self.flux_err[4.0], 1e-9)
         halo = np.zeros(image.shape, dtype=bool)
-        yy, xx = np.ogrid[: self.height, : self.width]
         for k in np.flatnonzero((snr4 >= 1000) | flat_top | (peak >= 0.5 * self.saturation)):
             radius = 60 if (flat_top[k] or peak[k] >= 0.5 * self.saturation) else 25
             x0, x1 = max(0, int(x[k]) - radius), min(self.width, int(x[k]) + radius + 1)
@@ -594,8 +593,8 @@ def evaluate_pair(filter_name: str, ours_path: str, pi_path: str, out_dir: Path)
         lab, n = ndimage.label(cand, structure=np.ones((3, 3)))
         if n == 0:
             return 0.0, 0.0
-        sizes = ndimage.sum(cand, lab, index=np.arange(1, n + 1))
-        small = np.flatnonzero(sizes <= 2) + 1
+        sizes = np.atleast_1d(ndimage.sum(cand, lab, index=np.arange(1, n + 1)))
+        small = [int(index) + 1 for index in np.flatnonzero(sizes <= 2)]
         hot = cold = 0
         slices = ndimage.find_objects(lab)
         for k in small:
@@ -771,7 +770,7 @@ def cross_channel(label: str, paths: dict[str, str], out_dir: Path) -> dict[str,
             worst_zone = max((math.hypot(*v) for v in zones.values()), default=float("nan"))
             rows.append({"pair": f"{names[i]}-{names[j]}", "matched": int(m.sum()),
                          "median": [float(np.median(dx)), float(np.median(dy))],
-                         "rms": math.sqrt(madn(dx) ** 2 + madn(dy) ** 2), "worstZone": worst_zone, "zones": zones})
+                         "rms": math.hypot(madn(dx), madn(dy)), "worstZone": worst_zone, "zones": zones})
     (out_dir / f"cross-channel-{label}.json").write_text(json.dumps(rows, indent=1), encoding="utf-8")
     return {"label": label, "pairs": rows}
 
