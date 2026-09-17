@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
+import sys
+import threading
 from dataclasses import dataclass
 from io import BytesIO
 import hashlib
@@ -17,6 +20,20 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image
 import sep
+
+# sep's extraction is not thread-safe on every platform: the Windows x86-64
+# wheel (sep 1.4.1) returns different object counts and fluxes when
+# ``sep.extract`` runs concurrently in several threads, which made QC
+# features and therefore integration weights differ between runs of the same
+# data.  The macOS build was measured deterministic under the same test, so
+# only platforms without that evidence serialize the two sep calls; the rest
+# of the measurement (photometry, matching, statistics) stays concurrent.
+_SEP_LOCK = threading.Lock()
+SEP_CALLS_SERIALIZED = sys.platform != "darwin"
+
+
+def _sep_guard():
+    return _SEP_LOCK if SEP_CALLS_SERIALIZED else nullcontext()
 
 from .config import DEFAULT_CONFIG, QcConfig
 from .identity import (
@@ -224,16 +241,17 @@ def measure_preview(
     box_width = _background_mesh_size(width)
     box_height = _background_mesh_size(height)
     try:
-        background = sep.Background(
-            image,
-            mask=invalid,
-            bw=box_width,
-            bh=box_height,
-            fw=_background_filter_size(width, box_width),
-            fh=_background_filter_size(height, box_height),
-        )
-        background_map = np.ascontiguousarray(background.back(), dtype=np.float32)
-        rms_map = np.ascontiguousarray(background.rms(), dtype=np.float32)
+        with _sep_guard():
+            background = sep.Background(
+                image,
+                mask=invalid,
+                bw=box_width,
+                bh=box_height,
+                fw=_background_filter_size(width, box_width),
+                fh=_background_filter_size(height, box_height),
+            )
+            background_map = np.ascontiguousarray(background.back(), dtype=np.float32)
+            rms_map = np.ascontiguousarray(background.rms(), dtype=np.float32)
     except Exception as error:
         raise FrameMeasurementError("SEP_BACKGROUND_FAILED", str(error)) from error
 
@@ -250,14 +268,15 @@ def measure_preview(
         rms_map[bad_rms] = np.float32(noise_floor)
 
     try:
-        objects, segmentation = sep.extract(
-            residual,
-            selected.detection_sigma,
-            err=rms_map,
-            mask=invalid,
-            minarea=selected.minimum_source_pixels,
-            segmentation_map=True,
-        )
+        with _sep_guard():
+            objects, segmentation = sep.extract(
+                residual,
+                selected.detection_sigma,
+                err=rms_map,
+                mask=invalid,
+                minarea=selected.minimum_source_pixels,
+                segmentation_map=True,
+            )
     except Exception as error:
         raise FrameMeasurementError("SEP_EXTRACTION_FAILED", str(error)) from error
 

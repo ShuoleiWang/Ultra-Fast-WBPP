@@ -22,7 +22,10 @@ from .catalogs import (
 )
 from .controller import controller_plan_envelope
 from .e2e import E2EError, ProgressEvent, bind_review_approval_selections, run_e2e
+from . import platform as platform_services
 from .hardware import detect_hardware
+from .native_kernels import describe_native_kernels
+from .performance_profile import select_execution_tuning
 from .inventory import InventoryBuildError, inventory_project
 from .planning import build_plan, default_registry, solver_backend_science_ready
 from .recipe import Recipe, RecipeError
@@ -91,6 +94,7 @@ def _emit(payload: object, output: str | None, *, compact: bool, force: bool) ->
 
 def doctor_payload() -> dict[str, Any]:
     hardware = detect_hardware()
+    tuning = select_execution_tuning(hardware)
     registry = default_registry()
     descriptors = registry.serializable()
     def ready(stage: StageKind) -> bool:
@@ -126,6 +130,8 @@ def doctor_payload() -> dict[str, Any]:
         "schemaVersion": 1,
         "engineVersion": __version__,
         "hardware": hardware.serializable(),
+        "tuning": tuning.serializable(),
+        "nativeKernels": describe_native_kernels(),
         "backends": descriptors,
         "status": {
             "inventoryReady": True,
@@ -636,20 +642,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _, request, solvers = prepare_project_execution(
                     inventory, recipe, args.output, **common
                 )
-                result = run_project_e2e(
-                    request,
-                    solver_backends=solvers,
-                    progress=progress if args.progress_json else None,
-                )
+                with platform_services.current().keep_awake():
+                    result = run_project_e2e(
+                        request,
+                        solver_backends=solvers,
+                        progress=progress if args.progress_json else None,
+                    )
             else:
                 _, request, solvers = prepare_execution(
                     inventory, recipe, args.output, **common
                 )
-                result = run_e2e(
-                    request,
-                    solver_backends=solvers,
-                    progress=progress if args.progress_json else None,
-                )
+                with platform_services.current().keep_awake():
+                    result = run_e2e(
+                        request,
+                        solver_backends=solvers,
+                        progress=progress if args.progress_json else None,
+                    )
             sys.stdout.write(_json(result.serializable()) + "\n")
             return 0 if result.success else 3
         if args.command == "run-project":
@@ -717,11 +725,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                     sys.stderr.flush()
 
-            result = run_project_e2e(
-                request,
-                solver_backends=solvers,
-                progress=project_progress if args.progress_json else None,
-            )
+            with platform_services.current().keep_awake():
+                result = run_project_e2e(
+                    request,
+                    solver_backends=solvers,
+                    progress=project_progress if args.progress_json else None,
+                )
             sys.stdout.write(_json(result.serializable()) + "\n")
             return 0 if result.success else 3
         if args.command == "catalog":

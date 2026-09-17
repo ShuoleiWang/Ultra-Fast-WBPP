@@ -41,6 +41,8 @@ import numpy as np
 
 from lightframeqc.content_hash import file_sha256
 
+from . import platform as platform_services
+
 
 _SUPPORTED_SCALES = (1, 2, 3)
 _SUPPORTED_KERNELS = (
@@ -1238,24 +1240,7 @@ def _canonical_json(value: Mapping[str, Any]) -> bytes:
 
 
 def _fsync_directory(path: Path) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    try:
-        descriptor = os.open(path, flags)
-    except OSError as error:
-        if os.name == "nt" or error.errno in {
-            errno.EACCES,
-            errno.EINVAL,
-            errno.ENOTSUP,
-        }:
-            return
-        raise
-    try:
-        os.fsync(descriptor)
-    except OSError as error:
-        if not (os.name == "nt" or error.errno in {errno.EINVAL, errno.ENOTSUP}):
-            raise
-    finally:
-        os.close(descriptor)
+    platform_services.current().fsync_directory(path)
 
 
 def _publish_new_pair(

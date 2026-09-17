@@ -273,6 +273,41 @@ def test_build_runs_source_handshake_and_public_audit_before_pyinstaller(
     assert list(tmp_path.iterdir()) == []
 
 
+def test_native_kernel_smoke_requires_a_loaded_library(tmp_path: Path) -> None:
+    script = tmp_path / "fake_worker.py"
+    script.write_text(
+        "import json, sys\n"
+        "assert sys.argv[1:] == ['doctor', '--json'], sys.argv\n"
+        "print(json.dumps({'nativeKernels': json.loads(sys.argv[0] and open(sys.argv[0] + '.facts').read())}))\n",
+        encoding="utf-8",
+    )
+    facts_path = tmp_path / "fake_worker.py.facts"
+    command = [sys.executable, str(script)]
+
+    facts_path.write_text(
+        json.dumps({"loaded": True, "sha256": "sha256:" + "0" * 64, "cpuFeatures": ["neon"]}),
+        encoding="utf-8",
+    )
+    facts = worker_packaging.run_native_kernel_smoke(command)
+    assert facts["loaded"] is True
+    assert facts["sha256"].startswith("sha256:")
+
+    facts_path.write_text(
+        json.dumps({"loaded": False, "reason": "native library not found"}), encoding="utf-8"
+    )
+    with pytest.raises(worker_packaging.SidecarBuildError) as missing:
+        worker_packaging.run_native_kernel_smoke(command)
+    assert missing.value.code == "NATIVE_KERNELS_MISSING"
+    assert "native library not found" in str(missing.value)
+
+    facts_path.write_text("not json", encoding="utf-8")
+    with pytest.raises(worker_packaging.SidecarBuildError) as broken:
+        worker_packaging.run_native_kernel_smoke(command)
+    assert broken.value.code == "NATIVE_KERNEL_SMOKE_FAILED"
+    with pytest.raises(ValueError):
+        worker_packaging.run_native_kernel_smoke([])
+
+
 def test_production_launcher_rejects_the_legacy_unbound_handshake() -> None:
     completed = worker_packaging.subprocess.run(
         [sys.executable, str(ROOT / "packaging" / "worker" / "launcher.py")],

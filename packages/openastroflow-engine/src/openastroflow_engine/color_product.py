@@ -40,6 +40,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from lightframeqc.content_hash import file_sha256
+from . import platform as platform_services
+from .platform import NoReplaceError
 from .solver import validate_wcs_header
 
 
@@ -569,20 +571,7 @@ def _artifact(path: Path, root: Path, kind: str) -> dict[str, Any]:
 
 
 def _fsync_directory(path: Path) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    try:
-        descriptor = os.open(path, flags)
-    except OSError as error:
-        if os.name == "nt" or error.errno in {errno.EACCES, errno.EINVAL, errno.ENOTSUP}:
-            return
-        raise
-    try:
-        os.fsync(descriptor)
-    except OSError as error:
-        if not (os.name == "nt" or error.errno in {errno.EINVAL, errno.ENOTSUP}):
-            raise
-    finally:
-        os.close(descriptor)
+    platform_services.current().fsync_directory(path)
 
 
 def _best_effort_fsync_directory(path: Path) -> None:
@@ -600,41 +589,28 @@ def _best_effort_fsync_directory(path: Path) -> None:
 def _publish_directory_no_replace(source: Path, destination: Path) -> None:
     """Atomically publish one directory without replacing an existing path."""
 
-    if os.path.lexists(destination):
-        raise ColorProductError("OUTPUT_EXISTS", "refusing to overwrite output directory", path=str(destination))
-    if os.name == "nt":
-        try:
-            os.rename(source, destination)
-        except OSError as error:
-            if os.path.lexists(destination):
-                raise ColorProductError(
-                    "OUTPUT_EXISTS", "output appeared during publication", path=str(destination)
-                ) from error
-            raise ColorProductError(
-                "ATOMIC_PUBLICATION_FAILED", str(error), path=str(destination)
-            ) from error
-        return
-    library = ctypes.CDLL(None, use_errno=True)
-    encoded_source = os.fsencode(source)
-    encoded_destination = os.fsencode(destination)
-    if sys.platform == "darwin" and hasattr(library, "renamex_np"):
-        result = library.renamex_np(encoded_source, encoded_destination, 0x00000004)
-    elif sys.platform.startswith("linux") and hasattr(library, "renameat2"):
-        result = library.renameat2(-100, encoded_source, -100, encoded_destination, 0x00000001)
-    else:
+    try:
+        platform_services.current().rename_directory_no_replace(source, destination)
+    except NoReplaceError as error:
+        if error.code == "OUTPUT_EXISTS":
+            message = (
+                "refusing to overwrite output directory"
+                if error.precheck
+                else "output appeared during publication"
+            )
+            raise ColorProductError("OUTPUT_EXISTS", message, path=str(destination)) from error
         raise ColorProductError(
             "ATOMIC_DIRECTORY_PUBLISH_UNSUPPORTED",
             "platform has no create-only atomic directory publication primitive",
-        )
-    if result != 0:
-        error_number = ctypes.get_errno()
-        if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
-            raise ColorProductError("OUTPUT_EXISTS", "output appeared during publication", path=str(destination))
+        ) from error
+    except OSError as error:
+        if os.path.lexists(destination):
+            raise ColorProductError(
+                "OUTPUT_EXISTS", "output appeared during publication", path=str(destination)
+            ) from error
         raise ColorProductError(
-            "ATOMIC_PUBLICATION_FAILED",
-            os.strerror(error_number),
-            path=str(destination),
-        )
+            "ATOMIC_PUBLICATION_FAILED", os.strerror(error.errno) if error.errno else str(error), path=str(destination)
+        ) from error
 
 
 def build_color_product(

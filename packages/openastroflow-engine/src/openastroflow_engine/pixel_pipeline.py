@@ -61,6 +61,9 @@ from .metal_integration import (
     SUPPORTED_BACKENDS,
     integrate_registered_group,
 )
+from . import platform as platform_services
+from .platform import NoReplaceError
+from .native_kernels import describe_native_kernels
 from .performance_profile import select_execution_tuning
 from .local_normalization import (
     LocalNormalizationParameters,
@@ -2460,12 +2463,15 @@ def _calibrate_and_register_frames(
     cpu_workers: int,
     division_floor: float,
     durable: bool = True,
+    kernel_threads: int | None = None,
 ) -> tuple[tuple[_LightJobResult, ...], dict[str, Any]]:
     """Calibrate and register every Light with one shared memory budget.
 
     Lights run concurrently in ``workers`` threads; each thread hands its warp
     to the native kernel with the remaining CPU share, so all cores stay busy
-    whether memory allows many Lights in flight or only one.
+    whether memory allows many Lights in flight or only one.  ``kernel_threads``
+    is the native thread budget shared by the in-flight warps (defaults to
+    ``cpu_workers``, the pre-tuning-table behaviour).
     """
 
     workers = _fused_worker_count(
@@ -2474,7 +2480,8 @@ def _calibrate_and_register_frames(
         resampler=resampler,
         cpu_workers=cpu_workers,
     )
-    native_threads = max(1, cpu_workers // workers)
+    thread_budget = cpu_workers if kernel_threads is None else max(1, int(kernel_threads))
+    native_threads = max(1, thread_budget // workers)
     worker_memory_bytes = max_memory_bytes // workers
     # Lights start in submission order, so the last ``len(jobs) % workers``
     # Lights run while the other workers are already idle; their warps take
@@ -2482,7 +2489,7 @@ def _calibrate_and_register_frames(
     # on the thread count.
     rounds = max(1, math.ceil(len(jobs) / workers))
     tail_start = (rounds - 1) * workers
-    tail_threads = max(native_threads, cpu_workers // max(1, len(jobs) - tail_start))
+    tail_threads = max(native_threads, thread_budget // max(1, len(jobs) - tail_start))
 
     def run(index: int, job: _LightJob) -> _LightJobResult:
         return _process_light_job(
@@ -2768,40 +2775,16 @@ def _crop_fits(
 
 
 def _rename_directory_no_replace(source: Path, destination: Path) -> None:
-    if os.path.lexists(destination):
-        raise CalibrationError(
-            "OUTPUT_EXISTS", "refusing to overwrite output directory", path=str(destination)
-        )
-    if os.name == "nt":
-        try:
-            os.rename(source, destination)
-        except FileExistsError as error:
+    """Create-only directory publication through the platform service layer."""
+
+    try:
+        platform_services.current().rename_directory_no_replace(source, destination)
+    except NoReplaceError as error:
+        if error.code == "OUTPUT_EXISTS":
             raise CalibrationError(
                 "OUTPUT_EXISTS", "refusing to overwrite output directory", path=str(destination)
             ) from error
-        return
-    encoded_source = os.fsencode(source)
-    encoded_destination = os.fsencode(destination)
-    library = ctypes.CDLL(None, use_errno=True)
-    if sys.platform == "darwin" and hasattr(library, "renamex_np"):
-        result = library.renamex_np(encoded_source, encoded_destination, 0x00000004)
-    elif sys.platform.startswith("linux") and hasattr(library, "renameat2"):
-        at_fdcwd = -100
-        result = library.renameat2(
-            at_fdcwd, encoded_source, at_fdcwd, encoded_destination, 0x00000001
-        )
-    else:
-        raise CalibrationError(
-            "ATOMIC_DIRECTORY_PUBLISH_UNSUPPORTED",
-            "platform has no no-replace directory rename primitive",
-        )
-    if result != 0:
-        error_number = ctypes.get_errno()
-        if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
-            raise CalibrationError(
-                "OUTPUT_EXISTS", "refusing to overwrite output directory", path=str(destination)
-            )
-        raise OSError(error_number, os.strerror(error_number), str(destination))
+        raise CalibrationError(error.code, error.message) from error
 
 
 def _write_receipt(path: Path, payload: Mapping[str, Any]) -> None:
@@ -3780,6 +3763,7 @@ def _run_portable_pipeline_fits(
             max_memory_bytes=parameters.registration_memory_bytes,
             resampler=parameters.registration_resampler,
             cpu_workers=execution_tuning.cpu_workers,
+            kernel_threads=execution_tuning.kernel_threads,
             division_floor=parameters.integration.division_floor,
             durable=parameters.durable_intermediates,
         )
@@ -4314,6 +4298,14 @@ def _run_portable_pipeline_fits(
                 "calibration": stage_statistics,
                 "registration": registration_execution,
                 "integrationGroups": integration_groups,
+            },
+            # Platform facts behind the execution choices: what the machine
+            # is, which tuning table row ran, and which native library (if
+            # any) produced the kernel results.  None of them changes pixels.
+            "platform": {
+                "hardware": hardware_profile.serializable(),
+                "tuning": execution_tuning.serializable(),
+                "nativeKernels": describe_native_kernels(),
             },
             "astrometry": {
                 "status": "UNSOLVED",

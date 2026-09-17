@@ -10,6 +10,15 @@ cmake --build build/native --parallel
 ctest --test-dir build/native --output-on-failure
 ```
 
+`python scripts/build_native_runtime.py --build-dir build/native-release` is the
+one cross-platform Release chain (configure, build, `ctest`, install into
+`packages/openastroflow-engine/src/openastroflow_engine/native`) that CI, the
+release workflow and Windows machines use; it writes a JSON report with the
+compiler and the installed library's SHA-256. On Windows the supported compiler
+is MSVC 2022 (`/W4 /WX /fp:strict`, `/MD`; the Visual Studio generator needs no
+environment setup, Ninja needs a developer prompt), and the frozen worker
+collects the DLL as a PyInstaller binary so the MSVC runtime ships with it.
+
 Strict builds disable fast-math and floating-point contraction. An accelerator result must match finite masks and rejection counts and remain within the committed numerical gate before it can satisfy a product recipe.
 
 The production parity gate is evaluated in a documented normalized Float32 domain: `maxAbs <= 2e-6` and `RMSE <= 2e-7`. High-dynamic-range tiles are scaled into that domain before the ABI call, the Metal masked kernel uses compensated summation, and the output is restored to the original linear scale only after the gate passes. Every integration deterministically samples the first, middle, and last tile (deduplicated for short images), requires exact finite-mask and count agreement for each, and records per-tile plus aggregate worst-case evidence. Amplitude-dependent threshold relaxation is not allowed.
@@ -28,6 +37,19 @@ exact zero may differ). They are exposed through the C ABI as
 `oaf_native_cpu_mad_rejection_v1`, `oaf_native_cpu_masked_mean_v1` and
 `oaf_native_cpu_tile_offsets_v1`, are compiled with `-fno-fast-math
 -ffp-contract=off`, and are covered by `tests/PortableKernelTests.cpp`.
+Each kernel splits its range with `ParallelRange`: worker threads (and the
+calling thread) claim fixed-size chunks from an atomic counter (8 warp rows,
+4096 rejection pixels, 8192 reduction pixels, one normalization tile), so a
+slow core never holds the tail of a range while the others idle; every item
+is processed exactly once and its result never depends on the thread or chunk
+that ran it, which the thread-count invariance tests assert on ranges that end
+in a partial chunk.
+
+`oaf_native_cpu_features_v1` (`src/CpuFeatures.cpp`) reports the compiled
+architecture, the instruction-set extensions the running OS can use (cpuid plus
+the XSAVE state check on x86-64: `sse4.2`, `avx`, `avx2`, `fma`, `avx512*`;
+`neon` on arm64) and the cpuid brand string. It is report-only evidence for
+receipts and `doctor`; no kernel selects code by it.
 
 Ordinary integration uses a two-stage exact full-stack path. CPU code computes the same per-sample median/MAD rejection decision used by the portable integrator; `fused_ln_masked_weighted_integration` then reduces every frame in one Metal request. It never averages partial batches. The product policy admits up to 512 frames; resource/capability failure falls back to CPU with `inputFramesTruncated=false` and a reason in the receipt. The older native linear-fit rejection kernel remains limited to 64 frames because it uses private per-thread sorting storage and is not used for larger ordinary stacks.
 

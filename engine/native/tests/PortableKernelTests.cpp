@@ -493,6 +493,121 @@ void TestCAbiRoundTrip()
             "C ABI masked mean must exclude the rejected outlier" );
    Require( oaf_native_default_kernel_threads_v1() >= 1,
             "default kernel thread count must be positive" );
+
+   OafNativeCpuFeaturesV1 features{};
+   features.struct_size = sizeof( features );
+   Require( oaf_native_cpu_features_v1( &features, error.data(), error.size() )
+               == OAF_NATIVE_OK,
+            error.data() );
+   Require( features.architecture == OAF_NATIVE_CPU_ARCHITECTURE_X86_64
+         || features.architecture == OAF_NATIVE_CPU_ARCHITECTURE_ARM64,
+            "cpu features must name the compiled architecture" );
+   const std::string names( features.features );
+   Require( features.architecture != OAF_NATIVE_CPU_ARCHITECTURE_X86_64
+         || names.find( "sse4.2" ) != std::string::npos,
+            "every x86-64 host running this test supports SSE4.2" );
+   Require( features.architecture != OAF_NATIVE_CPU_ARCHITECTURE_ARM64
+         || names == "neon",
+            "arm64 reports neon" );
+   Require( names.find( ' ' ) == std::string::npos && names.find( ",," ) == std::string::npos,
+            "feature names are a comma-separated lowercase list" );
+   Require( std::strlen( features.brand ) < sizeof( features.brand ),
+            "brand string is NUL-terminated" );
+   OafNativeCpuFeaturesV1 wrongSize{};
+   wrongSize.struct_size = 1;
+   Require( oaf_native_cpu_features_v1( &wrongSize, error.data(), error.size() )
+               == OAF_NATIVE_INVALID_ARGUMENT,
+            "cpu features must reject an unexpected struct size" );
+}
+
+// Dynamic chunking: results of every kernel must not depend on how the
+// range is split among threads. Row/pixel counts that are not multiples
+// of the chunk grains exercise the last, partial chunk on several threads.
+void TestDynamicChunkingIsThreadAndGrainInvariant()
+{
+   const std::uint32_t width = 131;
+   const std::uint32_t height = 37;
+   std::vector<float> source( width*height );
+   std::mt19937 generator( 77 );
+   std::uniform_real_distribution<float> values( 0.0F, 1.0F );
+   for ( float& value : source )
+      value = values( generator );
+   WarpLanczos3Request warp;
+   warp.source = source;
+   warp.sourceWidth = width;
+   warp.sourceHeight = height;
+   warp.inverse.m00 = 0.999;
+   warp.inverse.m01 = 0.013;
+   warp.inverse.m02 = 0.37;
+   warp.inverse.m10 = -0.011;
+   warp.inverse.m11 = 1.001;
+   warp.inverse.m12 = -0.21;
+   warp.outputWidth = width;
+   warp.rowCount = height;
+   warp.domainScale = 1.0F;
+   std::vector<float> serial( width*height );
+   warp.threads = 1;
+   WarpLanczos3Clamped( warp, serial );
+   for ( std::uint32_t threads : { 2U, 3U, 7U, 64U } )
+   {
+      std::vector<float> parallel( width*height );
+      warp.threads = threads;
+      WarpLanczos3Clamped( warp, parallel );
+      for ( std::size_t i = 0; i < serial.size(); ++i )
+         Require( SameOrBothNan( serial[i], parallel[i] ),
+                  "warp output must not depend on the thread count" );
+   }
+
+   const std::uint32_t frames = 9;
+   const std::uint32_t pixels = 4096*2 + 517;
+   std::vector<float> stack( static_cast<std::size_t>( frames )*pixels );
+   std::normal_distribution<float> noise( 100.0F, 3.0F );
+   for ( float& value : stack )
+      value = noise( generator );
+   stack[3*pixels + 4100] = 1.0e6F;
+   stack[5*pixels + 8000] = Nan;
+   MadRejectionRequest mad;
+   mad.frameMajorSamples = stack;
+   mad.frameCount = frames;
+   mad.rowCount = 1;
+   mad.width = pixels;
+   std::vector<std::uint8_t> serialAccepted( stack.size() );
+   std::vector<float> serialCenter( pixels );
+   mad.threads = 1;
+   MadRejectionMask( mad, serialAccepted, serialCenter );
+   std::vector<double> weights( frames, 0.5 );
+   MaskedMeanRequest mean;
+   mean.frameMajorSamples = stack;
+   mean.frameMajorAccepted = serialAccepted;
+   mean.frameWeights = weights;
+   mean.frameCount = frames;
+   mean.rowCount = 1;
+   mean.width = pixels;
+   std::vector<float> serialIntegrated( pixels );
+   std::vector<std::uint16_t> serialAcceptedCount( pixels );
+   std::vector<std::uint16_t> serialRejectedCount( pixels );
+   mean.threads = 1;
+   MaskedWeightedMean( mean, { serialIntegrated, serialAcceptedCount, serialRejectedCount } );
+   for ( std::uint32_t threads : { 2U, 5U, 64U } )
+   {
+      std::vector<std::uint8_t> accepted( stack.size() );
+      std::vector<float> center( pixels );
+      mad.threads = threads;
+      MadRejectionMask( mad, accepted, center );
+      Require( accepted == serialAccepted, "chunked rejection decisions differ" );
+      for ( std::size_t i = 0; i < pixels; ++i )
+         Require( SameOrBothNan( center[i], serialCenter[i] ), "chunked centres differ" );
+      std::vector<float> integrated( pixels );
+      std::vector<std::uint16_t> acceptedCount( pixels );
+      std::vector<std::uint16_t> rejectedCount( pixels );
+      mean.threads = threads;
+      MaskedWeightedMean( mean, { integrated, acceptedCount, rejectedCount } );
+      for ( std::size_t i = 0; i < pixels; ++i )
+         Require( SameOrBothNan( integrated[i], serialIntegrated[i] )
+               && acceptedCount[i] == serialAcceptedCount[i]
+               && rejectedCount[i] == serialRejectedCount[i],
+                  "chunked weighted mean differs" );
+   }
 }
 
 } // namespace
@@ -509,6 +624,7 @@ int main()
       TestMaskedMeanAccumulatesInFrameOrder();
       TestTileOffsetsMatchReferenceStatistics();
       TestCAbiRoundTrip();
+      TestDynamicChunkingIsThreadAndGrainInvariant();
       std::cout << "OpenAstroFlowPortableKernelTests passed\n";
       return 0;
    }

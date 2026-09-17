@@ -139,9 +139,37 @@ threads measured slower.) See the scoped, reproducible measurements in
 
 ## Platform and solver support
 
-Apple Silicon/macOS is the current desktop target. Windows has development and
-interface tests, but needs independent packaged scientific acceptance. Keep
-platform-specific code behind the existing filesystem/process adapters.
+Apple Silicon/macOS is the current desktop target. Windows (x86-64, Windows
+10/11) is being brought up in phases (see [windows.md](windows.md)): the native
+CPU kernels build with MSVC (`/W4 /WX /fp:strict`), the Python CI job builds and
+installs them on Ubuntu, macOS and Windows before the tests so the
+value-identical differential tests run against the real library on every
+runner, and the sidecar builder refuses a frozen worker that cannot load them.
+Windows still needs independent packaged scientific acceptance before it is a
+support claim.
+
+Operating-system differences live in the platform service layer
+`openastroflow_engine.platform` (`current()` selects the `darwin`, `windows` or
+`linux` services behind one `PlatformServices` protocol). It reports the facts
+that tuning and receipts consume: physical/available memory (`sysconf`,
+`GlobalMemoryStatusEx`), the CPU topology (physical/performance/efficiency
+cores, SMT, from `sysctl`, `GetLogicalProcessorInformationEx` or
+`/proc/cpuinfo`), the native library file name, and later the filesystem and
+process primitives that are still duplicated across modules. Every probe is a
+pure function of its raw input, so each platform's parser is tested on every
+host, and `detect_hardware()` never claims a value it did not measure (an
+injected host reports memory as `unavailable`; a failed probe reports
+`fallback`). `HardwareProfile` and `ExecutionTuning` carry these facts, and the
+tuning itself is a table keyed by platform, CPU family (`APPLE_M`, `X86_64`,
+`GENERIC`), memory band and core count; the native library adds the
+instruction-set facts of the machine (`oaf_native_cpu_features_v1`) and its own
+SHA-256, all of which the `doctor` command, execution plans and the pipeline
+receipt's `platform` block record. None of these facts changes a pixel: tile
+sizes, memory budgets and thread counts are held result-invariant by the
+differential tests, and the native `ParallelRange` claims fixed-size chunks
+from an atomic counter so hybrid or throttled cores never change results, only
+timing. Keep remaining platform-specific code behind these services and the
+existing filesystem/process adapters.
 
 A separately installed Astrometry.net `solve-field` and checked local indexes
 satisfy the current final solve contract. ASTAP and Siril adapters are optional

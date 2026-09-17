@@ -382,3 +382,22 @@ def test_measure_paths_writes_unique_thumbnails_under_output_directory(
     assert len(set(paths)) == 2
     assert all(path.is_file() for path in paths)
     assert all(path.parent == output / "thumbnails" for path in paths)
+
+
+def test_sep_calls_are_serialized_off_macos() -> None:
+    """The Windows sep wheel races under concurrent extraction; see measure.py."""
+
+    import sys
+    from contextlib import nullcontext
+    import threading
+
+    from lightframeqc import measure as measure_module
+
+    guard = measure_module._sep_guard()
+    if sys.platform == "darwin":
+        assert measure_module.SEP_CALLS_SERIALIZED is False
+        assert isinstance(guard, nullcontext)
+    else:
+        assert measure_module.SEP_CALLS_SERIALIZED is True
+        assert isinstance(guard, type(threading.Lock()))
+        assert guard is measure_module._sep_guard()

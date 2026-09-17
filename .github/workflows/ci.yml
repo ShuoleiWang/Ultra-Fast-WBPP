@@ -40,7 +40,18 @@ jobs:
           -e "./packages/openastroflow-engine[test,all]"
       - name: Check installed dependency consistency
         run: python -m pip check
-      - name: Test Quality Gate and engine
+      - name: Build, test and install the native kernels (MSVC /fp:strict on Windows)
+        run: >-
+          python scripts/build_native_runtime.py
+          --build-dir build/native-release
+          --report build/native-release/native-build-report.json
+      - name: Require the native kernels to load on this runner
+        shell: bash
+        run: >-
+          python -c "import json, sys; from openastroflow_engine.native_kernels import describe_native_kernels;
+          facts = describe_native_kernels(); print(json.dumps(facts, indent=2));
+          sys.exit(0 if facts['loaded'] else 1)"
+      - name: Test Quality Gate and engine (native kernels value-identical to NumPy)
         run: >-
           python -m pytest -q
           packages/light-frame-qc/tests
@@ -56,7 +67,7 @@ jobs:
         run: |
           ultra-fast-wbpp --version
           openastroflow-engine --version
-          ultra-fast-wbpp doctor --json
+          ultra-fast-wbpp doctor --json | python -c "import json, sys; facts = json.load(sys.stdin); sys.exit(0 if facts['nativeKernels']['loaded'] and facts['hardware']['memorySource'] not in {'fallback', 'unavailable'} else 1)"
           printf '%s\n' '{"protocolVersion":1,"sessionId":"ci-smoke","sequence":0,"sentAtUnixMs":0,"type":"handshake","payload":{"role":"controller","implementation":"ci-smoke","implementationVersion":"1","supportedProtocolVersions":[1]}}' \
             | openastroflow-worker \
             | python scripts/verify_worker_handshake.py --runner-os "${RUNNER_OS}" --runner-arch "${RUNNER_ARCH}"

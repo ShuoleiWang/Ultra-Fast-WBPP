@@ -20,10 +20,10 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 from functools import lru_cache
+import hashlib
 import os
 from pathlib import Path
 import stat
-import sys
 import threading
 from typing import Any
 
@@ -45,11 +45,9 @@ class NativeKernelError(RuntimeError):
 
 
 def _library_filename() -> str:
-    if sys.platform == "darwin":
-        return "libopenastroflow_native.dylib"
-    if os.name == "nt":
-        return "openastroflow_native.dll"
-    return "libopenastroflow_native.so"
+    from .platform import current
+
+    return current().native_library_filename()
 
 
 def _candidate_library_paths(explicit: str | os.PathLike[str] | None) -> tuple[Path, ...]:
@@ -211,6 +209,18 @@ class _TileOffsetOutputV1(ctypes.Structure):
     ]
 
 
+class _CpuFeaturesV1(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32),
+        ("architecture", ctypes.c_uint32),
+        ("features", ctypes.c_char * 256),
+        ("brand", ctypes.c_char * 64),
+    ]
+
+
+_CPU_ARCHITECTURES = {0: "unknown", 1: "x86-64", 2: "arm64"}
+
+
 _ERROR_BYTES = 1024
 _REQUIRED_SYMBOLS = (
     "oaf_native_abi_version",
@@ -294,6 +304,74 @@ class NativeKernels:
         library.oaf_native_default_kernel_threads_v1.argtypes = []
         library.oaf_native_default_kernel_threads_v1.restype = ctypes.c_uint32
         self.hardware_threads = max(1, int(library.oaf_native_default_kernel_threads_v1()))
+        # Optional since ABI 1 libraries built before the probe existed load too.
+        self._features_probe = getattr(library, "oaf_native_cpu_features_v1", None)
+        if self._features_probe is not None:
+            self._features_probe.argtypes = [ctypes.POINTER(_CpuFeaturesV1), *error_arguments]
+            self._features_probe.restype = ctypes.c_int
+        self._cpu_features: tuple[str, str, tuple[str, ...]] | None = None
+        self._sha256: str | None = None
+
+    @property
+    def library_sha256(self) -> str:
+        """SHA-256 of the loaded library file (receipt evidence), computed once."""
+
+        if self._sha256 is None:
+            digest = hashlib.sha256()
+            with open(self.library_path, "rb") as stream:
+                for block in iter(lambda: stream.read(1 << 20), b""):
+                    digest.update(block)
+            self._sha256 = digest.hexdigest()
+        return self._sha256
+
+    def _probe_cpu(self) -> tuple[str, str, tuple[str, ...]]:
+        if self._cpu_features is None:
+            if self._features_probe is None:
+                self._cpu_features = ("unknown", "", ())
+            else:
+                request = _CpuFeaturesV1()
+                request.struct_size = ctypes.sizeof(_CpuFeaturesV1)
+                error = ctypes.create_string_buffer(_ERROR_BYTES)
+                status = int(self._features_probe(ctypes.byref(request), error, ctypes.sizeof(error)))
+                if status != 0:
+                    self._raise(error, status, "native CPU feature probe")
+                names = request.features.decode("ascii", errors="replace")
+                self._cpu_features = (
+                    _CPU_ARCHITECTURES.get(int(request.architecture), "unknown"),
+                    request.brand.decode("ascii", errors="replace").strip(),
+                    tuple(name for name in names.split(",") if name),
+                )
+        return self._cpu_features
+
+    def cpu_architecture(self) -> str:
+        """Architecture the library was compiled for: ``x86-64``, ``arm64``."""
+
+        return self._probe_cpu()[0]
+
+    def cpu_brand(self) -> str:
+        """cpuid brand string (x86-64 only; empty elsewhere)."""
+
+        return self._probe_cpu()[1]
+
+    def cpu_features(self) -> tuple[str, ...]:
+        """ISA extensions usable by the running OS, e.g. ``("sse4.2", "avx2")``."""
+
+        return self._probe_cpu()[2]
+
+    def describe(self) -> dict[str, Any]:
+        """Receipt-ready facts about the loaded library."""
+
+        return {
+            "loaded": True,
+            "libraryPath": str(self.library_path),
+            "sha256": f"sha256:{self.library_sha256}",
+            "abiVersion": NATIVE_ABI_VERSION,
+            "hardwareThreads": self.hardware_threads,
+            "cpuArchitecture": self.cpu_architecture(),
+            "cpuBrand": self.cpu_brand(),
+            "cpuFeatures": list(self.cpu_features()),
+            "kernels": [WARP_KERNEL_ID, MAD_KERNEL_ID, MEAN_KERNEL_ID, TILE_OFFSET_KERNEL_ID],
+        }
 
     @staticmethod
     def _raise(buffer: ctypes.Array[Any], status: int, kernel: str) -> None:
@@ -570,18 +648,44 @@ def reset_native_kernel_cache() -> None:
         _CACHE.clear()
 
 
+def describe_native_kernels() -> dict[str, Any]:
+    """Receipt/doctor evidence: the loaded library or why the NumPy path runs."""
+
+    if native_kernels_disabled():
+        return {
+            "loaded": False,
+            "reason": f"disabled by {DISABLE_ENVIRONMENT_VARIABLE}",
+            "libraryPath": None,
+        }
+    kernels = load_native_kernels()
+    if kernels is None:
+        candidates = [str(path) for path in _candidate_library_paths(None)]
+        return {
+            "loaded": False,
+            "reason": (
+                "no candidate library exports the kernel symbols"
+                if candidates
+                else "native library not found"
+            ),
+            "libraryPath": None,
+            "candidates": candidates,
+            "expectedFilename": _library_filename(),
+        }
+    return kernels.describe()
+
+
 @lru_cache(maxsize=1)
 def default_kernel_threads() -> int:
-    """Threads per kernel call: the hardware profile's CPU worker count."""
+    """Threads per kernel call: the tuning row's native-kernel thread budget."""
 
     try:
         from .hardware import detect_hardware
         from .performance_profile import select_execution_tuning
 
-        workers = int(select_execution_tuning(detect_hardware()).cpu_workers)
+        threads = int(select_execution_tuning(detect_hardware()).kernel_threads)
     except Exception:  # pragma: no cover - defensive: tuning never blocks pixels
-        workers = int(os.cpu_count() or 1)
-    return max(1, min(workers, _MAXIMUM_KERNEL_THREADS))
+        threads = int(os.cpu_count() or 1)
+    return max(1, min(threads, _MAXIMUM_KERNEL_THREADS))
 
 
 __all__ = [
@@ -594,6 +698,7 @@ __all__ = [
     "TILE_OFFSET_KERNEL_ID",
     "WARP_KERNEL_ID",
     "default_kernel_threads",
+    "describe_native_kernels",
     "load_native_kernels",
     "native_kernels_disabled",
     "reset_native_kernel_cache",

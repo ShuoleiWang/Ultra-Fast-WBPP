@@ -161,7 +161,7 @@ def test_parallel_warps_preserve_fits_and_ordered_provenance(
     for workers in (1, 4):
         monkeypatch.setattr(
             pipeline, "select_execution_tuning",
-            lambda _hardware, workers=workers: replace(tuning, cpu_workers=workers),
+            lambda _hardware, workers=workers: replace(tuning, cpu_workers=workers, kernel_threads=workers),
         )
         result = run_portable_pipeline(
             bias_files=biases, dark_files=darks, flat_files=flats, light_files=lights,

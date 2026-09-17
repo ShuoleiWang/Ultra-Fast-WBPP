@@ -345,6 +345,23 @@ def test_cli_doctor_distinguishes_executors_from_catalog_coverage(capsys) -> Non
         "DRIZZLE",
         "SOLVER",
     }
+    # Platform facts: measured memory and cores, the tuning row, and whether
+    # the native kernel library loaded (with its digest) or why not.
+    assert payload["hardware"]["memoryBytes"] > 0
+    assert payload["hardware"]["memorySource"] not in {"fallback", "unavailable"}
+    assert payload["hardware"]["platformId"] in {"darwin", "windows", "linux"}
+    assert payload["tuning"]["profileId"] == payload["hardware"]["optimizationProfile"] or (
+        payload["tuning"]["profileId"] == "apple-silicon-generic-v1"
+    )
+    assert payload["tuning"]["memoryBytes"] == payload["hardware"]["memoryBytes"]
+    native = payload["nativeKernels"]
+    assert isinstance(native["loaded"], bool)
+    if native["loaded"]:
+        assert native["sha256"].startswith("sha256:")
+        assert native["cpuArchitecture"] in {"x86-64", "arm64"}
+        assert native["kernels"]
+    else:
+        assert native["reason"]
 
 
 def test_cli_inventory_plan_and_canonical_controller_plan(

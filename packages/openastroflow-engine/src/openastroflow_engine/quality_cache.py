@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from . import platform as platform_services
 import os
 from pathlib import Path
 import sys
@@ -19,10 +20,5 @@ def quality_cache_directory() -> Path | None:
         if not override.strip() or override.strip().lower() in {"off", "none", "disabled"}:
             return None
         return Path(override).expanduser().absolute()
-    if sys.platform == "darwin":
-        root = Path.home() / "Library" / "Caches"
-    elif os.name == "nt":
-        root = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
-    else:
-        root = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))
+    root = platform_services.current().cache_root()
     return root / "Ultra-Fast-WBPP" / "quality-analysis-v1"

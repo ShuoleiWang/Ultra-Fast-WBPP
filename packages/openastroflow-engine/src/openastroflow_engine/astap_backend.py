@@ -29,6 +29,7 @@ from typing import Any, Mapping, Sequence
 from astropy.io import fits
 from astropy.wcs import WCS
 
+from . import platform as platform_services
 from .backends import BackendDescriptor, DeviceKind, StageKind
 from .solver import (
     SolutionKind,
@@ -194,28 +195,7 @@ def discover_astap(
         if candidate:
             return candidate
 
-    candidates: list[Path] = []
-    if os.name == "nt":
-        for root_key in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
-            root = env.get(root_key)
-            if root:
-                candidates.extend(
-                    (
-                        Path(root) / "ASTAP" / "astap.exe",
-                        Path(root) / "ASTAP" / "astap_cli.exe",
-                    )
-                )
-    elif sys_platform() == "darwin":
-        candidates.extend(
-            (
-                Path("/Applications/ASTAP.app/Contents/MacOS/astap"),
-                Path("/Applications/ASTAP.app/Contents/MacOS/ASTAP"),
-                Path("/opt/homebrew/bin/astap"),
-                Path("/usr/local/bin/astap"),
-            )
-        )
-    else:
-        candidates.extend((Path("/usr/bin/astap"), Path("/usr/local/bin/astap")))
+    candidates = platform_services.current().well_known_executables("astap", environment=env)
     for path in candidates:
         candidate = _candidate_path(path)
         if candidate:
@@ -393,33 +373,7 @@ class _BoundedLogCapture:
 
 
 def _kill_process_tree(process: subprocess.Popen[Any]) -> None:
-    if process.poll() is not None:
-        return
-    if os.name == "posix":
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            process.kill()
-    elif os.name == "nt":
-        system_root = os.environ.get("SystemRoot", r"C:\Windows")
-        taskkill = Path(system_root) / "System32" / "taskkill.exe"
-        if taskkill.is_file():
-            try:
-                subprocess.run(
-                    [str(taskkill), "/PID", str(process.pid), "/T", "/F"],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    shell=False,
-                    check=False,
-                    timeout=5,
-                )
-            except (OSError, subprocess.SubprocessError):
-                pass
-        if process.poll() is None:
-            process.kill()
-    else:
-        process.kill()
+    platform_services.current().kill_process_tree(process)
 
 
 def _kill_lingering_posix_group(process: subprocess.Popen[Any]) -> None:
@@ -533,12 +487,7 @@ class SolverProcessRuntime:
             "close_fds": True,
             "bufsize": 0,
         }
-        if os.name == "posix":
-            popen_options["start_new_session"] = True
-        elif os.name == "nt":
-            popen_options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
-                subprocess, "CREATE_NO_WINDOW", 0
-            )
+        popen_options.update(platform_services.current().child_process_options().popen_kwargs())
         stdout_capture = _BoundedLogCapture()
         stderr_capture = _BoundedLogCapture()
         capture_threads: list[threading.Thread] = []
@@ -989,20 +938,10 @@ def _publish_solved_copy(input_path: Path, output_path: Path, wcs_header: fits.H
 
 
 def _fsync_directory(path: Path) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     try:
-        descriptor = os.open(path, flags)
+        platform_services.current().fsync_directory(path)
     except OSError as error:
-        if os.name == "nt" or error.errno in {errno.EACCES, errno.EINVAL, errno.ENOTSUP}:
-            return
         raise SolverExecutionError("DIRECTORY_SYNC_FAILED", str(error)) from error
-    try:
-        os.fsync(descriptor)
-    except OSError as error:
-        if not (os.name == "nt" or error.errno in {errno.EINVAL, errno.ENOTSUP}):
-            raise SolverExecutionError("DIRECTORY_SYNC_FAILED", str(error)) from error
-    finally:
-        os.close(descriptor)
 
 
 def _probe_astap_runtime(runtime: SolverProcessRuntime, timeout_seconds: float) -> ExecutableProbe:

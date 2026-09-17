@@ -1,6 +1,7 @@
 #include "openastroflow/c_api.h"
 
 #include "openastroflow/FusedLnIntegration.h"
+#include "openastroflow/CpuFeatures.h"
 #include "openastroflow/PortableKernels.h"
 #if defined(OAF_WITH_METAL_ABI)
 #include "openastroflow/MetalFusedLnIntegration.h"
@@ -37,7 +38,6 @@ void CopyError( char* destination, std::size_t capacity,
    destination[count] = '\0';
 }
 
-#if defined(OAF_WITH_METAL_ABI)
 void CopyFixed( char* destination, std::size_t capacity,
                 std::string_view value ) noexcept
 {
@@ -47,7 +47,6 @@ void CopyFixed( char* destination, std::size_t capacity,
    const std::size_t count = std::min( capacity - 1, value.size() );
    std::memcpy( destination, value.data(), count );
 }
-#endif
 
 openastroflow::native::NativeLinearFitIntegrationRequest MakeRequest(
    const OafNativeIntegrationRequestV1& input )
@@ -807,4 +806,43 @@ extern "C" int oaf_native_cpu_tile_offsets_v1(
 extern "C" uint32_t oaf_native_default_kernel_threads_v1(void)
 {
    return openastroflow::native::DefaultKernelThreads();
+}
+
+extern "C" int oaf_native_cpu_features_v1(
+   OafNativeCpuFeaturesV1* features,
+   char* error_message,
+   size_t error_message_capacity )
+{
+   if ( features == nullptr || features->struct_size != sizeof( OafNativeCpuFeaturesV1 ) )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "cpu features struct size mismatch" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   try
+   {
+      const openastroflow::native::CpuFeatures detected =
+         openastroflow::native::DetectCpuFeatures();
+      features->architecture = OAF_NATIVE_CPU_ARCHITECTURE_UNKNOWN;
+      if ( detected.architecture == "x86-64" )
+         features->architecture = OAF_NATIVE_CPU_ARCHITECTURE_X86_64;
+      else if ( detected.architecture == "arm64" )
+         features->architecture = OAF_NATIVE_CPU_ARCHITECTURE_ARM64;
+      CopyFixed( features->features, sizeof( features->features ),
+                 openastroflow::native::JoinFeatures( detected ) );
+      CopyFixed( features->brand, sizeof( features->brand ), detected.brand );
+      CopyError( error_message, error_message_capacity, {} );
+      return OAF_NATIVE_OK;
+   }
+   catch ( const std::exception& error )
+   {
+      CopyError( error_message, error_message_capacity, error.what() );
+      return OAF_NATIVE_EXECUTION_FAILED;
+   }
+   catch ( ... )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "unknown cpu features failure" );
+      return OAF_NATIVE_EXECUTION_FAILED;
+   }
 }
