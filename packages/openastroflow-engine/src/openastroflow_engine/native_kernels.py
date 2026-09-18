@@ -4,7 +4,8 @@ The native library (``engine/native``) exports three kernels that reproduce the
 NumPy reference arithmetic of the ordinary mono pipeline value for value:
 
 * ``warp_lanczos3``: normalized, domain-bounded 6x6 Lanczos-3 affine warp,
-* ``mad_rejection``: full-stack per-pixel median/MAD sigma clipping,
+* ``mad_rejection``: full-stack per-pixel median/MAD sigma clipping with the
+  v2 scale model (row-pooled MAD, per-frame noise factors),
 * ``masked_weighted_mean``: exact Float64 frame-order weighted mean.
 
 Every caller keeps its NumPy implementation as the portable fallback.  The
@@ -25,7 +26,7 @@ import os
 from pathlib import Path
 import stat
 import threading
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
@@ -34,7 +35,7 @@ from numpy.typing import NDArray
 NATIVE_ABI_VERSION = 1
 DISABLE_ENVIRONMENT_VARIABLE = "OPENASTROFLOW_DISABLE_NATIVE_KERNELS"
 WARP_KERNEL_ID = "native-cpu-lanczos3-warp-v2"
-MAD_KERNEL_ID = "native-cpu-mad-rejection-v1"
+MAD_KERNEL_ID = "native-cpu-mad-rejection-v2"
 MEAN_KERNEL_ID = "native-cpu-masked-mean-v1"
 TILE_OFFSET_KERNEL_ID = "native-cpu-tile-offsets-v1"
 _MAXIMUM_KERNEL_THREADS = 64
@@ -151,6 +152,27 @@ class _MadRequestV1(ctypes.Structure):
     ]
 
 
+class _MadRequestV2(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32),
+        ("frame_count", ctypes.c_uint32),
+        ("row_count", ctypes.c_uint32),
+        ("width", ctypes.c_uint32),
+        ("minimum_rejection_frames", ctypes.c_uint32),
+        ("threads", ctypes.c_uint32),
+        ("frame_major_samples", ctypes.POINTER(ctypes.c_float)),
+        ("sample_count", ctypes.c_size_t),
+        ("sigma_clip", ctypes.c_float),
+        ("group_sigma_floor", ctypes.c_float),
+        ("absolute_floor", ctypes.c_float),
+        ("epsilon_floor", ctypes.c_float),
+        ("frame_scales", ctypes.POINTER(ctypes.c_float)),
+        ("frame_scale_count", ctypes.c_size_t),
+        ("pool_half_width", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32),
+    ]
+
+
 class _MeanRequestV1(ctypes.Structure):
     _fields_ = [
         ("struct_size", ctypes.c_uint32),
@@ -227,6 +249,7 @@ _REQUIRED_SYMBOLS = (
     "oaf_native_cpu_warp_lanczos3_v1",
     "oaf_native_cpu_warp_lanczos3_v2",
     "oaf_native_cpu_mad_rejection_v1",
+    "oaf_native_cpu_mad_rejection_v2",
     "oaf_native_cpu_masked_mean_v1",
     "oaf_native_cpu_tile_offsets_v1",
     "oaf_native_default_kernel_threads_v1",
@@ -289,6 +312,15 @@ class NativeKernels:
             *error_arguments,
         ]
         library.oaf_native_cpu_mad_rejection_v1.restype = ctypes.c_int
+        library.oaf_native_cpu_mad_rejection_v2.argtypes = [
+            ctypes.POINTER(_MadRequestV2),
+            ctypes.POINTER(ctypes.c_uint8),
+            ctypes.c_size_t,
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.c_size_t,
+            *error_arguments,
+        ]
+        library.oaf_native_cpu_mad_rejection_v2.restype = ctypes.c_int
         library.oaf_native_cpu_masked_mean_v1.argtypes = [
             ctypes.POINTER(_MeanRequestV1),
             ctypes.POINTER(_MeanOutputV1),
@@ -446,16 +478,32 @@ class NativeKernels:
         group_sigma_floor: float,
         absolute_floor: float,
         epsilon_floor: float,
+        frame_scales: Sequence[float] | NDArray[Any] | None = None,
+        pool_half_width: int = 0,
         threads: int | None = None,
     ) -> tuple[NDArray[np.bool_], NDArray[np.float32]]:
-        """Return (accepted, center) for a frame-major (F, R, W) Float32 stack."""
+        """Return (accepted, center) for a frame-major (F, R, W) Float32 stack.
+
+        ``frame_scales`` (one Float32 factor per frame) and ``pool_half_width``
+        select the v2 scale model; ``None``/0 reproduce the v1 per-pixel MAD
+        decisions exactly.
+        """
 
         values = np.ascontiguousarray(samples, dtype=np.float32)
         if values.ndim != 3:
             raise ValueError("MAD rejection samples must be frame-major 3-D")
         frames, rows, width = values.shape
-        request = _MadRequestV1()
-        request.struct_size = ctypes.sizeof(_MadRequestV1)
+        if isinstance(pool_half_width, bool) or int(pool_half_width) < 0:
+            raise ValueError("pool_half_width must be a nonnegative integer")
+        scales: NDArray[np.float32] | None = None
+        if frame_scales is not None:
+            scales = np.ascontiguousarray(frame_scales, dtype=np.float32).ravel()
+            if scales.size != frames:
+                raise ValueError("MAD rejection frame scale count differs from the frame count")
+            if not np.all(np.isfinite(scales)) or np.any(scales <= 0):
+                raise ValueError("MAD rejection frame scales must be finite and positive")
+        request = _MadRequestV2()
+        request.struct_size = ctypes.sizeof(_MadRequestV2)
         request.frame_count = int(frames)
         request.row_count = int(rows)
         request.width = int(width)
@@ -467,11 +515,19 @@ class NativeKernels:
         request.group_sigma_floor = float(group_sigma_floor)
         request.absolute_floor = float(absolute_floor)
         request.epsilon_floor = float(epsilon_floor)
+        if scales is not None:
+            request.frame_scales = scales.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+            request.frame_scale_count = scales.size
+        else:
+            request.frame_scales = ctypes.POINTER(ctypes.c_float)()
+            request.frame_scale_count = 0
+        request.pool_half_width = int(pool_half_width)
+        request.reserved = 0
         accepted = np.empty(values.shape, dtype=np.uint8)
         center = np.empty((rows, width), dtype=np.float32)
         error = ctypes.create_string_buffer(_ERROR_BYTES)
         status = int(
-            self._library.oaf_native_cpu_mad_rejection_v1(
+            self._library.oaf_native_cpu_mad_rejection_v2(
                 ctypes.byref(request),
                 accepted.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
                 accepted.size,

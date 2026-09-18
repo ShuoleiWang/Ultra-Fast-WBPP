@@ -39,6 +39,7 @@ from .calibration import (
     _expression_rows,
     _combined_integration_weights,
     _estimate_rejection_sigma_floor,
+    _rejection_method_id,
     _open_expression_sources,
     _prepare_transient_rejection,
     _ordinary_integration_tile,
@@ -1061,11 +1062,12 @@ def integrate_registered_group(
                     serialized_noise_weights,
                     serialized_quality_weights,
                     serialized_weights,
+                    frame_noise,
                 ) = _combined_integration_weights(
                     canonical, sources, shape, integration, quality_weights
                 )
                 rejection_sigma_floor = _estimate_rejection_sigma_floor(
-                    canonical, sources, shape, integration
+                    canonical, sources, shape, integration, frame_noise=frame_noise
                 )
                 transient_model = _prepare_transient_rejection(
                     canonical, sources, shape, integration, weights64,
@@ -1384,13 +1386,15 @@ def integrate_registered_group(
                     "algorithm": "cpu-mad-mask-plus-metal-full-stack-weighted-v1",
                     "rejectionMask": {
                         "producer": "portable-cpu",
-                        "method": "median-mad-sigma",
+                        "method": _rejection_method_id(rejection_sigma_floor),
                         "sigma": integration.sigma_clip,
                         "scope": "all-frames-per-pixel",
                         "partialMeanBatching": False,
                         "sigmaFloor": rejection_sigma_floor.serializable(),
+                        "frameScaleModel": rejection_sigma_floor.frame_evidence(),
                         "spatialTransients": transient_model.serializable(),
                     },
+                    "noiseWeights": frame_noise.serializable(),
                     "tileRows": tile_rows,
                     "integrationMemoryBudgetBytes": integration_memory_budget,
                     "memoryBudgetSource": memory_budget_source,

@@ -88,14 +88,30 @@ struct MadRejectionRequest
    // Already multiplied: epsilonFactor*float32 epsilon.
    float epsilonFloor = 16.0F*1.1920928955078125e-07F;
    std::uint32_t threads = 1;
+   // v2 scale model. frameScales holds one finite positive Float32 factor per
+   // frame (empty: every factor is 1) that turns the pooled mixture sigma into
+   // the frame's own noise; poolHalfWidth is the half width of the same-row
+   // window whose per-pixel MADs are pooled (0: no pooling). Empty scales and
+   // half width 0 reproduce the v1 per-pixel decisions exactly.
+   std::span<const float> frameScales;
+   std::uint32_t poolHalfWidth = 0;
 
    void Validate() const;
    std::size_t TilePixels() const;
+   bool UsesScaleModel() const noexcept;
 };
 
 // Per-pixel median/MAD sigma clipping over the complete frame stack. Writes
 // one accepted flag per sample (frame-major, 1 accepted / 0 rejected or
 // unavailable) and the per-pixel Float32 centre (NaN without finite samples).
+//
+// With the v2 scale model the threshold of frame j at a pixel is
+//   sigmaClip * max( sqrt( (s_j*sigmaPool)^2 + max(sigmaPix^2 - sigmaPool^2, 0) ),
+//                    groupSigmaFloor, numericalFloor )
+// where sigmaPix = 1.4826*MAD of the pixel, sigmaPool = 1.4826*nanmedian of
+// the MADs of the pixels [x-h, x+h] of the same row (pixels with too few
+// finite samples excluded), and s_j the frame's factor. Float32 throughout,
+// in exactly this evaluation order (the NumPy reference does the same).
 void MadRejectionMask( const MadRejectionRequest& request,
                        std::span<std::uint8_t> accepted,
                        std::span<float> center );

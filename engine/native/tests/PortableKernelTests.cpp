@@ -295,6 +295,144 @@ void TestMadRejectionMatchesReferenceSemantics()
    Require( accepted[0*pixels + 2] == 1, "finite inliers stay accepted" );
 }
 
+void TestMadRejectionScaleModelMatchesReferenceRule()
+{
+   // One row of 41 pixels, 9 frames of Gaussian noise. Pixel 20 has an
+   // artificially narrow stack (per-pixel MAD far below the row's noise)
+   // holding one sample at 2.5 true sigma: the v1 per-pixel rule rejects it,
+   // the pooled rule keeps it. Pixel 30 is a "star core" whose stack is much
+   // wider than the row: its excess variance must be kept per pixel.
+   const std::uint32_t frames = 9;
+   const std::uint32_t width = 41;
+   const std::uint32_t rows = 1;
+   const std::size_t pixels = width;
+   std::vector<float> samples( frames*pixels );
+   std::mt19937 generator( 7U );
+   std::normal_distribution<float> noise( 100.0F, 2.0F );
+   for ( float& value : samples )
+      value = noise( generator );
+   for ( std::uint32_t frame = 0; frame < frames; ++frame )
+      samples[frame*pixels + 20] = 100.0F + 0.05F*static_cast<float>( frame );
+   samples[4*pixels + 20] = 105.0F;
+   for ( std::uint32_t frame = 0; frame < frames; ++frame )
+      samples[frame*pixels + 30] = 500.0F + 40.0F*static_cast<float>( frame );
+   samples[0*pixels + 30] = 500.0F + 40.0F*frames + 30.0F;
+   // Pixel 5 has too few finite samples: it must not pool into neighbours.
+   for ( std::uint32_t frame = 2; frame < frames; ++frame )
+      samples[frame*pixels + 5] = Nan;
+
+   MadRejectionRequest request;
+   request.frameMajorSamples = samples;
+   request.frameCount = frames;
+   request.rowCount = rows;
+   request.width = width;
+   request.sigmaClip = 4.0F;
+   request.minimumRejectionFrames = 3;
+   request.groupSigmaFloor = 1.0e-7F;
+   request.poolHalfWidth = 12;
+   std::vector<float> scales( frames, 1.0F );
+   scales[4] = 1.25F;
+   scales[8] = 0.8F;
+   request.frameScales = scales;
+   request.threads = 3;
+   std::vector<std::uint8_t> accepted( samples.size(), 7 );
+   std::vector<float> center( pixels, 0.0F );
+   MadRejectionMask( request, accepted, center );
+
+   std::vector<std::uint8_t> serial( samples.size(), 7 );
+   std::vector<float> serialCenter( pixels, 0.0F );
+   request.threads = 1;
+   MadRejectionMask( request, serial, serialCenter );
+   Require( accepted == serial, "scale model: thread count must not change decisions" );
+
+   // Reference rule, evaluated independently.
+   std::vector<float> madMap( pixels, Nan );
+   std::vector<float> centers( pixels, Nan );
+   for ( std::size_t pixel = 0; pixel < pixels; ++pixel )
+   {
+      std::vector<float> finite;
+      for ( std::uint32_t frame = 0; frame < frames; ++frame )
+         if ( std::isfinite( samples[frame*pixels + pixel] ) )
+            finite.push_back( samples[frame*pixels + pixel] );
+      if ( finite.empty() )
+         continue;
+      centers[pixel] = ReferenceMedian( finite );
+      Require( center[pixel] == centers[pixel], "scale model keeps the nanmedian centre" );
+      if ( finite.size() < 3 )
+         continue;
+      std::vector<float> deviations;
+      for ( float value : finite )
+         deviations.push_back( std::fabs( value - centers[pixel] ) );
+      madMap[pixel] = ReferenceMedian( deviations );
+   }
+   for ( std::size_t pixel = 0; pixel < pixels; ++pixel )
+   {
+      if ( std::isnan( madMap[pixel] ) )
+      {
+         for ( std::uint32_t frame = 0; frame < frames; ++frame )
+            Require( (accepted[frame*pixels + pixel] != 0)
+                        == std::isfinite( samples[frame*pixels + pixel] ),
+                     "sparse pixels accept every finite sample" );
+         continue;
+      }
+      std::vector<float> window;
+      const std::size_t first = pixel > 12 ? pixel - 12 : 0;
+      const std::size_t last = std::min<std::size_t>( width - 1, pixel + 12 );
+      for ( std::size_t column = first; column <= last; ++column )
+         if ( !std::isnan( madMap[column] ) )
+            window.push_back( madMap[column] );
+      const float pooled = ReferenceMedian( window );
+      const float robust = 1.4826F*madMap[pixel];
+      const float sigmaPool = 1.4826F*pooled;
+      const float excess = std::max( robust*robust - sigmaPool*sigmaPool, 0.0F );
+      const float numerical = std::max(
+         1.0e-7F, request.epsilonFloor*std::max( 1.0F, std::fabs( centers[pixel] ) ) );
+      for ( std::uint32_t frame = 0; frame < frames; ++frame )
+      {
+         const float value = samples[frame*pixels + pixel];
+         const float scaled = scales[frame]*sigmaPool;
+         const float sigmaFrame = std::sqrt( scaled*scaled + excess );
+         const float threshold =
+            4.0F*std::max( std::max( sigmaFrame, 1.0e-7F ), numerical );
+         const bool expected = std::isfinite( value )
+            && std::fabs( value - centers[pixel] ) <= threshold;
+         Require( (accepted[frame*pixels + pixel] != 0) == expected,
+                  "scale model decision differs from the reference rule" );
+      }
+   }
+   Require( accepted[4*pixels + 20] == 1,
+            "a 2.5 sigma sample survives when the row noise is pooled" );
+   Require( accepted[0*pixels + 30] == 1,
+            "a wide star-core stack keeps its own per-pixel scale" );
+
+   // Legacy request (no scales, no pooling) through the same entry point
+   // must reproduce the v1 decisions bit for bit.
+   MadRejectionRequest legacy = request;
+   legacy.frameScales = {};
+   legacy.poolHalfWidth = 0;
+   std::vector<std::uint8_t> legacyAccepted( samples.size(), 7 );
+   std::vector<float> legacyCenter( pixels, 0.0F );
+   MadRejectionMask( legacy, legacyAccepted, legacyCenter );
+   MadRejectionRequest unitScales = request;
+   std::vector<float> ones( frames, 1.0F );
+   unitScales.frameScales = ones;
+   unitScales.poolHalfWidth = 0;
+   std::vector<std::uint8_t> unitAccepted( samples.size(), 7 );
+   std::vector<float> unitCenter( pixels, 0.0F );
+   MadRejectionMask( unitScales, unitAccepted, unitCenter );
+   Require( legacyAccepted == unitAccepted,
+            "unit scales without pooling equal the legacy decisions" );
+   Require( legacyAccepted[4*pixels + 20] == 0,
+            "the legacy per-pixel rule rejects the narrow-stack sample" );
+
+   MadRejectionRequest badScales = request;
+   std::vector<float> wrong( frames - 1, 1.0F );
+   badScales.frameScales = wrong;
+   RequireThrows<std::invalid_argument>(
+      [&]() { MadRejectionMask( badScales, accepted, center ); },
+      "frame scale count must match the frame count" );
+}
+
 void TestMaskedMeanAccumulatesInFrameOrder()
 {
    const std::uint32_t frames = 5;
@@ -464,6 +602,46 @@ void TestCAbiRoundTrip()
             "C ABI MAD rejection must flag the outlier only" );
    Require( center[5] == 3.0F, "C ABI centre must be the median" );
 
+   OafNativeMadRejectionRequestV2 madV2{};
+   madV2.struct_size = sizeof( madV2 );
+   madV2.frame_count = frames;
+   madV2.row_count = height;
+   madV2.width = width;
+   madV2.minimum_rejection_frames = 3;
+   madV2.threads = 3;
+   madV2.frame_major_samples = samples.data();
+   madV2.sample_count = samples.size();
+   madV2.sigma_clip = 4.0F;
+   madV2.group_sigma_floor = 1.0e-7F;
+   madV2.absolute_floor = 1.0e-7F;
+   madV2.epsilon_floor = 16.0F*1.1920928955078125e-07F;
+   std::vector<float> scales( frames, 1.0F );
+   madV2.frame_scales = scales.data();
+   madV2.frame_scale_count = scales.size();
+   madV2.pool_half_width = 12;
+   std::vector<std::uint8_t> acceptedV2( samples.size(), 9 );
+   std::vector<float> centerV2( width*height );
+   Require( oaf_native_cpu_mad_rejection_v2(
+               &madV2, acceptedV2.data(), acceptedV2.size(), centerV2.data(),
+               centerV2.size(), error.data(), error.size() ) == OAF_NATIVE_OK,
+            error.data() );
+   Require( acceptedV2[2*width*height + 5] == 0 && acceptedV2[5] == 1,
+            "C ABI MAD v2 rejection must flag the outlier only" );
+   Require( centerV2 == center, "C ABI MAD v2 centres equal v1" );
+   madV2.frame_scales = nullptr;
+   Require( oaf_native_cpu_mad_rejection_v2(
+               &madV2, acceptedV2.data(), acceptedV2.size(), centerV2.data(),
+               centerV2.size(), error.data(), error.size() )
+               == OAF_NATIVE_INVALID_ARGUMENT,
+            "C ABI MAD v2 must reject a scale count without a pointer" );
+   madV2.frame_scale_count = 0;
+   madV2.pool_half_width = 0;
+   Require( oaf_native_cpu_mad_rejection_v2(
+               &madV2, acceptedV2.data(), acceptedV2.size(), centerV2.data(),
+               centerV2.size(), error.data(), error.size() ) == OAF_NATIVE_OK,
+            error.data() );
+   Require( acceptedV2 == accepted, "C ABI MAD v2 without the scale model equals v1" );
+
    std::vector<double> weights( frames, 0.25 );
    OafNativeMaskedMeanRequestV1 mean{};
    mean.struct_size = sizeof( mean );
@@ -621,6 +799,7 @@ int main()
       TestWarpNanSupportAndDomainClamp();
       TestWarpValidationRejectsBadGeometry();
       TestMadRejectionMatchesReferenceSemantics();
+      TestMadRejectionScaleModelMatchesReferenceRule();
       TestMaskedMeanAccumulatesInFrameOrder();
       TestTileOffsetsMatchReferenceStatistics();
       TestCAbiRoundTrip();

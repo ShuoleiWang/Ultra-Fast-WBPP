@@ -34,7 +34,10 @@ types, evaluation order, `nanmedian` even-count semantics, and NaN policy, so
 value-identical pixels, masks, and counts from both paths (only the sign of an
 exact zero may differ). They are exposed through the C ABI as
 `oaf_native_cpu_warp_lanczos3_v2` (v1 keeps the affine-only layout),
-`oaf_native_cpu_mad_rejection_v1`, `oaf_native_cpu_masked_mean_v1` and
+`oaf_native_cpu_mad_rejection_v2` (v1 keeps the per-pixel MAD layout; v2 adds
+the row-pooled MAD and per-frame noise factors of the rejection scale model,
+and reproduces v1 exactly when neither is requested),
+`oaf_native_cpu_masked_mean_v1` and
 `oaf_native_cpu_tile_offsets_v1`, are compiled with `-fno-fast-math
 -ffp-contract=off`, and are covered by `tests/PortableKernelTests.cpp`.
 Each kernel splits its range with `ParallelRange`: worker threads (and the

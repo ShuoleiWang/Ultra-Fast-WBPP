@@ -251,6 +251,40 @@ OAF_NATIVE_API int oaf_native_cpu_mad_rejection_v1(
    char* error_message,
    size_t error_message_capacity );
 
+// v2 adds the rejection scale model: frame_scales points at frame_count
+// finite positive Float32 factors (NULL with frame_scale_count 0 means every
+// factor is 1) and pool_half_width is the half width of the same-row window
+// whose per-pixel MADs are pooled (0: none). NULL scales and 0 reproduce the
+// v1 decisions exactly.
+typedef struct OafNativeMadRejectionRequestV2
+{
+   uint32_t struct_size;
+   uint32_t frame_count;
+   uint32_t row_count;
+   uint32_t width;
+   uint32_t minimum_rejection_frames;
+   uint32_t threads;
+   const float* frame_major_samples;
+   size_t sample_count;
+   float sigma_clip;
+   float group_sigma_floor;
+   float absolute_floor;
+   float epsilon_floor;
+   const float* frame_scales;
+   size_t frame_scale_count;
+   uint32_t pool_half_width;
+   uint32_t reserved;
+} OafNativeMadRejectionRequestV2;
+
+OAF_NATIVE_API int oaf_native_cpu_mad_rejection_v2(
+   const OafNativeMadRejectionRequestV2* request,
+   uint8_t* accepted,
+   size_t accepted_capacity,
+   float* center,
+   size_t center_capacity,
+   char* error_message,
+   size_t error_message_capacity );
+
 typedef struct OafNativeMaskedMeanRequestV1
 {
    uint32_t struct_size;

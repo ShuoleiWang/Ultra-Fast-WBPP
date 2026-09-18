@@ -69,8 +69,11 @@ contracts; it is not the transport used for every desktop operation. See
    (tilt, differential refraction) and asymmetric PSFs do not leave
    filter-dependent offsets. Exact identity/integer half-turns copy pixels;
    general rotations and dithers use one Lanczos warp.
-5. Normalize, reject inconsistent samples and detected transient trails, and
-   integrate. Frames are matched to the frame with the flattest large-scale
+5. Normalize, reject inconsistent samples and detected transient trails
+   (each frame's residual against the temporal median is integrated along
+   every line of every dyadic length with a fast Radon transform, so faint
+   satellites are found from their whole length and only that frame's
+   samples inside the corridor are dropped), and integrate. Frames are matched to the frame with the flattest large-scale
    background of acceptable quality; when the sky level varies enough across
    the group, the sky-proportional part of each frame's background (residual
    flat-field structure) is separated from the object by regression in the
@@ -103,8 +106,12 @@ cap process RSS or the OS file cache.
 The three hot loops of the ordinary pipeline run in multithreaded native CPU
 kernels (`engine/native/src/PortableKernels.cpp`, bound through
 [`native_kernels.py`](../packages/openastroflow-engine/src/openastroflow_engine/native_kernels.py)):
-the Lanczos-3 registration warp, the full-stack median/MAD rejection decision,
-and the weighted reduction. Each kernel reproduces the NumPy reference
+the Lanczos-3 registration warp, the full-stack median/MAD rejection decision
+(v2: the noise part of each pixel's scale is the pooled MAD of its row window
+and every frame is judged against its own noise, so small stacks no longer clip
+good samples where the per-pixel MAD is low by chance), and the weighted
+reduction. Frame weights are the inverse variance of 4x4 block means, which is
+insensitive to the sub-pixel phase of the resampling. Each kernel reproduces the NumPy reference
 arithmetic operation for operation, so the two paths publish identical pixels;
 the NumPy path remains the portable fallback and every receipt names the kernel
 that ran. Calibration and registration are fused: a Light is decoded once,

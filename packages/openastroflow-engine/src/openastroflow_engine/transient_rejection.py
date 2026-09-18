@@ -4,6 +4,14 @@ A trail must be absent from the robust registered reference and have distributed
 positive evidence along a long narrow corridor. Ordinary MAD rejection decisions
 are preserved; the corridor mask can reject additional samples.
 
+Detection (v2) integrates each frame's residual against the temporal median
+along every line of every dyadic length with a fast Radon transform (the
+multi-scale streak detection of Nir, Zackay & Ofek 2018, AJ 156, 229), so a
+trail is found from the sum of its whole length rather than from individual
+bright samples: a 0.3 sigma-per-pixel satellite across a frame integrates to a
+30-40 sigma line, and a trail that fades or blinks along its length keeps the
+extent over which its running mean stays positive.
+
 At pixels affected by that additional rejection, an optional group-relative sky
 model adjusts the temporary integration values to preserve the original accepted
 background. This avoids stripes when the removed frame has a different sky level.
@@ -19,8 +27,27 @@ import numpy as np
 from numpy.typing import NDArray
 from .residual_background import ResidualBackgroundAlignment
 
-ALGORITHM = "temporal-residual-supported-line-corridor-v1"
+ALGORITHM = "temporal-residual-radon-line-corridor-v2"
 MINIMUM_LENGTH_PIXELS = 256
+# Dyadic line lengths tested, in preview bins: from FRT_MINIMUM_LEVEL_BINS up
+# to the padded frame height.  A detection needs a line sum of
+# FRT_DETECTION_Z (after per-level standardisation) and, on the preview, a
+# core mean of at least CORE_MINIMUM_SIGMA, a peaked cross-track profile and
+# a significance of at least SIGNIFICANCE_MINIMUM.
+FRT_MINIMUM_LEVEL_BINS = 16
+FRT_DETECTION_Z = 6.5
+FRT_MINIMUM_COVERAGE = 0.6
+FRT_MAXIMUM_CANDIDATES_PER_LEVEL = 24
+CORE_MINIMUM_SIGMA = 0.2
+SIGNIFICANCE_MINIMUM = 6.0
+EXTENT_WINDOW_BINS = 32
+EXTENT_THRESHOLD_SIGMA = 0.12
+MINIMUM_SUPPORTED_SEGMENTS = 4
+CORE_CONCENTRATION_MINIMUM = 0.6
+OBJECT_MASK_SIGMA = 30.0
+ANCHOR_STAR_SIGMA = 300.0
+ANCHOR_CENTRE_FRACTION = 0.2
+ANCHOR_MAXIMUM_LENGTH_PIXELS = 1600
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,9 +140,16 @@ class TransientRejectionModel:
             "reference": "registered-group-temporal-median",
             "backgroundRemoval": "detection-only-clipped-smooth-residual",
             "minimumLengthPixels": MINIMUM_LENGTH_PIXELS,
-            "seedSigma": 2.5,
-            "minimumSupportedSegments": 6,
-            "minimumProfileSigma": 6.0,
+            "detection": "dyadic-fast-radon-multiscale",
+            "detectionZ": FRT_DETECTION_Z,
+            "minimumLevelBins": FRT_MINIMUM_LEVEL_BINS,
+            "coreMinimumSigma": CORE_MINIMUM_SIGMA,
+            "extentThresholdSigma": EXTENT_THRESHOLD_SIGMA,
+            "minimumSupportedSegments": MINIMUM_SUPPORTED_SEGMENTS,
+            "coreConcentrationMinimum": CORE_CONCENTRATION_MINIMUM,
+            "objectMaskSigma": OBJECT_MASK_SIGMA,
+            "anchorStarSigma": ANCHOR_STAR_SIGMA,
+            "minimumProfileSigma": SIGNIFICANCE_MINIMUM,
             "tileInvariant": True,
             "intensitiesModified": self.background_alignment is not None,
             "storedInputsModified": False,
@@ -141,6 +175,366 @@ class TransientRejectionModel:
             accepted[trail.frame, corridor] = False
 
 
+def _next_power_of_two(value: int) -> int:
+    power = 1
+    while power < value:
+        power *= 2
+    return power
+
+
+def fast_radon_levels(image: NDArray[np.float32], minimum_rows: int) -> list[tuple[int, NDArray[np.float32]]]:
+    """Dyadic fast Radon transform for lines within 45 degrees of the columns.
+
+    ``image`` is ``(H, W)`` with ``H`` a power of two.  Returns, for every
+    block length ``n = 2**k >= minimum_rows``, an array ``F`` of shape
+    ``(H // n, 2n - 1, W + 2H)`` where ``F[b, s + n - 1, x]`` is the sum along
+    the dyadic line from ``(x - H, b n)`` to ``(x - H + s, b n + n - 1)``
+    (columns are padded by ``H`` zeros on both sides so every shift stays
+    inside).  Level ``k`` is built from level ``k - 1`` as
+    ``F_k[b, s, x] = F_{k-1}[2b, h, x] + F_{k-1}[2b+1, h, x + (s - h)]`` with
+    ``h = trunc(s / 2)``, the standard O(H W log H) recursion.
+    """
+
+    height, width = image.shape
+    pad = height
+    padded = np.zeros((height, width + 2 * pad), dtype=np.float32)
+    padded[:, pad : pad + width] = image
+    current = padded[:, None, :]  # (blocks=H, shifts=1, Wp): n = 1, s = 0
+    levels: list[tuple[int, NDArray[np.float32]]] = []
+    n = 1
+    columns = np.arange(padded.shape[1])
+    while n < height:
+        half = n
+        n *= 2
+        shifts = np.arange(-(n - 1), n)
+        halves = np.trunc(shifts / 2.0).astype(np.int64)
+        deltas = shifts - halves
+        half_index = halves + (half - 1)
+        top = current[0::2][:, half_index, :]
+        bottom = current[1::2][:, half_index, :]
+        take = np.clip(columns[None, :] + deltas[:, None], 0, padded.shape[1] - 1)
+        shifted = np.take_along_axis(bottom, np.broadcast_to(take[None], bottom.shape), axis=2)
+        current = top + shifted
+        if n >= minimum_rows:
+            levels.append((n, current))
+    return levels
+
+
+def _line_normal_form(p0: NDArray[np.float64], p1: NDArray[np.float64]) -> tuple[float, float, float, float, float]:
+    """Normal (nx, ny), distance and along-track coordinates of a segment."""
+
+    direction = p1 - p0
+    length = float(np.hypot(direction[0], direction[1]))
+    if length <= 0:
+        raise ValueError("degenerate segment")
+    tx, ty = direction / length
+    nx, ny = -ty, tx
+    distance = float(p0[0] * nx + p0[1] * ny)
+    a0 = float(-p0[0] * ny + p0[1] * nx)
+    a1 = float(-p1[0] * ny + p1[1] * nx)
+    return nx, ny, distance, min(a0, a1), max(a0, a1)
+
+
+def _standardised_z(sums: NDArray[np.float32], counts: NDArray[np.float32], minimum_count: float) -> NDArray[np.float32]:
+    valid = counts >= minimum_count
+    z = np.zeros(sums.shape, dtype=np.float32)
+    np.divide(sums, np.sqrt(np.maximum(counts, 1.0)), out=z, where=valid)
+    sample = z[valid]
+    if sample.size >= 64:
+        scale = 1.4826 * float(np.median(np.abs(sample - np.median(sample))))
+        if np.isfinite(scale) and scale > 0:
+            z /= np.float32(scale)
+    z[~valid] = 0.0
+    return z
+
+
+def _candidate_lines(residual_z: NDArray[np.float32], weight: NDArray[np.float32], minimum_rows: int):
+    """Multi-scale line candidates of one frame: (z, p0, p1) in preview coords."""
+
+    from scipy.ndimage import maximum_filter
+
+    height, width = residual_z.shape
+    size = _next_power_of_two(max(height, width))
+    candidates: list[tuple[float, NDArray[np.float64], NDArray[np.float64]]] = []
+    for transpose in (False, True):
+        img = residual_z.T if transpose else residual_z
+        wgt = weight.T if transpose else weight
+        h, w = img.shape
+        image = np.zeros((size, w), dtype=np.float32)
+        image[:h] = img
+        weights = np.zeros((size, w), dtype=np.float32)
+        weights[:h] = wgt
+        sums = fast_radon_levels(image, minimum_rows)
+        counts = fast_radon_levels(weights, minimum_rows)
+        for (n, level_sums), (_, level_counts) in zip(sums, counts, strict=True):
+            z = _standardised_z(level_sums, level_counts, max(8.0, FRT_MINIMUM_COVERAGE * n))
+            peaks = (z >= FRT_DETECTION_Z) & (z == maximum_filter(z, size=(1, 5, 7)))
+            blocks, shift_index, xs = np.nonzero(peaks)
+            if blocks.size > FRT_MAXIMUM_CANDIDATES_PER_LEVEL:
+                order = np.argsort(-z[blocks, shift_index, xs])[:FRT_MAXIMUM_CANDIDATES_PER_LEVEL]
+                blocks, shift_index, xs = blocks[order], shift_index[order], xs[order]
+            for b, si, x in zip(blocks, shift_index, xs):
+                shift = int(si) - (n - 1)
+                x0 = float(int(x) - size)
+                y0 = float(int(b) * n)
+                p0 = np.array([x0, y0])
+                p1 = np.array([x0 + shift, y0 + n - 1])
+                if transpose:
+                    p0, p1 = p0[::-1], p1[::-1]
+                candidates.append((float(z[b, si, x]), p0, p1))
+    candidates.sort(key=lambda item: -item[0])
+    return candidates
+
+
+def _robust_sky(reference: NDArray[np.float32], common: NDArray[np.bool_]) -> NDArray[np.float64]:
+    """Large-scale sky of the reference that ignores objects (clipped smoothing)."""
+
+    from scipy.ndimage import gaussian_filter
+
+    level = float(np.median(reference[common])) if np.any(common) else 0.0
+    filled = np.where(common, reference, level).astype(np.float64)
+    weight = common.astype(np.float64)
+    sky = np.full(reference.shape, level)
+    for _ in range(3):
+        residual = filled - sky
+        scale = 1.4826 * float(np.median(np.abs(residual[common] - np.median(residual[common])))) if np.any(common) else 1.0
+        clipped = np.clip(residual, -3.0 * scale, 3.0 * scale)
+        sky = sky + gaussian_filter(clipped * weight, 24) / np.maximum(gaussian_filter(weight, 24), 0.05)
+    return sky
+
+
+def _anchored_on_star(result: dict, anchors: NDArray[np.bool_]) -> bool:
+    """True when the line's extent is centred on a bright star it passes through.
+
+    Diffraction spikes and halo asymmetries of a bright star under a seeing
+    or transparency difference are line-like residuals of one frame, but they
+    are symmetric about the star; a satellite that happens to cross a bright
+    star has its extent centred elsewhere.
+    """
+
+    ys, xs = np.nonzero(anchors)
+    if ys.size == 0:
+        return False
+    nx, ny = result["nx"], result["ny"]
+    cross = xs * nx + ys * ny - result["distance"]
+    along = -xs * ny + ys * nx
+    near = np.abs(cross) <= 2.5
+    if not np.any(near):
+        return False
+    start, stop = result["start"], result["stop"]
+    length = max(stop - start, 1.0)
+    middle = 0.5 * (start + stop)
+    return bool(np.any(np.abs(along[near] - middle) <= ANCHOR_CENTRE_FRACTION * length))
+
+
+def _merge_into(trail: dict, result: dict, half_width: float) -> bool:
+    """Union ``result`` into ``trail`` when both describe the same line.
+
+    Same line: normals within 2 degrees and the new segment's end points
+    within 3 bins of the accepted line.  The new extent is projected onto the
+    accepted line's along-track axis.
+    """
+
+    nx, ny = trail["nx"], trail["ny"]
+    dot = nx * result["nx"] + ny * result["ny"]
+    if abs(dot) < 0.99939:
+        return False
+    rx, ry, rd = result["nx"], result["ny"], result["distance"]
+    ends = []
+    for a in (result["start"], result["stop"]):
+        point = np.array([rd * rx - a * ry, rd * ry + a * rx])
+        cross = point[0] * nx + point[1] * ny - trail["distance"]
+        if abs(cross) > 3.0:
+            return False
+        ends.append(float(-point[0] * ny + point[1] * nx))
+    trail["start"] = min(trail["start"], min(ends))
+    trail["stop"] = max(trail["stop"], max(ends))
+    trail["half_width"] = max(trail["half_width"], half_width)
+    return True
+
+
+def _segment_inside(trail: dict, p0: NDArray[np.float64], p1: NDArray[np.float64]) -> bool:
+    """True when a candidate segment is already covered by an accepted trail.
+
+    Either both end points lie inside the corridor, or the segment is nearly
+    parallel (within 10 degrees) and its midpoint lies inside the corridor:
+    an oblique dyadic line that only crosses a bright trail.
+    """
+
+    nx, ny = trail["nx"], trail["ny"]
+    reach = trail["half_width"] + 2.0
+    inside = []
+    for point in (p0, p1, 0.5 * (p0 + p1)):
+        cross = point[0] * nx + point[1] * ny - trail["distance"]
+        along = -point[0] * ny + point[1] * nx
+        inside.append(abs(cross) <= reach and trail["start"] - 8 <= along <= trail["stop"] + 8)
+    if inside[0] and inside[1]:
+        return True
+    direction = p1 - p0
+    length = float(np.hypot(direction[0], direction[1]))
+    if length <= 0:
+        return False
+    cos_angle = abs((-direction[1] * nx + direction[0] * ny) / length)
+    return bool(inside[2] and cos_angle > 0.985)
+
+
+def _refine_line(residual, valid, xx, yy, nx, ny, distance, start, stop):
+    """Best (nx, ny, distance) around a candidate inside its along-track range."""
+
+    margin = 12.0
+    cross0 = xx * nx + yy * ny - distance
+    along0 = -xx * ny + yy * nx
+    roi = valid & (np.abs(cross0) <= margin) & (along0 >= start - 64) & (along0 <= stop + 64)
+    ry, rx = np.nonzero(roi)
+    if ry.size < 32:
+        return None
+    rv = residual[ry, rx]
+    fx, fy = xx[ry, rx], yy[ry, rx]
+    base_angle = np.arctan2(ny, nx)
+    best = None
+    for dtheta in np.deg2rad(np.arange(-2.0, 2.001, 0.1)):
+        cnx, cny = float(np.cos(base_angle + dtheta)), float(np.sin(base_angle + dtheta))
+        cross = fx * cnx + fy * cny
+        for drho in np.arange(-1.5, 1.51, 0.5):
+            core = np.abs(cross - (distance + drho)) <= 0.5
+            count = np.count_nonzero(core)
+            if count < 16:
+                continue
+            score = float(np.sum(rv[core])) / np.sqrt(count)
+            if best is None or score > best[0]:
+                best = (score, cnx, cny, distance + drho)
+    if best is None:
+        return None
+    return best[1], best[2], best[3]
+
+
+def _tracked_extent(core_along, core_values, sigma, seed_along):
+    """Grow the extent outward from ``seed_along`` while the running mean of
+    the core samples stays positive; gaps shorter than two windows are bridged
+    (a blinking aircraft, a star mask on the line)."""
+
+    window = min(EXTENT_WINDOW_BINS, core_values.size)
+    running = np.convolve(core_values, np.ones(window) / window, mode="same")
+    on = running > EXTENT_THRESHOLD_SIGMA * sigma
+    centre = int(np.argmin(np.abs(core_along - seed_along)))
+    if not on[centre]:
+        near = np.flatnonzero(on)
+        if near.size == 0:
+            return None
+        centre = int(near[np.argmin(np.abs(near - centre))])
+        if abs(core_along[centre] - seed_along) > 2 * window:
+            return None
+    gap_limit = 2 * window
+    lo = hi = centre
+    gap = 0
+    for index in range(centre - 1, -1, -1):
+        if on[index]:
+            lo, gap = index, 0
+        else:
+            gap += 1
+            if gap > gap_limit:
+                break
+    gap = 0
+    for index in range(centre + 1, core_values.size):
+        if on[index]:
+            hi, gap = index, 0
+        else:
+            gap += 1
+            if gap > gap_limit:
+                break
+    return float(core_along[lo]), float(core_along[hi])
+
+
+def _measure_line(residual: NDArray[np.float64], valid: NDArray[np.bool_], sigma: float,
+                  nx: float, ny: float, distance: float, start: float, stop: float):
+    """Refine a candidate line on the preview and measure its extent/profile.
+
+    Returns None when the line is not a peaked, significant, distributed
+    positive residual.  Otherwise a dict with the refined normal form, the
+    along-track extent, the core statistics and the cross-track profile.
+    The extent is tracked outward along the refined line beyond the
+    candidate block, and the line is re-refined on the grown extent, so one
+    dyadic block of a long or fading trail yields the whole trail.
+    """
+
+    height, width = residual.shape
+    yy, xx = np.mgrid[:height, :width].astype(np.float64)
+    seed_mid = 0.5 * (start + stop)
+    ext_start, ext_stop = start, stop
+    cnx = cny = cdist = None
+    for _ in range(3):
+        refined = _refine_line(residual, valid, xx, yy, nx, ny, distance, ext_start, ext_stop)
+        if refined is None:
+            return None
+        cnx, cny, cdist = refined
+        band = valid & (np.abs(xx * cnx + yy * cny - cdist) <= 1.0)
+        by, bx = np.nonzero(band)
+        if by.size < 32:
+            return None
+        along = -bx * cny + by * cnx
+        order = np.argsort(along)
+        core_along = along[order]
+        core_values = residual[by, bx][order]
+        extent = _tracked_extent(core_along, core_values, sigma, seed_mid)
+        if extent is None:
+            return None
+        new_start, new_stop = extent
+        seed_mid = 0.5 * (new_start + new_stop)
+        nx, ny, distance = cnx, cny, cdist
+        grown = (new_stop - new_start) > 1.1 * (ext_stop - ext_start) + 8
+        ext_start, ext_stop = new_start, new_stop
+        if not grown:
+            break
+    inside = (core_along >= ext_start) & (core_along <= ext_stop)
+    core_inside = core_values[inside]
+    if core_inside.size < 16:
+        return None
+    clipped = np.clip(core_inside, -4 * sigma, 4 * sigma)
+    mean_core = float(np.mean(clipped))
+    significance = mean_core / sigma * np.sqrt(core_inside.size)
+    if mean_core < CORE_MINIMUM_SIGMA * sigma or significance < SIGNIFICANCE_MINIMUM:
+        return None
+    edges = np.linspace(ext_start, ext_stop, 9)
+    along_inside = core_along[inside]
+    supported = 0
+    for lo, hi in zip(edges[:-1], edges[1:], strict=True):
+        segment = (along_inside >= lo) & (along_inside < hi)
+        if np.count_nonzero(segment) >= 4 and np.mean(clipped[segment]) > EXTENT_THRESHOLD_SIGMA * sigma:
+            supported += 1
+    if supported < MINIMUM_SUPPORTED_SEGMENTS:
+        return None
+    # Cross-track profile over the extent (median per one-bin band).
+    wide = valid & (np.abs(xx * cnx + yy * cny - cdist) <= 8.5)
+    wy, wx = np.nonzero(wide)
+    rel = wx * cnx + wy * cny - cdist
+    walong = -wx * cny + wy * cnx
+    wv = residual[wy, wx]
+    in_extent = (walong >= ext_start) & (walong <= ext_stop)
+    profile = np.zeros(17)
+    counts = np.zeros(17, dtype=np.int64)
+    for offset in range(-8, 9):
+        band = in_extent & (np.abs(rel - offset) < 0.5)
+        counts[offset + 8] = np.count_nonzero(band)
+        profile[offset + 8] = float(np.median(wv[band])) if counts[offset + 8] >= 8 else 0.0
+    wings = [profile[8 + k] for k in (-3, -2, 2, 3) if counts[8 + k] >= 8]
+    if len(wings) < 3:
+        return None
+    wing = float(np.mean(np.abs(wings)))
+    if profile[8] < 2.0 * wing + 0.1 * sigma:
+        return None
+    # A trail is narrow: the three core bands must hold most of the positive
+    # cross-track flux within +-6 bins.  A bright star's asymmetric halo or a
+    # reflection ghost in one frame is a broad blob that fails this.
+    positive = np.clip(profile[2:15], 0.0, None)
+    if positive.sum() <= 0 or positive[5:8].sum() < CORE_CONCENTRATION_MINIMUM * positive.sum():
+        return None
+    return {
+        "nx": cnx, "ny": cny, "distance": cdist, "start": ext_start, "stop": ext_stop,
+        "core_count": int(core_inside.size), "mean_core": mean_core,
+        "significance": float(significance), "supported": supported, "profile": profile,
+    }
+
+
 def detect_transient_trails(values: NDArray[np.float32], bin_factor: int,
                             *, workers: int = 1) -> TransientRejectionModel:
     """Fit deterministic corridors from block-mean registered frame samples.
@@ -150,7 +544,6 @@ def detect_transient_trails(values: NDArray[np.float32], bin_factor: int,
     for any worker count and keep frame order.
     """
     from scipy.ndimage import binary_dilation, gaussian_filter
-    from skimage.transform import hough_line, hough_line_peaks
 
     frame_count, height, width = values.shape
     if frame_count < 5 or min(height, width) * bin_factor < MINIMUM_LENGTH_PIXELS:
@@ -160,11 +553,16 @@ def detect_transient_trails(values: NDArray[np.float32], bin_factor: int,
     reference = np.zeros((height, width), dtype=np.float32)
     if np.any(common):
         reference[common] = np.nanmedian(values[:, common], axis=0)
-    yy, xx = np.mgrid[:height, :width].astype(np.float64)
-    theta = np.linspace(-np.pi / 2, np.pi / 2, 1440, endpoint=False)
     # Shared stars, diffraction spikes, and resolved structure cannot seed
-    # a trail; the structure map depends only on the reference.
+    # a trail; the structure map depends only on the reference.  Bright
+    # extended objects and star halos are masked from detection as well:
+    # under a small scale or seeing difference their residual scales with
+    # their own brightness, and a galaxy's major axis integrates like a line.
     structure = reference - gaussian_filter(reference, 3)
+    sky = _robust_sky(reference, common)
+    elevation = np.where(common, reference - sky, 0.0)
+    minimum_rows = max(2, min(_next_power_of_two(FRT_MINIMUM_LEVEL_BINS),
+                              _next_power_of_two(max(1, MINIMUM_LENGTH_PIXELS // (2 * bin_factor)))))
 
     def frame_trails(frame_index: int) -> list[TransientTrail]:
         trails: list[TransientTrail] = []
@@ -189,88 +587,84 @@ def detect_transient_trails(values: NDArray[np.float32], bin_factor: int,
         # The final corridor can cross protected structure, using other
         # frames there.
         protected = binary_dilation(structure > 4 * sigma, iterations=2)
+        protected |= binary_dilation(elevation > OBJECT_MASK_SIGMA * sigma, iterations=2)
+        anchors = structure > ANCHOR_STAR_SIGMA * sigma
         # Normalized smoothing remains valid at a footprint boundary: requiring
         # almost full support would truncate every fitted trail by several
         # smoothing radii before the image edge.
-        valid &= ~protected & (support > 0.25)
-        seeds = valid & (residual > 2.5 * sigma)
-        hough, angles, distances = hough_line(seeds, theta=theta)
-        peaks, peak_angles, peak_distances = hough_line_peaks(
-            hough, angles, distances, threshold=12,
-            min_distance=4, min_angle=8, num_peaks=16,
-        )
-        for peak, angle, distance in zip(peaks, peak_angles, peak_distances, strict=True):
-            nx, ny = float(np.cos(angle)), float(np.sin(angle))
-            cross = xx * nx + yy * ny - distance
-            near = seeds & (np.abs(cross) <= 1.5)
-            py, px = np.nonzero(near)
-            if px.size < 12:
+        detect = valid & ~protected & (support > 0.25)
+        residual_z = np.where(detect, np.clip(residual / sigma, -5.0, 5.0), 0.0).astype(np.float32)
+        weight = detect.astype(np.float32)
+        candidates = _candidate_lines(residual_z, weight, minimum_rows)
+        measured = []
+        # Accepted corridors are blanked before the next candidate is measured,
+        # so oblique dyadic lines that only borrow a bright trail's samples
+        # lose their support ("clean" order: strongest line first).
+        work_residual = residual.copy()
+        work_detect = detect.copy()
+        yy, xx = np.mgrid[:height, :width].astype(np.float64)
+        for z_line, p0, p1 in candidates:
+            try:
+                nx, ny, distance, start, stop = _line_normal_form(p0, p1)
+            except ValueError:
                 continue
-            # Refine the Hough angle using only distributed seed coordinates.
-            points = np.column_stack((px, py)).astype(np.float64)
-            centroid = np.mean(points, axis=0)
-            _, _, axes = np.linalg.svd(points - centroid, full_matrices=False)
-            normal = axes[1]
-            if normal @ np.array([nx, ny]) < 0:
-                normal *= -1
-            nx, ny = map(float, normal)
-            distance = float(centroid @ normal)
-            cross = xx * nx + yy * ny - distance
-            along = -xx * ny + yy * nx
-            seed_along = -px * ny + py * nx
-            start, stop = np.quantile(seed_along, [0.01, 0.99])
-            length = float(stop - start)
+            # Skip candidates whose segment already lies inside an accepted
+            # corridor (shorter or oblique dyadic lines through the same trail).
+            if any(_segment_inside(t, p0, p1) for t in measured):
+                continue
+            result = _measure_line(work_residual, work_detect, sigma, nx, ny, distance, start, stop)
+            if result is None:
+                continue
+            if ((result["stop"] - result["start"]) * bin_factor <= ANCHOR_MAXIMUM_LENGTH_PIXELS
+                    and _anchored_on_star(result, anchors)):
+                continue
+            length = result["stop"] - result["start"]
             if length * bin_factor < MINIMUM_LENGTH_PIXELS:
                 continue
-            core = valid & (np.abs(cross) < 1.5) & (along >= start) & (along <= stop)
-            if np.count_nonzero(core) < 64:
-                continue
-            # Independent positions along a line, not a bright point source,
-            # must account for the excess in at least 6 of 8 spatial segments.
-            clipped_signal = np.clip(residual, -4 * sigma, 4 * sigma)
-            supported = 0
-            for lo, hi in zip(np.linspace(start, stop, 9)[:-1],
-                              np.linspace(start, stop, 9)[1:], strict=True):
-                segment = core & (along >= lo) & (along < hi)
-                if (np.count_nonzero(segment) >= 8
-                        and np.mean(clipped_signal[segment]) > 0.3 * sigma):
-                    supported += 1
-            # A sub-bin vertical/horizontal trail can occupy only one of the
-            # three core columns. A median would erase that coherent evidence.
-            signal = float(np.mean(clipped_signal[core]))
-            significance = signal / sigma * np.sqrt(length / 3)
-            if supported < 6 or significance < 6:
-                continue
-            # Measure the cross-track profile, including sub-threshold wings.
-            # The uncertainty uses independent along-track positions; one bin
-            # of support padding covers bin phase and interpolation wings.
-            profile = []
-            for offset in range(-8, 9):
-                band = (valid & (np.abs(cross - offset) < 0.5)
-                        & (along >= start) & (along <= stop))
-                profile.append(float(np.median(residual[band]))
-                               if np.count_nonzero(band) >= 16 else 0.0)
-            threshold = max(0.15, 3 / np.sqrt(length / 3)) * sigma
+            profile = result["profile"]
+            threshold = max(0.15, 3 / np.sqrt(max(result["core_count"], 1) / 3)) * sigma
             left = right = 8
             while left > 0 and profile[left - 1] > threshold:
                 left -= 1
             while right < 16 and profile[right + 1] > threshold:
                 right += 1
             half_width = float(max(8 - left, right - 8) + 1.5)
-            if half_width >= 8 or 2 * half_width * length > height * width * 0.05:
+            # The profile is measured over +-8 bins; a brighter trail's wings
+            # are simply capped there.  The corridor never covers more than
+            # 5% of the frame: the concentration test above already refused
+            # blobs, so a wider profile only narrows the corridor.
+            half_width = min(half_width, 8.5, height * width * 0.05 / (2.0 * max(length, 1.0)))
+            # Merge with an accepted line of the same geometry (other levels
+            # or blocks of the same trail): keep the union of the extents,
+            # projected onto the accepted line.
+            merged = False
+            for t in measured:
+                if _merge_into(t, result, half_width):
+                    merged = True
+                    break
+            if merged:
                 continue
-            # Deduplicate neighboring Hough peaks for the same corridor.
-            if any(t.frame == frame_index and abs(t.normal_x * nx + t.normal_y * ny) > .999
-                   and abs(t.distance / bin_factor - distance) < half_width + 2 for t in trails):
-                continue
-            shift = (bin_factor - 1) / 2
+            result["half_width"] = half_width
+            result["z_line"] = z_line
+            measured.append(result)
+            cross = xx * result["nx"] + yy * result["ny"] - result["distance"]
+            along = -xx * result["ny"] + yy * result["nx"]
+            blank = ((np.abs(cross) <= half_width + 1.0)
+                     & (along >= result["start"] - 4) & (along <= result["stop"] + 4))
+            work_residual[blank] = 0.0
+            work_detect[blank] = False
+        shift = (bin_factor - 1) / 2
+        for t in measured:
+            nx, ny = t["nx"], t["ny"]
             trails.append(TransientTrail(
                 frame_index, nx, ny,
-                float(distance * bin_factor + shift * (nx + ny)),
-                float(start * bin_factor + shift * (nx - ny) - 2 * bin_factor),
-                float(stop * bin_factor + shift * (nx - ny) + 2 * bin_factor),
-                half_width * bin_factor, int(px.size), supported, significance,
+                float(t["distance"] * bin_factor + shift * (nx + ny)),
+                float(t["start"] * bin_factor + shift * (nx - ny) - 2 * bin_factor),
+                float(t["stop"] * bin_factor + shift * (nx - ny) + 2 * bin_factor),
+                t["half_width"] * bin_factor, int(t["core_count"]), int(t["supported"]),
+                float(t["significance"]),
             ))
+        trails.sort(key=lambda trail: (-trail.profile_sigma, trail.distance))
         return trails
 
     frame_workers = max(1, min(workers, frame_count))
