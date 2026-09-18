@@ -349,12 +349,139 @@ void MadRejectionRequest::Validate() const
       if ( !std::isfinite( floor ) || floor < 0.0F )
          throw std::invalid_argument(
             "MAD rejection floors must be finite and nonnegative" );
+   if ( !frameScales.empty() )
+   {
+      if ( frameScales.size() != frameCount )
+         throw std::invalid_argument(
+            "MAD rejection frame scale count differs from the frame count" );
+      for ( float scale : frameScales )
+         if ( !std::isfinite( scale ) || scale <= 0.0F )
+            throw std::invalid_argument(
+               "MAD rejection frame scales must be finite and positive" );
+   }
+   if ( poolHalfWidth > 65535U )
+      throw std::invalid_argument( "MAD rejection pool half width is too large" );
 }
 
 std::size_t MadRejectionRequest::TilePixels() const
 {
    return CheckedMultiply( rowCount, width, "MAD rejection tile overflow" );
 }
+
+bool MadRejectionRequest::UsesScaleModel() const noexcept
+{
+   if ( poolHalfWidth > 0 )
+      return true;
+   for ( float scale : frameScales )
+      if ( scale != 1.0F )
+         return true;
+   return false;
+}
+
+namespace
+{
+
+// v2 scale model, phase 2: per-frame thresholds from the pooled row MADs.
+// Phase 1 (MadRejectionMask) has written the centre of every pixel and its
+// MAD (NaN when the pixel has too few finite samples for a decision).
+void ScaledRejectionDecisions( const MadRejectionRequest& request,
+                               const std::vector<float>& madMap,
+                               std::span<const float> centerData,
+                               std::span<std::uint8_t> accepted )
+{
+   const std::size_t pixels = request.TilePixels();
+   const std::uint32_t frames = request.frameCount;
+   const std::uint32_t width = request.width;
+   const std::size_t halfWidth = request.poolHalfWidth;
+   const float* samples = request.frameMajorSamples.data();
+   std::uint8_t* acceptedData = accepted.data();
+   std::vector<float> scales( frames, 1.0F );
+   if ( !request.frameScales.empty() )
+      std::copy( request.frameScales.begin(), request.frameScales.end(),
+                 scales.begin() );
+
+   ParallelRange( pixels, request.threads, RejectionPixelGrain,
+      [&]( std::size_t begin, std::size_t end )
+      {
+         constexpr std::size_t Block = 64;
+         std::vector<float> transposed( Block*frames );
+         std::vector<float> window( 2*halfWidth + 1 );
+         std::vector<std::uint8_t> decisions( Block*frames );
+         for ( std::size_t blockStart = begin; blockStart < end;
+               blockStart += Block )
+         {
+            const std::size_t count = std::min( Block, end - blockStart );
+            for ( std::uint32_t frame = 0; frame < frames; ++frame )
+            {
+               const float* row = samples
+                  + static_cast<std::size_t>( frame )*pixels + blockStart;
+               for ( std::size_t i = 0; i < count; ++i )
+                  transposed[i*frames + frame] = row[i];
+            }
+            for ( std::size_t i = 0; i < count; ++i )
+            {
+               const std::size_t pixel = blockStart + i;
+               const float* values = transposed.data() + i*frames;
+               std::uint8_t* flags = decisions.data() + i*frames;
+               const float mad = madMap[pixel];
+               if ( std::isnan( mad ) )
+               {
+                  // Too few usable samples: never infer outliers.
+                  for ( std::uint32_t frame = 0; frame < frames; ++frame )
+                     flags[frame] = std::isfinite( values[frame] ) ? 1 : 0;
+                  continue;
+               }
+               const std::size_t x = pixel % width;
+               const std::size_t rowStart = pixel - x;
+               const std::size_t first = x > halfWidth ? x - halfWidth : 0;
+               const std::size_t last = std::min<std::size_t>( width - 1, x + halfWidth );
+               std::uint32_t windowCount = 0;
+               for ( std::size_t column = first; column <= last; ++column )
+               {
+                  const float neighbour = madMap[rowStart + column];
+                  if ( !std::isnan( neighbour ) )
+                     window[windowCount++] = neighbour;
+               }
+               const float pooledMad = MedianOfFinite( window.data(), windowCount );
+               const float pixelCenter = centerData[pixel];
+               const float robustSigma = 1.4826F*mad;
+               const float sigmaPool = 1.4826F*pooledMad;
+               const float excess = std::max(
+                  robustSigma*robustSigma - sigmaPool*sigmaPool, 0.0F );
+               const float numericalFloor = std::max(
+                  request.absoluteFloor,
+                  request.epsilonFloor
+                     *std::max( 1.0F, std::fabs( pixelCenter ) ) );
+               for ( std::uint32_t frame = 0; frame < frames; ++frame )
+               {
+                  const float value = values[frame];
+                  bool keep = false;
+                  if ( std::isfinite( value ) )
+                  {
+                     const float scaled = scales[frame]*sigmaPool;
+                     const float sigmaFrame = std::sqrt( scaled*scaled + excess );
+                     const float effectiveSigma = std::max(
+                        std::max( sigmaFrame, request.groupSigmaFloor ),
+                        numericalFloor );
+                     const float threshold = request.sigmaClip*effectiveSigma;
+                     const float deviation = value - pixelCenter;
+                     keep = std::fabs( deviation ) <= threshold;
+                  }
+                  flags[frame] = keep ? 1 : 0;
+               }
+            }
+            for ( std::uint32_t frame = 0; frame < frames; ++frame )
+            {
+               std::uint8_t* row = acceptedData
+                  + static_cast<std::size_t>( frame )*pixels + blockStart;
+               for ( std::size_t i = 0; i < count; ++i )
+                  row[i] = decisions[i*frames + frame];
+            }
+         }
+      } );
+}
+
+} // namespace
 
 void MadRejectionMask( const MadRejectionRequest& request,
                        std::span<std::uint8_t> accepted,
@@ -372,6 +499,10 @@ void MadRejectionMask( const MadRejectionRequest& request,
    const float nan = std::numeric_limits<float>::quiet_NaN();
    std::uint8_t* acceptedData = accepted.data();
    float* centerData = center.data();
+   // Scale model: phase 1 below records every pixel's MAD, phase 2 pools
+   // them along the rows and decides; the legacy path decides in phase 1.
+   const bool scaleModel = applyRejection && request.UsesScaleModel();
+   std::vector<float> madMap( scaleModel ? pixels : 0 );
 
    ParallelRange( pixels, request.threads, RejectionPixelGrain,
       [&]( std::size_t begin, std::size_t end )
@@ -407,6 +538,8 @@ void MadRejectionMask( const MadRejectionRequest& request,
                  || finiteCount < request.minimumRejectionFrames )
                {
                   // Too few usable samples: never infer outliers.
+                  if ( scaleModel )
+                     madMap[blockStart + i] = nan;
                   for ( std::uint32_t frame = 0; frame < frames; ++frame )
                      flags[frame] = std::isfinite( values[frame] ) ? 1 : 0;
                   continue;
@@ -419,6 +552,11 @@ void MadRejectionMask( const MadRejectionRequest& request,
                      scratch[deviationCount++] = std::fabs( deviation );
                   }
                const float mad = MedianOfFinite( scratch.data(), deviationCount );
+               if ( scaleModel )
+               {
+                  madMap[blockStart + i] = mad;
+                  continue;
+               }
                const float robustSigma = 1.4826F*mad;
                const float numericalFloor = std::max(
                   request.absoluteFloor,
@@ -449,6 +587,9 @@ void MadRejectionMask( const MadRejectionRequest& request,
             }
          }
       } );
+   if ( scaleModel )
+      ScaledRejectionDecisions(
+         request, madMap, std::span<const float>( centerData, pixels ), accepted );
 }
 
 void MaskedMeanRequest::Validate() const

@@ -226,3 +226,118 @@ def test_vectorized_cell_statistics_match_per_frame_reference(monkeypatch) -> No
     assert actual_nodes.shape == expected_nodes.shape
     assert np.isfinite(expected_nodes).sum() > 0.5 * expected_nodes.size
     assert np.array_equal(actual_nodes, expected_nodes, equal_nan=True)
+
+
+# --- v2 detector: fast Radon transform and multi-scale line detection ---
+
+
+def _dyadic_path(n, s):
+    if n == 1:
+        return [0]
+    h = int(np.trunc(s / 2))
+    d = s - h
+    top = _dyadic_path(n // 2, h)
+    return top + [o + d for o in _dyadic_path(n // 2, h)]
+
+
+def test_fast_radon_levels_are_exact_dyadic_line_sums():
+    from openastroflow_engine.transient_rejection import fast_radon_levels
+
+    rng = np.random.default_rng(0)
+    height, width = 8, 11
+    image = rng.standard_normal((height, width)).astype(np.float32)
+    levels = fast_radon_levels(image, 2)
+    assert [n for n, _ in levels] == [2, 4, 8]
+    for n, sums in levels:
+        assert sums.shape == (height // n, 2 * n - 1, width + 2 * height)
+        for b in range(height // n):
+            for s in range(-(n - 1), n):
+                offsets = _dyadic_path(n, s)
+                for x in range(-height, width + height):
+                    expected = sum(
+                        float(image[b * n + r, x + o]) for r, o in enumerate(offsets) if 0 <= x + o < width
+                    )
+                    assert abs(float(sums[b, s + n - 1, x + height]) - expected) < 1e-4
+    # The steepest dyadic paths are the exact diagonal, shallow ones are staircases.
+    assert _dyadic_path(8, 7) == [0, 1, 2, 3, 4, 5, 6, 7]
+    assert _dyadic_path(8, -5) == [0, -1, -1, -2, -3, -4, -4, -5]
+
+
+def _clean_stack(rng, frames=12, size=(320, 480), sigma=10.0):
+    yy, xx = np.mgrid[: size[0], : size[1]]
+    common = 100 + 0.01 * xx + 0.02 * yy
+    for x, y in [(60, 70), (250, 200), (400, 300), (150, 260), (430, 60)]:
+        common = common + 3000 * np.exp(-((xx - x) ** 2 + (yy - y) ** 2) / 6)
+    # An elongated galaxy-like object.
+    common = common + 400 * np.exp(-(((xx - 300) * 0.8 + (yy - 120) * 0.6) ** 2 / 60**2
+                                    + ((xx - 300) * -0.6 + (yy - 120) * 0.8) ** 2 / 20**2) / 2)
+    values = common[None] + rng.normal(0.0, sigma, (frames,) + size)
+    return values.astype(np.float32), xx, yy
+
+
+def _detect(values, factor=4):
+    frames, height, width = values.shape
+    preview = values.reshape(frames, height // factor, factor, width // factor, factor).mean((2, 4))
+    return detect_transient_trails(preview.astype(np.float32), factor, workers=3)
+
+
+def test_faint_full_length_trail_is_found_from_its_line_integral():
+    """0.35 sigma per pixel, 2 px wide, across the frame: per-pixel rules see nothing."""
+
+    rng = np.random.default_rng(11)
+    values, xx, yy = _clean_stack(rng)
+    nx, ny = np.cos(np.radians(50.0)), np.sin(np.radians(50.0))
+    cross = xx * nx + yy * ny - 260.0
+    values[5] += (3.5 * np.exp(-cross**2 / (2 * 1.0**2))).astype(np.float32)
+    model = _detect(values)
+    assert [t.frame for t in model.trails] == [5]
+    trail = model.trails[0]
+    assert abs(abs(trail.normal_x * nx + trail.normal_y * ny) - 1.0) < 2e-3
+    assert abs(trail.distance * np.sign(trail.normal_x * nx + trail.normal_y * ny) - 260.0) < 4.0
+    assert trail.stop - trail.start > 0.6 * 400
+    assert _detect(np.delete(values, 5, axis=0)).trails == ()
+
+
+def test_trail_that_fades_and_blinks_keeps_its_running_extent():
+    rng = np.random.default_rng(12)
+    values, xx, yy = _clean_stack(rng)
+    nx, ny = np.cos(np.radians(-35.0)), np.sin(np.radians(-35.0))
+    cross = xx * nx + yy * ny + 40.0
+    along = -xx * ny + yy * nx
+    # Bright in the first half, faint in the second half, with blinking gaps.
+    amplitude = np.where(along < 200, 25.0, 6.0) * (np.sin(along / 12.0) > -0.6)
+    values[3] += (amplitude * np.exp(-cross**2 / (2 * 1.2**2))).astype(np.float32)
+    model = _detect(values)
+    assert {t.frame for t in model.trails} == {3}
+    covered = np.zeros(values.shape[1:], dtype=bool)
+    for trail in model.trails:
+        mask = np.ones(values.shape, dtype=bool)
+        model.reject_rows(mask, 0, np.ones(values.shape[1:], dtype=bool))
+        covered |= ~mask[3]
+    line = np.abs(cross) < 1.0
+    assert np.mean(covered[line]) > 0.85
+
+
+def test_static_galaxy_and_star_halos_under_a_scale_error_are_not_trails():
+    """A frame 2% brighter than the group leaves the galaxy's major axis and
+    every halo positive in the residual; none of them is a corridor."""
+
+    rng = np.random.default_rng(13)
+    values, xx, yy = _clean_stack(rng)
+    values[4] *= np.float32(1.02)
+    values[7] = (values[7] - 100.0) * np.float32(0.97) + 100.0
+    assert _detect(values).trails == ()
+
+
+def test_short_bright_trail_is_found_at_a_lower_level():
+    rng = np.random.default_rng(14)
+    values, xx, yy = _clean_stack(rng)
+    nx, ny = np.cos(np.radians(80.0)), np.sin(np.radians(80.0))
+    cross = xx * nx + yy * ny - 150.0
+    along = -xx * ny + yy * nx
+    segment = (along > -80) & (along < 220)  # ~300 px of a 2 px wide, 3 sigma trail
+    values[8] += (30.0 * segment * np.exp(-cross**2 / (2 * 1.0**2))).astype(np.float32)
+    model = _detect(values)
+    assert [t.frame for t in model.trails] == [8]
+    trail = model.trails[0]
+    assert 250 <= trail.stop - trail.start <= 420

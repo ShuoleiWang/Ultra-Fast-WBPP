@@ -114,6 +114,126 @@ def test_native_mad_rejection_matches_numpy_decisions_bitwise(frames: int) -> No
     assert np.array_equal(production_center, center, equal_nan=True)
 
 
+def _numpy_scaled_decision(
+    samples: np.ndarray,
+    parameters: IntegrationParameters,
+    group_floor: float,
+    frame_scales: tuple[float, ...],
+    pool_half_width: int,
+):
+    floor = _RejectionSigmaFloor(
+        True, group_floor, None, 200_000, 65_536, 1, 1, 1, 1,
+        parameters.minimum_rejection_frames, "sha256:test",
+        frame_scales, pool_half_width,
+    )
+    native_kernels_module_cache = dict(native_kernels._CACHE)
+    try:
+        os.environ[native_kernels.DISABLE_ENVIRONMENT_VARIABLE] = "1"
+        native_kernels._CACHE.clear()
+        finite, center, accepted = _ordinary_mad_rejection_decision(
+            samples, parameters, floor
+        )
+    finally:
+        os.environ.pop(native_kernels.DISABLE_ENVIRONMENT_VARIABLE, None)
+        native_kernels._CACHE.clear()
+        native_kernels._CACHE.update(native_kernels_module_cache)
+    return floor, finite, center, accepted
+
+
+@requires_native
+@pytest.mark.parametrize(
+    ("frames", "rows", "width", "half_width"),
+    [(3, 5, 9, 12), (4, 6, 40, 12), (9, 7, 61, 3), (13, 4, 200, 12), (38, 4, 30, 1)],
+)
+def test_native_scaled_mad_rejection_matches_numpy_decisions_bitwise(
+    frames: int, rows: int, width: int, half_width: int
+) -> None:
+    """The v2 scale model (row-pooled MAD, per-frame factors) is value-identical."""
+
+    assert KERNELS is not None
+    rng = np.random.default_rng(100 + frames)
+    samples = _random_stack(41 + frames, frames, rows, width)
+    # Frames of two noise levels, a narrow stack next to normal ones, a
+    # saturated core, a coverage edge and a pixel column with no MAD.
+    samples[: frames // 2] += rng.normal(0.0, 45.0, (frames // 2, rows, width)).astype(np.float32)
+    samples[:, 2, 4] = np.float32(1000.0) + np.float32(0.01) * np.arange(frames, dtype=np.float32)
+    samples[min(1, frames - 1), 2, 4] = np.float32(1900.0)
+    samples[:, 1, 5] = np.float32(60000.0)
+    samples[:, 3, width - 1] = np.nan
+    samples[: min(2, frames), 3, width - 1] = np.float32(1000.0)
+    parameters = IntegrationParameters(sigma_clip=4.0, minimum_rejection_frames=3)
+    scales = tuple(
+        float(np.float32(value))
+        for value in np.concatenate(
+            (np.full(frames // 2, 1.6), np.full(frames - frames // 2, 0.9))
+        )
+    )
+    group_floor = 0.5
+    floor, finite, center, accepted = _numpy_scaled_decision(
+        samples, parameters, group_floor, scales, half_width
+    )
+    assert floor.pooled
+    native_accepted, native_center = KERNELS.mad_rejection(
+        samples,
+        sigma_clip=parameters.sigma_clip,
+        minimum_rejection_frames=parameters.minimum_rejection_frames,
+        group_sigma_floor=group_floor,
+        absolute_floor=REJECTION_FLOOR_ABSOLUTE,
+        epsilon_floor=float(np.float32(REJECTION_FLOOR_EPSILON_FACTOR * np.finfo(np.float32).eps)),
+        frame_scales=scales,
+        pool_half_width=half_width,
+        threads=3,
+    )
+    np.testing.assert_array_equal(native_accepted, accepted)
+    assert np.array_equal(native_center, center, equal_nan=True)
+    production_finite, production_center, production_accepted = (
+        _ordinary_mad_rejection_decision(samples, parameters, floor, native_threads=2)
+    )
+    np.testing.assert_array_equal(production_accepted, accepted)
+    np.testing.assert_array_equal(production_finite, finite)
+    assert np.array_equal(production_center, center, equal_nan=True)
+    # The narrow stack's 900-unit excursion is a real outlier at every scale
+    # (the row noise is ~40) while the coverage-edge pixel keeps every finite
+    # sample.
+    if frames >= 4:
+        assert not accepted[1, 2, 4]
+    np.testing.assert_array_equal(accepted[:, 3, width - 1], finite[:, 3, width - 1])
+    # Unit scales without pooling reproduce the v1 decisions bit for bit.
+    _, _, _, legacy = _numpy_mad_decision(samples, parameters, group_floor)
+    _, _, _, unit = _numpy_scaled_decision(
+        samples, parameters, group_floor, (1.0,) * frames, 0
+    )
+    np.testing.assert_array_equal(unit, legacy)
+    native_unit, _ = KERNELS.mad_rejection(
+        samples,
+        sigma_clip=parameters.sigma_clip,
+        minimum_rejection_frames=parameters.minimum_rejection_frames,
+        group_sigma_floor=group_floor,
+        absolute_floor=REJECTION_FLOOR_ABSOLUTE,
+        epsilon_floor=float(np.float32(REJECTION_FLOOR_EPSILON_FACTOR * np.finfo(np.float32).eps)),
+        frame_scales=(1.0,) * frames,
+        pool_half_width=0,
+        threads=2,
+    )
+    np.testing.assert_array_equal(native_unit, legacy)
+
+
+@requires_native
+def test_native_scaled_mad_rejection_validates_scales() -> None:
+    assert KERNELS is not None
+    samples = _random_stack(3, 5, 4, 6)
+    common = dict(
+        sigma_clip=4.0, minimum_rejection_frames=3, group_sigma_floor=0.1,
+        absolute_floor=REJECTION_FLOOR_ABSOLUTE, epsilon_floor=1e-6,
+    )
+    with pytest.raises(ValueError):
+        KERNELS.mad_rejection(samples, frame_scales=(1.0, 1.0), **common)
+    with pytest.raises(ValueError):
+        KERNELS.mad_rejection(samples, frame_scales=(1.0, 0.0, 1.0, 1.0, 1.0), **common)
+    with pytest.raises(ValueError):
+        KERNELS.mad_rejection(samples, pool_half_width=-1, **common)
+
+
 @requires_native
 def test_native_masked_mean_matches_numpy_float64_accumulation_bitwise() -> None:
     assert KERNELS is not None
@@ -176,7 +296,7 @@ def test_integrate_expressions_native_and_numpy_paths_publish_identical_files(
     numpy_result, numpy_maps = outputs["numpy"]
     assert native_result.execution["rejectionMask"]["kernel"] == native_kernels.MAD_KERNEL_ID
     assert native_result.execution["reducer"] == native_kernels.MEAN_KERNEL_ID
-    assert numpy_result.execution["rejectionMask"]["kernel"] == "numpy-nanmedian-mad-v1"
+    assert numpy_result.execution["rejectionMask"]["kernel"] == "numpy-nanmedian-pooled-mad-v2"
     assert numpy_result.execution["reducer"] == "numpy-float64-weighted-mean-v1"
     assert native_result.accepted_samples == numpy_result.accepted_samples
     assert native_result.rejected_samples == numpy_result.rejected_samples

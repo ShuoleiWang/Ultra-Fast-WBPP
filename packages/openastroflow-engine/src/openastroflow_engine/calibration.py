@@ -47,8 +47,32 @@ TRANSIENT_BAND_ROWS = 128
 REJECTION_FLOOR_GROUP_FRACTION = 0.05
 REJECTION_FLOOR_ABSOLUTE = 1.0e-7
 REJECTION_FLOOR_EPSILON_FACTOR = 16.0
-NUMPY_MAD_KERNEL_ID = "numpy-nanmedian-mad-v1"
+NUMPY_MAD_KERNEL_ID = "numpy-nanmedian-pooled-mad-v2"
 NUMPY_MEAN_KERNEL_ID = "numpy-float64-weighted-mean-v1"
+# Rejection scale model: the per-pixel MAD of a stack of N frames has a
+# relative error of ~1.2/sqrt(N) (30% at N = 11), and the pixels where it
+# comes out low clip 1% of their good samples, which costs 2-3% of the master's
+# SNR at N = 11-13.  The noise part of every pixel's scale is therefore taken
+# from the median of the per-pixel MADs over a window of 2*12+1 pixels of the
+# same row (25 N samples); a frame whose per-pixel noise exceeds the group's
+# sampled mixture scale (what a per-pixel MAD over all frames measures) is
+# judged against its own noise, never against a tighter one; and excess
+# per-pixel variance beyond the pooled noise (star cores under variable
+# seeing, registration residuals) is kept per pixel.  The v2 threshold is
+# therefore never below the v1 threshold: v2 rejects a subset of v1's samples.
+REJECTION_SCALE_ALGORITHM = "row-pooled-mad-frame-studentized-v2"
+REJECTION_POOL_HALF_WIDTH = 12
+REJECTION_POOL_MAX_HALF_WIDTH = 64
+REJECTION_FRAME_SCALE_DIGITS = 6
+# Noise weights: 1/sigma^2 of the noise of 4x4 block means.  Per-pixel noise
+# on a registered frame depends on the sub-pixel phase of its Lanczos-3
+# resampling (the kernel's sum of squared weights is 0.62-1.0), so per-pixel
+# sigma would weight frames by their dither phase; block means recover the
+# low-frequency noise that the integration actually averages (within 2-3% of
+# the unresampled value at every phase).
+NOISE_WEIGHT_ALGORITHM = "block-mean-effective-noise-v2"
+NOISE_WEIGHT_BLOCK_SIZE = 4
+NOISE_WEIGHT_MINIMUM_DIFFERENCES = 64
 # Lanczos-3 tap constants for offsets k = -2..3, evaluated through exact
 # trigonometric identities: sin(pi(f-k)) = (-1)^k sin(pi f) and
 # sin(pi(f-k)/3) = sin(pi f/3) cos(k pi/3) - cos(pi f/3) sin(k pi/3).
@@ -1408,6 +1432,12 @@ class IntegrationParameters:
     max_statistics_samples: int = 200_000
     division_floor: float = 1e-12
     transient_rejection: bool = True
+    # Half width of the same-row window whose per-pixel MADs are pooled into
+    # the noise part of the rejection scale; 0 restores the plain per-pixel
+    # MAD.  Frame noise scaling widens the threshold of frames noisier than
+    # the group's mixture scale to their own noise.
+    rejection_pool_half_width: int = REJECTION_POOL_HALF_WIDTH
+    rejection_frame_noise_scaling: bool = True
 
     def validate(self) -> None:
         if not math.isfinite(self.sigma_clip) or self.sigma_clip <= 0:
@@ -1422,6 +1452,17 @@ class IntegrationParameters:
             raise ValueError("division_floor must be positive and finite")
         if not isinstance(self.transient_rejection, bool):
             raise ValueError("transient_rejection must be a boolean")
+        if (
+            isinstance(self.rejection_pool_half_width, bool)
+            or not isinstance(self.rejection_pool_half_width, int)
+            or not 0 <= self.rejection_pool_half_width <= REJECTION_POOL_MAX_HALF_WIDTH
+        ):
+            raise ValueError(
+                "rejection_pool_half_width must be an integer in "
+                f"[0, {REJECTION_POOL_MAX_HALF_WIDTH}]"
+            )
+        if not isinstance(self.rejection_frame_noise_scaling, bool):
+            raise ValueError("rejection_frame_noise_scaling must be a boolean")
 
     def serializable(self) -> dict[str, Any]:
         return {
@@ -1431,6 +1472,8 @@ class IntegrationParameters:
             "maxStatisticsSamples": self.max_statistics_samples,
             "divisionFloor": self.division_floor,
             "transientRejection": self.transient_rejection,
+            "rejectionPoolHalfWidth": self.rejection_pool_half_width,
+            "rejectionFrameNoiseScaling": self.rejection_frame_noise_scaling,
         }
 
 
@@ -1511,6 +1554,13 @@ class IntegrationMapPaths:
 
 @dataclass(frozen=True, slots=True)
 class _RejectionSigmaFloor:
+    """Group-wide rejection scale evidence: the sigma floor and, since v2,
+    the per-frame noise scale factors and the row pooling window that the
+    per-pixel decision applies.  Empty ``frame_scales`` means every frame is
+    compared against the mixture scale (factor 1) and ``pool_half_width`` 0
+    means the plain per-pixel MAD; that combination reproduces the v1
+    decisions exactly."""
+
     applicable: bool
     group_sigma_floor: float
     sampled_sigma_median: float | None
@@ -1522,6 +1572,16 @@ class _RejectionSigmaFloor:
     usable_sigma_count: int
     minimum_finite_frames_per_coordinate: int
     coordinate_sha256: str
+    frame_scales: tuple[float, ...] = ()
+    pool_half_width: int = 0
+    frame_sigma_pixel: tuple[float, ...] = ()
+    mixture_sigma: float | None = None
+
+    @property
+    def pooled(self) -> bool:
+        return self.pool_half_width > 0 or any(
+            value != 1.0 for value in self.frame_scales
+        )
 
     def serializable(self) -> dict[str, Any]:
         return {
@@ -1542,7 +1602,64 @@ class _RejectionSigmaFloor:
             "absoluteFloor": REJECTION_FLOOR_ABSOLUTE,
             "float32EpsilonFactor": REJECTION_FLOOR_EPSILON_FACTOR,
             "tileInvariant": True,
+            # Group-level (frame-order invariant) part of the scale model;
+            # the per-frame factors are reported by ``frame_evidence``.
+            "scaleModel": {
+                "algorithm": REJECTION_SCALE_ALGORITHM,
+                "status": "APPLIED" if self.pooled else "PER_PIXEL_MAD",
+                "poolHalfWidth": self.pool_half_width,
+                "poolWindowPixels": 2 * self.pool_half_width + 1,
+                "poolAxis": "row",
+                "frameNoiseScaling": any(value != 1.0 for value in self.frame_scales),
+                "mixtureSigma": _json_number(self.mixture_sigma)
+                if self.mixture_sigma is not None
+                else None,
+                "excessVariancePerPixel": True,
+            },
         }
+
+    def frame_evidence(self) -> dict[str, Any]:
+        """Per-frame factors in input order (deliberately outside ``serializable``)."""
+
+        return {
+            "frameScales": list(self.frame_scales),
+            "frameSigmaPixel": [_json_number(value) for value in self.frame_sigma_pixel],
+        }
+
+
+def _rejection_frame_scales(
+    frame_sigma_pixel: Sequence[float],
+    mixture_sigma: float | None,
+) -> tuple[tuple[float, ...], float | None]:
+    """Per-frame factors that turn the pooled stack scale into a frame's own noise.
+
+    ``mixture_sigma`` is the group-wide median of the per-pixel robust sigma
+    (the scale a per-pixel MAD over all frames measures, including its
+    small-sample bias); a frame whose per-pixel noise exceeds it gets the
+    factor ``sigma_j / mixture_sigma`` so its samples are judged against
+    their own noise.  Factors never drop below 1, so no frame is ever held
+    to a tighter threshold than the pooled mixture scale: the v2 decisions
+    are then a subset of the v1 rejections at every pixel.  Frames without a
+    usable estimate keep factor 1.  Factors are rounded to
+    ``REJECTION_FRAME_SCALE_DIGITS`` significant Float32 digits.
+    """
+
+    sigmas = np.asarray(frame_sigma_pixel, dtype=np.float64)
+    if (
+        mixture_sigma is None
+        or not math.isfinite(mixture_sigma)
+        or mixture_sigma <= 0.0
+    ):
+        return tuple(1.0 for _ in sigmas), None
+    scales: list[float] = []
+    for sigma in sigmas:
+        if not math.isfinite(sigma) or sigma <= 0.0:
+            scales.append(1.0)
+            continue
+        ratio = max(1.0, float(sigma) / float(mixture_sigma))
+        ratio = float(f"{ratio:.{REJECTION_FRAME_SCALE_DIGITS}g}")
+        scales.append(max(1.0, float(np.float32(ratio))))
+    return tuple(scales), float(mixture_sigma)
 
 
 def _coordinate_digest(
@@ -1563,6 +1680,8 @@ def _estimate_rejection_sigma_floor(
     sources: Mapping[str, FitsFrame],
     shape: tuple[int, int],
     parameters: IntegrationParameters,
+    *,
+    frame_noise: _FrameNoiseEstimates | None = None,
 ) -> _RejectionSigmaFloor:
     """Estimate one group-wide floor without a full-image statistics pass.
 
@@ -1570,6 +1689,11 @@ def _estimate_rejection_sigma_floor(
     are processed one at a time, so temporary memory is bounded by one sampled
     row times the frame count. Only the final scalar floor is consumed by tiled
     integration, making rejection decisions independent of tile partitioning.
+
+    ``frame_noise`` (the per-frame per-pixel noise measured for the weights)
+    supplies the frame scale factors of the v2 rejection scale model; the
+    pooling window comes from the parameters.  Both are group-wide scalars, so
+    the decisions stay independent of the tile partition.
     """
 
     sample_limit = min(
@@ -1579,6 +1703,10 @@ def _estimate_rejection_sigma_floor(
     coordinate_count = int(y_indices.size * x_indices.size)
     coordinate_sha256 = _coordinate_digest(shape, y_indices, x_indices)
     applicable = len(expressions) >= parameters.minimum_rejection_frames
+    frame_scales: tuple[float, ...] = ()
+    frame_sigma_pixel: tuple[float, ...] = ()
+    mixture_sigma: float | None = None
+    pool_half_width = 0
     if not applicable:
         return _RejectionSigmaFloor(
             False,
@@ -1627,6 +1755,12 @@ def _estimate_rejection_sigma_floor(
         sampled_sigma_median = None
         usable_sigma_count = 0
         group_sigma_floor = REJECTION_FLOOR_ABSOLUTE
+    pool_half_width = int(parameters.rejection_pool_half_width)
+    if parameters.rejection_frame_noise_scaling and frame_noise is not None:
+        frame_sigma_pixel = tuple(frame_noise.sigma_pixel)
+        frame_scales, mixture_sigma = _rejection_frame_scales(
+            frame_sigma_pixel, sampled_sigma_median
+        )
     return _RejectionSigmaFloor(
         True,
         group_sigma_floor,
@@ -1639,11 +1773,19 @@ def _estimate_rejection_sigma_floor(
         usable_sigma_count,
         parameters.minimum_rejection_frames,
         coordinate_sha256,
+        frame_scales,
+        pool_half_width,
+        frame_sigma_pixel,
+        mixture_sigma,
     )
 
 
 def _rejection_kernel_id() -> str:
     return MAD_KERNEL_ID if load_native_kernels() is not None else NUMPY_MAD_KERNEL_ID
+
+
+def _rejection_method_id(sigma_floor: _RejectionSigmaFloor) -> str:
+    return "median-pooled-mad-sigma-v2" if sigma_floor.pooled else "median-mad-sigma"
 
 
 def _reduction_kernel_id() -> str:
@@ -1670,6 +1812,11 @@ def _ordinary_mad_rejection_decision(
     samples = np.asarray(values, dtype=np.float32)
     if samples.ndim != 3:
         raise ValueError("ordinary integration values must be frame-major 3-D")
+    frame_count = samples.shape[0]
+    frame_scales = tuple(sigma_floor.frame_scales)
+    if frame_scales and len(frame_scales) != frame_count:
+        raise ValueError("rejection frame scale count differs from the frame count")
+    pool_half_width = int(sigma_floor.pool_half_width)
     kernels = load_native_kernels()
     if kernels is not None:
         finite = np.isfinite(samples)
@@ -1682,9 +1829,11 @@ def _ordinary_mad_rejection_decision(
             epsilon_floor=float(
                 np.float32(REJECTION_FLOOR_EPSILON_FACTOR * np.finfo(np.float32).eps)
             ),
+            frame_scales=frame_scales or None,
+            pool_half_width=pool_half_width,
             threads=native_threads,
         )
-        if transient_model is not None and samples.shape[0] >= parameters.minimum_rejection_frames:
+        if transient_model is not None and frame_count >= parameters.minimum_rejection_frames:
             enough_samples = (
                 np.count_nonzero(finite, axis=0) >= parameters.minimum_rejection_frames
             )
@@ -1699,7 +1848,7 @@ def _ordinary_mad_rejection_decision(
         center[valid_pixels] = np.asarray(
             np.nanmedian(selected, axis=0), dtype=np.float32
         )
-    if samples.shape[0] < parameters.minimum_rejection_frames:
+    if frame_count < parameters.minimum_rejection_frames:
         return finite, center, finite.copy()
     mad = np.full(samples.shape[1:], np.nan, dtype=np.float32)
     if np.any(valid_pixels):
@@ -1710,27 +1859,74 @@ def _ordinary_mad_rejection_decision(
             np.nanmedian(np.abs(selected - selected_center[None, :]), axis=0),
             dtype=np.float32,
         )
+    # Dither boundaries and masked detector defects may have fewer usable
+    # samples than the group size. Do not infer outliers from too few samples.
+    enough_samples = (
+        np.count_nonzero(finite, axis=0) >= parameters.minimum_rejection_frames
+    )
     robust_sigma = np.asarray(np.float32(1.4826) * mad, dtype=np.float32)
     numerical_floor = np.maximum(
         np.float32(REJECTION_FLOOR_ABSOLUTE),
         np.float32(REJECTION_FLOOR_EPSILON_FACTOR * np.finfo(np.float32).eps)
         * np.maximum(np.float32(1.0), np.abs(center)),
     )
-    effective_sigma = np.maximum(
-        np.maximum(robust_sigma, np.float32(sigma_floor.group_sigma_floor)),
-        numerical_floor,
-    )
+    group_floor = np.float32(sigma_floor.group_sigma_floor)
+    if pool_half_width > 0 or any(scale != 1.0 for scale in frame_scales):
+        # v2 scale model: the noise part of the scale is the pooled MAD of
+        # the row window, scaled to each frame's own noise; per-pixel excess
+        # variance beyond the pooled noise is kept.  Pixels without enough
+        # samples contribute no MAD to their neighbours.
+        pooled = _pooled_row_mad(
+            np.where(enough_samples, mad, np.float32(np.nan)).astype(np.float32),
+            pool_half_width,
+        )
+        sigma_pool = np.asarray(np.float32(1.4826) * pooled, dtype=np.float32)
+        excess = np.maximum(
+            robust_sigma * robust_sigma - sigma_pool * sigma_pool, np.float32(0.0)
+        )
+        scales = np.asarray(
+            frame_scales if frame_scales else (1.0,) * frame_count, dtype=np.float32
+        ).reshape(frame_count, 1, 1)
+        scaled = scales * sigma_pool[None, :, :]
+        sigma_frame = np.sqrt(scaled * scaled + excess[None, :, :])
+        effective_sigma = np.maximum(
+            np.maximum(sigma_frame, group_floor), numerical_floor[None, :, :]
+        )
+    else:
+        effective_sigma = np.maximum(
+            np.maximum(robust_sigma, group_floor), numerical_floor
+        )
     threshold = np.float32(parameters.sigma_clip) * effective_sigma
     accepted = finite & (np.abs(samples - center[None, :, :]) <= threshold)
-    # Dither boundaries and masked detector defects may have fewer usable
-    # samples than the group size. Do not infer outliers from too few samples.
-    enough_samples = (
-        np.count_nonzero(finite, axis=0) >= parameters.minimum_rejection_frames
-    )
     accepted |= finite & ~enough_samples[None, :, :]
     if transient_model is not None:
         transient_model.reject_rows(accepted, first_row, enough_samples)
     return finite, center, accepted
+
+
+def _pooled_row_mad(
+    mad: NDArray[np.float32], half_width: int
+) -> NDArray[np.float32]:
+    """``np.nanmedian`` of each pixel's MAD over ``[x-h, x+h]`` of its own row.
+
+    The window is clipped to the row (no padding values take part), NaN
+    entries are ignored, and a pixel whose window holds no finite MAD stays
+    NaN.  Rows are evaluated one at a time so the temporary window stack is
+    ``(2h+1) x width`` regardless of the tile height.  The native kernel
+    reproduces this arithmetic value for value.
+    """
+
+    rows, width = mad.shape
+    if half_width <= 0:
+        return np.array(mad, dtype=np.float32, copy=True)
+    window = 2 * half_width + 1
+    padded = np.full((rows, width + 2 * half_width), np.nan, dtype=np.float32)
+    padded[:, half_width : half_width + width] = mad
+    result = np.empty_like(mad, dtype=np.float32)
+    for row in range(rows):
+        windows = np.lib.stride_tricks.sliding_window_view(padded[row], window)
+        result[row] = nanmedian_frames(np.ascontiguousarray(windows.T))
+    return result
 
 
 def _ordinary_mad_rejection_mask(
@@ -1855,45 +2051,206 @@ def _ordinary_integration_tile(
     return finite, center, accepted
 
 
+@dataclass(frozen=True, slots=True)
+class _FrameNoiseEstimates:
+    """Per-frame noise measured on one sampling pass over the registered frames.
+
+    ``sigma_pixel`` is the per-pixel noise (dispersion of neighbouring lattice
+    samples of a row); it is the scale the stack's per-pixel MAD sees and
+    feeds the rejection frame scales.  ``sigma_block`` is the noise of
+    ``block_size`` x ``block_size`` block means (the low-frequency noise the
+    integration averages, insensitive to the resampling phase) and feeds the
+    weights.  Frames without a usable estimate carry NaN.
+    """
+
+    sigma_pixel: tuple[float, ...]
+    sigma_block: tuple[float, ...]
+    block_size: int
+    band_count: int
+    lattice_column_count: int
+    block_column_count: int
+    pixel_difference_counts: tuple[int, ...]
+    block_difference_counts: tuple[int, ...]
+    # "lattice-differences", or "sample-mad" when a frame offered fewer than
+    # NOISE_WEIGHT_MINIMUM_DIFFERENCES finite differences (tiny images).
+    pixel_sigma_methods: tuple[str, ...] = ()
+
+    def serializable(self) -> dict[str, Any]:
+        return {
+            "algorithm": NOISE_WEIGHT_ALGORITHM,
+            "blockSize": self.block_size,
+            "bandCount": self.band_count,
+            "latticeColumnCount": self.lattice_column_count,
+            "blockColumnCount": self.block_column_count,
+            "frameSigmaPixel": [_json_number(value) for value in self.sigma_pixel],
+            "frameSigmaBlock": [_json_number(value) for value in self.sigma_block],
+            "pixelDifferenceCounts": list(self.pixel_difference_counts),
+            "blockDifferenceCounts": list(self.block_difference_counts),
+            "pixelSigmaMethods": list(self.pixel_sigma_methods),
+            "minimumDifferences": NOISE_WEIGHT_MINIMUM_DIFFERENCES,
+        }
+
+
+def _json_number(value: float) -> float | None:
+    return float(value) if math.isfinite(value) else None
+
+
+def _difference_sigma(differences: NDArray[np.float64]) -> float:
+    """Noise of one sample from the robust dispersion of pairwise differences.
+
+    Adjacent lattice samples (or adjacent block means) share the same sky to
+    well below the noise, so a sky gradient or a moonlit night does not enter
+    the estimate, and their difference is sqrt(2) times the noise of one.
+    """
+
+    finite = differences[np.isfinite(differences)]
+    if finite.size < NOISE_WEIGHT_MINIMUM_DIFFERENCES:
+        return float("nan")
+    return 1.4826 * float(np.median(np.abs(finite - np.median(finite)))) / math.sqrt(2.0)
+
+
+def _sample_sigma(samples: NDArray[np.float64]) -> float:
+    """Plain robust dispersion of the samples (the tiny-image fallback)."""
+
+    finite = samples[np.isfinite(samples)]
+    if finite.size == 0:
+        return float("nan")
+    median = float(np.median(finite))
+    return 1.4826 * float(np.median(np.abs(finite - median)))
+
+
+def _frame_noise_estimates(
+    expressions: tuple[FrameExpression, ...],
+    sources: Mapping[str, FitsFrame],
+    shape: tuple[int, int],
+    parameters: IntegrationParameters,
+) -> _FrameNoiseEstimates:
+    """Measure per-pixel and block-mean noise of every frame on one lattice.
+
+    Every fourth lattice row starts a band of ``NOISE_WEIGHT_BLOCK_SIZE``
+    consecutive rows, so the rows read per frame equal the plain lattice.
+    Per-pixel differences are taken between the lattice columns within each
+    band row; block differences between the means of the ``b x b`` blocks
+    that start at consecutive lattice columns.  The lattice depends only on
+    the image geometry and ``max_statistics_samples``.
+    """
+
+    height, width = shape
+    block = NOISE_WEIGHT_BLOCK_SIZE
+    y_indices, x_indices = _sample_coordinates(shape, parameters.max_statistics_samples)
+    band_starts = y_indices[::block]
+    band_starts = band_starts[band_starts + block <= height]
+    rows_per_band = block
+    if band_starts.size == 0:
+        # Images shorter than one block: single lattice rows, no block noise.
+        band_starts = y_indices
+        rows_per_band = 1
+    rows = (band_starts[:, None] + np.arange(rows_per_band)[None, :]).reshape(-1)
+    block_columns = _non_overlapping_block_columns(x_indices, block, width)
+    column_offsets = np.arange(block)
+    sigma_pixel: list[float] = []
+    sigma_block: list[float] = []
+    pixel_counts: list[int] = []
+    block_counts: list[int] = []
+    methods: list[str] = []
+    for expression in expressions:
+        sampled = _expression_sampled_rows(
+            expression, sources, rows, division_floor=parameters.division_floor
+        )
+        bands = sampled.reshape(band_starts.size, rows_per_band, width)
+        lattice = bands[:, :, x_indices].astype(np.float64, copy=False)
+        with np.errstate(invalid="ignore"):
+            pixel_differences = np.diff(lattice, axis=2).reshape(-1)
+        pixel_counts.append(int(np.count_nonzero(np.isfinite(pixel_differences))))
+        sigma = _difference_sigma(pixel_differences)
+        method = "lattice-differences"
+        if not math.isfinite(sigma):
+            sigma = _sample_sigma(lattice.reshape(-1))
+            method = "sample-mad" if math.isfinite(sigma) else "unavailable"
+        sigma_pixel.append(sigma)
+        methods.append(method)
+        if rows_per_band == block and block_columns.size >= 2:
+            gathered = bands[:, :, block_columns[:, None] + column_offsets[None, :]]
+            with np.errstate(invalid="ignore"):
+                means = np.mean(gathered.astype(np.float64, copy=False), axis=(1, 3))
+                block_differences = np.diff(means, axis=1).reshape(-1)
+            block_counts.append(int(np.count_nonzero(np.isfinite(block_differences))))
+            sigma_block.append(_difference_sigma(block_differences))
+        else:
+            block_counts.append(0)
+            sigma_block.append(float("nan"))
+    return _FrameNoiseEstimates(
+        tuple(sigma_pixel),
+        tuple(sigma_block),
+        block,
+        int(band_starts.size),
+        int(x_indices.size),
+        int(block_columns.size),
+        tuple(pixel_counts),
+        tuple(block_counts),
+        tuple(methods),
+    )
+
+
+def _non_overlapping_block_columns(
+    x_indices: NDArray[np.int64], block: int, width: int
+) -> NDArray[np.int64]:
+    """Lattice columns whose ``block``-wide blocks fit the row and do not overlap.
+
+    A dense lattice (small images) would otherwise difference overlapping
+    block means, which measures the noise of the strip between them, not the
+    block noise.  Greedy in lattice order, so the selection depends only on
+    the lattice.
+    """
+
+    selected: list[int] = []
+    last = -block
+    for column in x_indices:
+        value = int(column)
+        if value + block > width:
+            continue
+        if value - last >= block:
+            selected.append(value)
+            last = value
+    return np.asarray(selected, dtype=np.int64)
+
+
+def _noise_weights_from_estimates(
+    estimates: _FrameNoiseEstimates,
+) -> tuple[NDArray[np.float64], tuple[float, ...]]:
+    """Inverse-variance weights from the block noise (per-pixel noise as fallback)."""
+
+    sigmas: list[float] = []
+    for block_sigma, pixel_sigma in zip(
+        estimates.sigma_block, estimates.sigma_pixel, strict=True
+    ):
+        sigma = block_sigma
+        if not math.isfinite(sigma) or sigma <= 1e-12:
+            sigma = pixel_sigma
+        if not math.isfinite(sigma) or sigma <= 1e-12:
+            sigma = 1.0
+        sigmas.append(sigma)
+    raw = 1.0 / np.square(np.asarray(sigmas, dtype=np.float64))
+    # Prevent one almost-noiseless frame from completely dominating a group.
+    positive = raw[np.isfinite(raw) & (raw > 0)]
+    if not positive.size:
+        raw = np.ones(len(sigmas), dtype=np.float64)
+    else:
+        median_weight = float(np.median(positive))
+        raw = np.clip(raw, median_weight / 16.0, median_weight * 16.0)
+    normalized = raw / np.sum(raw)
+    return normalized, tuple(float(value) for value in normalized)
+
+
 def _normalized_noise_weights(
     expressions: tuple[FrameExpression, ...],
     sources: Mapping[str, FitsFrame],
     shape: tuple[int, int],
     parameters: IntegrationParameters,
 ) -> tuple[NDArray[np.float64], tuple[float, ...]]:
-    estimates: list[float] = []
-    y_indices, x_indices = _sample_coordinates(shape, parameters.max_statistics_samples)
-    for expression in expressions:
-        sampled = _expression_sampled_rows(
-            expression, sources, y_indices, division_floor=parameters.division_floor
-        )[:, x_indices].astype(np.float64, copy=False)
-        # Pixel noise from the dispersion of neighbouring lattice samples along
-        # each row: a sky gradient or a moonlit night changes the sample
-        # values across the frame by far more than the noise, and the plain
-        # MAD of all samples would then weight such frames down several
-        # times too much.  Adjacent lattice samples share the same sky to
-        # well below the noise, so their difference is sqrt(2) times the noise.
-        differences = np.diff(sampled, axis=1)
-        differences = differences[np.isfinite(differences)]
-        if differences.size >= 64:
-            sigma = 1.4826 * float(np.median(np.abs(differences - np.median(differences)))) / math.sqrt(2.0)
-        else:
-            sample = sampled[np.isfinite(sampled)]
-            median = float(np.median(sample)) if sample.size else 0.0
-            sigma = 1.4826 * float(np.median(np.abs(sample - median))) if sample.size else 1.0
-        if not math.isfinite(sigma) or sigma <= 1e-12:
-            sigma = 1.0
-        estimates.append(sigma)
-    raw = 1.0 / np.square(np.asarray(estimates, dtype=np.float64))
-    # Prevent one almost-noiseless frame from completely dominating a group.
-    positive = raw[np.isfinite(raw) & (raw > 0)]
-    if not positive.size:
-        raw = np.ones(len(expressions), dtype=np.float64)
-    else:
-        median_weight = float(np.median(positive))
-        raw = np.clip(raw, median_weight / 16.0, median_weight * 16.0)
-    normalized = raw / np.sum(raw)
-    return normalized, tuple(float(value) for value in normalized)
+    return _noise_weights_from_estimates(
+        _frame_noise_estimates(expressions, sources, shape, parameters)
+    )
 
 
 def _combined_integration_weights(
@@ -1903,13 +2260,16 @@ def _combined_integration_weights(
     parameters: IntegrationParameters,
     quality_weights: Sequence[float] | None,
 ) -> tuple[
-    NDArray[np.float64], tuple[float, ...], tuple[float, ...], tuple[float, ...]
+    NDArray[np.float64],
+    tuple[float, ...],
+    tuple[float, ...],
+    tuple[float, ...],
+    _FrameNoiseEstimates,
 ]:
-    noise, serialized_noise = _normalized_noise_weights(
-        expressions, sources, shape, parameters
-    )
+    frame_noise = _frame_noise_estimates(expressions, sources, shape, parameters)
+    noise, serialized_noise = _noise_weights_from_estimates(frame_noise)
     if quality_weights is None:
-        return noise, serialized_noise, (), serialized_noise
+        return noise, serialized_noise, (), serialized_noise, frame_noise
     else:
         if len(quality_weights) != len(expressions):
             raise CalibrationError(
@@ -1941,6 +2301,7 @@ def _combined_integration_weights(
         serialized_noise,
         tuple(float(value) for value in quality),
         tuple(float(value) for value in combined),
+        frame_noise,
     )
 
 
@@ -2002,11 +2363,12 @@ def integrate_expressions(
                 serialized_noise_weights,
                 serialized_quality_weights,
                 serialized_weights,
+                frame_noise,
             ) = _combined_integration_weights(
                 canonical, sources, shape, parameters, quality_weights
             )
             rejection_sigma_floor = _estimate_rejection_sigma_floor(
-                canonical, sources, shape, parameters
+                canonical, sources, shape, parameters, frame_noise=frame_noise
             )
             transient_model = _prepare_transient_rejection(
                 canonical, sources, shape, parameters, weights,
@@ -2144,14 +2506,16 @@ def integrate_expressions(
                 "acceleratorUsed": False,
                 "rejectionMask": {
                     "producer": "portable-cpu",
-                    "method": "median-mad-sigma",
+                    "method": _rejection_method_id(rejection_sigma_floor),
                     "kernel": _rejection_kernel_id(),
                     "sigma": parameters.sigma_clip,
                     "scope": "all-frames-per-pixel",
                     "partialMeanBatching": False,
                     "sigmaFloor": rejection_sigma_floor.serializable(),
+                    "frameScaleModel": rejection_sigma_floor.frame_evidence(),
                     "spatialTransients": transient_model.serializable(),
                 },
+                "noiseWeights": frame_noise.serializable(),
                 "reducer": _reduction_kernel_id(),
                 "nativeThreads": native_threads,
                 "fastMath": False,

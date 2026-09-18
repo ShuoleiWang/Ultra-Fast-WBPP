@@ -687,6 +687,72 @@ extern "C" int oaf_native_cpu_mad_rejection_v1(
       "unknown native MAD rejection failure" );
 }
 
+extern "C" int oaf_native_cpu_mad_rejection_v2(
+   const OafNativeMadRejectionRequestV2* request,
+   uint8_t* accepted,
+   size_t accepted_capacity,
+   float* center,
+   size_t center_capacity,
+   char* error_message,
+   size_t error_message_capacity )
+{
+   if ( request == nullptr || accepted == nullptr || center == nullptr )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "request, accepted, and center buffers are required" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   if ( request->struct_size != sizeof( OafNativeMadRejectionRequestV2 )
+     || request->frame_major_samples == nullptr )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "MAD v2 C ABI structure version or input buffer is invalid" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   if ( (request->frame_scales == nullptr) != (request->frame_scale_count == 0) )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "MAD v2 frame scales pointer and count disagree" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   const size_t pixels =
+      static_cast<size_t>( request->row_count )*request->width;
+   const size_t samples = pixels*request->frame_count;
+   if ( pixels == 0 || accepted_capacity < samples || center_capacity < pixels )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "MAD output capacity is smaller than the requested tile" );
+      return OAF_NATIVE_BUFFER_TOO_SMALL;
+   }
+   return GuardedKernelCall(
+      [&]()
+      {
+         using namespace openastroflow::native;
+         MadRejectionRequest native;
+         native.frameMajorSamples = std::span<const float>(
+            request->frame_major_samples, request->sample_count );
+         native.frameCount = request->frame_count;
+         native.rowCount = request->row_count;
+         native.width = request->width;
+         native.sigmaClip = request->sigma_clip;
+         native.minimumRejectionFrames = request->minimum_rejection_frames;
+         native.groupSigmaFloor = request->group_sigma_floor;
+         native.absoluteFloor = request->absolute_floor;
+         native.epsilonFloor = request->epsilon_floor;
+         native.threads = request->threads;
+         if ( request->frame_scales != nullptr )
+            native.frameScales = std::span<const float>(
+               request->frame_scales, request->frame_scale_count );
+         native.poolHalfWidth = request->pool_half_width;
+         MadRejectionMask(
+            native,
+            std::span<uint8_t>( accepted, accepted_capacity ),
+            std::span<float>( center, center_capacity ) );
+      },
+      error_message, error_message_capacity,
+      "unknown native MAD rejection failure" );
+}
+
 extern "C" int oaf_native_cpu_masked_mean_v1(
    const OafNativeMaskedMeanRequestV1* request,
    OafNativeMaskedMeanOutputV1* output,
