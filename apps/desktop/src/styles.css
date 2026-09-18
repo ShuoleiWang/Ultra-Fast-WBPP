@@ -600,11 +600,40 @@ svg {
 .calibration-cfa-section,
 .compute-panel,
 .solver-setup,
-.artifact-section {
+.artifact-section,
+.launch-panel,
+.screening-section {
   margin-top: 18px;
   border: 1px solid var(--line-soft);
   border-radius: 12px;
   background: var(--surface);
+}
+/* Output folder, optional screening and the start button: one panel under
+   the imported frames, repeated under the screening review. */
+.launch-panel {
+  margin-top: 26px;
+  padding: 16px 18px 18px;
+}
+.launch-panel > .compute-panel,
+.launch-panel > .progressive-panel {
+  margin-top: 14px;
+}
+.launch-panel .page-actions {
+  margin-top: 18px;
+}
+.launch-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.screening-section {
+  padding: 16px 18px 18px;
+}
+.screening-clean,
+.screening-hint {
+  margin: 10px 0 0;
+  color: var(--tertiary);
+  font-size: 12px;
 }
 .progressive-panel > summary,
 .evidence-panel > summary,

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 import sys
 import threading
@@ -42,6 +41,7 @@ from .identity import (
     verify_file_identity_stat,
 )
 from .models import FrameMeasurement, FrameMetadata, Star
+from .parallel import FrameRunner
 from .readers import (
     DEFAULT_MAX_FULL_DECODE_BYTES,
     FrameReadError,
@@ -524,11 +524,23 @@ def _thumbnail_name(run_token: str, index: int, path: Path) -> str:
     return f"{run_token}-{index:06d}-{stem}-{digest}.png"
 
 
+_MeasureTask = tuple[str, str | None, QcConfig]
+
+
+def _measure_task(task: _MeasureTask) -> FrameMeasurement:
+    """One frame of :func:`measure_paths`, importable so a child process can run it."""
+
+    path, thumbnail, config = task
+    return measure_frame_safe(path, config=config, thumbnail_path=thumbnail)
+
+
 def measure_paths(
     paths: Iterable[str | os.PathLike[str]],
     output_dir: str | os.PathLike[str],
     config: QcConfig,
     workers: int = 1,
+    *,
+    stats: dict[str, Any] | None = None,
 ) -> list[FrameMeasurement]:
     """Measure paths in stable order, optionally with bounded parallelism.
 
@@ -536,6 +548,8 @@ def measure_paths(
     permits that many simultaneous frame decoders and therefore multiplies the
     memory ceiling by approximately the same factor.  Per-frame failures are
     returned with ``status='ERROR'`` so a long acquisition is fully audited.
+    ``stats`` receives the parallelism that ran (``parallelism``, ``workers``);
+    see :mod:`lightframeqc.parallel` for how it is chosen.
     """
 
     config.validate()
@@ -553,25 +567,22 @@ def measure_paths(
     # A fresh token makes rerunning into an existing report directory safe.
     # Old review thumbnails remain recoverable and no file is overwritten.
     run_token = secrets.token_hex(5)
-
-    def run(item: tuple[int, Path]) -> FrameMeasurement:
-        index, frame_path = item
-        thumbnail = (
-            thumbnail_root / _thumbnail_name(run_token, index, frame_path)
+    tasks: list[_MeasureTask] = [
+        (
+            str(frame_path),
+            str(thumbnail_root / _thumbnail_name(run_token, index, frame_path))
             if thumbnail_root is not None
-            else None
+            else None,
+            config,
         )
-        return measure_frame_safe(
-            frame_path,
-            config=config,
-            thumbnail_path=thumbnail,
-        )
+        for index, frame_path in enumerate(ordered_paths)
+    ]
 
-    indexed = list(enumerate(ordered_paths))
-    if workers == 1:
-        return [run(item) for item in indexed]
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lightframeqc") as pool:
-        return list(pool.map(run, indexed))
+    with FrameRunner(workers, len(tasks)) as runner:
+        results = runner.map(_measure_task, tasks)
+        if stats is not None:
+            stats.update(runner.stats)
+    return results
 
 
 __all__ = [

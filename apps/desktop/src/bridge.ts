@@ -143,9 +143,12 @@ export const desktopBridge: DesktopBridge = hasTauriRuntime() ? tauriBridge : mo
 
 export async function listenForDesktopDrops(onPaths: (paths: string[]) => void): Promise<() => void> {
   if (!hasTauriRuntime()) return () => undefined;
-  const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
-  return getCurrentWebviewWindow().onDragDropEvent((event) => {
-    if (event.payload.type === "drop") onPaths(event.payload.paths);
+  // Only the drop itself is needed. `onDragDropEvent` would also subscribe to
+  // enter/over/leave, and the core forwards every drag-over event (one per
+  // pointer move) to a webview that listens for it, which stutters the drag.
+  const { listen, TauriEvent } = await import("@tauri-apps/api/event");
+  return listen<{ paths: string[] }>(TauriEvent.DRAG_DROP, ({ payload }) => {
+    if (Array.isArray(payload.paths) && payload.paths.length) onPaths(payload.paths);
   });
 }
 

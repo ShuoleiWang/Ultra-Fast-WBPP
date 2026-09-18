@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import math
 from pathlib import Path
 import re
@@ -15,6 +15,7 @@ from .analysis_cache import GroupAnalysisCache
 from .grouping import build_groups
 from .metadata import field_token
 from .morphology import measure_fragmented_trails
+from .parallel import FrameRunner
 from .models import (
     Confidence,
     Decision,
@@ -302,17 +303,20 @@ def _reference_point_is_in_source(
     x: float,
     y: float,
     frame: FrameMeasurement,
-    registration: RegistrationResult,
+    inverse: Any,
 ) -> bool:
-    """Whether a reference coordinate lies in the candidate frame footprint."""
+    """Whether a reference coordinate lies in the candidate frame footprint.
 
-    if registration.transform is None:
+    ``inverse`` is the registration's inverse transform, built once per frame
+    (``transform.inverse`` inverts the matrix on every access; applying the
+    prebuilt object to one point is the same arithmetic).
+    """
+
+    if inverse is None:
         return False
     try:
         source = np.asarray(
-            registration.transform.inverse(
-                np.asarray([[x, y]], dtype=np.float64)
-            ),
+            inverse(np.asarray([[x, y]], dtype=np.float64)),
             dtype=np.float64,
         )[0]
     except (ValueError, np.linalg.LinAlgError):
@@ -428,6 +432,10 @@ def _spatial_features(
     reference_indices = registration.matched_reference_indices[valid]
     ref_stars = reference.stars
     source_stars = frame.stars
+    try:
+        inverse = registration.transform.inverse if registration.transform is not None else None
+    except (ValueError, np.linalg.LinAlgError):
+        inverse = None
 
     for star in ref_stars:
         location = _cell(
@@ -442,7 +450,7 @@ def _spatial_features(
             reference_expected[location] += 1
         # Stars outside the candidate's transformed footprint are not missing:
         # they are simply outside the common field after dither/rotation.
-        if not _reference_point_is_in_source(star.x, star.y, frame, registration):
+        if not _reference_point_is_in_source(star.x, star.y, frame, inverse):
             continue
         location = _cell(
             star.x,
@@ -1135,28 +1143,61 @@ def _apply_scores(
         result.reasons = sorted(set(reasons))
 
 
+@dataclass(frozen=True)
+class _FrameTask:
+    """One frame's registration and spatial features against the reference."""
+
+    frame: FrameMeasurement
+    reference: FrameMeasurement
+    is_reference: bool
+    registration: RegistrationResult | None
+    config: QcConfig
+
+
+def _analyze_frame(task: _FrameTask) -> tuple[RegistrationResult, FrameFeatures, dict[str, Any]]:
+    """Per-frame part of a group analysis, importable so a child process can run it."""
+
+    registration = (
+        _identity_registration(task.frame)
+        if task.is_reference
+        else task.registration or _registration(task.frame, task.reference, task.config)
+    )
+    if registration.estimated:
+        features, grid = _spatial_features(task.frame, task.reference, registration, task.config)
+    else:
+        features, grid = FrameFeatures(), {}
+    return registration, features, grid
+
+
 def _analyze_group(
-    group_id: str, frames: list[FrameMeasurement], config: QcConfig
+    group_id: str,
+    frames: list[FrameMeasurement],
+    config: QcConfig,
+    runner: FrameRunner | None = None,
 ) -> tuple[dict[str, Any], list[FrameResult]]:
     reference, cached_registrations = _supported_reference(frames, config)
+    tasks = [
+        _FrameTask(
+            frame=frame,
+            reference=reference,
+            is_reference=frame is reference,
+            registration=None if frame is reference else cached_registrations.get(frame.metadata.path),
+            config=config,
+        )
+        for frame in frames
+    ]
+    # Frames are independent once the reference is fixed; the group steps
+    # below (morphology, consensus, scores) see them in their original order.
+    analyses = runner.map(_analyze_frame, tasks) if runner is not None else [_analyze_frame(task) for task in tasks]
     results: list[FrameResult] = []
     ordered_measurements: list[FrameMeasurement] = []
-    for frame in frames:
-        registration = (
-            _identity_registration(frame)
-            if frame is reference
-            else cached_registrations.get(frame.metadata.path) or _registration(frame, reference, config)
-        )
+    for frame, (registration, features, grid) in zip(frames, analyses, strict=True):
         confidence = _confidence(len(frames), registration, config)
         warnings: list[str] = []
         if len(frames) < config.minimum_group_frames:
             warnings.append("INSUFFICIENT_GROUP_FRAMES")
         if not registration.accepted:
             warnings.extend(registration.reason_codes)
-        if registration.estimated:
-            features, grid = _spatial_features(frame, reference, registration, config)
-        else:
-            features, grid = FrameFeatures(), {}
         features.detected_source_ratio = _detected_ratio(frame, reference)
         if (
             features.overlap_fraction is not None
@@ -1206,7 +1247,15 @@ def analyze_measurements(
     measurements: Iterable[FrameMeasurement], config: QcConfig, *,
     cache_directory: Path | str | None = None,
     cache_stats: dict[str, int] | None = None,
+    workers: int = 1,
+    stats: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[FrameResult]]:
+    """Group the measurements and analyze every group against its reference.
+
+    ``workers`` bounds the per-frame registration/feature work (see
+    :mod:`lightframeqc.parallel`); ``stats`` receives what ran.
+    """
+
     config.validate()
     frames = list(measurements)
     summaries: list[dict[str, Any]] = []
@@ -1214,23 +1263,26 @@ def analyze_measurements(
     cache = GroupAnalysisCache(cache_directory, config, cache_stats) if cache_directory is not None else None
 
     measured_paths: set[str] = set()
-    for base_id, base_frames in build_groups(frames, config):
-        cache_key = cache.key(base_id, base_frames) if cache is not None else None
-        cached = cache.load(cache_key, base_frames) if cache is not None else None
-        if cached is None:
-            base_summaries: list[dict[str, Any]] = []
-            base_results: list[FrameResult] = []
-            for group_id, group_frames in _split_auto_fields(base_id, base_frames, config):
-                summary, group_results = _analyze_group(group_id, group_frames, config)
-                base_summaries.append(summary)
-                base_results.extend(group_results)
-            if cache is not None:
-                cache.store(cache_key, base_summaries, base_results)
-        else:
-            base_summaries, base_results = cached
-        summaries.extend(base_summaries)
-        results.extend(base_results)
-        measured_paths.update(item.metadata.path for item in base_frames)
+    with FrameRunner(workers, len(frames)) as runner:
+        for base_id, base_frames in build_groups(frames, config):
+            cache_key = cache.key(base_id, base_frames) if cache is not None else None
+            cached = cache.load(cache_key, base_frames) if cache is not None else None
+            if cached is None:
+                base_summaries: list[dict[str, Any]] = []
+                base_results: list[FrameResult] = []
+                for group_id, group_frames in _split_auto_fields(base_id, base_frames, config):
+                    summary, group_results = _analyze_group(group_id, group_frames, config, runner)
+                    base_summaries.append(summary)
+                    base_results.extend(group_results)
+                if cache is not None:
+                    cache.store(cache_key, base_summaries, base_results)
+            else:
+                base_summaries, base_results = cached
+            summaries.extend(base_summaries)
+            results.extend(base_results)
+            measured_paths.update(item.metadata.path for item in base_frames)
+        if stats is not None:
+            stats.update(runner.stats)
 
     for frame in frames:
         if frame.metadata.path in measured_paths:

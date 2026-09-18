@@ -198,6 +198,11 @@ pub(crate) struct UiReviewSelection {
 pub(crate) struct ProjectRunRequest {
     sources: Vec<UiRunSource>,
     project_name: String,
+    /// Label the interface derives from the target names (for example
+    /// `NGC 7331`); it names the output folder.  Empty falls back to the
+    /// project name.
+    #[serde(default)]
+    run_label: String,
     recipe: UiRecipeOptions,
     master_metadata_overrides: Vec<UiMasterOverride>,
     raw_frame_metadata_overrides: Vec<UiRawFrameOverride>,
@@ -292,6 +297,38 @@ struct GateReport {
     checks: Vec<GateCheck>,
 }
 
+/// One Light the quality gate did not pass, as the result page shows it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UiScreeningFrame {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
+    disposition: String,
+    admitted: bool,
+    summary: String,
+    evidence: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    star_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview_data_url: Option<String>,
+}
+
+/// The run's Light screening: counts plus every frame that needed a decision.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UiScreening {
+    admitted: u64,
+    excluded: u64,
+    counts: BTreeMap<String, u64>,
+    frames: Vec<UiScreeningFrame>,
+}
+
+struct Completion {
+    artifacts: Vec<UiArtifact>,
+    screening: Option<UiScreening>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CompleteEvent {
@@ -299,6 +336,161 @@ struct CompleteEvent {
     output_directory: String,
     artifacts: Vec<UiArtifact>,
     gate: GateReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    screening: Option<UiScreening>,
+}
+
+const MAX_SCREENING_FRAMES: usize = 512;
+const MAX_SCREENING_PREVIEWS: usize = 128;
+const MAX_SCREENING_PREVIEW_BYTES: u64 = 512 * 1024;
+const MAX_SCREENING_PREVIEW_TOTAL_BYTES: usize = 24 * 1024 * 1024;
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+
+/// Standard base64 with padding; the previews are small, so no crate.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let value = chunk.iter().enumerate().fold(0_u32, |acc, (index, byte)| {
+            acc | (u32::from(*byte) << (16 - 8 * index))
+        });
+        for position in 0..4 {
+            if position <= chunk.len() {
+                let index = (value >> (18 - 6 * position)) & 0x3f;
+                encoded.push(ALPHABET[index as usize] as char);
+            } else {
+                encoded.push('=');
+            }
+        }
+    }
+    encoded
+}
+
+/// Load one review preview the worker published under `root` as a data URL.
+fn screening_preview(root: &Path, relative: &str, budget: &mut usize) -> Option<String> {
+    let (_, resolved) = relative_artifact(root, relative).ok()?;
+    let size = resolved.metadata().ok()?.len();
+    if size == 0 || size > MAX_SCREENING_PREVIEW_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(size as usize);
+    File::open(&resolved)
+        .ok()?
+        .take(MAX_SCREENING_PREVIEW_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 != size || !bytes.starts_with(&PNG_SIGNATURE) {
+        return None;
+    }
+    let encoded = format!("data:image/png;base64,{}", base64_encode(&bytes));
+    if *budget < encoded.len() {
+        return None;
+    }
+    *budget -= encoded.len();
+    Some(encoded)
+}
+
+/// The receipt's `execution.screening`, with previews loaded; `None` when a
+/// receipt predates screening records.  A malformed record is an error: the
+/// result page must not show a partial screening as if it were complete.
+fn screening_summary(
+    root: &Path,
+    receipt: &serde_json::Value,
+) -> Result<Option<UiScreening>, String> {
+    let Some(record) = receipt
+        .get("execution")
+        .and_then(|item| item.get("screening"))
+    else {
+        return Ok(None);
+    };
+    let count = |field: &str| -> Result<u64, String> {
+        record
+            .get(field)
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| format!("screening record has no {field}"))
+    };
+    let counts = record
+        .get("counts")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("screening record has no counts")?
+        .iter()
+        .map(|(key, value)| {
+            value
+                .as_u64()
+                .map(|count| (key.clone(), count))
+                .ok_or_else(|| format!("screening count {key} is not a number"))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let records = record
+        .get("frames")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("screening record has no frames")?;
+    if records.len() > MAX_SCREENING_FRAMES {
+        return Err("screening record lists too many frames".to_owned());
+    }
+    let mut budget = MAX_SCREENING_PREVIEW_TOTAL_BYTES;
+    let mut previews = 0_usize;
+    let mut frames = Vec::with_capacity(records.len());
+    for item in records {
+        let path = value_string(item, "path")?;
+        let disposition = value_string(item, "disposition")?;
+        if !matches!(disposition, "PASS" | "REVIEW" | "HARD_FAIL") {
+            return Err(format!(
+                "screening frame has an unknown disposition {disposition}"
+            ));
+        }
+        let evidence = item
+            .get("evidence")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .take(8)
+                    .map(|text| text.chars().take(500).collect::<String>())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let preview_data_url = item
+            .get("reviewPreview")
+            .and_then(serde_json::Value::as_str)
+            .filter(|_| previews < MAX_SCREENING_PREVIEWS)
+            .and_then(|relative| screening_preview(root, relative, &mut budget));
+        previews += usize::from(preview_data_url.is_some());
+        frames.push(UiScreeningFrame {
+            name: path
+                .rsplit(['/', '\\'])
+                .next()
+                .filter(|name| !name.is_empty())
+                .unwrap_or(path)
+                .to_owned(),
+            target: item
+                .get("target")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            disposition: disposition.to_owned(),
+            admitted: item
+                .get("admitted")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            summary: item
+                .get("summary")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .chars()
+                .take(2000)
+                .collect(),
+            evidence,
+            star_count: item.get("starCount").and_then(serde_json::Value::as_u64),
+            preview_data_url,
+        });
+    }
+    Ok(Some(UiScreening {
+        admitted: count("admitted")?,
+        excluded: count("excluded")?,
+        counts,
+        frames,
+    }))
 }
 
 fn checked_sha256(value: &str) -> bool {
@@ -593,10 +785,7 @@ fn value_string<'a>(value: &'a serde_json::Value, field: &str) -> Result<&'a str
         .ok_or_else(|| format!("published artifact has no {field}"))
 }
 
-fn validate_completion(
-    output: &Path,
-    result: &serde_json::Value,
-) -> Result<Vec<UiArtifact>, String> {
+fn validate_completion(output: &Path, result: &serde_json::Value) -> Result<Completion, String> {
     if result.get("success").and_then(serde_json::Value::as_bool) != Some(true)
         || result.get("state").and_then(serde_json::Value::as_str) != Some("SOLVED")
     {
@@ -800,7 +989,11 @@ fn validate_completion(
             astrometry: None,
         },
     });
-    Ok(artifacts)
+    let screening = screening_summary(&root, &receipt)?;
+    Ok(Completion {
+        artifacts,
+        screening,
+    })
 }
 
 fn stage_id(value: &str) -> Option<String> {
@@ -939,6 +1132,72 @@ pub(crate) fn start<R: Runtime>(
     start_with(app, registry, request, executable)
 }
 
+/// Folder-name token of a run label: `NGC 7331` -> `NGC7331`, `盾牌座 马赛克`
+/// -> `盾牌座-马赛克`.  Whitespace between a letter run and a digit run (a
+/// catalogue designation) is removed, other whitespace becomes `-`, and only
+/// alphanumerics, `-` and `_` survive; the result is at most 48 characters.
+pub(crate) fn output_directory_label(raw: &str) -> String {
+    let words: Vec<String> = raw
+        .split_whitespace()
+        .map(|word| {
+            word.chars()
+                .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+                .collect::<String>()
+        })
+        .filter(|word| !word.is_empty())
+        .collect();
+    let mut label = String::new();
+    for word in &words {
+        if !label.is_empty() {
+            let previous_alpha = label.chars().last().is_some_and(char::is_alphabetic);
+            let next_digit = word.chars().next().is_some_and(|c| c.is_ascii_digit());
+            if !(previous_alpha && next_digit) {
+                label.push('-');
+            }
+        }
+        label.push_str(word);
+    }
+    let mut compact = String::new();
+    for c in label.chars() {
+        if c == '-' && compact.ends_with('-') {
+            continue;
+        }
+        compact.push(c);
+    }
+    let compact: String = compact.trim_matches(['-', '_']).chars().take(48).collect();
+    if compact.is_empty() {
+        "wbpp".to_owned()
+    } else {
+        compact
+    }
+}
+
+/// `<label>_<YYYY-MM-DD_HHMM>` inside `parent`, with `_2`, `_3`, ... when
+/// that name (or its `.unsolved` twin) already exists.
+fn unique_output_directory(
+    parent: &Path,
+    label: &str,
+    now: chrono::DateTime<chrono::Local>,
+) -> Result<PathBuf, String> {
+    let stem = format!(
+        "{}_{}",
+        output_directory_label(label),
+        now.format("%Y-%m-%d_%H%M")
+    );
+    for attempt in 1..=99_u32 {
+        let name = if attempt == 1 {
+            stem.clone()
+        } else {
+            format!("{stem}_{attempt}")
+        };
+        let candidate = parent.join(&name);
+        if !candidate.exists() && !candidate.with_extension("unsolved").exists() {
+            return Ok(candidate);
+        }
+    }
+    Err("create-only output destination already exists".to_owned())
+}
+
 fn start_with<R: Runtime>(
     app: AppHandle<R>,
     registry: Arc<ProjectRegistry>,
@@ -950,10 +1209,12 @@ fn start_with<R: Runtime>(
     }
     let parent = canonical_output_parent(&request.output_parent_directory)?;
     let job_id = new_public_identifier("project")?;
-    let output = parent.join(format!("ultra-fast-wbpp-{job_id}"));
-    if output.exists() || output.with_extension("unsolved").exists() {
-        return Err("create-only output destination already exists".to_owned());
-    }
+    let label = if request.run_label.trim().is_empty() {
+        request.project_name.as_str()
+    } else {
+        request.run_label.as_str()
+    };
+    let output = unique_output_directory(&parent, label, chrono::Local::now())?;
     let request_value = project_request_json(&request, &output)?;
     let request_path = create_private_request(&request_value)?;
     let mut command = executable.command("run-project");
@@ -1028,7 +1289,10 @@ fn start_with<R: Runtime>(
             }
         };
         match validate_completion(&thread_output, &result) {
-            Ok(artifacts) => {
+            Ok(Completion {
+                artifacts,
+                screening,
+            }) => {
                 let ids = artifacts
                     .iter()
                     .map(|item| item.receipt.artifact_id.clone())
@@ -1066,6 +1330,7 @@ fn start_with<R: Runtime>(
                         output_directory: thread_output.to_string_lossy().into_owned(),
                         artifacts,
                         gate,
+                        screening,
                     },
                 );
             }
@@ -1139,6 +1404,112 @@ mod tests {
     use super::*;
 
     #[test]
+    fn output_directory_label_keeps_designations_and_readable_names() {
+        assert_eq!(output_directory_label("NGC 7331"), "NGC7331");
+        assert_eq!(output_directory_label("  M 31  "), "M31");
+        assert_eq!(output_directory_label("Sh2-155 / Cave"), "Sh2-155-Cave");
+        assert_eq!(output_directory_label("盾牌座 马赛克"), "盾牌座-马赛克");
+        assert_eq!(
+            output_directory_label("Ultra-Fast WBPP project"),
+            "Ultra-Fast-WBPP-project"
+        );
+        assert_eq!(output_directory_label("../..//"), "wbpp");
+        assert_eq!(output_directory_label(""), "wbpp");
+        assert_eq!(output_directory_label(&"x".repeat(80)).chars().count(), 48);
+    }
+
+    #[test]
+    fn unique_output_directory_adds_a_counter_on_collision() {
+        let root = std::env::temp_dir().join(new_public_identifier("output-name-test").unwrap());
+        std::fs::create_dir_all(&root).unwrap();
+        let now = chrono::Local::now();
+        let first = unique_output_directory(&root, "NGC 7331", now).unwrap();
+        let expected = format!("NGC7331_{}", now.format("%Y-%m-%d_%H%M"));
+        assert_eq!(first.file_name().unwrap().to_string_lossy(), expected);
+        std::fs::create_dir_all(&first).unwrap();
+        let second = unique_output_directory(&root, "NGC 7331", now).unwrap();
+        assert_eq!(
+            second.file_name().unwrap().to_string_lossy(),
+            format!("{expected}_2")
+        );
+        std::fs::create_dir_all(second.with_extension("unsolved")).unwrap();
+        let third = unique_output_directory(&root, "NGC 7331", now).unwrap();
+        assert_eq!(
+            third.file_name().unwrap().to_string_lossy(),
+            format!("{expected}_3")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn base64_encodes_the_reference_vectors() {
+        for (input, expected) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64_encode(input.as_bytes()), expected);
+        }
+        assert_eq!(base64_encode(&[0xff, 0xee, 0xdd, 0x00]), "/+7dAA==");
+    }
+
+    #[test]
+    fn screening_summary_loads_bounded_previews_and_rejects_malformed_records() {
+        let root = std::env::temp_dir().join(new_public_identifier("screening-test").unwrap());
+        let review = root.join("details/runs/NGC7331/qc/review");
+        std::fs::create_dir_all(&review).unwrap();
+        // Previews resolve against the canonical output root, as in production.
+        let root = root.canonicalize().unwrap();
+        let png: Vec<u8> = PNG_SIGNATURE.iter().copied().chain([1_u8; 32]).collect();
+        std::fs::write(review.join("0001-cloudy.png"), &png).unwrap();
+        std::fs::write(review.join("0002-not-a-png.png"), b"plain text").unwrap();
+        let receipt = serde_json::json!({"execution": {"screening": {
+            "admitted": 61, "excluded": 2,
+            "counts": {"PASS": 61, "REVIEW": 1, "HARD_FAIL": 1},
+            "frames": [
+                {"path": "source/src-1/NGC 7331_300.00s_L_cloudy.fits", "disposition": "HARD_FAIL", "admitted": false,
+                 "summary": "clouds", "evidence": ["star count collapsed", "background rose"], "starCount": 12,
+                 "reviewPreview": "details/runs/NGC7331/qc/review/0001-cloudy.png", "target": "NGC 7331"},
+                {"path": "source/src-2/trail.fits", "disposition": "REVIEW", "admitted": true,
+                 "summary": "trail", "evidence": [], "starCount": null,
+                 "reviewPreview": "details/runs/NGC7331/qc/review/0002-not-a-png.png"},
+                {"path": "source/src-3/missing.fits", "disposition": "REVIEW", "admitted": false,
+                 "summary": "", "reviewPreview": "../escaped.png"}
+            ]
+        }}});
+        let screening = screening_summary(&root, &receipt).unwrap().unwrap();
+        assert_eq!((screening.admitted, screening.excluded), (61, 2));
+        assert_eq!(screening.counts["REVIEW"], 1);
+        assert_eq!(screening.frames.len(), 3);
+        let cloudy = &screening.frames[0];
+        assert_eq!(cloudy.name, "NGC 7331_300.00s_L_cloudy.fits");
+        assert_eq!(cloudy.target.as_deref(), Some("NGC 7331"));
+        assert_eq!(cloudy.star_count, Some(12));
+        assert_eq!(cloudy.evidence.len(), 2);
+        let preview = cloudy.preview_data_url.as_deref().unwrap();
+        assert_eq!(
+            preview,
+            format!("data:image/png;base64,{}", base64_encode(&png))
+        );
+        // Not a PNG, and a path escaping the output: no preview, frame kept.
+        assert!(screening.frames[1].preview_data_url.is_none() && screening.frames[1].admitted);
+        assert!(screening.frames[2].preview_data_url.is_none());
+        assert!(
+            screening_summary(&root, &serde_json::json!({"execution": {}}))
+                .unwrap()
+                .is_none()
+        );
+        let bad = serde_json::json!({"execution": {"screening": {"admitted": 1, "excluded": 0, "counts": {},
+            "frames": [{"path": "x", "disposition": "MAYBE"}]}}});
+        assert!(screening_summary(&root, &bad).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     #[ignore = "requires OAF_TEST_PROJECT_RECEIPT pointing to retained real project output"]
     fn retained_real_project_passes_native_final_gate_read_only() {
         let receipt_path = PathBuf::from(
@@ -1146,9 +1517,27 @@ mod tests {
         );
         let root = receipt_path.parent().unwrap();
         let result = serde_json::json!({"success":true, "state":"SOLVED", "outputDirectory":root, "receiptPath":receipt_path});
-        let artifacts = validate_completion(root, &result)
+        let completion = validate_completion(root, &result)
             .expect("real project must pass native final artifact validation");
+        let artifacts = completion.artifacts;
         assert_eq!(artifacts.len(), 12); // 11 products plus the outer receipt.
+        let screening = completion
+            .screening
+            .expect("a current receipt records the run's screening");
+        assert_eq!(
+            screening.admitted + screening.excluded,
+            screening.counts.values().sum::<u64>()
+        );
+        assert!(screening.frames.iter().all(|frame| frame
+            .preview_data_url
+            .as_deref()
+            .is_some_and(|url| url.starts_with("data:image/png;base64,"))));
+        println!(
+            "Screening: {} admitted, {} excluded, {} frames with previews.",
+            screening.admitted,
+            screening.excluded,
+            screening.frames.len()
+        );
         assert_eq!(
             artifacts
                 .iter()
@@ -1191,7 +1580,7 @@ mod tests {
         }});
         let validate = |receipt: &serde_json::Value| {
             std::fs::write(&receipt_path, serde_json::to_vec(receipt).unwrap()).unwrap();
-            validate_completion(&root, &result)
+            validate_completion(&root, &result).map(|completion| completion.artifacts)
         };
         for value in [digest.clone(), format!("sha256:{digest}")] {
             receipt["finalProducts"]["guiArtifacts"][0]["sha256"] = value.into();
@@ -1389,6 +1778,7 @@ sys.exit(1)
                     recursive: false,
                 }],
                 project_name: "synthetic crash".to_owned(),
+                run_label: String::new(),
                 recipe: UiRecipeOptions {
                     balanced: true,
                     drizzle_enabled: false,
@@ -1482,6 +1872,7 @@ sys.exit(1)
                 },
             ],
             project_name: "Standard masters".into(),
+            run_label: String::new(),
             recipe: UiRecipeOptions {
                 balanced: true,
                 drizzle_enabled: false,
@@ -1688,6 +2079,7 @@ print(json.dumps({"success":True,"code":"PROJECT_MONO_SUCCEEDED","state":"SOLVED
                     recursive: false,
                 }],
                 project_name: "盾牌座 马赛克".to_owned(),
+                run_label: "盾牌座 马赛克".to_owned(),
                 recipe: UiRecipeOptions {
                     balanced: true,
                     drizzle_enabled: false,

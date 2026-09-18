@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
@@ -108,6 +109,10 @@ def test_build_color_product_writes_linear_fits_and_16_bit_previews(tmp_path: Pa
     assert len(receipt["wcs"]["fivePointConsistency"]) == 3
     assert {item["channel"] for item in receipt["inputs"]} == {"R", "G", "B", "L"}
     assert {name: _digest(path) for name, path in channels.items()} == before
+    # PixInsight names an opened image after its file stem, so the cube and
+    # its previews are called after the channels they hold.
+    assert sorted(path.name for path in output.iterdir()) == ["LRGB.fits", "LRGB.png", "LRGB.tiff", "receipt.json"]
+    assert [item["path"] for item in receipt["artifacts"]] == ["LRGB.fits", "LRGB.tiff", "LRGB.png"]
 
     with pytest.raises(ColorProductError) as captured:
         build_color_product(
@@ -119,6 +124,24 @@ def test_build_color_product_writes_linear_fits_and_16_bit_previews(tmp_path: Pa
             )
         )
     assert captured.value.code == "OUTPUT_EXISTS"
+
+
+def test_color_product_name_defaults_to_channels_and_rejects_unsafe_names(tmp_path: Path) -> None:
+    channels = _channels(tmp_path)
+    request = ColorProductRequest(
+        red_path=str(channels["R"]), green_path=str(channels["G"]), blue_path=str(channels["B"]),
+        output_directory=str(tmp_path / "rgb"),
+    )
+    result = build_color_product(request)
+    assert Path(result.linear_rgb_path).name == "RGB.fits"
+    assert Path(result.preview_png_path).name == "RGB.png"
+    named = build_color_product(replace(request, output_directory=str(tmp_path / "named"), product_name="NGC7331_RGB"))
+    assert Path(named.linear_rgb_path).name == "NGC7331_RGB.fits"
+    for bad in ("", "../x", "a b", "-lead", "x" * 65):
+        with pytest.raises(ColorProductError) as info:
+            build_color_product(replace(request, output_directory=str(tmp_path / "bad"), product_name=bad))
+        assert info.value.code == "PRODUCT_NAME_INVALID"
+        assert not (tmp_path / "bad").exists()
 
 
 def test_color_product_rejects_missing_channel_without_publication(tmp_path: Path) -> None:

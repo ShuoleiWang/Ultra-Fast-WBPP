@@ -34,9 +34,9 @@ make bootstrap
 make desktop-dev
 ```
 
-1. **Import／导入：**加入所有 Light 和校准文件夹，检查识别的帧类型、滤镜及校准匹配。
-2. **Review／检查：**查看筛片结果，检查可疑帧预览。
-3. **Process／处理：**选择新的输出位置，完成后打开 FITS 主图和预览。
+1. **Import／导入：**加入所有 Light 和校准文件夹，检查识别的帧类型、滤镜及校准匹配，选好输出文件夹（下次自动记住）后直接开始。
+2. **Process／处理：**筛片、校准、配准、叠加和解算在同一个任务里完成。
+3. **Result／结果：**FITS 主图和预览，以及哪些 Light 被排除、为什么。想在处理前看可疑帧，可在导入页打开可选的筛片复核并批准 REVIEW 帧。
 
 界面支持英文和简体中文，不覆盖已有输出目录。缺失元数据和 Master 复用约定见 [N.I.N.A. 输入](recipes/nina-mono.md)及[校准说明](recipes/calibration.md)。
 

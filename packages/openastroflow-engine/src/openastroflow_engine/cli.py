@@ -11,42 +11,27 @@ from typing import Any, Mapping, Sequence
 
 from . import __version__
 from .backends import StageKind
-from .calibration import CalibrationError
 from .catalogs import (
-    CatalogError,
     catalog_doctor,
     catalog_list,
     install_catalog,
     remove_catalog_plan,
     verify_catalog,
 )
-from .controller import controller_plan_envelope
-from .e2e import E2EError, ProgressEvent, bind_review_approval_selections, run_e2e
 from . import platform as platform_services
 from .hardware import detect_hardware
 from .native_kernels import describe_native_kernels
 from .performance_profile import select_execution_tuning
-from .inventory import InventoryBuildError, inventory_project
+from .inventory import inventory_manifest_sha256, inventory_project
 from .planning import build_plan, default_registry, solver_backend_science_ready
 from .recipe import Recipe, RecipeError
-from .runtime import (
-    RuntimeConfigurationError,
-    inventory_manifest_sha256,
-    prepare_execution,
-    prepare_project_execution,
-)
-from .project_e2e import (
-    ProjectE2EError,
-    classify_project_layout,
-    project_requires_orchestration,
-    run_project_e2e,
-)
-from .quality_preflight import QualityPreflightError, inspect_light_quality
-from .calibration_preflight import (
-    CalibrationPreflightError,
-    inspect_calibration,
-    load_calibration_request,
-)
+from .calibration_preflight import inspect_calibration, load_calibration_request
+
+# The E2E pipeline, the solver backends, the quality gate's analysis stack and
+# the controller cost about a second to import; the interface's short
+# commands (``inventory``, ``calibration-check``, ``doctor``, ``catalog``)
+# would pay it on every launch, so those modules are imported by the
+# commands that run them.
 
 
 def _json(payload: object, *, compact: bool = False) -> str:
@@ -174,6 +159,8 @@ def _load_recipe(path: str | None) -> dict[str, Any]:
 
 
 def _load_project_request(path: str) -> tuple[list[str], str | None, str, Recipe, dict[str, Any]]:
+    from .runtime import RuntimeConfigurationError
+
     try:
         source = Path(path).expanduser().resolve(strict=True)
         raw = json.loads(source.read_text(encoding="utf-8"))
@@ -248,6 +235,8 @@ def _load_project_request(path: str) -> tuple[list[str], str | None, str, Recipe
 
 
 def _load_quality_request(path: str) -> list[str]:
+    from .quality_preflight import QualityPreflightError
+
     try:
         source = Path(path).expanduser().resolve(strict=True)
         raw = json.loads(source.read_text(encoding="utf-8"))
@@ -277,6 +266,8 @@ def _load_quality_request(path: str) -> list[str]:
 
 
 def _verify_expected_source_roles(inventory: Any, expected: Mapping[str, str]) -> None:
+    from .runtime import RuntimeConfigurationError
+
     for asset in inventory.assets:
         asset_path = Path(asset.path)
         matches = [
@@ -576,12 +567,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stdout.write(_json(payload, compact=args.compact) + "\n")
             return 0
         if args.command == "quality-check":
+            from .quality_preflight import inspect_light_quality
+
             payload = inspect_light_quality(
                 _load_quality_request(args.request_json), workers=args.workers
             )
             sys.stdout.write(_json(payload, compact=args.compact) + "\n")
             return 0
         if args.command == "controller-plan":
+            from .controller import controller_plan_envelope
+
             inventory = inventory_project(args.inputs, name=args.name)
             envelope = controller_plan_envelope(
                 inventory,
@@ -617,6 +612,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
         if args.command == "run":
+            from .e2e import ProgressEvent, run_e2e
+            from .project_e2e import project_requires_orchestration, run_project_e2e
+            from .runtime import prepare_execution, prepare_project_execution
+
             inventory = inventory_project(args.inputs, name=args.name)
             recipe = _recipe_from_args(args)
 
@@ -661,6 +660,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stdout.write(_json(result.serializable()) + "\n")
             return 0 if result.success else 3
         if args.command == "run-project":
+            from .e2e import ProgressEvent, bind_review_approval_selections
+            from .project_e2e import classify_project_layout, run_project_e2e
+            from .runtime import RuntimeConfigurationError, prepare_project_execution
+
             review_selections: Sequence[Mapping[str, str]] = ()
             if args.request_json:
                 if args.inputs or args.output or args.recipe:
@@ -810,33 +813,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             from .worker import run_worker
 
             return run_worker(sys.stdin, sys.stdout)
-    except (
-        FileExistsError,
-        InventoryBuildError,
-        RecipeError,
-        RuntimeConfigurationError,
-        E2EError,
-        ProjectE2EError,
-        CalibrationError,
-        CatalogError,
-        QualityPreflightError,
-        CalibrationPreflightError,
-        OSError,
-    ) as error:
+    except Exception as error:
+        # Every engine boundary error (inventory, recipe, runtime, E2E,
+        # project, calibration, catalog and preflight errors) carries a stable
+        # ``code``; matching on it keeps their modules out of this module's
+        # import path.  Anything else is a defect and keeps its traceback.
         if isinstance(error, FileExistsError):
             code = "OUTPUT_EXISTS"
-        elif isinstance(error, RecipeError):
+        elif isinstance(getattr(error, "code", None), str) and getattr(error, "code"):
             code = error.code
-        elif isinstance(error, InventoryBuildError):
-            code = error.code
-        elif isinstance(error, (RuntimeConfigurationError, E2EError, ProjectE2EError, CalibrationError)):
-            code = error.code
-        elif isinstance(error, CatalogError):
-            code = error.code
-        elif isinstance(error, (QualityPreflightError, CalibrationPreflightError)):
-            code = error.code
-        else:
+        elif isinstance(error, OSError):
             code = "IO_ERROR"
+        else:
+            raise
         sys.stderr.write(
             _json({"ok": False, "error": {"code": code, "message": str(error)}})
             + "\n"

@@ -1048,6 +1048,23 @@ def test_qc_review_is_manifested_and_never_enters_pixel_pipeline(
         item["code"] == "GATE_INSUFFICIENT_NIGHT_BASELINE"
         for item in frame["qualityGate"]["evidence"]
     )
+    # The excluded frame gets a bounded review preview and a compact
+    # screening record in the receipt, so the desktop can show why it is out
+    # without reading the manifest or the raw file.
+    assert frame["reviewPreviewPath"].startswith("qc/review/")
+    preview = output / frame["reviewPreviewPath"]
+    assert preview.is_file() and preview.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    assert 0 < preview.stat().st_size <= 512 * 1024
+    assert all(item.get("reviewPreviewPath") is None for item in manifest["frames"] if item["qualityGate"]["disposition"] == "PASS")
+    receipt = json.loads((output / "receipt.json").read_text(encoding="utf-8"))
+    screening = receipt["qualityControl"]["screening"]
+    assert screening["counts"] == {"PASS": 8, "REVIEW": 1, "HARD_FAIL": 0}
+    assert (screening["admitted"], screening["excluded"]) == (8, 1)
+    [excluded] = screening["frames"]
+    assert excluded["path"].endswith("/" + Path(review_path).name)
+    assert excluded["disposition"] == "REVIEW" and excluded["admitted"] is False
+    assert excluded["reviewPreview"] == frame["reviewPreviewPath"]
+    assert excluded["summary"] and excluded["evidence"]
     pipeline_receipt = json.loads(
         (output / "receipts" / "pixel-pipeline.json").read_text(encoding="utf-8")
     )

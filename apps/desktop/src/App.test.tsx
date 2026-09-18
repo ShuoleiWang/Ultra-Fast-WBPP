@@ -15,7 +15,7 @@ describe("Ultra-Fast WBPP browser development mode", () => {
   it("exposes the guided workflow but disables native path pickers", async () => {
     render(<App />);
     const navigation = screen.getByRole("navigation", { name: "Workflow" });
-    for (const label of ["Import", "Review", "Process"]) {
+    for (const label of ["Import", "Process", "Result"]) {
       expect(within(navigation).getByText(label)).toBeInTheDocument();
     }
     for (const role of ["All", "Light", "Flat", "Dark", "Bias"]) {
@@ -27,7 +27,7 @@ describe("Ultra-Fast WBPP browser development mode", () => {
     }
     expect(screen.getByRole("button", { name: /Choose files$/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /Choose folder$/ })).toBeDisabled();
-    expect(await screen.findByText("Browser demo")).toBeInTheDocument();
+    expect((await screen.findAllByText("Browser demo")).length).toBeGreaterThan(0);
     expect(screen.getByText("Legal")).toBeInTheDocument();
     expect(screen.queryByText("WCS SOLVED")).not.toBeInTheDocument();
   });
@@ -37,7 +37,7 @@ describe("Ultra-Fast WBPP browser development mode", () => {
     expect(screen.queryByText("DEMO")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Load the clearly labelled browser demo" }));
     await userEvent.click(screen.getByRole("button", { name: "Confirm type" }));
-    await userEvent.click(screen.getByRole("button", { name: /Review 370 Lights/ }));
+    await userEvent.click(screen.getByRole("button", { name: /Screen 370 Lights first/ }));
     expect(screen.getByRole("heading", { name: "Review groups and real frame evidence" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Target × filter matrix" })).toBeInTheDocument();
     expect(screen.getByText("347")).toBeInTheDocument();
@@ -49,10 +49,9 @@ describe("Ultra-Fast WBPP browser development mode", () => {
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Load the clearly labelled browser demo" }));
     await userEvent.click(screen.getByRole("button", { name: "Confirm type" }));
-    await userEvent.click(screen.getByRole("button", { name: /Review 370 Lights/ }));
-    await userEvent.click(screen.getByRole("button", { name: /Continue to processing/ }));
-    expect(screen.getByRole("button", { name: /Start end-to-end processing/ })).toBeEnabled();
-    await userEvent.click(screen.getByRole("button", { name: /Start end-to-end processing/ }));
+    await userEvent.click(screen.getByRole("button", { name: /Screen 370 Lights first/ }));
+    expect(screen.getByRole("button", { name: /Start processing/ })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: /Start processing/ }));
     await act(async () => { vi.advanceTimersByTime(6_000); });
     expect(await screen.findByText("DEMO RESULT")).toBeInTheDocument();
     expect(screen.queryByText("WCS SOLVED")).not.toBeInTheDocument();
@@ -64,9 +63,8 @@ describe("Ultra-Fast WBPP browser development mode", () => {
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Load the clearly labelled browser demo" }));
     await userEvent.click(screen.getByRole("button", { name: "Confirm type" }));
-    await userEvent.click(screen.getByRole("button", { name: /Review 370 Lights/ }));
-    await userEvent.click(screen.getByRole("button", { name: /Continue to processing/ }));
-    await userEvent.click(screen.getByRole("button", { name: /Start end-to-end processing/ }));
+    await userEvent.click(screen.getByRole("button", { name: /Screen 370 Lights first/ }));
+    await userEvent.click(screen.getByRole("button", { name: /Start processing/ }));
     expect(await screen.findByText("DEMO")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Cancel safely" }));
     expect(await screen.findByRole("heading", { name: "Run safely cancelled" })).toBeInTheDocument();

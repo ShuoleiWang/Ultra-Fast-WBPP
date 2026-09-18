@@ -26,6 +26,7 @@ from .e2e import (
     ReviewApproval,
 )
 from .hardware import HardwareProfile, detect_hardware
+from .inventory import inventory_manifest_sha256
 from .models import AssetRole, AssetStatus, IssueSeverity, ProjectInventory
 from .performance_profile import select_execution_tuning
 from .pixel_pipeline import (
@@ -52,24 +53,6 @@ class RuntimeConfigurationError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         super().__init__(message)
-
-
-def inventory_manifest_sha256(inventory: ProjectInventory) -> str:
-    """Return the raw SHA-256 of the canonical inventory snapshot.
-
-    The digest includes resolved paths, role/metadata probes, source stat
-    identities, and inventory issues.  Pixel execution performs stronger full
-    content hashes before publication; this manifest digest binds planning.
-    """
-
-    encoded = json.dumps(
-        inventory.serializable(),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _recipe_sha256(recipe: Recipe) -> str:

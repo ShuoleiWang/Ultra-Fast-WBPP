@@ -25,6 +25,7 @@ import type {
   RunStatus,
   RuntimeCapabilities,
   QualityInspection,
+  ScreeningSummary,
   SolverDoctorResponse,
   SourceSet,
   StageProgress,
@@ -62,6 +63,14 @@ const numberKnown = (value: number | undefined | null) => typeof value === "numb
 const monoCfa = (value: string) => ["NONE", "MONO", "MONOCHROME"].includes(value.trim().toUpperCase());
 const unknownCfa = (value: string | undefined | null) => !value?.trim() || ["UNKNOWN", "UNSPECIFIED"].includes(value.trim().toUpperCase());
 const safeSourceId = (role: FrameRole, index: number) => `${role.toLowerCase().replaceAll("_", "-")}-${String(index + 1).padStart(4, "0")}`;
+const OUTPUT_PARENT_STORAGE_KEY = "ultra-fast-wbpp.outputParent";
+/** The output folder chosen last time, so a returning user only drops files and starts. */
+function storedOutputParent(): string | undefined {
+  try { return window.localStorage.getItem(OUTPUT_PARENT_STORAGE_KEY) ?? undefined; } catch { return undefined; }
+}
+function rememberOutputParent(value: string | undefined) {
+  try { if (value) window.localStorage.setItem(OUTPUT_PARENT_STORAGE_KEY, value); else window.localStorage.removeItem(OUTPUT_PARENT_STORAGE_KEY); } catch { /* storage is a convenience only */ }
+}
 
 function buildMasterOverride(master: InspectedAsset, current?: MasterMetadataOverride): MasterMetadataOverride {
   if (current) return current;
@@ -102,6 +111,30 @@ function masterOverrideRequests(items: MasterMetadataOverride[]): MasterMetadata
     }
     return result;
   });
+}
+
+/** Words a mosaic's panel names end with that say nothing about the object. */
+const PANEL_WORDS = /^(panel|tile|part|p|frame|field|mosaic)$/i;
+
+/**
+ * Output-folder label: the target itself, the leading words a mosaic's panels
+ * share (`NGC 7000 Panel 1` + `NGC 7000 Panel 2` → `NGC 7000`), the targets
+ * joined when they share none, or the project name without any target.
+ */
+export function runLabel(cells: Array<{ target: string }>, fallback: string): string {
+  const targets = [...new Set(cells.map((cell) => cell.target.trim()).filter(Boolean))];
+  if (!targets.length) return fallback;
+  if (targets.length === 1) return targets[0];
+  const words = targets.map((target) => target.split(/[\s_-]+/).filter(Boolean));
+  const shared: string[] = [];
+  for (let index = 0; index < Math.min(...words.map((list) => list.length)); index += 1) {
+    const word = words[0][index];
+    if (!words.every((list) => list[index].localeCompare(word, undefined, { sensitivity: "accent" }) === 0)) break;
+    shared.push(word);
+  }
+  if (shared.length && PANEL_WORDS.test(shared[shared.length - 1])) shared.pop();
+  if (shared.length) return shared.join(" ");
+  return targets.length <= 3 ? targets.join(" + ") : `${targets.slice(0, 2).join(" + ")} + ${targets.length - 2} more`;
 }
 
 function panelMatrix(assets: InspectedAsset[], admittedPaths: ReadonlySet<string> = new Set()): Array<PanelCell & { admittedCount: number }> {
@@ -164,7 +197,9 @@ export function useWorkflow(t: Translator) {
   const [jobId, setJobId] = useState<string>();
   const [executionMode, setExecutionMode] = useState<"native" | "demo">("native");
   const [artifacts, setArtifacts] = useState<OutputArtifact[]>([]);
-  const [outputParent, setOutputParent] = useState<string>();
+  const [screening, setScreening] = useState<ScreeningSummary>();
+  const [outputParent, setOutputParentState] = useState<string | undefined>(() => nativeRuntime ? storedOutputParent() : undefined);
+  const setOutputParent = (value: string | undefined) => { setOutputParentState(value); if (nativeRuntime) rememberOutputParent(value); };
   const [outputDirectory, setOutputDirectory] = useState<string>();
   const [errorMessage, setErrorMessage] = useState<string>();
   const [demoMode, setDemoMode] = useState(false);
@@ -375,6 +410,7 @@ export function useWorkflow(t: Translator) {
       return;
     }
     setArtifacts(event.artifacts);
+    setScreening(event.screening);
     setOutputDirectory(event.outputDirectory);
     setStages((current) => current.map((stage) => ({ ...stage, status: "DONE", percent: 100 })));
     setOverallProgress(100);
@@ -456,7 +492,7 @@ export function useWorkflow(t: Translator) {
   const pickDirectories = async (role?: FrameRole) => { try { await importPaths(await desktopBridge.pickInputDirectories(role), role); } catch (error) { setErrorMessage(String(error)); } };
   const chooseOutputParent = async () => { try { const selected = await desktopBridge.pickOutputParent(); if (selected) setOutputParent(selected); } catch (error) { setErrorMessage(String(error)); } };
   const useOutputParentPath = (path: string) => {
-    if (!nativeRuntime || stepRef.current !== "recipe" || runLaunchInFlightRef.current || runStatus === "RUNNING" || runStatus === "CANCELLING") return;
+    if (!nativeRuntime || !["import", "inspect"].includes(stepRef.current) || runLaunchInFlightRef.current || runStatus === "RUNNING" || runStatus === "CANCELLING") return;
     // The native start command resolves the path and requires an existing directory.
     setOutputParent(path.trim() || undefined);
   };
@@ -496,7 +532,7 @@ export function useWorkflow(t: Translator) {
     if (inventoryInFlightRef.current || qualityInFlightRef.current || runLaunchInFlightRef.current || runStatus === "RUNNING" || runStatus === "CANCELLING") return;
     stopRunClock(); setRunElapsedSeconds(0);
     jobIdRef.current = undefined; pendingProgressRef.current = []; pendingTerminalRef.current = undefined;
-    setSources(emptySources()); setAssets([]); setMasterOverrides([]); setGate({ pass: 0, review: 0, hardFail: 0 }); setQualityInspection(undefined); setApprovedReviewDigests([]); setSelectedRole(undefined); setStep("import"); setDemoMode(false); setArtifacts([]); setOutputDirectory(undefined); setRunStatus("IDLE"); setRunLaunchBusy(false); setErrorMessage(undefined);
+    setSources(emptySources()); setAssets([]); setMasterOverrides([]); setGate({ pass: 0, review: 0, hardFail: 0 }); setQualityInspection(undefined); setApprovedReviewDigests([]); setSelectedRole(undefined); setStep("import"); setDemoMode(false); setArtifacts([]); setScreening(undefined); setOutputDirectory(undefined); setRunStatus("IDLE"); setRunLaunchBusy(false); setErrorMessage(undefined);
   };
   const runInspection = async (force = false) => {
     if (demoMode && !nativeRuntime) { setStep("inspect"); return; }
@@ -541,7 +577,7 @@ export function useWorkflow(t: Translator) {
     runLaunchInFlightRef.current = true; setRunLaunchBusy(true);
     jobIdRef.current = undefined; pendingProgressRef.current = []; pendingTerminalRef.current = undefined;
     terminalJobIdRef.current = undefined; progressContextRef.current = undefined; cancellingRef.current = false;
-    setJobId(undefined); setRunProgress(undefined); setExecutionMode("native"); setArtifacts([]); setOutputDirectory(undefined); setRunStatus("RUNNING"); setOverallProgress(0); setStages(initialStages()); setStep("run");
+    setJobId(undefined); setRunProgress(undefined); setExecutionMode("native"); setArtifacts([]); setScreening(undefined); setOutputDirectory(undefined); setRunStatus("RUNNING"); setOverallProgress(0); setStages(initialStages()); setStep("run");
     // Include launch-command work, but exclude the earlier review and screening.
     startRunClock();
     try {
@@ -549,6 +585,7 @@ export function useWorkflow(t: Translator) {
       const receipt = await desktopBridge.startRun({
         sources: sources.filter((source) => source.paths.length).flatMap((source) => source.paths.map((path) => ({ sourceId: safeSourceId(source.role, sourceIndex++), role: source.role, paths: [path], recursive: false }))),
         projectName,
+        runLabel: runLabel(matrix, projectName),
         recipe: { balanced: true, drizzleEnabled, localNormalizationEnabled, solverRequired: true, calibrationWorkflow: "mono-standard-v1" },
         masterMetadataOverrides: masterOverrideRequests(masterOverrides),
         rawFrameMetadataOverrides: [],
@@ -625,20 +662,24 @@ export function useWorkflow(t: Translator) {
   const matrix = useMemo(() => panelMatrix(assets, admittedPaths), [assets, admittedPaths]);
   const minimumAdmittedLights = 2;
   const insufficientQualityPanels = qualityReady ? matrix.filter((cell) => cell.admittedCount < minimumAdmittedLights) : [];
-  const qualityPanelsReady = qualityReady && matrix.length > 0 && insufficientQualityPanels.length === 0;
+  // Screening before the run is optional: the run screens every Light itself
+  // and lists the excluded frames with its result.  Before a screening, a
+  // panel only needs enough Lights to register; after one, enough admitted.
+  const insufficientPanels = qualityReady ? insufficientQualityPanels : matrix.filter((cell) => cell.lightCount < minimumAdmittedLights);
+  const panelsReady = matrix.length > 0 && insufficientPanels.length === 0;
   const runNavigationLocked = runLaunchBusy || runStatus === "RUNNING" || runStatus === "CANCELLING";
-  const canStart = demoMode && !nativeRuntime ? !runNavigationLocked : Boolean(!runNavigationLocked && !inputBusy && nativeRuntime && capabilities?.available && outputParent && calibrationReady && allRequiredConfirmed && masterOverridesReady && cfaBlockedAssets.length === 0 && solverSetupReady && qualityPanelsReady);
+  const canStart = demoMode && !nativeRuntime ? !runNavigationLocked : Boolean(!runNavigationLocked && !inputBusy && nativeRuntime && capabilities?.available && outputParent && calibrationReady && allRequiredConfirmed && masterOverridesReady && cfaBlockedAssets.length === 0 && solverSetupReady && panelsReady);
   const importedTotal = useMemo(() => sources.reduce((sum, source) => sum + source.fileCount, 0), [sources]);
   const firstSolved = artifacts.find((artifact) => artifact.receipt?.astrometry)?.receipt?.astrometry;
 
   return {
-    step, setStep, sources, assets, selectedRole, setSelectedRole, isDragging, setDragging, gate, capabilities, runStatus, runLaunchBusy, runElapsedSeconds, stages, overallProgress, runProgress, executionMode, artifacts,
+    step, setStep, sources, assets, selectedRole, setSelectedRole, isDragging, setDragging, gate, capabilities, runStatus, runLaunchBusy, runElapsedSeconds, stages, overallProgress, runProgress, executionMode, artifacts, screening,
     importPaths, confirmRole, loadDemo, clearSources, runInspection, startRun, cancelRun, canInspect, allRequiredConfirmed, importedTotal, nativeRuntime,
     browserDemoAvailable: !nativeRuntime, pickFiles, pickDirectories, chooseOutputParent, useOutputParentPath, outputParent, outputDirectory, canStart, inventoryBusy, inputBusy, errorMessage, calibrationReady,
     firstSolved, demoMode, projectName, matrix, masterOverrides, updateMasterOverride, resetMasterOverride, confirmMasterOverride, masterOverridesReady, runNavigationLocked,
     cfaBlockedAssets,
     qualityInspection, qualityBusy, qualityElapsedSeconds, qualityReady, approvedReviewDigests: validApprovedReviewDigests, toggleReviewApproval, canApproveReview,
-    insufficientQualityPanels, minimumAdmittedLights,
+    insufficientQualityPanels, insufficientPanels, minimumAdmittedLights,
     calibrationInspection, calibrationBusy, calibrationError, recheckCalibration,
     drizzleEnabled, setDrizzleEnabled, localNormalizationEnabled, setLocalNormalizationEnabled,
     catalogList, catalogDoctor, solverDoctor, recommendedCatalog, solveField, astap, solverSetupReady, catalogTermsAccepted, setCatalogTermsAccepted,

@@ -2,7 +2,7 @@ export type RawFrameRole = "LIGHT" | "FLAT" | "DARK" | "BIAS";
 export type MasterFrameRole = "MASTER_FLAT" | "MASTER_DARK" | "MASTER_BIAS";
 export type FrameRole = RawFrameRole | MasterFrameRole;
 export type GateDisposition = "PASS" | "REVIEW" | "HARD_FAIL";
-export type WorkflowStep = "import" | "inspect" | "recipe" | "run" | "result";
+export type WorkflowStep = "import" | "inspect" | "run" | "result";
 export type RecipeId = "balanced";
 export type RunStatus = "IDLE" | "RUNNING" | "CANCELLING" | "CANCELLED" | "COMPLETED" | "FAILED";
 export type ProgressState = "queued" | "running" | "finalizing" | "succeeded" | "failed" | "cancelled";
@@ -134,6 +134,8 @@ export interface RunSource { sourceId: string; role: FrameRole; paths: string[];
 export interface RunRequest {
   sources: RunSource[];
   projectName: string;
+  /** Target-derived label that names the output folder (`NGC 7331`); empty falls back to projectName. */
+  runLabel: string;
   recipe: ProjectRecipeOptions;
   masterMetadataOverrides: MasterMetadataOverrideRequest[];
   rawFrameMetadataOverrides: Array<Pick<RawFrameMetadataOverride, "sourceSha256" | "cfaPattern">>;
@@ -188,7 +190,11 @@ export interface PipelineProgressEvent { jobId: string; stageId?: string; state:
 export interface PipelineArtifactEvent { jobId: string; stage: { stageId: string; kind: string; status: string }; artifact: ArtifactReceipt; }
 export interface GateCheck { code: string; required: boolean; passed: boolean; artifactIds: string[]; message: string; }
 export interface ResultGateReport { decision: "ready" | "blocked"; checks: GateCheck[]; }
-export interface PipelineCompleteEvent { jobId: string; outputDirectory: string; artifacts: OutputArtifact[]; gate: ResultGateReport; }
+/** One Light the run's quality gate did not pass, with the reasons and a small preview. */
+export interface ScreeningFrame { name: string; target?: string; disposition: GateDisposition; admitted: boolean; summary: string; evidence: string[]; starCount?: number; previewDataUrl?: string; }
+/** The run's Light screening: counts plus every frame that needed a decision. */
+export interface ScreeningSummary { admitted: number; excluded: number; counts: Partial<Record<GateDisposition, number>>; frames: ScreeningFrame[]; }
+export interface PipelineCompleteEvent { jobId: string; outputDirectory: string; artifacts: OutputArtifact[]; gate: ResultGateReport; screening?: ScreeningSummary; }
 export interface PipelineErrorEvent { jobId: string; code: string; message: string; retryable: boolean; details?: Record<string, unknown>; }
 export interface PipelineLogEvent { jobId: string; stream: "stderr"; message: string; }
 export interface PipelineEventHandlers {

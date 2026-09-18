@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import errno
 import hashlib
 import json
 from pathlib import Path
@@ -254,8 +255,26 @@ class FakePanelRunner:
                 ],
             }
         receipt = output / "receipt.json"
+        # One excluded frame per target with a review preview, as the real
+        # run records it, so the project receipt's aggregation is exercised.
+        review = output / "qc" / "review" / "0000-excluded.png"
+        review.parent.mkdir(parents=True)
+        review.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+        screening = {
+            "counts": {"PASS": len(request.light_files) - 1, "REVIEW": 1, "HARD_FAIL": 0},
+            "admitted": len(request.light_files) - 1,
+            "excluded": 1,
+            "frames": [{
+                "path": request.light_files[0], "disposition": "REVIEW", "admitted": False,
+                "summary": "fake review", "evidence": ["fake evidence"], "starCount": 3,
+                "reviewPreview": "qc/review/0000-excluded.png",
+            }],
+        }
         receipt.write_text(
-            json.dumps({"pipelineVersion": "fake-panel-e2e", "astrometry": {"filters": astrometry}}),
+            json.dumps({
+                "pipelineVersion": "fake-panel-e2e", "astrometry": {"filters": astrometry},
+                "qualityControl": {"screening": screening},
+            }),
             encoding="utf-8",
         )
         if self.drift_source is not None and self.calls == 1:
@@ -559,6 +578,103 @@ def test_single_panel_review_approval_preserves_exact_raw_request(tmp_path: Path
     assert receipt["execution"]["sharedCalibration"]["mode"] == (
         "SINGLE_PANEL_DIRECT_APPROVED_REQUEST"
     )
+
+
+def test_published_layout_is_channels_previews_receipt_and_details(tmp_path: Path) -> None:
+    inventory, base, _ = _project(tmp_path, filters=("R", "G", "B", "L"))
+    result = run_project_e2e(
+        ProjectE2ERequest(inventory, base, base.output_directory),
+        solver_backends=(ManagedCopySolver(),),
+        panel_runner=FakePanelRunner(),
+        mosaic_provider=FakeReproject().provider(),
+    )
+    assert result.success is True
+    output = Path(result.output_directory)
+    # Top level: one FITS per channel named after it (PixInsight labels an
+    # opened image with the file stem), the color cube, previews, receipt.
+    assert sorted(path.name for path in output.iterdir()) == [
+        "B.fits", "G.fits", "L.fits", "LRGB.fits", "R.fits", "details", "previews", "receipt.json",
+    ]
+    assert sorted(path.name for path in (output / "previews").iterdir()) == [
+        "B.png", "G.png", "L.png", "LRGB.png", "LRGB.tiff", "R.png",
+    ]
+    assert sorted(path.name for path in (output / "details").iterdir()) == [
+        "color", "mosaics", "runs", "shared-calibration",
+    ]
+    for name in ("B", "G", "L", "R"):
+        assert fits.getheader(output / f"{name}.fits")["FILTER"] == name
+    receipt = json.loads(Path(result.receipt_path).read_text(encoding="utf-8"))
+    assert receipt["execution"]["sharedCalibration"]["receipt"] == "details/shared-calibration/receipt.json"
+    assert receipt["execution"]["color"]["receipt"] == "details/color/receipt.json"
+    assert {item["relativePath"] for item in receipt["finalProducts"]["guiArtifacts"]} == {
+        "B.fits", "G.fits", "L.fits", "R.fits", "LRGB.fits", "previews/B.png", "previews/G.png",
+        "previews/L.png", "previews/R.png", "previews/LRGB.png", "previews/LRGB.tiff",
+    }
+    assert result.product_paths == tuple(
+        str(output / name)
+        for name in ("B.fits", "G.fits", "L.fits", "R.fits", "LRGB.fits", "previews/LRGB.tiff", "previews/LRGB.png")
+    )
+    assert result.color_product_path == str(output / "LRGB.fits")
+    # A channel whose grid is final is the solved master itself, not a copy:
+    # same storage, header untouched.
+    alignment = receipt["execution"]["alignment"]
+    assert alignment["l"]["mode"] == "REFERENCE_SOLVED_GRID"
+    assert alignment["l"]["publication"] == "HARDLINK"
+    assert alignment["l"]["referenceFilter"] == "L"
+    solved_l = output / receipt["execution"]["finalSolves"]["l"]["output"]
+    assert (output / "L.fits").stat().st_ino == solved_l.stat().st_ino
+    assert "OAFALGN" not in fits.getheader(output / "L.fits")
+    assert (output / "LRGB.fits").stat().st_ino == (output / "details/color/LRGB.fits").stat().st_ino
+    assert receipt["execution"]["color"]["publication"] == {
+        "linearRgb": "HARDLINK", "previewTiff": "HARDLINK", "previewPng": "HARDLINK",
+    }
+    # Screening is summed over the four target runs; every frame that needed
+    # a decision keeps its target and a preview path inside the project.
+    screening = receipt["execution"]["screening"]
+    assert screening["counts"] == {"PASS": 44, "REVIEW": 4, "HARD_FAIL": 0}
+    assert (screening["admitted"], screening["excluded"]) == (44, 4)
+    assert len(screening["frames"]) == 4
+    for frame in screening["frames"]:
+        assert frame["disposition"] == "REVIEW" and frame["admitted"] is False
+        assert frame["target"].startswith("DUNPAI")
+        assert frame["path"].startswith("source/")
+        assert (output / frame["reviewPreview"]).is_file()
+        assert frame["reviewPreview"].startswith("details/runs/")
+
+
+def test_publish_file_links_and_gives_a_private_solver_output_normal_permissions(tmp_path: Path) -> None:
+    import openastroflow_engine.project_e2e as project_module
+
+    source = tmp_path / "master_light_L_wcs.fits"
+    source.write_bytes(b"solved master")
+    source.chmod(0o600)
+    destination = tmp_path / "L.fits"
+    assert project_module._publish_file(source, destination) == "HARDLINK"
+    assert destination.stat().st_ino == source.stat().st_ino
+    assert destination.stat().st_mode & 0o777 == 0o666 & ~project_module._current_umask()
+
+
+def test_publish_file_copies_when_the_volume_has_no_hard_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import openastroflow_engine.project_e2e as project_module
+
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"solved master")
+    destination = tmp_path / "final.bin"
+
+    def refuse_link(src: Any, dst: Any, **kwargs: Any) -> None:
+        raise OSError(errno.EPERM, "hard links are not supported")
+
+    monkeypatch.setattr(project_module.os, "link", refuse_link)
+    assert project_module._publish_file(source, destination) == "COPY"
+    assert destination.read_bytes() == b"solved master"
+    assert destination.stat().st_ino != source.stat().st_ino
+    with pytest.raises(FileExistsError):
+        project_module._publish_file(source, destination)
+    monkeypatch.undo()
+    with pytest.raises(FileExistsError):
+        project_module._publish_file(source, destination)
 
 
 def test_missing_rgb_channel_publishes_solved_mono_only(tmp_path: Path) -> None:
@@ -877,7 +993,7 @@ def test_unexpected_final_metadata_error_preserves_completed_products_and_diagno
     inventory, base, _ = _project(tmp_path)
     original = project_module._astrometry_gui_evidence
     def fail_rgb_metadata(path: Path, quality: Any) -> Any:
-        if path.name == "linear-rgb.fits":
+        if path.name == "RGB.fits":
             raise ValueError("injected final RGB metadata failure")
         return original(path, quality)
     monkeypatch.setattr(project_module, "_astrometry_gui_evidence", fail_rgb_metadata)
@@ -891,8 +1007,9 @@ def test_unexpected_final_metadata_error_preserves_completed_products_and_diagno
     assert "ValueError: injected final RGB metadata failure" in result.message
     assert not Path(base.output_directory).exists()
     evidence = Path(result.evidence_directory)
-    assert (evidence / "products/color/linear-rgb.fits").is_file()
-    assert len(list((evidence / "runs").glob("*/receipt.json"))) == 4
+    assert (evidence / "RGB.fits").is_file()
+    assert (evidence / "details/color/RGB.fits").is_file()
+    assert len(list((evidence / "details/runs").glob("*/receipt.json"))) == 4
     receipt = json.loads(Path(result.receipt_path).read_text())
     diagnostic = json.loads((evidence / receipt["execution"]["unexpectedFailure"]["diagnostic"]).read_text())
     assert diagnostic["exceptionType"] == "ValueError"
