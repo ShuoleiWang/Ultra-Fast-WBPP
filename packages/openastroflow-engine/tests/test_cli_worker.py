@@ -255,7 +255,7 @@ def _synthetic_project_e2e(request, *, solver_backends, progress) -> ProjectE2ER
     assert len(request.inventory.assets) > 0
     assert solver_backends
     output = Path(request.output_directory)
-    product = output / "products" / "mono" / "master_light_R_solved.fits"
+    product = output / "R.fits"
     product.parent.mkdir(parents=True)
     header = fits.Header()
     header["CTYPE1"] = "RA---TAN"

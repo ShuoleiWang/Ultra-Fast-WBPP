@@ -33,6 +33,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import tempfile
 import traceback
@@ -91,6 +92,8 @@ from .solver import SolverBackend, canonical_wcs_sha256, validate_wcs_header
 
 
 PROJECT_E2E_VERSION = "openastroflow-project-e2e-v1"
+# Everything that is not a final channel, a preview or the receipt lives here.
+DETAILS_DIRECTORY = "details"
 
 
 class ProjectE2EError(RuntimeError):
@@ -460,6 +463,54 @@ def _artifact(path: Path, root: Path, kind: str) -> dict[str, Any]:
         "sha256": _sha256(path),
         "sizeBytes": info.st_size,
     }
+
+
+def _screening_record(receipt_path: Path, staging: Path, target: str) -> dict[str, Any] | None:
+    """The run's screening summary with preview paths relative to the project."""
+
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    screening = receipt.get("qualityControl", {}).get("screening")
+    if not isinstance(screening, Mapping):
+        return None
+    run_root = receipt_path.parent.relative_to(staging).as_posix()
+    frames = []
+    for frame in screening.get("frames", []):
+        if not isinstance(frame, Mapping):
+            continue
+        preview = frame.get("reviewPreview")
+        frames.append(
+            {
+                **frame,
+                "target": target,
+                "reviewPreview": f"{run_root}/{preview}" if isinstance(preview, str) else None,
+            }
+        )
+    return {
+        "target": target,
+        "counts": dict(screening.get("counts", {})),
+        "admitted": screening.get("admitted"),
+        "excluded": screening.get("excluded"),
+        "frames": frames,
+    }
+
+
+def _project_screening(subruns: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Screening across every target run: totals plus the frames needing a decision."""
+
+    counts: dict[str, int] = {}
+    frames: list[dict[str, Any]] = []
+    admitted = 0
+    excluded = 0
+    for record in subruns:
+        screening = record.get("screening")
+        if not isinstance(screening, Mapping):
+            continue
+        for key, value in screening.get("counts", {}).items():
+            counts[key] = counts.get(key, 0) + int(value)
+        admitted += int(screening.get("admitted") or 0)
+        excluded += int(screening.get("excluded") or 0)
+        frames.extend(screening.get("frames", []))
+    return {"counts": counts, "admitted": admitted, "excluded": excluded, "frames": frames}
 
 
 def _accepted_quality(receipt_path: Path, filter_name: str) -> dict[str, Any]:
@@ -932,14 +983,39 @@ def _five_point_pixel_error(reference: Path, source: Path) -> tuple[float, tuple
     return float(np.max(np.abs(projected - points))), reference_shape, source_shape
 
 
-def _copy_solved_channel(source: Path, destination: Path, *, reference_filter: str) -> None:
-    with fits.open(source, mode="readonly", memmap=False, checksum=True) as hdul:
-        hdul.writeto(destination, overwrite=False, checksum=True, output_verify="exception")
-    with fits.open(destination, mode="update", memmap=False) as hdul:
-        image = next(item for item in hdul if item.data is not None and item.data.ndim == 2)
-        image.header["OAFALGN"] = (reference_filter, "Color reference filter")
-        image.header["OAFWCSPR"] = ("INDEPENDENT_SOLVE", "WCS provenance before color alignment")
-        hdul.flush(output_verify="exception")
+def _publish_file(source: Path, destination: Path) -> str:
+    """Expose ``source`` at ``destination`` without a second copy on disk.
+
+    Final products are the run-level masters and color files byte for byte,
+    so they are hard links wherever the volume allows one; a volume without
+    hard links gets a verified copy.  Returns the mode used.  ``destination``
+    is create-only either way.
+    """
+
+    try:
+        os.link(source, destination)
+    except FileExistsError:
+        raise
+    except OSError:
+        with source.open("rb") as input_stream, destination.open("xb") as output_stream:
+            shutil.copyfileobj(input_stream, output_stream, length=4 * 1024 * 1024)
+            output_stream.flush()
+            os.fsync(output_stream.fileno())
+        if _sha256(source) != _sha256(destination):
+            raise ProjectE2EError(
+                "ARTIFACT_HASH_MISMATCH", "published product differs from its source", path=str(destination)
+            )
+        return "COPY"
+    # Solver outputs are born private (0600, from a temporary file); a final
+    # product gets the permissions a file created here would have.
+    os.chmod(destination, 0o666 & ~_current_umask())
+    return "HARDLINK"
+
+
+def _current_umask() -> int:
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
 
 
 def _channel_sky_overlap(reference: Path, source: Path) -> dict[str, Any]:
@@ -1002,10 +1078,13 @@ def _align_channel(
     reference_identity = _source_identity(reference)
     error, reference_shape, source_shape = _five_point_pixel_error(reference, source)
     if source_shape == reference_shape and error <= tolerance_pixels:
-        _copy_solved_channel(source, destination, reference_filter=reference_filter)
+        publication = _publish_file(source, destination)
         return {
             "filter": filter_name,
             "mode": "EXACT_GEOMETRY_COPY",
+            "referenceFilter": reference_filter,
+            "wcsProvenance": "INDEPENDENT_SOLVE",
+            "publication": publication,
             "maximumFivePointErrorPixels": error,
             "maximumNinePointResidualPixels": error,
             "sampleCount": 9,
@@ -1080,8 +1159,8 @@ def _align_channel(
     header["OAFSTATE"] = "SOLVED"
     header["OAFWCS"] = "SOLVED"
     header["OAFPROD"] = "ALIGNED_MONO"
-    header["OAFALGN"] = reference_filter
-    header["OAFWCSPR"] = "REPROJECTED_INDEPENDENT_SOLVE"
+    header["OAFALGN"] = (reference_filter, "Color reference filter")
+    header["OAFWCSPR"] = ("REPROJECTED_INDEPENDENT_SOLVE", "WCS provenance of this grid")
     header.add_history("Ultra-Fast WBPP: independently solved mono reprojected to solved color reference grid")
     fits.writeto(destination, science, header, overwrite=False, checksum=True)
     validation = validate_wcs_header(header, image_shape=reference_shape)
@@ -1102,6 +1181,8 @@ def _align_channel(
     return {
         "filter": filter_name,
         "mode": "REPROJECTED_INDEPENDENT_SOLVE",
+        "referenceFilter": reference_filter,
+        "wcsProvenance": "REPROJECTED_INDEPENDENT_SOLVE",
         "maximumFivePointErrorPixelsBeforeAlignment": error,
         "maximumNinePointResidualPixelsBeforeAlignment": error,
         "maximumNinePointResidualPixelsAfterAlignment": output_error,
@@ -1335,13 +1416,18 @@ def run_project_e2e(
     if any(Path(item.path) == output or output in Path(item.path).parents for item in sources):
         raise ProjectE2EError("OUTPUT_ALIASES_SOURCE", "output cannot contain or alias a source")
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", suffix=".project-staging", dir=output.parent))
+    # The published directory holds only the final channels, ``previews`` and
+    # ``receipt.json`` at its top level; every intermediate stage lives under
+    # ``details`` so the result reads at a glance.
+    details = staging / DETAILS_DIRECTORY
+    details.mkdir()
     records: dict[str, Any] = {"subruns": [], "mosaics": {}, "finalSolves": {}, "alignment": {}}
     passed: list[str] = []
     excluded: list[str] = []
     project_progress = _ProjectProgress(layout, request.e2e_request, progress)
     try:
         project_progress.phase("prepare", 0, 1, "building shared calibration library")
-        shared_root = staging / "shared-calibration"
+        shared_root = details / "shared-calibration"
         shared_root.mkdir()
         direct_approved_panel = bool(request.e2e_request.review_approvals)
         if direct_approved_panel:
@@ -1369,7 +1455,7 @@ def run_project_e2e(
                 shared_receipt,
             ) = _build_shared_calibration(request.e2e_request, shared_root)
         records["sharedCalibration"] = {
-            "receipt": "shared-calibration/receipt.json",
+            "receipt": (shared_root / "receipt.json").relative_to(staging).as_posix(),
             "receiptSha256": _sha256(shared_root / "receipt.json"),
             "mode": shared_receipt["mode"],
             "rawIntegrationCount": shared_receipt["rawIntegrationCount"],
@@ -1378,7 +1464,7 @@ def run_project_e2e(
 
         panels_by_filter: dict[str, list[tuple[SciencePanel, Path]]] = {}
         panel_quality_by_path: dict[str, dict[str, Any]] = {}
-        runs_root = staging / "runs"
+        runs_root = details / "runs"
         runs_root.mkdir()
         # One run per target carries every filter of that target: the run
         # registers all Lights onto one reference frame and crops the filter
@@ -1435,10 +1521,15 @@ def run_project_e2e(
                 "panels": [panel.serializable() for panel in panels],
                 "success": sub_result.success,
                 "code": sub_result.code,
-                "receipt": str(Path(sub_result.receipt_path).relative_to(staging)),
+                "receipt": Path(sub_result.receipt_path).relative_to(staging).as_posix(),
                 "receiptSha256": _sha256(Path(sub_result.receipt_path)),
             }
             records["subruns"].append(record)
+            try:
+                record["screening"] = _screening_record(Path(sub_result.receipt_path), staging, group.target)
+            except (OSError, ValueError, json.JSONDecodeError):
+                record["screening"] = None
+            records["screening"] = _project_screening(records["subruns"])
             if not sub_result.success:
                 sub_message = sub_result.message or f"{group.target}/{group.filter_name}: {sub_result.code}"
                 _verify_sources(sources)
@@ -1464,14 +1555,14 @@ def run_project_e2e(
                 )
                 panels_by_filter.setdefault(panel.filter_key, []).append((panel, product))
                 record["solvedProducts"][panel.filter_name] = {
-                    "path": str(product.relative_to(staging)),
+                    "path": product.relative_to(staging).as_posix(),
                     "sha256": _sha256(product),
                 }
             project_progress.panel_done(index, group)
 
         final_sources: dict[str, tuple[str, Path]] = {}
         final_quality: dict[str, dict[str, Any]] = {}
-        mosaic_root = staging / "mosaics"
+        mosaic_root = details / "mosaics"
         mosaic_root.mkdir()
         mosaic_total = 2 * sum(len(panels) > 1 for panels in panels_by_filter.values())
         mosaic_completed = 0
@@ -1525,15 +1616,15 @@ def run_project_e2e(
             records["mosaics"][filter_key] = {
                 "mode": "SOLVED_PANEL_MOSAIC",
                 "panelCount": len(panels),
-                "workingReceipt": str(Path(mosaic.receipt_path).relative_to(staging)),
+                "workingReceipt": Path(mosaic.receipt_path).relative_to(staging).as_posix(),
                 "workingReceiptSha256": _sha256(Path(mosaic.receipt_path)),
                 "workingState": mosaic.state,
                 "propagatedWcsIsFinalSolution": False,
             }
             records["finalSolves"][filter_key] = {
                 "status": "SOLVED" if solved else "UNSOLVED",
-                "input": str(working.relative_to(staging)),
-                "output": str(solved_path.relative_to(staging)) if solved else None,
+                "input": working.relative_to(staging).as_posix(),
+                "output": solved_path.relative_to(staging).as_posix() if solved else None,
                 "hints": hints.serializable(),
                 "attempts": _relativize_solver_attempts(attempts, staging),
             }
@@ -1564,9 +1655,6 @@ def run_project_e2e(
             mosaic_completed += 1
             project_progress.phase("mosaic", mosaic_completed, mosaic_total, f"{display_filter}: fresh mosaic solve verified")
 
-        products = staging / "products"
-        mono_root = products / "mono"
-        mono_root.mkdir(parents=True)
         # Luminance carries the detail of an LRGB product, so when channels do
         # not already share their grid it is the one that stays unresampled.
         reference_key = next(
@@ -1579,12 +1667,17 @@ def run_project_e2e(
         astrometry_provenance: dict[str, dict[str, Any]] = {}
         project_progress.phase("alignment", 0, len(final_sources), "aligning solved channels onto the reference grid")
         for key, (filter_name, source) in sorted(final_sources.items()):
-            destination = mono_root / f"master_light_{_safe_token(filter_name)}_solved.fits"
+            # ``<FILTER>.fits`` so PixInsight labels the opened image with the
+            # channel name (its view identifier comes from the file name).
+            destination = staging / f"{_safe_token(filter_name)}.fits"
             if key == reference_key:
-                _copy_solved_channel(source, destination, reference_filter=reference_filter)
+                publication = _publish_file(source, destination)
                 alignment = {
                     "filter": filter_name,
                     "mode": "REFERENCE_SOLVED_GRID",
+                    "referenceFilter": reference_filter,
+                    "wcsProvenance": "INDEPENDENT_SOLVE",
+                    "publication": publication,
                     "coverageFraction": 1.0,
                     "source": _source_identity(source),
                     "output": _source_identity(destination),
@@ -1653,6 +1746,9 @@ def run_project_e2e(
                 # previews, RGB and GUI verification, not the intermediate grid.
                 records["alignment"][key]["output"] = _source_identity(path)
                 if final_crop["applied"]:
+                    # The crop rewrote the file, so it no longer shares the
+                    # run master's storage.
+                    records["alignment"][key]["publication"] = "CROPPED_COPY"
                     provenance = astrometry_provenance[key]
                     provenance["type"] = "PROPAGATED_VERIFIED"
                     provenance["freshSolveOnThisPixelGrid"] = False
@@ -1667,7 +1763,7 @@ def run_project_e2e(
         color_total = len(mono_paths) + int({"r", "g", "b"}.issubset(mono_paths))
         project_progress.phase("color", 0, color_total, "rendering mono previews and color products")
         for key, path in sorted(mono_paths.items()):
-            preview = preview_root / f"mono_{_safe_token(final_sources[key][0])}.png"
+            preview = preview_root / f"{path.stem}.png"
             render_auto_stretch_preview(
                 path,
                 preview,
@@ -1678,6 +1774,7 @@ def run_project_e2e(
             project_progress.phase("color", len(preview_paths), color_total, f"{final_sources[key][0]}: preview rendered")
 
         color_result: ColorProductResult | None = None
+        color_paths: dict[str, Path] = {}
         if {"r", "g", "b"}.issubset(mono_paths):
             color_result = color_builder(
                 ColorProductRequest(
@@ -1685,15 +1782,27 @@ def run_project_e2e(
                     green_path=str(mono_paths["g"]),
                     blue_path=str(mono_paths["b"]),
                     luminance_path=str(mono_paths["l"]) if "l" in mono_paths else None,
-                    output_directory=str(products / "color"),
+                    output_directory=str(details / "color"),
                     wcs_tolerance_pixels=request.channel_wcs_tolerance_pixels,
                     preview_max_long_edge=request.e2e_request.pipeline_parameters.preview_max_long_edge,
                 )
             )
+            # The color stage publishes into ``details/color``; its FITS and
+            # previews surface at the top level like the mono channels.
+            color_publication = {}
+            for name, source in (
+                ("linearRgb", Path(color_result.linear_rgb_path)),
+                ("previewTiff", Path(color_result.preview_tiff_path)),
+                ("previewPng", Path(color_result.preview_png_path)),
+            ):
+                final = (staging if name == "linearRgb" else preview_root) / source.name
+                color_publication[name] = _publish_file(source, final)
+                color_paths[name] = final
             records["color"] = {
                 "status": "SOLVED_LRGB" if "l" in mono_paths else "SOLVED_RGB",
-                "receipt": str(Path(color_result.receipt_path).relative_to(staging)),
+                "receipt": Path(color_result.receipt_path).relative_to(staging).as_posix(),
                 "receiptSha256": _sha256(Path(color_result.receipt_path)),
+                "publication": color_publication,
                 "luminanceParticipated": "l" in mono_paths,
                 "astrometryProvenance": {
                     "type": "PROPAGATED_VERIFIED",
@@ -1762,9 +1871,9 @@ def run_project_e2e(
         product_paths = list(mono_paths.values())
         if color_result is not None:
             for path, kind in (
-                (Path(color_result.linear_rgb_path), "LINEAR_RGB_FITS"),
-                (Path(color_result.preview_tiff_path), "RGB_PREVIEW_TIFF_16"),
-                (Path(color_result.preview_png_path), "RGB_PREVIEW_PNG_16"),
+                (color_paths["linearRgb"], "LINEAR_RGB_FITS"),
+                (color_paths["previewTiff"], "RGB_PREVIEW_TIFF_16"),
+                (color_paths["previewPng"], "RGB_PREVIEW_PNG_16"),
             ):
                 final_artifacts.append(_artifact(path, staging, kind))
                 product_paths.append(path)
@@ -1772,7 +1881,7 @@ def run_project_e2e(
                 item for item in final_artifacts if item["kind"] == "LINEAR_RGB_FITS"
             )
             rgb_artifact["astrometry"] = _astrometry_gui_evidence(
-                Path(color_result.linear_rgb_path), output_quality[reference_key]
+                color_paths["linearRgb"], output_quality[reference_key]
             )
             rgb_artifact["astrometryProvenance"] = records["color"][
                 "astrometryProvenance"
@@ -1862,7 +1971,7 @@ def run_project_e2e(
             excluded_light_paths=tuple(excluded),
             mono_filters=tuple(final_sources[key][0] for key in sorted(final_sources)),
             color_product_path=(
-                str(output / Path(color_result.linear_rgb_path).relative_to(staging))
+                str(output / color_paths["linearRgb"].relative_to(staging))
                 if color_result is not None
                 else None
             ),
@@ -1905,7 +2014,7 @@ def run_project_e2e(
         diagnostic_path.parent.mkdir(exist_ok=True)
         _write_json(diagnostic_path, diagnostic)
         records["unexpectedFailure"] = {
-            "diagnostic": str(diagnostic_path.relative_to(staging)),
+            "diagnostic": diagnostic_path.relative_to(staging).as_posix(),
             "exceptionType": diagnostic["exceptionType"],
         }
         code = "PROJECT_UNEXPECTED_FAILURE"

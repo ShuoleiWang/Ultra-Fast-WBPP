@@ -24,8 +24,10 @@ import sys
 import tempfile
 from typing import Any
 
+import numpy as np
+
 from .config import QcConfig
-from .models import Confidence, Decision, FrameFeatures, FrameMeasurement, FrameResult, RegistrationMetrics
+from .models import Confidence, Decision, FrameFeatures, FrameMeasurement, FrameResult, RegistrationMetrics, Star
 
 
 _SCHEMA = 1
@@ -95,6 +97,33 @@ def _implementation_fingerprint() -> str:
             raise ValueError("Cache runtime version is unavailable")
         digest.update(_encode([name, version]))
     return digest.hexdigest()
+
+
+_STAR_FLOAT_FIELDS = ("x", "y", "flux", "peak", "a", "b", "theta", "fwhm", "ellipticity")
+_STAR_INT_FIELDS = ("flags", "support_pixels", "detection_pixels")
+
+
+def _packed_stars(stars: list[Star] | None) -> bytes:
+    """Exact little-endian float64/int64 image of a star list for hashing.
+
+    A frame carries thousands of stars twice over (supported and raw); their
+    JSON text was most of the key's cost.  ``None`` integers become -1, which
+    no real count takes, and a missing list is distinguished from an empty one.
+    """
+
+    if stars is None:
+        return b"none"
+    if not stars:
+        return b"empty"
+    floats = np.array(
+        [[getattr(star, name) for name in _STAR_FLOAT_FIELDS] for star in stars],
+        dtype="<f8",
+    )
+    integers = np.array(
+        [[-1 if getattr(star, name) is None else getattr(star, name) for name in _STAR_INT_FIELDS] for star in stars],
+        dtype="<i8",
+    )
+    return len(stars).to_bytes(8, "big") + floats.tobytes(order="C") + integers.tobytes(order="C")
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -228,6 +257,15 @@ def _restore(payload: Any, frames: list[FrameMeasurement], config: QcConfig) -> 
     return summaries, results
 
 
+# Every FrameMeasurement field except the star lists, the nested dataclasses
+# (encoded separately) and the presentation-only thumbnail path.
+_FRAME_KEY_FIELDS = tuple(
+    item.name
+    for item in fields(FrameMeasurement)
+    if item.name not in {"stars", "raw_stars", "metadata", "identity", "thumbnail_path"}
+)
+
+
 class GroupAnalysisCache:
     def __init__(self, directory: Path | str, config: QcConfig, stats: dict[str, int] | None = None):
         self.directory = Path(directory) / "group-analysis-v1"
@@ -250,14 +288,22 @@ class GroupAnalysisCache:
                 # Include all scientific inputs and freshly measured identity,
                 # even optional metadata and source counts. Only the report's
                 # presentation-specific thumbnail destination is excluded.
-                value = asdict(frame)
-                value.pop("thumbnail_path")
-                data = _encode(value)
-                size += len(data)
-                if size > _MAX_KEY_BYTES:
-                    return None
-                digest.update(len(data).to_bytes(8, "big"))
-                digest.update(data)
+                # Star lists are hashed from their exact binary image; the
+                # rest of the measurement is small enough for canonical JSON.
+                value = {name: getattr(frame, name) for name in _FRAME_KEY_FIELDS}
+                value["metadata"] = asdict(frame.metadata)
+                value["identity"] = None if frame.identity is None else asdict(frame.identity)
+                parts = [
+                    _encode(value),
+                    _packed_stars(frame.stars),
+                    _packed_stars(frame.raw_stars),
+                ]
+                for data in parts:
+                    size += len(data)
+                    if size > _MAX_KEY_BYTES:
+                        return None
+                    digest.update(len(data).to_bytes(8, "big"))
+                    digest.update(data)
             return digest.hexdigest()
         except Exception:
             return None

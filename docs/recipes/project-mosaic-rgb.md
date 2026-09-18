@@ -22,6 +22,19 @@ The required transaction contract is:
 6. Align independently solved filters to one solved reference grid. R/G/B creates linear RGB FITS and color-preserving 16-bit TIFF/PNG. L, when present, participates in LRGB. Missing channels publish clearly labelled solved mono only.
 7. Re-hash the original sources and publish the complete output with one create-only atomic rename. Failure publishes only `<output>.unsolved`.
 
+The published directory reads at a glance:
+
+```
+NGC7331_2026-09-18_2335/      # desktop: <target>_<date>_<time>; the CLI uses --output as given
+  L.fits  R.fits  G.fits  B.fits   # one solved master per channel, named after it
+  LRGB.fits                        # linear color cube (RGB.fits without L)
+  previews/                        # L.png ... LRGB.png, LRGB.tiff
+  receipt.json
+  details/                         # shared-calibration/, runs/<target>/, mosaics/, color/
+```
+
+PixInsight names an opened image after its file stem, so `L.fits` opens as the view `L` and PixelMath can address the channels as `L`, `R`, `G`, `B` directly. A channel whose grid is already final (the reference channel, an exactly aligned channel) is the run-level master itself, hard-linked from `details/`, so the top level costs no extra disk; `execution.alignment.<key>.publication` records `HARDLINK`, `COPY` (a volume without hard links) or `CROPPED_COPY` (the common finite-support crop rewrote it).
+
 The outer receipt includes a share-safe panel matrix, hashes of shared-calibration and child receipts, mosaic/final-solve/alignment evidence, and `finalProducts.guiArtifacts[]` with relative path, SHA-256, size, final gate, and managed astrometric quality. Published JSON contains no absolute host path or inode/device/mtime values.
 
 v1 is mono-camera only. A Light whose CFA pattern is not `NONE` fails before pixel work; Bayer-as-mono processing is never called CFA Drizzle.

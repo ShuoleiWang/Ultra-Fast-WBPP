@@ -108,22 +108,34 @@ const astrometry = {
 const solvedArtifact = { kind: "SOLVED_MONO_FITS" as const, name: "盾牌座_R_mosaic.fits", path: "/结果/深空 输出/ultra-fast-wbpp-run/盾牌座_R_mosaic.fits", detail: "final WCS", filter: "R", target: "盾牌座", receipt: { artifactId: "final-r", relativePath: "盾牌座_R_mosaic.fits", sha256: "a".repeat(64), sizeBytes: 4096, astrometry } };
 const readyChecks = ["final-project-products-present", "final-project-receipts-valid", "final-project-astrometry-validated"].map((code) => ({ code, required: true, passed: true, artifactIds: ["final-r"], message: "ready" }));
 
+// Import a folder and open the optional screening review; its page carries
+// the same launch panel (output folder, start) as the import page.
 async function reachRecipe() {
   native.lightCount = Math.max(2, native.lightCount);
   await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
-  await userEvent.click(await screen.findByRole("button", { name: /复核 \d+ 张 Light/ }));
-  await userEvent.click(screen.getByRole("button", { name: /继续处理/ }));
+  await userEvent.click(await screen.findByRole("button", { name: /先看筛片结果（\d+ 张 Light/ }));
+  await screen.findByRole("heading", { name: "检查分组与真实筛片证据" });
   await waitFor(() => expect(native.inspectCalibration).toHaveBeenCalled());
 }
 async function reachRun() {
   await reachRecipe();
   await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
-  await waitFor(() => expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeEnabled()); await userEvent.click(screen.getByRole("button", { name: /开始端到端处理/ }));
+  await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled()); await userEvent.click(screen.getByRole("button", { name: /开始处理/ }));
+  await screen.findByRole("heading", { name: "正在生成验证后的产品" });
+}
+// Import a folder and start straight away: no screening review before the run.
+async function reachRunDirectly() {
+  native.lightCount = Math.max(2, native.lightCount);
+  await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
+  await waitFor(() => expect(native.inspectCalibration).toHaveBeenCalled());
+  await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled()); await userEvent.click(screen.getByRole("button", { name: /开始处理/ }));
   await screen.findByRole("heading", { name: "正在生成验证后的产品" });
 }
 
 beforeEach(() => {
   window.localStorage.setItem("ultra-fast-wbpp.language", "zh-CN");
+  window.localStorage.removeItem("ultra-fast-wbpp.outputParent");
   native.handlers = undefined; native.catalogHandlers = undefined; native.inspectError = undefined; native.qualityDisposition = "PASS"; native.reviewFirst = false; native.cfa = false; native.unknownCfa = false; native.useMasterDark = false; native.catalogReady = true; native.catalogInspectionError = undefined;
   native.capabilityCalls = 0; native.solverSetupCalls = 0; native.dropListenerCalls = 0; native.pipelineListenerCalls = 0; native.catalogListenerCalls = 0; native.lightCount = 1;
   native.solverReady = true; native.solverError = undefined; native.dropHandler = undefined;
@@ -157,14 +169,13 @@ describe("native product workflow", () => {
     await userEvent.click(screen.getByRole("button", { name: "导入路径" }));
     expect(native.inspectPaths).toHaveBeenCalledWith({ paths: ["/数据/夜晚 1", "/数据/校准/主平场.fit"], roleHint: undefined });
     expect(native.startRun).not.toHaveBeenCalled();
-    await userEvent.click(await screen.findByRole("button", { name: /复核 2 张 Light/ }));
-    await userEvent.click(screen.getByRole("button", { name: /继续处理/ }));
+    await userEvent.click(await screen.findByRole("button", { name: /先看筛片结果（2 张 Light/ }));
     await userEvent.click(screen.getByText("输入输出文件夹路径"));
     fireEvent.change(screen.getByRole("textbox", { name: "输出文件夹路径" }), { target: { value: " /结果/深空 手动输出 " } });
-    expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
     await userEvent.click(screen.getByRole("button", { name: "使用此路径" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeEnabled());
-    await userEvent.click(screen.getByRole("button", { name: /开始端到端处理/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled());
+    await userEvent.click(screen.getByRole("button", { name: /开始处理/ }));
     expect(native.inspectQuality).toHaveBeenCalledTimes(1);
     expect(native.startRun).toHaveBeenCalledWith(expect.objectContaining({ outputParentDirectory: "/结果/深空 手动输出", reviewSelections: [], sources: expect.arrayContaining([expect.objectContaining({ role: "LIGHT", paths: ["/数据/盾牌座/亮场 01.fit"] })]) }));
   });
@@ -179,7 +190,7 @@ describe("native product workflow", () => {
     if (!enabled) await userEvent.click(localNormalization);
     expect(localNormalization).toHaveProperty("checked", enabled);
     await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
-    await userEvent.click(screen.getByRole("button", { name: /开始端到端处理/ }));
+    await userEvent.click(screen.getByRole("button", { name: /开始处理/ }));
     expect(native.startRun).toHaveBeenCalledWith(expect.objectContaining({
       recipe: expect.objectContaining({ localNormalizationEnabled: enabled }),
     }));
@@ -189,20 +200,20 @@ describe("native product workflow", () => {
     native.qualityDisposition = "REVIEW";
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
-    await userEvent.click(await screen.findByRole("button", { name: /复核 1 张 Light/ }));
+    await userEvent.click(await screen.findByRole("button", { name: /先看筛片结果（1 张 Light/ }));
     await screen.findByRole("heading", { name: "检查分组与真实筛片证据" });
-    const navigation = screen.getByRole("navigation");
-    await userEvent.click(within(navigation).getByRole("button", { name: /导入/ }));
-    expect(within(navigation).getByRole("button", { name: /复核/ })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: "返回" }));
+    expect(screen.getAllByRole("button", { name: /查看筛片结果/ })[0]).toBeEnabled();
     const extra = { ...lightAsset("/数据/校准/added-flat.fit"), role: "MASTER_FLAT" as const };
     native.inspectPaths.mockResolvedValueOnce({ projectName: "same project", totalFiles: 1, assets: [extra], sources: [{ role: extra.role, paths: [extra.path], fileCount: 1, confidence: 1, needsConfirmation: false }] });
     await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
     await userEvent.click((await screen.findAllByRole("button", { name: /查看筛片结果/ }))[0]);
+    await screen.findByRole("heading", { name: "检查分组与真实筛片证据" });
     expect(native.inspectQuality).toHaveBeenCalledTimes(1);
-    await userEvent.click(within(navigation).getByRole("button", { name: /导入/ }));
+    await userEvent.click(screen.getByRole("button", { name: "返回" }));
     await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
-    await screen.findByRole("button", { name: /复核 1 张 Light/ });
-    expect(within(navigation).getByRole("button", { name: /复核/ })).toBeDisabled();
+    await screen.findByRole("button", { name: /先看筛片结果（1 张 Light/ });
+    expect(screen.queryByRole("button", { name: /查看筛片结果/ })).not.toBeInTheDocument();
   });
 
   it("shows an available solver even when catalog inspection fails", async () => {
@@ -211,7 +222,7 @@ describe("native product workflow", () => {
     render(<App />);
     await reachRecipe();
     expect(screen.getByText(/solve-field.*可执行/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
   });
 
   it("shows real calibration blockers even when all frame types are present", async () => {
@@ -220,26 +231,22 @@ describe("native product workflow", () => {
     await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
     expect(await screen.findByText(/已导入 FLAT/)).toBeInTheDocument();
     expect(screen.getByText("Flat filter does not match R")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: /复核 1 张 Light/ }));
-    await userEvent.click(screen.getByRole("button", { name: /继续处理/ }));
     await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
-    expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
   });
 
   it("invalidates calibration readiness while a new check is pending or fails", async () => {
     render(<App />);
     await reachRecipe();
     await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
-    expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeEnabled();
-    await userEvent.click(within(screen.getByRole("navigation")).getByText("复核"));
+    expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled();
     let rejectCheck!: (error: Error) => void;
     native.inspectCalibration.mockImplementationOnce(() => new Promise((_, reject) => { rejectCheck = reject; }));
     await userEvent.click(screen.getByRole("button", { name: "重新检查校准" }));
-    await userEvent.click(screen.getByRole("button", { name: /继续处理/ }));
-    expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
     await waitFor(() => expect(rejectCheck).toBeTypeOf("function"));
     await act(async () => rejectCheck(new Error("metadata read failed")));
-    expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
   });
 
   it("keeps mixed Raw and Master tabs separate from import role hints", async () => {
@@ -280,15 +287,14 @@ describe("native product workflow", () => {
     native.inspectQuality.mockImplementationOnce(() => new Promise((resolve) => { finishInspection = resolve; }));
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
-    await userEvent.click(await screen.findByRole("button", { name: /复核 2 张 Light/ }));
+    await userEvent.click(await screen.findByRole("button", { name: /先看筛片结果（2 张 Light/ }));
     expect(screen.getByRole("button", { name: /选择文件夹$/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: "清空" })).toBeDisabled();
     await act(async () => native.dropHandler?.(["/data/more-flats"]));
     expect(native.inspectPaths).toHaveBeenCalledTimes(1);
     await act(async () => finishInspection(quality));
-    await userEvent.click(screen.getByRole("button", { name: /继续处理/ }));
     await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeEnabled()); await userEvent.click(screen.getByRole("button", { name: /开始端到端处理/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled()); await userEvent.click(screen.getByRole("button", { name: /开始处理/ }));
     await screen.findByRole("heading", { name: "正在生成验证后的产品" });
     await act(async () => native.dropHandler?.(["/data/other-project"]));
     expect(native.inspectPaths).toHaveBeenCalledTimes(1);
@@ -299,10 +305,10 @@ describe("native product workflow", () => {
     render(<App />);
     await reachRecipe();
     await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
-    expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
     native.solverReady = true;
     await userEvent.click(screen.getByRole("button", { name: "重新检测配置" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled());
     expect(native.inspectPaths).toHaveBeenCalledTimes(1);
     expect(native.solverSetupCalls).toBe(6);
   });
@@ -311,11 +317,11 @@ describe("native product workflow", () => {
     render(<App />);
     await reachRecipe();
     await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
-    expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled();
     native.solverError = new Error("Solver configuration could not be read");
     await userEvent.click(screen.getByRole("button", { name: "重新检测配置" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Solver configuration could not be read");
-    expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
   });
 
   it("explains missing calibration when only Lights were imported", async () => {
@@ -328,7 +334,7 @@ describe("native product workflow", () => {
     await reachRecipe();
     await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
     expect(screen.getByText(/请完成校准检查，处理缺失/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
   });
 
   it("does not repeat expensive runtime probes when the selected import role changes", async () => {
@@ -366,7 +372,7 @@ describe("native product workflow", () => {
     render(<App />);
     await reachRecipe();
     await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeEnabled()); await userEvent.dblClick(screen.getByRole("button", { name: /开始端到端处理/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled()); await userEvent.dblClick(screen.getByRole("button", { name: /开始处理/ }));
     expect(await screen.findByRole("heading", { name: "正在生成验证后的产品" })).toBeInTheDocument();
     expect(native.startRun).toHaveBeenCalledTimes(1);
     expect(within(screen.getByRole("navigation", { name: "处理流程" })).getByRole("button", { name: /处理/ })).toBeDisabled();
@@ -377,13 +383,51 @@ describe("native product workflow", () => {
     native.reviewFirst = true;
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
-    await userEvent.click(await screen.findByRole("button", { name: /复核 55 张 Light/ }));
+    await userEvent.click(await screen.findByRole("button", { name: /先看筛片结果（55 张 Light/ }));
     const initialFrames = document.querySelectorAll(".quality-frame");
     expect(initialFrames).toHaveLength(51);
     expect(initialFrames[0]).toHaveClass("quality-review");
     const more = screen.getByRole("button", { name: "再显示 4 张通过帧" });
     await userEvent.click(more);
     expect(document.querySelectorAll(".quality-frame")).toHaveLength(55);
+  });
+
+  it("starts without a screening review and shows the run's own screening with the result", async () => {
+    render(<App />); await reachRunDirectly();
+    expect(native.inspectQuality).not.toHaveBeenCalled();
+    expect(native.startRun).toHaveBeenCalledWith(expect.objectContaining({ reviewSelections: [], runLabel: "盾牌座 Panel 1" }));
+    const preview = "data:image/png;base64,iVBORw0KGgo=";
+    await act(async () => native.handlers?.onComplete({
+      jobId: "run-native-1", outputDirectory: "/结果/深空 输出/盾牌座-Panel-1_2026-09-19_0010", artifacts: [solvedArtifact], gate: { decision: "ready", checks: readyChecks },
+      screening: { admitted: 61, excluded: 2, counts: { PASS: 61, REVIEW: 1, HARD_FAIL: 1 }, frames: [
+        { name: "亮场 07.fit", target: "盾牌座 Panel 1", disposition: "HARD_FAIL", admitted: false, summary: "clouds", evidence: ["星点数量骤降", "背景升高"], starCount: 12, previewDataUrl: preview },
+        { name: "亮场 09.fit", disposition: "REVIEW", admitted: false, summary: "trail", evidence: [] },
+      ] },
+    }));
+    expect(await screen.findByText(/最终门禁 · WCS 已解算/)).toBeInTheDocument();
+    const section = screen.getByRole("region", { name: "筛片结果" });
+    expect(within(section).getByText("61 张进入叠加 · 2 张排除")).toBeInTheDocument();
+    expect(within(section).getByText("亮场 07.fit")).toBeInTheDocument();
+    expect(within(section).getByText("星点数量骤降; 背景升高")).toBeInTheDocument();
+    expect(within(section).getByRole("img", { name: "亮场 07.fit 的复核预览" })).toHaveAttribute("src", preview);
+    expect(within(section).getByText("trail")).toBeInTheDocument();
+    expect(within(section).getByText(/如需纳入 REVIEW 帧/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "显示输出：盾牌座-Panel-1_2026-09-19_0010" })).toBeEnabled();
+  });
+
+  it("remembers the output folder for the next session and blocks a one-Light panel before any screening", async () => {
+    const first = render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
+    await waitFor(() => expect(native.inspectCalibration).toHaveBeenCalled());
+    expect(screen.getByText("选择输出文件夹。")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
+    expect(screen.queryByText("选择输出文件夹。")).not.toBeInTheDocument();
+    expect(screen.getByText("盾牌座 Panel 1 × R：当前可用 1 张 Light，至少需要 2 张。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
+    expect(window.localStorage.getItem("ultra-fast-wbpp.outputParent")).toBe("/结果/深空 输出");
+    first.unmount();
+    render(<App />);
+    expect(screen.getByText("/结果/深空 输出")).toBeInTheDocument();
   });
 
   it("preserves Unicode paths and shows WCS SOLVED only after the final gate", async () => {
@@ -425,8 +469,9 @@ describe("native product workflow", () => {
   });
 
   it("blocks CFA/OSC before recipe execution", async () => {
-    native.cfa = true; render(<App />); await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ })); await userEvent.click(await screen.findByRole("button", { name: /复核 1 张 Light/ }));
-    expect(screen.getByText(/当前版本不处理 CFA/)).toBeInTheDocument(); expect(screen.getByRole("button", { name: /继续处理/ })).toBeDisabled();
+    native.cfa = true; render(<App />); await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ })); await userEvent.click(await screen.findByRole("button", { name: /先看筛片结果（1 张 Light/ }));
+    expect(screen.getByText(/当前版本不处理 CFA/)).toBeInTheDocument(); expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
+    expect(screen.getByText("当前不支持 CFA / OSC。")).toBeInTheDocument();
   });
 
   it("marks the noninteractive toolbar subtree as draggable without capturing language controls", () => {
@@ -457,9 +502,8 @@ describe("native product workflow", () => {
     expect(within(form).getByLabelText("偏置值")).toHaveValue(null);
     expect(within(form).getByLabelText("温度 °C")).toHaveValue(null);
     expect(within(form).getByLabelText("读出模式")).toHaveValue("");
-    await userEvent.click(await screen.findByRole("button", { name: /复核 2 张 Light/ }));
-    expect(screen.getByRole("button", { name: /继续处理/ })).toBeEnabled();
-    await userEvent.click(screen.getByRole("button", { name: /继续处理/ })); await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" })); await waitFor(() => expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeEnabled()); await userEvent.click(screen.getByRole("button", { name: /开始端到端处理/ }));
+    await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" })); await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled()); await userEvent.click(screen.getByRole("button", { name: /开始处理/ }));
+    expect(native.inspectQuality).not.toHaveBeenCalled();
     expect(native.startRun).toHaveBeenCalledWith(expect.objectContaining({ masterMetadataOverrides: [] }));
   });
 
@@ -475,21 +519,23 @@ describe("native product workflow", () => {
     expect(within(form).getByLabelText("偏置值")).toHaveValue(null);
     await userEvent.click(within(form).getByRole("button", { name: "保存修改" }));
     await waitFor(() => expect(native.inspectCalibration).toHaveBeenLastCalledWith(expect.objectContaining({ recipe: { calibration: { workflow: "mono-standard-v1", bias: "OPTIONAL", masterMetadataOverrides: [{ sourceSha256: `sha256:${"8".repeat(64)}`, binning: [1, 1], gain: 0, biasIncluded: false }] }, rawFrameMetadataOverrides: [] } })));
-    await userEvent.click(await screen.findByRole("button", { name: /复核 2 张 Light/ }));
-    await userEvent.click(screen.getByRole("button", { name: /继续处理/ })); await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" })); await waitFor(() => expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeEnabled()); await userEvent.click(screen.getByRole("button", { name: /开始端到端处理/ }));
+    await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" })); await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled()); await userEvent.click(screen.getByRole("button", { name: /开始处理/ }));
     expect(native.startRun).toHaveBeenCalledWith(expect.objectContaining({ masterMetadataOverrides: [{ sourceSha256: `sha256:${"8".repeat(64)}`, binning: [1, 1], gain: 0, biasIncluded: false }] }));
   });
 
-  it("requires saving or discarding actual advanced edits before continuing", async () => {
-    native.useMasterDark = true; render(<App />); await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
-    await userEvent.click(await screen.findByRole("button", { name: /复核 1 张 Light/ }));
+  it("requires saving or discarding actual advanced edits before starting", async () => {
+    native.lightCount = 2; native.useMasterDark = true; render(<App />); await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
+    await waitFor(() => expect(native.inspectCalibration).toHaveBeenCalled());
+    await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled());
     await userEvent.click(await screen.findByText("校准高级设置"));
     const form = screen.getByText("MASTER_DARK").closest("article")!;
     await userEvent.type(within(form).getByLabelText("偏置值"), "30");
-    expect(screen.getByRole("button", { name: /继续处理/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
+    expect(screen.getByText("保存高级校准修改，或恢复文件设置。")).toBeInTheDocument();
     await userEvent.click(within(form).getByRole("button", { name: "恢复文件设置" }));
     expect(within(form).getByLabelText("偏置值")).toHaveValue(null);
-    expect(screen.getByRole("button", { name: /继续处理/ })).toBeEnabled();
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled());
   });
 
   it("surfaces inventory errors without claiming success", async () => {
@@ -500,31 +546,27 @@ describe("native product workflow", () => {
   it("shows real per-Light REVIEW evidence and sends a content-bound single-panel approval", async () => {
     native.lightCount = 2; native.reviewFirst = true; render(<App />);
     await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
-    await userEvent.click(await screen.findByRole("button", { name: /复核 2 张 Light/ }));
+    await userEvent.click(await screen.findByRole("button", { name: /先看筛片结果（2 张 Light/ }));
     expect(screen.getByRole("cell", { name: "可用 1 / 导入 2 · 至少 2" })).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: /继续处理/ }));
     await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
-    expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeDisabled();
-    await userEvent.click(screen.getByRole("button", { name: "返回复核排除项或补充可用素材" }));
+    expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
     await userEvent.click(screen.getByRole("button", { name: "人工复核后批准纳入" }));
     expect(screen.getByRole("cell", { name: "可用 2 / 导入 2 · 至少 2" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "已批准（内容绑定）" }));
     expect(screen.getByRole("cell", { name: "可用 1 / 导入 2 · 至少 2" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "人工复核后批准纳入" }));
-    await userEvent.click(screen.getByRole("button", { name: /继续处理/ }));
-    await waitFor(() => expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeEnabled()); await userEvent.click(screen.getByRole("button", { name: /开始端到端处理/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled()); await userEvent.click(screen.getByRole("button", { name: /开始处理/ }));
     expect(native.startRun).toHaveBeenCalledWith(expect.objectContaining({ reviewSelections: [{ sourceSha256: `sha256:${"9".repeat(64)}`, gatePolicyDigest: `sha256:${"7".repeat(64)}` }] }));
   });
 
   it("blocks a one-Light panel before starting and names the missing admission count", async () => {
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
-    await userEvent.click(await screen.findByRole("button", { name: /复核 1 张 Light/ }));
+    await userEvent.click(await screen.findByRole("button", { name: /先看筛片结果（1 张 Light/ }));
     expect(screen.getByRole("cell", { name: "可用 1 / 导入 1 · 至少 2" })).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: /继续处理/ }));
     await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
     expect(screen.getByText("盾牌座 Panel 1 × R：当前可用 1 张 Light，至少需要 2 张。")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
     expect(native.startRun).not.toHaveBeenCalled();
   });
 
@@ -545,8 +587,11 @@ describe("native product workflow", () => {
     await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
     expect(screen.getByText("盾牌座 Panel 1 × B：当前可用 1 张 Light，至少需要 2 张。")).toBeInTheDocument();
     expect(screen.queryByText(/× L：当前可用/)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
     expect(native.startRun).not.toHaveBeenCalled();
+    // The review page is where the blocker is shown; the import page's
+    // blocker list links back to it.
+    await userEvent.click(screen.getByRole("button", { name: "返回" }));
     await userEvent.click(screen.getByRole("button", { name: "返回复核排除项或补充可用素材" }));
     expect(await screen.findByRole("heading", { name: "检查分组与真实筛片证据" })).toBeInTheDocument();
     expect(screen.getByRole("cell", { name: "可用 1 / 导入 2 · 至少 2" })).toBeInTheDocument();
@@ -569,9 +614,8 @@ describe("native product workflow", () => {
     render(<App />);
     await reachRecipe();
     await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
-    expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
     expect(screen.getByText("盾牌座 Panel 1 × R：当前可用 1 张 Light，至少需要 2 张。")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "返回复核排除项或补充可用素材" }));
     expect(screen.queryByRole("button", { name: "人工复核后批准纳入" })).not.toBeInTheDocument();
     expect(native.startRun).not.toHaveBeenCalled();
   });
@@ -585,11 +629,11 @@ describe("native run elapsed time", () => {
     render(<App />);
     await reachRecipe();
     await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled());
   };
   const start = async () => {
-    await waitFor(() => expect(screen.getByRole("button", { name: /开始端到端处理/ })).toBeEnabled());
-    await userEvent.click(screen.getByRole("button", { name: /开始端到端处理/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled());
+    await userEvent.click(screen.getByRole("button", { name: /开始处理/ }));
   };
 
   beforeEach(() => vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "performance", "Date"] }));
@@ -646,7 +690,7 @@ describe("native run elapsed time", () => {
     expect(screen.getByRole("timer", { name: "总用时" })).toHaveTextContent("00:00:04");
     await advance(10_000);
     expect(elapsed()).toHaveTextContent("00:00:04");
-    await userEvent.click(screen.getByRole("button", { name: "返回设置" }));
+    await userEvent.click(screen.getByRole("button", { name: "返回导入" }));
     native.startRun.mockResolvedValueOnce({ jobId: "run-native-2", accepted: true, executionMode: "native", outputDirectory: "/结果/retry" });
     await start();
     expect(elapsed()).toHaveTextContent("00:00:00");

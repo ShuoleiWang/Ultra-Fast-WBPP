@@ -1,11 +1,16 @@
 """Entry point for the frozen worker and one-shot controller helpers."""
 
 import json
+import multiprocessing
 import platform
 import sys
 
 
 def main() -> int:
+    # Quality-gate measurement spawns worker processes from this same frozen
+    # executable; a child carries ``--multiprocessing-fork`` and must run its
+    # task loop here instead of the command line.
+    multiprocessing.freeze_support()
     # A no-argument launch retains the long-running externalBin behavior.  GUI
     # plan construction uses the same signed/frozen binary with
     # ``controller-plan ...`` and therefore cannot drift from worker semantics.

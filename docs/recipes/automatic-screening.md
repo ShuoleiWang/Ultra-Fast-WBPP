@@ -8,7 +8,9 @@ Advanced settings are for unusual calibration inputs. An override can change jus
 
 ## Automatic Light screening
 
-The desktop invokes the same pixel measurement, stellar registration and quality-gate implementation used by scientific execution. It measures images rather than trusting a filename's HFR alone.
+Screening is part of every run: the quality-control stage measures and gates every Light, the excluded frames are listed with the result (name, disposition, the gate's reasons and a bounded preview, from the receipt's `execution.screening` and the run's `qc/review/` previews), and nothing has to be clicked before starting. The desktop's screening review is optional: it invokes the same pixel measurement, stellar registration and quality-gate implementation used by scientific execution, so its verdicts match the run's, and it is where a REVIEW frame can be inspected and approved before processing. It measures images rather than trusting a filename's HFR alone.
+
+Measurement and per-frame analysis run in spawned worker processes (`lightframeqc.parallel`; `LIGHTFRAMEQC_PARALLELISM=threads` forces threads). Every frame is computed by the same function either way, so the executor never changes a value; on eight cores the 67-frame NGC 7331 screening dropped from 22 s to 10 s.
 
 Star candidates need at least three above-threshold pixels in SEP's unfiltered image (`minimum_source_support_pixels`), in addition to the existing five-pixel filtered detection area. This prevents a single hot pixel expanded by the detection kernel from behaving like a star. The original detections remain available for fragmented-trail analysis. Distributed, aligned chains of bright split detections provide independent trailing evidence before reference selection; their fragments cannot win the reference ranking merely by inflating source counts. A reference must also have independent geometric support.
 
@@ -50,7 +52,7 @@ Dark matching uses exposure and a temperature window; the current policy permits
 
 Meridian flips are handled by the estimated source-to-reference transform, not by a separate image-rotation pass or by assuming that a mount-side tag proves an exact half-turn. Exact 180-degree transforms with integer translation use bounded pixel-copy reversal, with only floating-point roundoff tolerated across the full image corners. Real angular deviations, shear and subpixel dithering continue through a single configured resampling pass. The crop mask and recorded interpolation method follow the same classification. Ordinary warps retain bounded multi-frame CPU parallelism. The current affine pixel registration is not a claim of equivalence to PixInsight's optional thin-plate-spline distortion correction.
 
-The desktop runtime clock starts when processing is requested, includes native launch time, and excludes the separate Review screening step. It shows HH:MM:SS while running and retains total time after completion, failure or confirmed cancellation. Channel changes do not reset it; a rejected cancellation does not imply that processing has stopped.
+The desktop runtime clock starts when processing is requested, includes native launch time, and excludes the optional screening review. It shows HH:MM:SS while running and retains total time after completion, failure or confirmed cancellation. Channel changes do not reset it; a rejected cancellation does not imply that processing has stopped.
 
 - Same-profile Lights from multiple dates can share compatible calibration inputs. The retained private 38-Light B fixture spans four capture dates and matches 20 Raw Flats and supplied Bias/Dark masters.
 - A general library spanning different cameras, gains, readout settings or incompatible temperatures is not automatically partitioned into per-Light calibration choices. Unsupported mixtures are reported before execution.

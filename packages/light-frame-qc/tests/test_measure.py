@@ -361,6 +361,69 @@ def test_measure_paths_preserves_order_supports_workers_and_audits_failures(
     assert not (tmp_path / "output").exists()
 
 
+def test_measure_paths_process_pool_matches_threads_and_reports_parallelism(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lightframeqc.parallel import choose_parallelism
+
+    frames = []
+    for index in range(3):
+        frame = tmp_path / f"frame-{index}.fits"
+        _write_star_field(frame, seed=10 + index)
+        frames.append(frame)
+    unsupported = tmp_path / "bad.txt"
+    unsupported.write_text("bad input", encoding="utf-8")
+    frames.insert(1, unsupported)
+    config = replace(DEFAULT_CONFIG, preview_long_edge=256, make_thumbnails=True)
+
+    monkeypatch.setenv("LIGHTFRAMEQC_PARALLELISM", "threads")
+    thread_stats: dict[str, object] = {}
+    by_threads = measure_paths(frames, tmp_path / "threads", config, workers=2, stats=thread_stats)
+    monkeypatch.setenv("LIGHTFRAMEQC_PARALLELISM", "processes")
+    process_stats: dict[str, object] = {}
+    by_processes = measure_paths(frames, tmp_path / "processes", config, workers=2, stats=process_stats)
+
+    assert thread_stats == {"parallelism": "threads", "workers": 2}
+    assert process_stats == {"parallelism": "processes", "workers": 2}
+    assert [item.status for item in by_processes] == ["MEASURED", "ERROR", "MEASURED", "MEASURED"]
+    for left, right in zip(by_threads, by_processes):
+        assert left.metadata.path == right.metadata.path
+        assert left.stars == right.stars
+        assert left.background_grid == right.background_grid
+        assert left.texture_grid == right.texture_grid
+        assert left.image_median == right.image_median and left.image_mad == right.image_mad
+        assert left.error_code == right.error_code
+        assert (left.thumbnail_path is None) == (right.thumbnail_path is None)
+    assert all(Path(item.thumbnail_path).is_file() for item in by_processes if item.status == "MEASURED")
+
+    monkeypatch.delenv("LIGHTFRAMEQC_PARALLELISM")
+    assert choose_parallelism(1, 100) == "sequential"
+    assert choose_parallelism(8, 1) == "sequential"
+    assert choose_parallelism(8, 4) == "threads"
+    assert choose_parallelism(8, 12) == "processes"
+
+
+def test_measure_paths_falls_back_to_threads_when_processes_cannot_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lightframeqc import parallel as parallel_module
+
+    frame = tmp_path / "frame.fits"
+    _write_star_field(frame, seed=21)
+    config = replace(DEFAULT_CONFIG, preview_long_edge=256, make_thumbnails=False)
+    monkeypatch.setenv("LIGHTFRAMEQC_PARALLELISM", "processes")
+
+    class RefusingPool:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            raise OSError("process table exhausted")
+
+    monkeypatch.setattr(parallel_module, "ProcessPoolExecutor", RefusingPool)
+    stats: dict[str, object] = {}
+    results = measure_paths([frame, frame], tmp_path / "out", config, workers=2, stats=stats)
+    assert stats == {"parallelism": "threads", "workers": 2}
+    assert [item.status for item in results] == ["MEASURED", "MEASURED"]
+
+
 def test_measure_paths_writes_unique_thumbnails_under_output_directory(
     tmp_path: Path,
 ) -> None:

@@ -24,6 +24,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import struct
@@ -69,6 +70,10 @@ class ColorProductRequest:
     wcs_tolerance_pixels: float = 0.05
     preview_max_long_edge: int = 2048
     asinh_softness: float = 12.0
+    # File stem of the FITS cube and both previews; ``None`` picks ``RGB`` or
+    # ``LRGB``.  PixInsight labels an opened image with its file stem, so the
+    # default names the view after the channels it holds.
+    product_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,6 +368,17 @@ def _validate_request(request: ColorProductRequest) -> tuple[Path, float, int, f
     return output, tolerance, edge, softness
 
 
+def _product_name(request: ColorProductRequest) -> str:
+    name = request.product_name
+    if name is None:
+        return "LRGB" if request.luminance_path is not None else "RGB"
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,63}", name):
+        raise ColorProductError(
+            "PRODUCT_NAME_INVALID", "product_name must be 1-64 letters, digits, '_' or '-'"
+        )
+    return name
+
+
 def _matched_luminance_rgb(
     rgb: NDArray[np.float32], luminance: NDArray[np.float32]
 ) -> tuple[NDArray[np.float32], dict[str, Any]]:
@@ -621,6 +637,7 @@ def build_color_product(
     """Build and atomically publish a solved linear RGB product and previews."""
 
     output, tolerance, preview_edge, softness = _validate_request(request)
+    product_name = _product_name(request)
     values = {"R": request.red_path, "G": request.green_path, "B": request.blue_path}
     if request.luminance_path is not None:
         values["L"] = request.luminance_path
@@ -649,9 +666,9 @@ def build_color_product(
         raise ColorProductError("OUTPUT_EXISTS", "refusing to overwrite output directory", path=str(output))
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.staging-", dir=output.parent))
     try:
-        linear = staging / "linear-rgb.fits"
-        tiff = staging / "preview-16bit.tiff"
-        png = staging / "preview-16bit.png"
+        linear = staging / f"{product_name}.fits"
+        tiff = staging / f"{product_name}.tiff"
+        png = staging / f"{product_name}.png"
         receipt_path = staging / "receipt.json"
         _write_linear_fits(linear, rgb, reference, "L" in channels)
         preview_rgb, block_size = _block_mean_rgb(rgb, preview_edge)
@@ -716,9 +733,9 @@ def build_color_product(
 
     return ColorProductResult(
         output_directory=str(output),
-        linear_rgb_path=str(output / "linear-rgb.fits"),
-        preview_tiff_path=str(output / "preview-16bit.tiff"),
-        preview_png_path=str(output / "preview-16bit.png"),
+        linear_rgb_path=str(output / linear.name),
+        preview_tiff_path=str(output / tiff.name),
+        preview_png_path=str(output / png.name),
         receipt_path=str(output / "receipt.json"),
         receipt=receipt,
     )

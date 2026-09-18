@@ -42,6 +42,13 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 import warnings
 
 from .quality_cache import quality_cache_directory
+from .review_preview import (
+    MAX_REVIEW_PREVIEWS,
+    MAX_TOTAL_PREVIEW_BYTES,
+    REVIEW_DIRECTORY,
+    bounded_review_preview,
+    review_preview_name,
+)
 
 from astropy.io import fits
 from astropy.wcs import WCS
@@ -1311,12 +1318,79 @@ def _validate_request(request: E2ERequest) -> None:
         )
 
 
+def _write_review_previews(
+    staging: Path, qc_dir: Path, results: Sequence[FrameResult]
+) -> dict[str, str]:
+    """Bounded previews of every frame the gate did not pass, keyed by path.
+
+    The desktop shows them with the run's result so an excluded frame can be
+    judged without opening the raw file; values are paths relative to the run.
+    """
+
+    previews: dict[str, str] = {}
+    total = 0
+    for index, result in enumerate(results):
+        gate = result.quality_gate
+        if gate is None or gate.disposition is GateDisposition.PASS or result.thumbnail_path is None:
+            continue
+        if len(previews) >= MAX_REVIEW_PREVIEWS:
+            break
+        data = bounded_review_preview(result.thumbnail_path)
+        if data is None or total + len(data) > MAX_TOTAL_PREVIEW_BYTES:
+            continue
+        destination = qc_dir / REVIEW_DIRECTORY / review_preview_name(index, result.path)
+        destination.parent.mkdir(exist_ok=True)
+        with destination.open("xb") as stream:
+            stream.write(data)
+        total += len(data)
+        previews[result.path] = destination.relative_to(staging).as_posix()
+    return previews
+
+
+def _screening_summary(
+    results: Sequence[FrameResult],
+    passed: Sequence[Path],
+    approved_review_paths: Sequence[str],
+    review_previews: Mapping[str, str],
+) -> dict[str, Any]:
+    """Counts plus the frames that needed a decision, for receipts and the desktop."""
+
+    counts = {disposition.value: 0 for disposition in GateDisposition}
+    frames: list[dict[str, Any]] = []
+    passed_set = {str(path) for path in passed}
+    for result in sorted(results, key=lambda item: item.path):
+        gate = result.quality_gate
+        disposition = gate.disposition.value if gate is not None else "HARD_FAIL"
+        counts[disposition] += 1
+        if gate is not None and gate.disposition is GateDisposition.PASS:
+            continue
+        resolved = str(Path(result.path).resolve(strict=True))
+        frames.append(
+            {
+                "path": resolved,
+                "disposition": disposition,
+                "admitted": resolved in passed_set or resolved in approved_review_paths,
+                "summary": gate.summary if gate is not None else "; ".join(result.reasons) or "not measured",
+                "evidence": [item.message for item in gate.evidence][:8] if gate is not None else list(result.reasons)[:8],
+                "starCount": result.star_count,
+                "reviewPreview": review_previews.get(result.path),
+            }
+        )
+    return {
+        "counts": counts,
+        "admitted": len(passed_set),
+        "excluded": len(results) - len(passed_set),
+        "frames": frames,
+    }
+
+
 def _qc_manifest(
     staging: Path,
     groups: Sequence[Mapping[str, Any]],
     results: Sequence[FrameResult],
     config: QcConfig,
     policy: GatePolicy,
+    review_previews: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     frame_payloads: list[dict[str, Any]] = []
     for result in results:
@@ -1324,9 +1398,10 @@ def _qc_manifest(
         thumbnail = payload.get("thumbnailPath")
         if isinstance(thumbnail, str):
             try:
-                payload["thumbnailPath"] = str(Path(thumbnail).relative_to(staging))
+                payload["thumbnailPath"] = Path(thumbnail).relative_to(staging).as_posix()
             except ValueError:
                 payload["thumbnailPath"] = None
+        payload["reviewPreviewPath"] = (review_previews or {}).get(result.path)
         frame_payloads.append(payload)
     counts = {
         disposition.value: sum(
@@ -4131,6 +4206,7 @@ def _failure_result(
     solver: Mapping[str, Any],
     sources: Sequence[_SourceIdentity],
     callback: ProgressCallback | None,
+    screening: Mapping[str, Any] | None = None,
 ) -> E2EResult:
     private_work = staging / "work"
     if private_work.exists():
@@ -4163,6 +4239,7 @@ def _failure_result(
             "manifest": "qc/manifest.json",
             "passedLights": len(passed),
             "excludedLights": len(excluded),
+            **({"screening": dict(screening)} if screening is not None else {}),
         },
         "astrometry": {"status": "UNSOLVED", **dict(solver)},
         "artifacts": evidence_artifacts,
@@ -4332,26 +4409,35 @@ def run_e2e(
         qc_dir.mkdir()
         qc_timings: dict[str, float] = {}
         qc_cache_stats: dict[str, int] = {}
+        qc_measurement_stats: dict[str, Any] = {}
         qc_started = perf_counter()
         measurements = measure_paths(
             [str(path) for path in lights],
             qc_dir,
             request.qc_config,
             workers=request.workers,
+            stats=qc_measurement_stats,
         )
         qc_timings["measurementSeconds"] = perf_counter() - qc_started
         _emit(progress, ProgressStage.QUALITY_CONTROL, "running", f"measured {len(measurements)} Light frames; analyzing star fields")
         qc_started = perf_counter()
+        qc_analysis_stats: dict[str, Any] = {}
         groups, frame_results = analyze_measurements(
             measurements, request.qc_config,
             cache_directory=quality_cache_directory(), cache_stats=qc_cache_stats,
+            workers=request.workers, stats=qc_analysis_stats,
         )
         qc_timings["analysisSeconds"] = perf_counter() - qc_started
         qc_started = perf_counter()
         evaluate_quality_gate(frame_results, measurements, request.gate_policy)
         qc_timings["gateSeconds"] = perf_counter() - qc_started
-        qc_manifest = _qc_manifest(staging, groups, frame_results, request.qc_config, request.gate_policy)
+        review_previews = _write_review_previews(staging, qc_dir, frame_results)
+        qc_manifest = _qc_manifest(
+            staging, groups, frame_results, request.qc_config, request.gate_policy, review_previews
+        )
         qc_manifest["timings"] = qc_timings
+        qc_manifest["measurement"] = qc_measurement_stats
+        qc_manifest["analysis"] = qc_analysis_stats
         qc_manifest["analysisCache"] = qc_cache_stats
         approved_review_paths, approval_request_digest, approval_evidence = (
             _apply_review_approvals(
@@ -4382,6 +4468,7 @@ def run_e2e(
         )
         passed_set = set(passed)
         excluded = tuple(path for path in lights if path not in passed_set)
+        screening = _screening_summary(frame_results, passed, approved_review_paths, review_previews)
         passed_results = [
             result
             for result in frame_results
@@ -4423,6 +4510,7 @@ def run_e2e(
                 solver={"attempts": {}},
                 sources=identities,
                 callback=progress,
+                screening=screening,
             )
             published = True
             return result
@@ -4871,6 +4959,7 @@ def run_e2e(
                 "manifest": "qc/manifest.json",
                 "passedLights": len(passed),
                 "excludedLights": len(excluded),
+                "screening": screening,
             },
             "registration": {
                 "receipt": "receipts/registration.json",

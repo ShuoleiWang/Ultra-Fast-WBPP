@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import replace
 import base64
 import hashlib
-from io import BytesIO
 from pathlib import Path
 import tempfile
 from time import perf_counter
@@ -17,11 +16,16 @@ from lightframeqc.measure import measure_paths
 from lightframeqc.models import GateDisposition, FrameRole
 from lightframeqc.quality_gate import GatePolicy, evaluate_quality_gate
 from lightframeqc.readers import probe_frame_metadata
-from PIL import Image
 
 from .hardware import detect_hardware
 from .performance_profile import select_execution_tuning
 from .quality_cache import quality_cache_directory
+from .review_preview import (
+    MAX_PREVIEW_BYTES as _MAX_PREVIEW_BYTES,
+    MAX_REVIEW_PREVIEWS as _MAX_REVIEW_PREVIEWS,
+    MAX_TOTAL_PREVIEW_BYTES as _MAX_TOTAL_PREVIEW_BYTES,
+    bounded_review_preview as _bounded_preview,
+)
 
 
 class QualityPreflightError(RuntimeError):
@@ -30,30 +34,6 @@ class QualityPreflightError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         super().__init__(message)
-
-
-_MAX_REVIEW_PREVIEWS = 128
-_MAX_PREVIEW_BYTES = 512 * 1024
-_MAX_TOTAL_PREVIEW_BYTES = 24 * 1024 * 1024
-
-
-def _bounded_preview(path: str | None) -> bytes | None:
-    if path is None:
-        return None
-    try:
-        with Image.open(path) as source:
-            image = source.convert("L")
-            for edge in (640, 512, 384, 256):
-                candidate = image.copy()
-                candidate.thumbnail((edge, edge), Image.Resampling.LANCZOS)
-                stream = BytesIO()
-                candidate.save(stream, format="PNG", optimize=False, compress_level=3)
-                value = stream.getvalue()
-                if len(value) <= _MAX_PREVIEW_BYTES:
-                    return value
-    except (OSError, ValueError):
-        return None
-    return None
 
 
 def inspect_light_quality(
@@ -104,15 +84,18 @@ def inspect_light_quality(
     policy = GatePolicy()
     timings: dict[str, float] = {}
     cache_stats: dict[str, int] = {}
+    measurement_stats: dict[str, Any] = {}
     with tempfile.TemporaryDirectory(prefix="ultra-fast-wbpp-qc-") as temporary:
         started = perf_counter()
         measurements = measure_paths(
-            canonical, temporary, config, workers=selected_workers
+            canonical, temporary, config, workers=selected_workers, stats=measurement_stats
         )
         timings["measurementSeconds"] = perf_counter() - started
         started = perf_counter()
+        analysis_stats: dict[str, Any] = {}
         _groups, results = analyze_measurements(
-            measurements, config, cache_directory=quality_cache_directory(), cache_stats=cache_stats
+            measurements, config, cache_directory=quality_cache_directory(), cache_stats=cache_stats,
+            workers=selected_workers, stats=analysis_stats,
         )
         timings["analysisSeconds"] = perf_counter() - started
         started = perf_counter()
@@ -177,6 +160,8 @@ def inspect_light_quality(
         "counts": counts,
         "frames": frames,
         "timings": timings,
+        "measurement": measurement_stats,
+        "analysis": analysis_stats,
         "analysisCache": cache_stats,
     }
 

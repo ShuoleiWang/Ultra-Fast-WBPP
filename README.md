@@ -34,9 +34,9 @@ make bootstrap
 make desktop-dev
 ```
 
-1. **Import** all Light and calibration folders. Check detected frame types, filters, and calibration matches.
-2. **Review** the Light quality results and inspect questionable frames.
-3. **Process** into a new output location. Open the FITS masters and previews after completion.
+1. **Import** all Light and calibration folders. Check detected frame types, filters, and calibration matches, choose the output folder (remembered for next time) and start.
+2. **Process**: Light screening, calibration, registration, integration and plate solving run as one job.
+3. **Result**: the FITS masters and previews, plus which Lights were excluded and why. To inspect questionable frames before the run, open the optional screening review on the import page and approve REVIEW frames there.
 
 The interface supports English and 简体中文. Existing output directories are never replaced. See [N.I.N.A. inputs](docs/recipes/nina-mono.md) and [calibration conventions](docs/recipes/calibration.md) for missing metadata and master reuse.
 

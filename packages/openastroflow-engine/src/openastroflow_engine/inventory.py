@@ -173,6 +173,24 @@ def _normalized_roots(
     return tuple(sorted(roots, key=lambda path: os.path.normcase(str(path))))
 
 
+def inventory_manifest_sha256(inventory: ProjectInventory) -> str:
+    """Return the raw SHA-256 of the canonical inventory snapshot.
+
+    The digest includes resolved paths, role/metadata probes, source stat
+    identities, and inventory issues.  Pixel execution performs stronger full
+    content hashes before publication; this manifest digest binds planning.
+    """
+
+    encoded = json.dumps(
+        inventory.serializable(),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def inventory_project(
     inputs: str | os.PathLike[str] | Iterable[str | os.PathLike[str]],
     *,
