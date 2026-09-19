@@ -484,6 +484,57 @@ void TestMaskedMeanAccumulatesInFrameOrder()
             "pixel without accepted samples is NaN; NaN inputs are not rejections" );
 }
 
+void TestMaskedMeanSampleWeightsScaleContributions()
+{
+   constexpr std::uint32_t frames = 2;
+   constexpr std::uint32_t width = 2;
+   constexpr std::uint32_t rows = 1;
+   constexpr std::size_t pixels = width*rows;
+   const std::array<float, frames*pixels> samples{ 1.0F, 3.0F, 5.0F, 7.0F };
+   const std::array<std::uint8_t, frames*pixels> accepted{ 1, 1, 1, 1 };
+   const std::array<double, frames> weights{ 0.5, 0.5 };
+   const std::array<float, frames*pixels> sampleWeights{ 1.0F, 0.0F, 1.0F, 1.0F };
+   MaskedMeanRequest request;
+   request.frameMajorSamples = samples;
+   request.frameMajorAccepted = accepted;
+   request.frameWeights = weights;
+   request.frameCount = frames;
+   request.rowCount = rows;
+   request.width = width;
+   request.threads = 1;
+   std::vector<float> plain( pixels );
+   std::vector<std::uint16_t> acceptedCount( pixels );
+   std::vector<std::uint16_t> rejectedCount( pixels );
+   MaskedWeightedMean( request, MaskedMeanOutput{ plain, acceptedCount, rejectedCount } );
+   request.frameMajorSampleWeights = sampleWeights;
+   std::vector<float> weighted( pixels );
+   MaskedWeightedMean( request, MaskedMeanOutput{ weighted, acceptedCount, rejectedCount } );
+   Require( plain[0] == 3.0F && plain[1] == 5.0F, "unweighted means" );
+   Require( weighted[0] == 3.0F,
+            "a sample weight of one leaves the contribution unchanged" );
+   Require( weighted[1] == 7.0F,
+            "a zero sample weight removes the sample from the mean" );
+   Require( acceptedCount[1] == 2,
+            "sample weights do not change the accepted-sample count" );
+   std::array<float, frames*pixels> zero{};
+   request.frameMajorSampleWeights = zero;
+   MaskedWeightedMean( request, MaskedMeanOutput{ weighted, acceptedCount, rejectedCount } );
+   Require( std::isnan( weighted[0] ) && std::isnan( weighted[1] ),
+            "pixels without positive effective weight are NaN" );
+   std::array<float, 3> wrong{ 1.0F, 1.0F, 1.0F };
+   request.frameMajorSampleWeights = wrong;
+   bool rejected = false;
+   try
+   {
+      MaskedWeightedMean( request, MaskedMeanOutput{ weighted, acceptedCount, rejectedCount } );
+   }
+   catch ( const std::invalid_argument& )
+   {
+      rejected = true;
+   }
+   Require( rejected, "sample weight geometry mismatch must be rejected" );
+}
+
 void TestTileOffsetsMatchReferenceStatistics()
 {
    // Two tiles: a clean linear relation with an outlier, and one that is too
@@ -891,6 +942,7 @@ int main()
       TestMadRejectionMatchesReferenceSemantics();
       TestMadRejectionScaleModelMatchesReferenceRule();
       TestMaskedMeanAccumulatesInFrameOrder();
+      TestMaskedMeanSampleWeightsScaleContributions();
       TestTileOffsetsMatchReferenceStatistics();
       TestRadonPeaksFindTheDyadicLineAtEveryLevel();
       TestCAbiRoundTrip();

@@ -61,7 +61,7 @@ contracts; it is not the transport used for every desktop operation. See
 ## Scientific work
 
 1. Inventory frames and interpret calibration metadata.
-2. Measure Light quality and exclude `HARD_FAIL` and unapproved `REVIEW` frames.
+2. Measure Light quality and exclude `HARD_FAIL` and unapproved `REVIEW` frames (or, under an unattended `selection.policy`, decide and weight every frame from the same evidence).
 3. Build raw calibration masters or validate supplied masters; calibrate Lights.
 4. Estimate transforms and register accepted frames. Every filter of a
    target registers onto one reference frame with a projective model fitted
@@ -97,6 +97,41 @@ LocalNormalization is optional and is not equivalent to PixInsight's algorithm;
 unsafe local models retain explicit fallback evidence. Final images may still
 need background modeling. Scientific thresholds must not change merely to make
 an acceptance test pass.
+
+### Unattended Light selection
+
+[`openastroflow_engine.selection`](../packages/openastroflow-engine/src/openastroflow_engine/selection/)
+turns the Light Frame QC evidence into per-frame decisions without a human
+review gate when a recipe sets `selection.policy` to `unattended-v1` (the
+default `legacy-gate` keeps the historical PASS-only admission). Guards
+exclude frames the pipeline cannot use (hard gate failures, failed
+registration, transparency below the normalization floor, extreme extinction);
+REVIEW codes that only mean "not enough evidence" keep the frame at reduced
+weight; defect codes enter a gray zone whose PSF cut-offs follow the chosen
+priority (depth, balanced, resolution). The PSF features come from Light
+Frame QC's native-resolution star stamps (`lightframeqc.native_psf`:
+half-flux radius, FWHM, wing fraction) and fall back to the preview FWHM when
+too few stars qualify. The decision's confidence, times a PSF factor for the
+chosen priority, scales the frame's registration quality weight. During
+integration a tile observer computes each frame's leave-one-out counterfactual
+on 64-row statistics tiles (block-noise depth, second-order background
+residual, FWHM proxy, tile bootstrap) so `qc/selection.json` records whether
+the master would be better without the frame. A frame the counterfactual
+confirms harmful (enough tiles, interval beyond the threshold, outlier against
+its group) is removed and the group is integrated again, at most three passes
+and within the soft-exclusion guard; normalization references and the
+two-frame panel minimum are never removed, and the receipt's `reintegration`
+block lists what was removed and why the rest was kept. The pixels of the
+final pass are the product; earlier passes are deleted. With
+`selection.regionWeights` the QC grid of a frame with a blocked or dimmed
+region becomes a per-frame weight map (`selection/region.py`) that the
+weighted mean applies sample by sample (frame expressions carry the node grid;
+the native masked-mean V2 kernel and the NumPy reference agree bit for bit),
+so the clean part of a partly occluded or partly clouded frame is used and the
+rest contributes nothing; the coverage map then reports the effective weight
+fraction. See
+[frame-selection-plan.md](frame-selection-plan.md) and
+[frame-selection-implementation.md](frame-selection-implementation.md).
 
 ## Performance
 

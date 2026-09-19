@@ -771,6 +771,10 @@ void MaskedMeanRequest::Validate() const
    for ( double weight : frameWeights )
       if ( !std::isfinite( weight ) )
          throw std::invalid_argument( "masked mean weights must be finite" );
+   if ( !frameMajorSampleWeights.empty()
+     && frameMajorSampleWeights.size() != samples )
+      throw std::invalid_argument(
+         "masked mean sample weight count differs from the geometry" );
 }
 
 std::size_t MaskedMeanRequest::TilePixels() const
@@ -791,6 +795,8 @@ void MaskedWeightedMean( const MaskedMeanRequest& request,
    const float* samples = request.frameMajorSamples.data();
    const std::uint8_t* accepted = request.frameMajorAccepted.data();
    const double* weights = request.frameWeights.data();
+   const float* sampleWeights = request.frameMajorSampleWeights.empty()
+      ? nullptr : request.frameMajorSampleWeights.data();
    const std::uint32_t frames = request.frameCount;
    const float nan = std::numeric_limits<float>::quiet_NaN();
    float* integrated = output.integrated.data();
@@ -820,14 +826,20 @@ void MaskedWeightedMean( const MaskedMeanRequest& request,
                const float* row = samples + offset;
                const std::uint8_t* mask = accepted + offset;
                const double weight = weights[frame];
+               const float* rowWeights =
+                  sampleWeights == nullptr ? nullptr : sampleWeights + offset;
                for ( std::size_t i = 0; i < count; ++i )
                {
                   const float value = row[i];
                   const bool isAccepted = mask[i] != 0;
+                  // Without sample weights this is exactly the previous
+                  // arithmetic (effective == weight).
+                  const double effective = rowWeights == nullptr
+                     ? weight : weight*static_cast<double>( rowWeights[i] );
                   const double term = isAccepted
-                     ? static_cast<double>( value )*weight : 0.0;
+                     ? static_cast<double>( value )*effective : 0.0;
                   numerator[i] = numerator[i] + term;
-                  denominator[i] = denominator[i] + (isAccepted ? weight : 0.0);
+                  denominator[i] = denominator[i] + (isAccepted ? effective : 0.0);
                   if ( isAccepted )
                      ++acceptedCount[i];
                   else if ( std::isfinite( value ) )

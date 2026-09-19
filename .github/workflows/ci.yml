@@ -59,6 +59,7 @@ jobs:
           packages/openastroflow-engine/tests
           tests
       - name: Enforce public-tree boundary
+        shell: bash
         run: |
           python scripts/check_public_tree.py .
           python scripts/check_local_links.py .

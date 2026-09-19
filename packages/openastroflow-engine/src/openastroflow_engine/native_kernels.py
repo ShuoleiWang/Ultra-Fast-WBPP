@@ -194,6 +194,14 @@ class _MeanRequestV1(ctypes.Structure):
     ]
 
 
+class _MeanRequestV2(ctypes.Structure):
+    _fields_ = [
+        *_MeanRequestV1._fields_,
+        ("frame_major_sample_weights", ctypes.POINTER(ctypes.c_float)),
+        ("sample_weight_count", ctypes.c_size_t),
+    ]
+
+
 class _MeanOutputV1(ctypes.Structure):
     _fields_ = [
         ("struct_size", ctypes.c_uint32),
@@ -374,6 +382,16 @@ class NativeKernels:
             *error_arguments,
         ]
         library.oaf_native_cpu_masked_mean_v1.restype = ctypes.c_int
+        # Optional: per-sample weights (region weight maps); older libraries
+        # lack the symbol and callers fall back to the NumPy reduction.
+        self.has_sample_weight_support = hasattr(library, "oaf_native_cpu_masked_mean_v2")
+        if self.has_sample_weight_support:
+            library.oaf_native_cpu_masked_mean_v2.argtypes = [
+                ctypes.POINTER(_MeanRequestV2),
+                ctypes.POINTER(_MeanOutputV1),
+                *error_arguments,
+            ]
+            library.oaf_native_cpu_masked_mean_v2.restype = ctypes.c_int
         library.oaf_native_cpu_tile_offsets_v1.argtypes = [
             ctypes.POINTER(_TileOffsetRequestV1),
             ctypes.POINTER(_TileOffsetOutputV1),
@@ -601,8 +619,14 @@ class NativeKernels:
         weights: NDArray[np.float64],
         *,
         threads: int | None = None,
+        sample_weights: NDArray[Any] | None = None,
     ) -> tuple[NDArray[np.float32], NDArray[np.uint16], NDArray[np.uint16]]:
-        """Return (integrated, accepted_count, rejected_count) for one tile."""
+        """Return (integrated, accepted_count, rejected_count) for one tile.
+
+        ``sample_weights`` (frame-major Float32, the layout of ``samples``)
+        multiplies each frame weight per sample; it requires a library with
+        the V2 entry point (``has_sample_weight_support``).
+        """
 
         values = np.ascontiguousarray(samples, dtype=np.float32)
         if values.ndim != 3:
@@ -618,8 +642,17 @@ class NativeKernels:
         frames, rows, width = values.shape
         if frame_weights.size != frames:
             raise ValueError("masked mean weight count differs from the frame count")
-        request = _MeanRequestV1()
-        request.struct_size = ctypes.sizeof(_MeanRequestV1)
+        sample_weight_values: NDArray[np.float32] | None = None
+        if sample_weights is not None:
+            if not getattr(self, "has_sample_weight_support", False):
+                raise NativeKernelError(
+                    "the native library has no per-sample weight entry point (masked mean V2)"
+                )
+            sample_weight_values = np.ascontiguousarray(sample_weights, dtype=np.float32)
+            if sample_weight_values.shape != values.shape:
+                raise ValueError("masked mean sample weights must match the samples")
+        request = _MeanRequestV2() if sample_weight_values is not None else _MeanRequestV1()
+        request.struct_size = ctypes.sizeof(type(request))
         request.frame_count = int(frames)
         request.row_count = int(rows)
         request.width = int(width)
@@ -630,6 +663,11 @@ class NativeKernels:
         request.accepted_count = mask.size
         request.frame_weights = frame_weights.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
         request.weight_count = frame_weights.size
+        if sample_weight_values is not None:
+            request.frame_major_sample_weights = sample_weight_values.ctypes.data_as(
+                ctypes.POINTER(ctypes.c_float)
+            )
+            request.sample_weight_count = sample_weight_values.size
         integrated = np.empty((rows, width), dtype=np.float32)
         accepted_count = np.empty((rows, width), dtype=np.uint16)
         rejected_count = np.empty((rows, width), dtype=np.uint16)
@@ -644,8 +682,13 @@ class NativeKernels:
         )
         output.pixel_capacity = integrated.size
         error = ctypes.create_string_buffer(_ERROR_BYTES)
+        entry = (
+            self._library.oaf_native_cpu_masked_mean_v2
+            if sample_weight_values is not None
+            else self._library.oaf_native_cpu_masked_mean_v1
+        )
         status = int(
-            self._library.oaf_native_cpu_masked_mean_v1(
+            entry(
                 ctypes.byref(request),
                 ctypes.byref(output),
                 error,

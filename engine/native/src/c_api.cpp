@@ -814,6 +814,72 @@ extern "C" int oaf_native_cpu_masked_mean_v1(
       "unknown native masked mean failure" );
 }
 
+extern "C" int oaf_native_cpu_masked_mean_v2(
+   const OafNativeMaskedMeanRequestV2* request,
+   OafNativeMaskedMeanOutputV1* output,
+   char* error_message,
+   size_t error_message_capacity )
+{
+   if ( request == nullptr || output == nullptr )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "request and output are required" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   if ( request->struct_size != sizeof( OafNativeMaskedMeanRequestV2 )
+     || output->struct_size != sizeof( OafNativeMaskedMeanOutputV1 )
+     || request->frame_major_samples == nullptr
+     || request->frame_major_accepted == nullptr
+     || request->frame_weights == nullptr
+     || (request->frame_major_sample_weights == nullptr
+         && request->sample_weight_count != 0) )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "masked mean V2 C ABI structure version or input buffer is invalid" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   const size_t pixels =
+      static_cast<size_t>( request->row_count )*request->width;
+   if ( pixels == 0 || output->pixel_capacity < pixels
+     || output->integrated == nullptr
+     || output->accepted_samples == nullptr
+     || output->rejected_samples == nullptr )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "masked mean output capacity is smaller than the requested tile" );
+      return OAF_NATIVE_BUFFER_TOO_SMALL;
+   }
+   return GuardedKernelCall(
+      [&]()
+      {
+         using namespace openastroflow::native;
+         MaskedMeanRequest native;
+         native.frameMajorSamples = std::span<const float>(
+            request->frame_major_samples, request->sample_count );
+         native.frameMajorAccepted = std::span<const uint8_t>(
+            request->frame_major_accepted, request->accepted_count );
+         native.frameWeights = std::span<const double>(
+            request->frame_weights, request->weight_count );
+         if ( request->frame_major_sample_weights != nullptr )
+            native.frameMajorSampleWeights = std::span<const float>(
+               request->frame_major_sample_weights,
+               request->sample_weight_count );
+         native.frameCount = request->frame_count;
+         native.rowCount = request->row_count;
+         native.width = request->width;
+         native.threads = request->threads;
+         const MaskedMeanOutput destination{
+            std::span<float>( output->integrated, output->pixel_capacity ),
+            std::span<uint16_t>(
+               output->accepted_samples, output->pixel_capacity ),
+            std::span<uint16_t>(
+               output->rejected_samples, output->pixel_capacity ) };
+         MaskedWeightedMean( native, destination );
+      },
+      error_message, error_message_capacity,
+      "unknown native masked mean failure" );
+}
+
 extern "C" int oaf_native_cpu_tile_offsets_v1(
    const OafNativeTileOffsetRequestV1* request,
    OafNativeTileOffsetOutputV1* output,

@@ -317,6 +317,33 @@ OAF_NATIVE_API int oaf_native_cpu_masked_mean_v1(
    char* error_message,
    size_t error_message_capacity );
 
+/* V2 adds optional frame-major per-sample weights (Float32, the layout of the
+   samples; null = every sample weighs 1). The effective sample weight is the
+   Float64 product frame_weight*sample_weight. */
+typedef struct OafNativeMaskedMeanRequestV2
+{
+   uint32_t struct_size;
+   uint32_t frame_count;
+   uint32_t row_count;
+   uint32_t width;
+   uint32_t threads;
+   uint32_t reserved;
+   const float* frame_major_samples;
+   size_t sample_count;
+   const uint8_t* frame_major_accepted;
+   size_t accepted_count;
+   const double* frame_weights;
+   size_t weight_count;
+   const float* frame_major_sample_weights;
+   size_t sample_weight_count;
+} OafNativeMaskedMeanRequestV2;
+
+OAF_NATIVE_API int oaf_native_cpu_masked_mean_v2(
+   const OafNativeMaskedMeanRequestV2* request,
+   OafNativeMaskedMeanOutputV1* output,
+   char* error_message,
+   size_t error_message_capacity );
+
 typedef struct OafNativeTileOffsetRequestV1
 {
    uint32_t struct_size;
