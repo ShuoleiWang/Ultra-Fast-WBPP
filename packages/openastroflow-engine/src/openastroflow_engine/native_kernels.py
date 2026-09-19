@@ -6,7 +6,10 @@ NumPy reference arithmetic of the ordinary mono pipeline value for value:
 * ``warp_lanczos3``: normalized, domain-bounded 6x6 Lanczos-3 affine warp,
 * ``mad_rejection``: full-stack per-pixel median/MAD sigma clipping with the
   v2 scale model (row-pooled MAD, per-frame noise factors),
-* ``masked_weighted_mean``: exact Float64 frame-order weighted mean.
+* ``masked_weighted_mean``: exact Float64 frame-order weighted mean,
+* ``tile_offsets``: per-tile additive normalization offsets,
+* ``radon_line_peaks``: multi-scale fast-Radon line peaks of the transient
+  trail detector.
 
 Every caller keeps its NumPy implementation as the portable fallback.  The
 kernels are optional: a missing library, a library without the symbols, an ABI
@@ -38,6 +41,7 @@ WARP_KERNEL_ID = "native-cpu-lanczos3-warp-v2"
 MAD_KERNEL_ID = "native-cpu-mad-rejection-v2"
 MEAN_KERNEL_ID = "native-cpu-masked-mean-v1"
 TILE_OFFSET_KERNEL_ID = "native-cpu-tile-offsets-v1"
+RADON_KERNEL_ID = "native-cpu-radon-peaks-v1"
 _MAXIMUM_KERNEL_THREADS = 64
 
 
@@ -231,6 +235,48 @@ class _TileOffsetOutputV1(ctypes.Structure):
     ]
 
 
+class _RadonPeakRequestV1(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32),
+        ("width", ctypes.c_uint32),
+        ("height", ctypes.c_uint32),
+        ("size", ctypes.c_uint32),
+        ("minimum_rows", ctypes.c_uint32),
+        ("minimum_scale_samples", ctypes.c_uint32),
+        ("threads", ctypes.c_uint32),
+        ("detection_z", ctypes.c_float),
+        ("image", ctypes.POINTER(ctypes.c_float)),
+        ("image_count", ctypes.c_size_t),
+        ("weight", ctypes.POINTER(ctypes.c_uint8)),
+        ("weight_count", ctypes.c_size_t),
+        ("minimum_coverage", ctypes.c_double),
+        ("minimum_count", ctypes.c_double),
+    ]
+
+
+_RADON_PEAK_DTYPE = np.dtype(
+    [
+        ("level", np.uint32),
+        ("block", np.uint32),
+        ("shift_index", np.uint32),
+        ("column", np.uint32),
+        ("z", np.float32),
+        ("reserved", np.uint32),
+    ]
+)
+_RADON_PEAK_INITIAL_CAPACITY = 4096
+
+
+class _RadonPeakOutputV1(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32),
+        ("peaks", ctypes.c_void_p),
+        ("peak_capacity", ctypes.c_size_t),
+        ("peak_count", ctypes.c_size_t),
+    ]
+
+
 class _CpuFeaturesV1(ctypes.Structure):
     _fields_ = [
         ("struct_size", ctypes.c_uint32),
@@ -252,6 +298,7 @@ _REQUIRED_SYMBOLS = (
     "oaf_native_cpu_mad_rejection_v2",
     "oaf_native_cpu_masked_mean_v1",
     "oaf_native_cpu_tile_offsets_v1",
+    "oaf_native_cpu_radon_peaks_v1",
     "oaf_native_default_kernel_threads_v1",
 )
 
@@ -333,6 +380,12 @@ class NativeKernels:
             *error_arguments,
         ]
         library.oaf_native_cpu_tile_offsets_v1.restype = ctypes.c_int
+        library.oaf_native_cpu_radon_peaks_v1.argtypes = [
+            ctypes.POINTER(_RadonPeakRequestV1),
+            ctypes.POINTER(_RadonPeakOutputV1),
+            *error_arguments,
+        ]
+        library.oaf_native_cpu_radon_peaks_v1.restype = ctypes.c_int
         library.oaf_native_default_kernel_threads_v1.argtypes = []
         library.oaf_native_default_kernel_threads_v1.restype = ctypes.c_uint32
         self.hardware_threads = max(1, int(library.oaf_native_default_kernel_threads_v1()))
@@ -661,6 +714,82 @@ class NativeKernels:
             self._raise(error, status, "native tile offsets")
         return offset, count, residual_mad, valid.view(np.bool_)
 
+    def radon_line_peaks(
+        self,
+        image: NDArray[np.float32],
+        weight: NDArray[np.uint8],
+        *,
+        size: int,
+        minimum_rows: int,
+        detection_z: float,
+        minimum_coverage: float,
+        minimum_count: float,
+        minimum_scale_samples: int,
+        threads: int | None = None,
+    ) -> list[tuple[int, NDArray[np.intp], NDArray[np.intp], NDArray[np.intp], NDArray[np.float32]]]:
+        """Line peaks per dyadic level: (n, blocks, shift_index, columns, z).
+
+        ``image`` and ``weight`` are the ``(height, width)`` samples and 0/1
+        weights of one orientation; ``size`` is the dyadic canvas height.
+        Levels ascend and each level lists its peaks in row-major order,
+        exactly the ``np.nonzero`` order of the NumPy reference.
+        """
+
+        samples = np.ascontiguousarray(image, dtype=np.float32)
+        weights = np.ascontiguousarray(weight, dtype=np.uint8)
+        if samples.ndim != 2 or samples.shape != weights.shape:
+            raise ValueError("radon peaks need matching 2-D image and weight arrays")
+        height, width = samples.shape
+        request = _RadonPeakRequestV1()
+        request.struct_size = ctypes.sizeof(_RadonPeakRequestV1)
+        request.width = int(width)
+        request.height = int(height)
+        request.size = int(size)
+        request.minimum_rows = int(minimum_rows)
+        request.minimum_scale_samples = int(minimum_scale_samples)
+        request.threads = _thread_count(threads)
+        request.detection_z = float(detection_z)
+        request.image = samples.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        request.image_count = samples.size
+        request.weight = weights.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
+        request.weight_count = weights.size
+        request.minimum_coverage = float(minimum_coverage)
+        request.minimum_count = float(minimum_count)
+        capacity = _RADON_PEAK_INITIAL_CAPACITY
+        while True:
+            peaks = np.zeros(capacity, dtype=_RADON_PEAK_DTYPE)
+            output = _RadonPeakOutputV1()
+            output.struct_size = ctypes.sizeof(_RadonPeakOutputV1)
+            output.peaks = peaks.ctypes.data
+            output.peak_capacity = capacity
+            output.peak_count = 0
+            error = ctypes.create_string_buffer(_ERROR_BYTES)
+            status = int(
+                self._library.oaf_native_cpu_radon_peaks_v1(
+                    ctypes.byref(request), ctypes.byref(output), error, ctypes.sizeof(error)
+                )
+            )
+            if status == 2 and int(output.peak_count) > capacity:
+                capacity = int(output.peak_count)
+                continue
+            if status != 0:
+                self._raise(error, status, "native radon line peaks")
+            break
+        found = peaks[: int(output.peak_count)]
+        levels: list[tuple[int, NDArray[np.intp], NDArray[np.intp], NDArray[np.intp], NDArray[np.float32]]] = []
+        for level in np.unique(found["level"]):
+            rows = found[found["level"] == level]
+            levels.append(
+                (
+                    int(level),
+                    rows["block"].astype(np.intp),
+                    rows["shift_index"].astype(np.intp),
+                    rows["column"].astype(np.intp),
+                    np.ascontiguousarray(rows["z"], dtype=np.float32),
+                )
+            )
+        return levels
+
 
 _LOCK = threading.Lock()
 _CACHE: dict[str, NativeKernels | None] = {}
@@ -751,6 +880,7 @@ __all__ = [
     "NATIVE_ABI_VERSION",
     "NativeKernelError",
     "NativeKernels",
+    "RADON_KERNEL_ID",
     "TILE_OFFSET_KERNEL_ID",
     "WARP_KERNEL_ID",
     "default_kernel_threads",

@@ -25,9 +25,12 @@ from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
+from .native_kernels import RADON_KERNEL_ID, load_native_kernels
 from .residual_background import ResidualBackgroundAlignment
 
 ALGORITHM = "temporal-residual-radon-line-corridor-v2"
+# (n, blocks, shift_index, columns, z) of one dyadic level's line peaks.
+LevelPeaks = tuple[int, NDArray[np.intp], NDArray[np.intp], NDArray[np.intp], NDArray[np.float32]]
 MINIMUM_LENGTH_PIXELS = 256
 # Dyadic line lengths tested, in preview bins: from FRT_MINIMUM_LEVEL_BINS up
 # to the padded frame height.  A detection needs a line sum of
@@ -38,6 +41,12 @@ FRT_MINIMUM_LEVEL_BINS = 16
 FRT_DETECTION_Z = 6.5
 FRT_MINIMUM_COVERAGE = 0.6
 FRT_MAXIMUM_CANDIDATES_PER_LEVEL = 24
+# A line is valid at block length n when its weight count reaches
+# max(FRT_MINIMUM_COUNT, FRT_MINIMUM_COVERAGE*n); a level standardises its z
+# only when at least FRT_MINIMUM_SCALE_SAMPLES lines are valid.
+FRT_MINIMUM_COUNT = 8.0
+FRT_MINIMUM_SCALE_SAMPLES = 64
+NUMPY_RADON_KERNEL_ID = "numpy-radon-peaks-v1"
 CORE_MINIMUM_SIGMA = 0.2
 SIGNIFICANCE_MINIMUM = 6.0
 EXTENT_WINDOW_BINS = 32
@@ -83,6 +92,7 @@ class TransientRejectionModel:
     trails: tuple[TransientTrail, ...] = ()
     status: str = "APPLIED"
     background_alignment: ResidualBackgroundAlignment | None = None
+    line_kernel: str = NUMPY_RADON_KERNEL_ID
 
     def normalize_rejected_rows(self, values: NDArray[np.float32], first_row: int,
                                 original: NDArray[np.bool_], accepted: NDArray[np.bool_]) -> None:
@@ -97,40 +107,84 @@ class TransientRejectionModel:
         changed = np.any(original & ~accepted, axis=0)
         if not np.any(changed):
             return
-        # Only rows that contain an additionally rejected pixel need the
-        # per-pixel correction; the model is evaluated on those contiguous
-        # row runs alone, which gives the same values as the full tile.
-        changed_rows = np.flatnonzero(np.any(changed, axis=1))
-        weights = np.asarray(self.background_alignment.weights)[:, None, None]
-        run_start = int(changed_rows[0])
-        previous = run_start
-        runs: list[tuple[int, int]] = []
-        for row in changed_rows[1:]:
-            row = int(row)
-            if row != previous + 1:
-                runs.append((run_start, previous + 1))
-                run_start = row
-            previous = row
-        runs.append((run_start, previous + 1))
-        for row0, row1 in runs:
-            correction = np.zeros(
-                (values.shape[0], row1 - row0, values.shape[2]), dtype=values.dtype
-            )
-            self.background_alignment.apply_rows(correction, first_row + row0)
-            original_rows = original[:, row0:row1]
-            changed_rows_mask = changed[row0:row1]
-            denominator = np.sum(original_rows * weights, axis=0)
-            anchor = np.divide(
-                np.sum(np.where(original_rows, correction, 0) * weights, axis=0),
-                denominator, out=np.zeros_like(denominator), where=denominator > 0,
-            )
-            # Equivalent to mean_new(X-C) + mean_original(C). No correction is
-            # applied elsewhere, so ordinary integration controls stay bitwise equal.
-            for index in range(values.shape[0]):
-                block = values[index, row0:row1]
-                block[changed_rows_mask] += (
-                    correction[index, changed_rows_mask] - anchor[changed_rows_mask]
-                ).astype(np.float32)
+        rows, cols = np.nonzero(changed)
+        self._normalize_pixels(values, first_row, rows, cols,
+                               [original[index, rows, cols] for index in range(values.shape[0])])
+
+    def apply_corridors(self, values: NDArray[np.float32], accepted: NDArray[np.bool_],
+                        first_row: int, enough_samples: NDArray[np.bool_]) -> int:
+        """Reject every trail corridor of this row band and normalise the changed pixels.
+
+        The same decisions and values as ``reject_rows`` followed by
+        ``normalize_rejected_rows`` on a copy of the original mask, without the
+        whole-tile passes: the corridors are evaluated on their candidate
+        pixels, the pixels whose acceptance they change are collected before
+        any flag is cleared, and the background model is evaluated there only.
+        Returns the number of changed samples.
+        """
+        height, width = accepted.shape[1:]
+        corridors: list[tuple[int, NDArray[np.intp], NDArray[np.intp]]] = []
+        changed: list[NDArray[np.intp]] = []
+        for trail in self.trails:
+            rows, cols = _corridor_candidates(trail, first_row, height, width)
+            if rows.size == 0:
+                continue
+            x = cols.astype(np.float64)
+            y = (rows + first_row).astype(np.float64)
+            distance = x * trail.normal_x + y * trail.normal_y - trail.distance
+            along = -x * trail.normal_y + y * trail.normal_x
+            corridor = ((np.abs(distance) <= trail.half_width)
+                        & (along >= trail.start) & (along <= trail.stop)
+                        & enough_samples[rows, cols])
+            rows, cols = rows[corridor], cols[corridor]
+            corridors.append((trail.frame, rows, cols))
+            newly = accepted[trail.frame, rows, cols]
+            changed.append(rows[newly] * width + cols[newly])
+        if not corridors:
+            return 0
+        linear = np.unique(np.concatenate(changed))
+        if linear.size == 0:
+            for frame, rows, cols in corridors:
+                accepted[frame, rows, cols] = False
+            return 0
+        rows, cols = np.divmod(linear, width)
+        original = [accepted[index, rows, cols] for index in range(values.shape[0])]
+        for frame, corridor_rows, corridor_cols in corridors:
+            accepted[frame, corridor_rows, corridor_cols] = False
+        if self.background_alignment is not None:
+            self._normalize_pixels(values, first_row, rows, cols, original)
+        return int(linear.size)
+
+    def _normalize_pixels(self, values: NDArray[np.float32], first_row: int,
+                          rows: NDArray[np.intp], cols: NDArray[np.intp],
+                          original: list[NDArray[np.bool_]]) -> None:
+        """Group-relative sky alignment at the pixels ``(rows, cols)`` of the band.
+
+        ``original[f]`` is the ordinary acceptance of frame ``f`` at those
+        pixels.  The model is evaluated at the pixels alone with the per-pixel
+        expressions of a whole-tile evaluation, accumulated over frames in the
+        same order, so the values are identical.
+        """
+        alignment = self.background_alignment
+        assert alignment is not None
+        weights = np.asarray(alignment.weights, dtype=np.float64)
+        correction = alignment.corrections_at(
+            cols.astype(np.float64), (rows + first_row).astype(np.float64)
+        )
+        # Frame-sequential Float64 sums, the order np.sum(axis=0) uses on a
+        # frame-major tile.
+        denominator = np.zeros(rows.size, dtype=np.float64)
+        numerator = np.zeros(rows.size, dtype=np.float64)
+        for index in range(values.shape[0]):
+            denominator += original[index] * weights[index]
+            numerator += np.where(original[index], correction[index], 0) * weights[index]
+        anchor = np.divide(
+            numerator, denominator, out=np.zeros_like(denominator), where=denominator > 0,
+        )
+        # Equivalent to mean_new(X-C) + mean_original(C). No correction is
+        # applied elsewhere, so ordinary integration controls stay bitwise equal.
+        for index in range(values.shape[0]):
+            values[index, rows, cols] += (correction[index] - anchor).astype(np.float32)
 
     def serializable(self) -> dict[str, Any]:
         return {
@@ -159,20 +213,78 @@ class TransientRejectionModel:
             "backgroundAlignment": (self.background_alignment.serializable()
                                     if self.background_alignment is not None else None),
             "trails": [trail.serializable() for trail in self.trails],
+            "lineKernel": self.line_kernel,
         }
 
     def reject_rows(self, accepted: NDArray[np.bool_], first_row: int,
                     enough_samples: NDArray[np.bool_]) -> None:
+        """Clear the accepted flags inside every trail corridor of this row band.
+
+        The corridor test is evaluated only on the pixels of each row that can
+        satisfy it (the analytic cross-track and along-track intervals with a
+        two-pixel margin), with the same Float64 expressions the full-tile
+        evaluation used, so the decisions are identical at a fraction of the
+        work.
+        """
         height, width = accepted.shape[1:]
-        x = np.arange(width, dtype=np.float64)[None, :]
-        y = np.arange(first_row, first_row + height, dtype=np.float64)[:, None]
         for trail in self.trails:
+            rows, cols = _corridor_candidates(trail, first_row, height, width)
+            if rows.size == 0:
+                continue
+            x = cols.astype(np.float64)
+            y = (rows + first_row).astype(np.float64)
             distance = x * trail.normal_x + y * trail.normal_y - trail.distance
             along = -x * trail.normal_y + y * trail.normal_x
             corridor = ((np.abs(distance) <= trail.half_width)
                         & (along >= trail.start) & (along <= trail.stop)
-                        & enough_samples)
-            accepted[trail.frame, corridor] = False
+                        & enough_samples[rows, cols])
+            accepted[trail.frame, rows[corridor], cols[corridor]] = False
+
+
+def _corridor_candidates(trail: TransientTrail, first_row: int, height: int,
+                         width: int) -> tuple[NDArray[np.intp], NDArray[np.intp]]:
+    """Pixels of a row band that can lie in a trail corridor: (rows, columns).
+
+    For every band row the cross-track condition ``|x nx + y ny - d| <= h``
+    and the along-track condition ``start <= -x ny + y nx <= stop`` are each
+    an interval of x (or the whole row, or nothing, when the normal component
+    vanishes); their intersection, widened by two pixels against rounding, is
+    the candidate run of the row.  Rows are band-relative.
+    """
+
+    y = np.arange(first_row, first_row + height, dtype=np.float64)
+    low = np.full(height, -np.inf)
+    high = np.full(height, np.inf)
+    keep = np.ones(height, dtype=bool)
+    nx, ny = trail.normal_x, trail.normal_y
+    if abs(nx) > 1e-9:
+        a = (trail.distance - trail.half_width - y * ny) / nx
+        b = (trail.distance + trail.half_width - y * ny) / nx
+        low = np.maximum(low, np.minimum(a, b))
+        high = np.minimum(high, np.maximum(a, b))
+    else:
+        keep &= np.abs(y * ny - trail.distance) <= trail.half_width + 1.0
+    if abs(ny) > 1e-9:
+        a = (y * nx - trail.stop) / ny
+        b = (y * nx - trail.start) / ny
+        low = np.maximum(low, np.minimum(a, b))
+        high = np.minimum(high, np.maximum(a, b))
+    else:
+        keep &= (y * nx >= trail.start - 1.0) & (y * nx <= trail.stop + 1.0)
+    low = np.maximum(np.floor(low) - 2.0, 0.0)
+    high = np.minimum(np.ceil(high) + 2.0, float(width - 1))
+    keep &= high >= low
+    band_rows = np.flatnonzero(keep)
+    if band_rows.size == 0:
+        return np.empty(0, dtype=np.intp), np.empty(0, dtype=np.intp)
+    starts = low[band_rows].astype(np.intp)
+    lengths = (high[band_rows] - low[band_rows]).astype(np.intp) + 1
+    rows = np.repeat(band_rows, lengths)
+    offsets = np.arange(rows.size, dtype=np.intp) - np.repeat(
+        np.cumsum(lengths) - lengths, lengths
+    )
+    cols = np.repeat(starts, lengths) + offsets
+    return rows, cols
 
 
 def _next_power_of_two(value: int) -> int:
@@ -240,7 +352,7 @@ def _standardised_z(sums: NDArray[np.float32], counts: NDArray[np.float32], mini
     z = np.zeros(sums.shape, dtype=np.float32)
     np.divide(sums, np.sqrt(np.maximum(counts, 1.0)), out=z, where=valid)
     sample = z[valid]
-    if sample.size >= 64:
+    if sample.size >= FRT_MINIMUM_SCALE_SAMPLES:
         scale = 1.4826 * float(np.median(np.abs(sample - np.median(sample))))
         if np.isfinite(scale) and scale > 0:
             z /= np.float32(scale)
@@ -248,32 +360,64 @@ def _standardised_z(sums: NDArray[np.float32], counts: NDArray[np.float32], mini
     return z
 
 
-def _candidate_lines(residual_z: NDArray[np.float32], weight: NDArray[np.float32], minimum_rows: int):
-    """Multi-scale line candidates of one frame: (z, p0, p1) in preview coords."""
+def _numpy_level_peaks(image: NDArray[np.float32], weights: NDArray[np.float32],
+                       minimum_rows: int) -> list[LevelPeaks]:
+    """NumPy reference of the native ``radon_line_peaks`` kernel.
+
+    Per dyadic level ``n >= minimum_rows``: the peaks of the standardised line
+    z (``z >= FRT_DETECTION_Z`` and the maximum of the (1, 5, 7) window) as
+    ``(n, blocks, shift_index, columns, z)`` in ``np.nonzero`` order.
+    """
 
     from scipy.ndimage import maximum_filter
+
+    sums = fast_radon_levels(image, minimum_rows)
+    counts = fast_radon_levels(weights, minimum_rows)
+    levels: list[LevelPeaks] = []
+    for (n, level_sums), (_, level_counts) in zip(sums, counts, strict=True):
+        z = _standardised_z(level_sums, level_counts, max(8.0, FRT_MINIMUM_COVERAGE * n))
+        peaks = (z >= FRT_DETECTION_Z) & (z == maximum_filter(z, size=(1, 5, 7)))
+        blocks, shift_index, xs = np.nonzero(peaks)
+        levels.append((n, blocks, shift_index, xs, z[blocks, shift_index, xs]))
+    return levels
+
+
+def _level_peaks(residual_z: NDArray[np.float32], detect: NDArray[np.bool_], size: int,
+                 minimum_rows: int, kernels: Any, threads: int | None) -> list[LevelPeaks]:
+    """Line peaks of one orientation from the native kernel or its NumPy reference."""
+
+    if kernels is not None:
+        return kernels.radon_line_peaks(
+            residual_z, detect.astype(np.uint8), size=size, minimum_rows=minimum_rows,
+            detection_z=FRT_DETECTION_Z, minimum_coverage=FRT_MINIMUM_COVERAGE,
+            minimum_count=FRT_MINIMUM_COUNT, minimum_scale_samples=FRT_MINIMUM_SCALE_SAMPLES,
+            threads=threads,
+        )
+    h, w = residual_z.shape
+    image = np.zeros((size, w), dtype=np.float32)
+    image[:h] = residual_z
+    weights = np.zeros((size, w), dtype=np.float32)
+    weights[:h] = detect
+    return _numpy_level_peaks(image, weights, minimum_rows)
+
+
+def _candidate_lines(residual_z: NDArray[np.float32], detect: NDArray[np.bool_], minimum_rows: int,
+                     *, kernels: Any = None, threads: int | None = None):
+    """Multi-scale line candidates of one frame: (z, p0, p1) in preview coords."""
 
     height, width = residual_z.shape
     size = _next_power_of_two(max(height, width))
     candidates: list[tuple[float, NDArray[np.float64], NDArray[np.float64]]] = []
     for transpose in (False, True):
-        img = residual_z.T if transpose else residual_z
-        wgt = weight.T if transpose else weight
-        h, w = img.shape
-        image = np.zeros((size, w), dtype=np.float32)
-        image[:h] = img
-        weights = np.zeros((size, w), dtype=np.float32)
-        weights[:h] = wgt
-        sums = fast_radon_levels(image, minimum_rows)
-        counts = fast_radon_levels(weights, minimum_rows)
-        for (n, level_sums), (_, level_counts) in zip(sums, counts, strict=True):
-            z = _standardised_z(level_sums, level_counts, max(8.0, FRT_MINIMUM_COVERAGE * n))
-            peaks = (z >= FRT_DETECTION_Z) & (z == maximum_filter(z, size=(1, 5, 7)))
-            blocks, shift_index, xs = np.nonzero(peaks)
+        img = np.ascontiguousarray(residual_z.T) if transpose else residual_z
+        wgt = np.ascontiguousarray(detect.T) if transpose else detect
+        for n, blocks, shift_index, xs, z_values in _level_peaks(
+                img, wgt, size, minimum_rows, kernels, threads):
             if blocks.size > FRT_MAXIMUM_CANDIDATES_PER_LEVEL:
-                order = np.argsort(-z[blocks, shift_index, xs])[:FRT_MAXIMUM_CANDIDATES_PER_LEVEL]
+                order = np.argsort(-z_values)[:FRT_MAXIMUM_CANDIDATES_PER_LEVEL]
                 blocks, shift_index, xs = blocks[order], shift_index[order], xs[order]
-            for b, si, x in zip(blocks, shift_index, xs):
+                z_values = z_values[order]
+            for b, si, x, z_line in zip(blocks, shift_index, xs, z_values):
                 shift = int(si) - (n - 1)
                 x0 = float(int(x) - size)
                 y0 = float(int(b) * n)
@@ -281,7 +425,7 @@ def _candidate_lines(residual_z: NDArray[np.float32], weight: NDArray[np.float32
                 p1 = np.array([x0 + shift, y0 + n - 1])
                 if transpose:
                     p0, p1 = p0[::-1], p1[::-1]
-                candidates.append((float(z[b, si, x]), p0, p1))
+                candidates.append((float(z_line), p0, p1))
     candidates.sort(key=lambda item: -item[0])
     return candidates
 
@@ -563,6 +707,11 @@ def detect_transient_trails(values: NDArray[np.float32], bin_factor: int,
     elevation = np.where(common, reference - sky, 0.0)
     minimum_rows = max(2, min(_next_power_of_two(FRT_MINIMUM_LEVEL_BINS),
                               _next_power_of_two(max(1, MINIMUM_LENGTH_PIXELS // (2 * bin_factor)))))
+    frame_workers = max(1, min(workers, frame_count))
+    # Frames are the unit of concurrency; a lone frame lets the kernel split
+    # its own levels across the tuning row's thread budget instead.
+    kernels = load_native_kernels()
+    kernel_threads = 1 if frame_workers > 1 else None
 
     def frame_trails(frame_index: int) -> list[TransientTrail]:
         trails: list[TransientTrail] = []
@@ -594,8 +743,8 @@ def detect_transient_trails(values: NDArray[np.float32], bin_factor: int,
         # smoothing radii before the image edge.
         detect = valid & ~protected & (support > 0.25)
         residual_z = np.where(detect, np.clip(residual / sigma, -5.0, 5.0), 0.0).astype(np.float32)
-        weight = detect.astype(np.float32)
-        candidates = _candidate_lines(residual_z, weight, minimum_rows)
+        candidates = _candidate_lines(residual_z, detect, minimum_rows,
+                                      kernels=kernels, threads=kernel_threads)
         measured = []
         # Accepted corridors are blanked before the next candidate is measured,
         # so oblique dyadic lines that only borrow a bright trail's samples
@@ -667,7 +816,6 @@ def detect_transient_trails(values: NDArray[np.float32], bin_factor: int,
         trails.sort(key=lambda trail: (-trail.profile_sigma, trail.distance))
         return trails
 
-    frame_workers = max(1, min(workers, frame_count))
     if frame_workers == 1:
         per_frame = [frame_trails(index) for index in range(frame_count)]
     else:
@@ -676,4 +824,7 @@ def detect_transient_trails(values: NDArray[np.float32], bin_factor: int,
         ) as executor:
             per_frame = list(executor.map(frame_trails, range(frame_count)))
     trails = [trail for frame in per_frame for trail in frame]
-    return TransientRejectionModel(bin_factor, tuple(trails))
+    return TransientRejectionModel(
+        bin_factor, tuple(trails),
+        line_kernel=RADON_KERNEL_ID if kernels is not None else NUMPY_RADON_KERNEL_ID,
+    )

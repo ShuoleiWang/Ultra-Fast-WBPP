@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import time
 from typing import Any, Iterable, Mapping, Sequence
 
 from astropy.io import fits
@@ -1995,18 +1996,26 @@ def _prepare_transient_rejection(
             band_y1 = min(height, last_block * factor)
             band = _expression_rows(expression, sources, band_y0, band_y1,
                                     division_floor=parameters.division_floor)
-            for row in range(first_block, last_block):
-                y0, y1 = row * factor, min(height, (row + 1) * factor)
-                values = band[y0 - band_y0 : y1 - band_y0]
+            # The complete block rows of the band reduce together (the row
+            # sums accumulate in row order and the column segments in
+            # column order, as for one block row alone); a partial last
+            # block row is reduced on its own.
+            complete = (band_y1 - band_y0) // factor
+            pieces: list[tuple[int, NDArray[np.float32]]] = []
+            if complete:
+                pieces.append((first_block, band[: complete * factor].reshape(complete, factor, width)))
+            if complete * factor < band_y1 - band_y0:
+                pieces.append((first_block + complete, band[complete * factor :][None, :, :]))
+            for row, values in pieces:
                 finite = np.isfinite(values)
-                sums = np.sum(np.where(finite, values, 0), axis=0, dtype=np.float64)
-                counts = np.sum(finite, axis=0)
-                sums = np.add.reduceat(sums, offsets)
-                counts = np.add.reduceat(counts, offsets)
+                sums = np.sum(np.where(finite, values, 0), axis=1, dtype=np.float64)
+                counts = np.sum(finite, axis=1)
+                sums = np.add.reduceat(sums, offsets, axis=1)
+                counts = np.add.reduceat(counts, offsets, axis=1)
                 # Exclude partly covered blocks from spatial detection. Ordinary
                 # per-pixel rejection still handles all valid edge samples.
-                expected = (y1 - y0) * covered_width
-                np.divide(sums, counts, out=preview[index, row],
+                expected = values.shape[1] * covered_width
+                np.divide(sums, counts, out=preview[index, row : row + values.shape[0]],
                           where=counts == expected, casting="unsafe")
 
     reader_count = max(1, min(int(workers or 1), len(expressions)))
@@ -2027,7 +2036,8 @@ def _prepare_transient_rejection(
             np.arange(bx,dtype=np.float64)*factor+(factor-1)/2,
             np.arange(by,dtype=np.float64)*factor+(factor-1)/2)
     model = detect_transient_trails(preview, factor, workers=reader_count)
-    return TransientRejectionModel(factor, model.trails, model.status, background)
+    return TransientRejectionModel(factor, model.trails, model.status, background,
+                                   line_kernel=model.line_kernel)
 
 
 def _ordinary_integration_tile(
@@ -2044,10 +2054,8 @@ def _ordinary_integration_tile(
         values, parameters, sigma_floor, native_threads=native_threads
     )
     if transient_model.trails:
-        original = accepted.copy()
         enough = np.sum(finite, axis=0) >= parameters.minimum_rejection_frames
-        transient_model.reject_rows(accepted, first_row, enough)
-        transient_model.normalize_rejected_rows(values, first_row, original, accepted)
+        transient_model.apply_corridors(values, accepted, first_row, enough)
     return finite, center, accepted
 
 
@@ -2343,6 +2351,8 @@ def integrate_expressions(
     }
     try:
         with ExitStack() as stack:
+            timing: dict[str, float] = {}
+            phase_started = time.perf_counter()
             sources = _open_expression_sources(stack, canonical)
             shape = _validate_expression_shapes(canonical, sources)
             height, width = shape
@@ -2367,13 +2377,19 @@ def integrate_expressions(
             ) = _combined_integration_weights(
                 canonical, sources, shape, parameters, quality_weights
             )
+            timing["weights"] = time.perf_counter() - phase_started
+            phase_started = time.perf_counter()
             rejection_sigma_floor = _estimate_rejection_sigma_floor(
                 canonical, sources, shape, parameters, frame_noise=frame_noise
             )
+            timing["sigmaFloor"] = time.perf_counter() - phase_started
+            phase_started = time.perf_counter()
             transient_model = _prepare_transient_rejection(
                 canonical, sources, shape, parameters, weights,
                 workers=native_threads,
             )
+            timing["transients"] = time.perf_counter() - phase_started
+            timing.update({"readExpressions": 0.0, "rejection": 0.0, "reduction": 0.0, "write": 0.0})
             kernels = load_native_kernels()
             stats = _StatsAccumulator()
             accepted_total = 0
@@ -2410,23 +2426,47 @@ def integrate_expressions(
                         temporary_map, shape, map_metadata[name], durable=durable
                     )
                 )
+            # Each frame's band is read and normalized into its own slot of
+            # the stack, so the frames of a band are read concurrently (the
+            # same source frames the transient pass already reads from
+            # several threads); the samples do not depend on the reader.
+            read_workers = max(1, min(native_threads, len(canonical)))
+            band_readers = (
+                stack.enter_context(
+                    ThreadPoolExecutor(max_workers=read_workers, thread_name_prefix="oaf-band")
+                )
+                if read_workers > 1
+                else None
+            )
             for y0 in range(0, height, tile_rows):
                 y1 = min(height, y0 + tile_rows)
                 stack_values = np.empty(
                     (len(canonical), y1 - y0, width), dtype=np.float32
                 )
-                for index, expression in enumerate(canonical):
-                    stack_values[index] = _expression_rows(
-                        expression,
+                band_started = time.perf_counter()
+
+                def read_band(index: int, y0: int = y0, y1: int = y1, target: NDArray[np.float32] = stack_values) -> None:
+                    target[index] = _expression_rows(
+                        canonical[index],
                         sources,
                         y0,
                         y1,
                         division_floor=parameters.division_floor,
                     )
+
+                if band_readers is None:
+                    for index in range(len(canonical)):
+                        read_band(index)
+                else:
+                    list(band_readers.map(read_band, range(len(canonical))))
+                timing["readExpressions"] += time.perf_counter() - band_started
+                band_started = time.perf_counter()
                 finite, center, accepted = _ordinary_integration_tile(
                     stack_values, parameters, rejection_sigma_floor, transient_model, y0,
                     native_threads,
                 )
+                timing["rejection"] += time.perf_counter() - band_started
+                band_started = time.perf_counter()
                 if kernels is not None:
                     result, accepted_map, rejected_map = kernels.masked_weighted_mean(
                         stack_values, accepted, weights, threads=native_threads
@@ -2456,6 +2496,8 @@ def integrate_expressions(
                     rejected_per_pixel = np.sum(
                         finite & ~accepted, axis=0, dtype=np.uint16
                     ).astype(np.float32)
+                timing["reduction"] += time.perf_counter() - band_started
+                band_started = time.perf_counter()
                 accepted_count = int(np.count_nonzero(accepted))
                 finite_count = int(np.count_nonzero(finite))
                 accepted_total += accepted_count
@@ -2472,6 +2514,7 @@ def integrate_expressions(
                     map_writers["rejectionCount"].write_rows(
                         y0, rejected_per_pixel
                     )
+                timing["write"] += time.perf_counter() - band_started
         final_statistics = stats.result()
         if final_statistics.finite_pixels == 0:
             raise CalibrationError(
@@ -2518,6 +2561,7 @@ def integrate_expressions(
                 "noiseWeights": frame_noise.serializable(),
                 "reducer": _reduction_kernel_id(),
                 "nativeThreads": native_threads,
+                "timingSeconds": {key: round(value, 3) for key, value in timing.items()},
                 "fastMath": False,
             },
         )

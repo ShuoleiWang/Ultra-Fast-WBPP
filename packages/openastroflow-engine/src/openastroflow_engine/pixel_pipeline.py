@@ -2677,23 +2677,32 @@ def _common_valid_crop(
             and resampler == "lanczos-3-clamped"
             else 0
         )
+    # Every frame's valid pixels of a row form one run (the frame's footprint
+    # is convex), so each frame contributes a per-row interval, found with
+    # the exact per-pixel test by bisection; the common mask row is the
+    # intersection of the intervals.  Rows the bisection cannot bracket are
+    # evaluated pixel by pixel, so every mask row equals the dense one.
     heights = np.zeros(width, dtype=np.int64)
     best: tuple[int, int, int, int, int] | None = None
     for y0 in range(0, height, tile_rows):
         y1 = min(height, y0 + tile_rows)
-        output_y = np.arange(y0, y1, dtype=np.float64)[:, None]
-        output_x = np.arange(width, dtype=np.float64)[None, :]
-        common = np.ones((y1 - y0, width), dtype=bool)
+        first = np.zeros(y1 - y0, dtype=np.int64)
+        last = np.full(y1 - y0, width - 1, dtype=np.int64)
         for inverse, interpolation_margin in zip(inverses, margins, strict=True):
-            input_x, input_y = _inverse_coordinates(inverse, output_x, output_y)
-            common &= (
-                (input_x >= interpolation_margin)
-                & (input_x <= width - 1 - interpolation_margin)
-                & (input_y >= interpolation_margin)
-                & (input_y <= height - 1 - interpolation_margin)
+            frame_first, frame_last = _valid_row_runs(
+                inverse, interpolation_margin, y0, y1, width, height
             )
-        for local_y, row in enumerate(common):
-            heights = np.where(row, heights + 1, 0)
+            first = np.maximum(first, frame_first)
+            last = np.minimum(last, frame_last)
+        for local_y in range(y1 - y0):
+            run_first = int(first[local_y])
+            run_last = int(last[local_y])
+            if run_last < run_first:
+                heights.fill(0)
+            else:
+                heights[:run_first] = 0
+                heights[run_first : run_last + 1] += 1
+                heights[run_last + 1 :] = 0
             candidate = _histogram_rectangle(heights, y0 + local_y)
             if candidate is not None and (best is None or candidate > best):
                 best = candidate
@@ -2703,6 +2712,113 @@ def _common_valid_crop(
         )
     _, top, left, bottom, right = best
     return top, left, bottom, right
+
+
+def _valid_row_runs(
+    inverse: NDArray[np.float64],
+    interpolation_margin: int,
+    y0: int,
+    y1: int,
+    width: int,
+    height: int,
+) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
+    """Per-row ``(first, last)`` valid output columns of one frame, rows y0..y1.
+
+    A column is valid when its inverse-mapped coordinates lie inside the
+    source frame less the interpolation margin, the dense mask test.  Rows
+    without a valid column return ``last < first``.
+    """
+
+    rows = y1 - y0
+    output_y = np.arange(y0, y1, dtype=np.float64)
+    x_low = float(interpolation_margin)
+    x_high = float(width - 1 - interpolation_margin)
+    y_low = float(interpolation_margin)
+    y_high = float(height - 1 - interpolation_margin)
+
+    def valid_at(columns: NDArray[np.int64]) -> NDArray[np.bool_]:
+        input_x, input_y = _inverse_coordinates(
+            inverse, columns.astype(np.float64), output_y
+        )
+        return (
+            (input_x >= x_low) & (input_x <= x_high)
+            & (input_y >= y_low) & (input_y <= y_high)
+        )
+
+    # Analytic run centre of each row (the geometry is affine or a
+    # near-identity projective map, so the source-centre column bounds the
+    # run's interior); the exact test decides whether it is inside.
+    centre_x = 0.5 * (x_low + x_high)
+    centre_y = 0.5 * (y_low + y_high)
+    a, b, c = inverse[0]
+    d, e, f = inverse[1]
+    g, h, i = inverse[2]
+    # Solve for x with y fixed: the column mapping to input (centre_x, *) or,
+    # when the x row is degenerate, to input (*, centre_y).
+    with np.errstate(divide="ignore", invalid="ignore"):
+        numerator_x = centre_x * (h * output_y + i) - (b * output_y + c)
+        denominator_x = a - centre_x * g
+        numerator_y = centre_y * (h * output_y + i) - (e * output_y + f)
+        denominator_y = d - centre_y * g
+        guess = np.where(
+            np.abs(denominator_x) >= np.abs(denominator_y),
+            numerator_x / denominator_x,
+            numerator_y / denominator_y,
+        )
+    guess = np.where(np.isfinite(guess), guess, 0.5 * (width - 1))
+    inside = np.clip(np.rint(guess), 0, width - 1).astype(np.int64)
+    bracketed = valid_at(inside)
+    first = np.zeros(rows, dtype=np.int64)
+    last = np.full(rows, -1, dtype=np.int64)
+    if np.any(bracketed):
+        # Bisection on the single run: ``low`` is outside (or virtual -1 /
+        # width), ``high`` is inside.
+        low = np.full(rows, -1, dtype=np.int64)
+        high = inside.copy()
+        while True:
+            active = high - low > 1
+            if not np.any(active):
+                break
+            middle = (low + high) // 2
+            probe = valid_at(np.clip(middle, 0, width - 1))
+            high = np.where(active & probe, middle, high)
+            low = np.where(active & ~probe, middle, low)
+        first_bisect = high
+        low = inside.copy()
+        high = np.full(rows, width, dtype=np.int64)
+        while True:
+            active = high - low > 1
+            if not np.any(active):
+                break
+            middle = (low + high) // 2
+            probe = valid_at(np.clip(middle, 0, width - 1))
+            low = np.where(active & probe, middle, low)
+            high = np.where(active & ~probe, middle, high)
+        last_bisect = low
+        first = np.where(bracketed, first_bisect, first)
+        last = np.where(bracketed, last_bisect, last)
+    unbracketed = np.flatnonzero(~bracketed)
+    if unbracketed.size:
+        # Rows whose centre guess is outside (edge rows of a tilted frame,
+        # or an unexpected geometry): the dense row test decides, a bounded
+        # number of rows at a time.
+        output_x = np.arange(width, dtype=np.float64)[None, :]
+        chunk = max(1, (8 * 1024 * 1024) // (width * 40))
+        for start in range(0, unbracketed.size, chunk):
+            selected = unbracketed[start : start + chunk]
+            input_x, input_y = _inverse_coordinates(
+                inverse, output_x, output_y[selected][:, None]
+            )
+            dense = (
+                (input_x >= x_low) & (input_x <= x_high)
+                & (input_y >= y_low) & (input_y <= y_high)
+            )
+            any_valid = np.any(dense, axis=1)
+            dense_first = np.argmax(dense, axis=1)
+            dense_last = width - 1 - np.argmax(dense[:, ::-1], axis=1)
+            first[selected] = np.where(any_valid, dense_first, 0)
+            last[selected] = np.where(any_valid, dense_last, -1)
+    return first, last
 
 
 def _crop_fits(
@@ -3859,6 +3975,7 @@ def _run_portable_pipeline_fits(
         # keeps the masters of different filters on one identical pixel grid,
         # as WBPP's autocrop does, so LRGB composition never resamples them.
         # A single-filter run keeps exactly its own crop.
+        crop_started = time.perf_counter()
         shared_crop, group_crops = _shared_auto_crop(
             light_groups,
             light_info,
@@ -3867,7 +3984,14 @@ def _run_portable_pipeline_fits(
             max_memory_bytes=parameters.registration_memory_bytes,
             resampler=parameters.registration_resampler,
         )
+        stage_timing: dict[str, Any] = {
+            "fusedCalibrateWarp": round(registration_wall_seconds, 3),
+            "autoCrop": round(time.perf_counter() - crop_started, 3),
+            "groups": {},
+        }
         for filter_name, paths in sorted(light_groups.items()):
+            group_timing: dict[str, float] = {}
+            group_started = time.perf_counter()
             exposures = {
                 info.exposure_seconds for path, info in light_info.items() if path in paths
             }
@@ -3965,6 +4089,7 @@ def _run_portable_pipeline_fits(
                             reference_path=str(registered_reference),
                         )
                     )
+                normalization_started = time.perf_counter()
                 global_result = fit_registered_group_global_normalization(
                     [str(path) for path in registered_paths],
                     reference_index=reference_index,
@@ -4022,6 +4147,8 @@ def _run_portable_pipeline_fits(
                 coverage=work_dir / f"coverage_{token}.fits",
                 rejection_count=work_dir / f"rejection_count_{token}.fits",
             )
+            group_timing["normalization"] = time.perf_counter() - group_started
+            integration_started = time.perf_counter()
             integration = integrate_registered_group(
                 integration_expressions,
                 full_master,
@@ -4078,6 +4205,8 @@ def _run_portable_pipeline_fits(
                     "AUTOCROP_TOO_SMALL",
                     f"common crop retains only {crop_fraction:.3%} of the frame",
                 )
+            group_timing["integration"] = time.perf_counter() - integration_started
+            crop_write_started = time.perf_counter()
             master_light = masters_dir / f"master_light_{token}.fits"
             master_stats, master_sha256 = _crop_fits(
                 full_master,
@@ -4172,6 +4301,8 @@ def _run_portable_pipeline_fits(
                     )
                 )
             preview_path = previews_dir / f"master_light_{token}.png"
+            group_timing["cropAndMaps"] = time.perf_counter() - crop_write_started
+            preview_started = time.perf_counter()
             preview_result = render_auto_stretch_preview(
                 master_light,
                 preview_path,
@@ -4194,6 +4325,11 @@ def _run_portable_pipeline_fits(
             integration_record["maps"] = {
                 name: str(path.relative_to(staging))
                 for name, path in cropped_maps.items()
+            }
+            group_timing["preview"] = time.perf_counter() - preview_started
+            group_timing["total"] = time.perf_counter() - group_started
+            stage_timing["groups"][filter_name] = {
+                key: round(value, 3) for key, value in group_timing.items()
             }
             integration_groups[filter_name] = {
                 "integration": integration_record,
@@ -4298,6 +4434,7 @@ def _run_portable_pipeline_fits(
                 "calibration": stage_statistics,
                 "registration": registration_execution,
                 "integrationGroups": integration_groups,
+                "timingSeconds": stage_timing,
             },
             # Platform facts behind the execution choices: what the machine
             # is, which tuning table row ran, and which native library (if

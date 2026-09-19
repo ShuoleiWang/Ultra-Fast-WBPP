@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import math
+import threading
 from typing import Any, Literal, Sequence
 
 import numpy as np
@@ -76,19 +78,49 @@ def _one_to_one_indices(
     )
 
 
+class _PhotometryImages:
+    """Per-analysis aperture photometry inputs, prepared once per estimation run.
+
+    The preview with its non-finite pixels replaced by the finite median, and
+    the invalid mask, are the same for every source a frame is paired with
+    (the group reference is paired with every other frame), so each frame
+    prepares them once; concurrent callers share the prepared arrays.
+    """
+
+    def __init__(self) -> None:
+        self._prepared: dict[int, tuple[FrameAnalysis, np.ndarray | None, np.ndarray]] = {}
+        self._lock = threading.Lock()
+
+    def prepared(self, analysis: FrameAnalysis) -> tuple[np.ndarray | None, np.ndarray]:
+        key = id(analysis)
+        with self._lock:
+            cached = self._prepared.get(key)
+        if cached is not None and cached[0] is analysis:
+            return cached[1], cached[2]
+        image = np.asarray(analysis.preview, dtype=np.float32)
+        invalid = ~np.isfinite(image)
+        finite = image[~invalid]
+        work: np.ndarray | None = None
+        if finite.size:
+            work = image.copy()
+            work[invalid] = np.float32(np.median(finite))
+        with self._lock:
+            self._prepared[key] = (analysis, work, invalid)
+        return work, invalid
+
+
 def _aperture_fluxes(
     analysis: FrameAnalysis,
     indices: np.ndarray,
+    images: _PhotometryImages | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
     native_per_preview = math.sqrt(analysis.scale_x * analysis.scale_y)
     radius = max(2.0, 10.0 / native_per_preview)
     annulus_inner = max(radius + 2.0, 45.0 / native_per_preview)
     annulus_outer = max(annulus_inner + 2.0, 65.0 / native_per_preview)
     points = analysis.catalog.points[indices]
-    image = np.asarray(analysis.preview, dtype=np.float32)
-    invalid = ~np.isfinite(image)
-    finite = image[~invalid]
-    if finite.size == 0:
+    work, invalid = (images or _PhotometryImages()).prepared(analysis)
+    if work is None:
         return (
             np.empty(0, dtype=np.float64),
             np.empty(0, dtype=np.int64),
@@ -98,8 +130,6 @@ def _aperture_fluxes(
                 "annulusOuterPreviewPixels": annulus_outer,
             },
         )
-    work = image.copy()
-    work[invalid] = np.float32(np.median(finite))
     flux, _error, flags = sep.sum_circle(
         work,
         points[:, 0],
@@ -169,14 +199,48 @@ def background_flatness(analysis: FrameAnalysis) -> dict[str, float]:
     height, width = preview.shape
     rows, columns = max(1, height // tile), max(1, width // tile)
     levels = np.full((rows, columns), np.nan)
+
+    def tile_level(block: np.ndarray) -> float:
+        block = block[np.isfinite(block)]
+        if block.size < 16:
+            return float("nan")
+        cut = np.quantile(block, 0.70)
+        return float(np.median(block[block <= cut]))
+
+    # Tiles of one tile row with the full tile shape and only finite pixels
+    # are reduced together: each tile's pixels are sorted once, the 70%
+    # quantile is NumPy's linear quantile of the sorted tile, the darker
+    # pixels are the sorted prefix at or below it, and their median is its
+    # middle order statistic (the mean of the two middle values for an even
+    # count) -- the values the per-tile evaluation yields.  Other tiles
+    # (edge tiles, tiles with non-finite pixels) take the per-tile path.
     for i in range(rows):
+        y0, y1 = i * tile, min(height, (i + 1) * tile)
+        full_columns = [
+            j for j in range(columns)
+            if min(width, (j + 1) * tile) - j * tile == tile and y1 - y0 == tile
+        ]
+        vectorised: list[int] = []
+        if full_columns and tile * tile >= 16:
+            band = preview[y0:y1]
+            blocks = np.stack([band[:, j * tile : (j + 1) * tile].ravel() for j in full_columns])
+            finite_blocks = np.all(np.isfinite(blocks), axis=1)
+            vectorised = [j for j, finite in zip(full_columns, finite_blocks) if finite]
+            if vectorised:
+                ordered = np.sort(blocks[finite_blocks], axis=1)
+                cuts = np.quantile(ordered, 0.70, axis=1)
+                counts = np.count_nonzero(ordered <= cuts[:, None], axis=1)
+                middle = counts // 2
+                upper = np.take_along_axis(ordered, middle[:, None], axis=1)[:, 0]
+                lower = np.take_along_axis(ordered, np.maximum(middle - 1, 0)[:, None], axis=1)[:, 0]
+                medians = np.where(counts % 2 == 1, upper, (lower + upper) / 2)
+                for position, j in enumerate(vectorised):
+                    levels[i, j] = float(medians[position])
         for j in range(columns):
-            block = preview[i * tile : min(height, (i + 1) * tile), j * tile : min(width, (j + 1) * tile)]
-            block = block[np.isfinite(block)]
-            if block.size < 16:
-                continue
-            cut = np.quantile(block, 0.70)
-            levels[i, j] = float(np.median(block[block <= cut]))
+            if j not in vectorised:
+                levels[i, j] = tile_level(
+                    preview[y0:y1, j * tile : min(width, (j + 1) * tile)]
+                )
     finite = levels[np.isfinite(levels)]
     if finite.size < 4:
         return {"gradientSpan": float("nan"), "sky": float(analysis.catalog.background)}
@@ -188,6 +252,8 @@ def select_normalization_reference(
     indices: Sequence[int],
     analyses: Sequence[FrameAnalysis],
     quality_weights: Sequence[float],
+    *,
+    workers: int = 1,
 ) -> tuple[int, dict[str, Any]]:
     """Pick the normalization reference of one filter group.
 
@@ -203,7 +269,16 @@ def select_normalization_reference(
     ordered = sorted(indices, key=lambda index: (-float(quality_weights[index]), index))
     keep = max(1, math.ceil(NORMALIZATION_REFERENCE_QUALITY_FRACTION * len(ordered)))
     candidates = ordered[:keep]
-    flatness = {index: background_flatness(analyses[index]) for index in candidates}
+    # Each candidate's flatness depends on its own preview only.
+    flatness_workers = max(1, min(workers, len(candidates)))
+    if flatness_workers == 1:
+        measured = [background_flatness(analyses[index]) for index in candidates]
+    else:
+        with ThreadPoolExecutor(max_workers=flatness_workers) as executor:
+            measured = list(
+                executor.map(lambda index: background_flatness(analyses[index]), candidates)
+            )
+    flatness = dict(zip(candidates, measured, strict=True))
 
     def score(index: int) -> float:
         value = flatness[index]
@@ -239,18 +314,27 @@ def estimate_stellar_scale_hints(
     *,
     match_radius_preview_pixels: float = 2.5,
     minimum_scale_stars: int = 16,
+    workers: int = 1,
 ) -> tuple[StellarScaleEstimate, ...]:
-    """Estimate same-filter reference/source throughput from matched stars."""
+    """Estimate same-filter reference/source throughput from matched stars.
+
+    Sources are independent given their group reference, so ``workers`` of
+    them run concurrently; the estimates do not depend on the worker count.
+    """
 
     if not (len(analyses) == len(transforms) == len(quality_weights)):
         raise ValueError("analyses, transforms, and quality_weights must align")
+    if workers < 1:
+        raise ValueError("workers must be positive")
     groups: dict[str | None, list[int]] = defaultdict(list)
     for index, analysis in enumerate(analyses):
         groups[analysis.filter_name].append(index)
     estimates: list[StellarScaleEstimate | None] = [None] * len(analyses)
+    images = _PhotometryImages()
+    pending: list[tuple[int, int, str | None, np.ndarray]] = []
     for filter_name, indices in groups.items():
         reference_index, reference_selection = select_normalization_reference(
-            indices, analyses, quality_weights
+            indices, analyses, quality_weights, workers=workers
         )
         reference = analyses[reference_index]
         reference_transform = transforms[reference_index].preview_matrix
@@ -280,102 +364,116 @@ def estimate_stellar_scale_hints(
         for source_index in indices:
             if source_index == reference_index:
                 continue
-            source = analyses[source_index]
-            source_transform = transforms[source_index].preview_matrix
-            evidence: dict[str, Any] = {
-                "method": "matched-preview-aperture-median-mad-v1",
-                "minimumScaleStars": minimum_scale_stars,
-                "matchRadiusPreviewPixels": match_radius_preview_pixels,
+            pending.append((source_index, reference_index, filter_name, reference_global))
+
+    def estimate(item: tuple[int, int, str | None, np.ndarray]) -> StellarScaleEstimate:
+        source_index, reference_index, filter_name, reference_global = item
+        reference = analyses[reference_index]
+        source = analyses[source_index]
+        source_transform = transforms[source_index].preview_matrix
+        evidence: dict[str, Any] = {
+            "method": "matched-preview-aperture-median-mad-v1",
+            "minimumScaleStars": minimum_scale_stars,
+            "matchRadiusPreviewPixels": match_radius_preview_pixels,
+        }
+        try:
+            if source_transform is None:
+                raise ValueError("source registration transform is unavailable")
+            source_global = _transform_points(
+                source.catalog.points,
+                np.asarray(source_transform, dtype=np.float64),
+            )
+            source_indices, reference_indices = _one_to_one_indices(
+                source_global,
+                reference_global,
+                match_radius_preview_pixels,
+            )
+            evidence["matchedSources"] = int(source_indices.size)
+            source_flux, retained_source, aperture = _aperture_fluxes(
+                source, source_indices, images
+            )
+            reference_flux, retained_reference, _ = _aperture_fluxes(
+                reference, reference_indices, images
+            )
+            source_by_index = {
+                int(index): float(value)
+                for index, value in zip(retained_source, source_flux, strict=True)
             }
-            try:
-                if source_transform is None:
-                    raise ValueError("source registration transform is unavailable")
-                source_global = _transform_points(
-                    source.catalog.points,
-                    np.asarray(source_transform, dtype=np.float64),
+            reference_by_index = {
+                int(index): float(value)
+                for index, value in zip(
+                    retained_reference, reference_flux, strict=True
                 )
-                source_indices, reference_indices = _one_to_one_indices(
-                    source_global,
-                    reference_global,
-                    match_radius_preview_pixels,
+            }
+            ratios = [
+                reference_by_index[int(reference_index_value)]
+                / source_by_index[int(source_index_value)]
+                for source_index_value, reference_index_value in zip(
+                    source_indices, reference_indices, strict=True
                 )
-                evidence["matchedSources"] = int(source_indices.size)
-                source_flux, retained_source, aperture = _aperture_fluxes(
-                    source, source_indices
+                if int(source_index_value) in source_by_index
+                and int(reference_index_value) in reference_by_index
+            ]
+            source_exposure = source.exposure_seconds
+            reference_exposure = reference.exposure_seconds
+            if (
+                source_exposure is None
+                or reference_exposure is None
+                or not math.isfinite(source_exposure)
+                or not math.isfinite(reference_exposure)
+                or source_exposure <= 0
+                or reference_exposure <= 0
+            ):
+                raise ValueError(
+                    "positive source/reference exposure is required for stellar scale"
                 )
-                reference_flux, retained_reference, _ = _aperture_fluxes(
-                    reference, reference_indices
-                )
-                source_by_index = {
-                    int(index): float(value)
-                    for index, value in zip(retained_source, source_flux, strict=True)
+            exposure_correction = source_exposure / reference_exposure
+            exposure_normalized_ratios = np.asarray(
+                ratios, dtype=np.float64
+            ) * exposure_correction
+            scale, sigma, accepted = _robust_ratio(
+                exposure_normalized_ratios,
+                minimum_samples=minimum_scale_stars,
+            )
+            evidence.update(
+                {
+                    **aperture,
+                    "apertureValidPairs": len(ratios),
+                    "acceptedScaleStars": accepted,
+                    "scaleSigma": sigma,
+                    "sourceExposureSeconds": source_exposure,
+                    "referenceExposureSeconds": reference_exposure,
+                    "exposureCorrection": exposure_correction,
+                    "scaleDomain": "post-linear-exposure-normalization",
                 }
-                reference_by_index = {
-                    int(index): float(value)
-                    for index, value in zip(
-                        retained_reference, reference_flux, strict=True
-                    )
-                }
-                ratios = [
-                    reference_by_index[int(reference_index_value)]
-                    / source_by_index[int(source_index_value)]
-                    for source_index_value, reference_index_value in zip(
-                        source_indices, reference_indices, strict=True
-                    )
-                    if int(source_index_value) in source_by_index
-                    and int(reference_index_value) in reference_by_index
-                ]
-                source_exposure = source.exposure_seconds
-                reference_exposure = reference.exposure_seconds
-                if (
-                    source_exposure is None
-                    or reference_exposure is None
-                    or not math.isfinite(source_exposure)
-                    or not math.isfinite(reference_exposure)
-                    or source_exposure <= 0
-                    or reference_exposure <= 0
-                ):
-                    raise ValueError(
-                        "positive source/reference exposure is required for stellar scale"
-                    )
-                exposure_correction = source_exposure / reference_exposure
-                exposure_normalized_ratios = np.asarray(
-                    ratios, dtype=np.float64
-                ) * exposure_correction
-                scale, sigma, accepted = _robust_ratio(
-                    exposure_normalized_ratios,
-                    minimum_samples=minimum_scale_stars,
-                )
-                evidence.update(
-                    {
-                        **aperture,
-                        "apertureValidPairs": len(ratios),
-                        "acceptedScaleStars": accepted,
-                        "scaleSigma": sigma,
-                        "sourceExposureSeconds": source_exposure,
-                        "referenceExposureSeconds": reference_exposure,
-                        "exposureCorrection": exposure_correction,
-                        "scaleDomain": "post-linear-exposure-normalization",
-                    }
-                )
-                estimates[source_index] = StellarScaleEstimate(
-                    source_index,
-                    reference_index,
-                    filter_name,
-                    scale,
-                    "STELLAR_SCALE_ACCEPTED",
-                    evidence,
-                )
-            except (ValueError, RuntimeError) as error:
-                evidence["reason"] = f"{type(error).__name__}: {error}"
-                estimates[source_index] = StellarScaleEstimate(
-                    source_index,
-                    reference_index,
-                    filter_name,
-                    None,
-                    "STELLAR_SCALE_UNAVAILABLE",
-                    evidence,
-                )
+            )
+            return StellarScaleEstimate(
+                source_index,
+                reference_index,
+                filter_name,
+                scale,
+                "STELLAR_SCALE_ACCEPTED",
+                evidence,
+            )
+        except (ValueError, RuntimeError) as error:
+            evidence["reason"] = f"{type(error).__name__}: {error}"
+            return StellarScaleEstimate(
+                source_index,
+                reference_index,
+                filter_name,
+                None,
+                "STELLAR_SCALE_UNAVAILABLE",
+                evidence,
+            )
+
+    estimate_workers = max(1, min(workers, len(pending)))
+    if estimate_workers == 1:
+        results = [estimate(item) for item in pending]
+    else:
+        with ThreadPoolExecutor(max_workers=estimate_workers) as executor:
+            results = list(executor.map(estimate, pending))
+    for item, result in zip(pending, results, strict=True):
+        estimates[item[0]] = result
     assert all(item is not None for item in estimates)
     return tuple(item for item in estimates if item is not None)
 

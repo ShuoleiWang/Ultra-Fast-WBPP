@@ -31,6 +31,7 @@ from skimage.transform import (
 )
 from lightframeqc.xisf import XISF
 
+from lightframeqc.parallel import FrameRunner
 from lightframeqc.readers import ImagePreview, read_frame_preview
 
 
@@ -613,6 +614,41 @@ def analyze_frame(
     )
 
 
+class _StatKeyedMasterCache(dict):
+    """Master preview cache whose keys carry the file's size and mtime, so a
+    master rewritten at the same path is decoded again."""
+
+    @staticmethod
+    def _key(path: str) -> str:
+        info = Path(path).stat()
+        return f"{path}|{info.st_size}|{info.st_mtime_ns}"
+
+    def get(self, key: str, default: ImagePreview | None = None) -> ImagePreview | None:  # type: ignore[override]
+        return super().get(self._key(key), default)
+
+    def __setitem__(self, key: str, value: ImagePreview) -> None:
+        super().__setitem__(self._key(key), value)
+
+
+# Master previews decoded by this process's frame analyses; each worker
+# process of a pool fills its own copy once.
+_MASTER_PREVIEWS = _StatKeyedMasterCache()
+_MASTER_PREVIEWS_LOCK = threading.Lock()
+
+
+def _analyze_frame_task(
+    task: tuple[str, DetectionConfig | None, CalibrationPlan | None],
+) -> FrameAnalysis:
+    path, detection, calibration = task
+    return analyze_frame(
+        path,
+        detection=detection,
+        calibration=calibration,
+        master_cache=_MASTER_PREVIEWS,
+        master_lock=_MASTER_PREVIEWS_LOCK,
+    )
+
+
 def analyze_frames(
     paths: Iterable[str],
     *,
@@ -620,29 +656,25 @@ def analyze_frames(
     calibration: CalibrationPlan | None = None,
     workers: int = 4,
 ) -> tuple[FrameAnalysis, ...]:
-    """Analyze multiple frames in stable order with a shared master cache."""
+    """Analyze multiple frames in stable order with a shared master cache.
+
+    SEP's detection holds the GIL, so a batch of frames runs in spawned
+    worker processes (``lightframeqc.parallel`` chooses processes from twelve
+    frames, threads below that, and falls back to threads when a pool cannot
+    start); every frame runs the same function, so the values never depend
+    on the executor.
+    """
 
     ordered = [str(Path(path).expanduser().resolve(strict=True)) for path in paths]
     if not ordered:
         return ()
     if workers < 1:
         raise ValueError("workers must be positive")
-    master_cache: dict[str, ImagePreview] = {}
-    master_lock = threading.Lock()
-
-    def analyze(path: str) -> FrameAnalysis:
-        return analyze_frame(
-            path,
-            detection=detection,
-            calibration=calibration,
-            master_cache=master_cache,
-            master_lock=master_lock,
-        )
-
+    tasks = [(path, detection, calibration) for path in ordered]
     if workers == 1:
-        return tuple(analyze(path) for path in ordered)
-    with ThreadPoolExecutor(max_workers=min(workers, len(ordered))) as executor:
-        return tuple(executor.map(analyze, ordered))
+        return tuple(_analyze_frame_task(task) for task in tasks)
+    with FrameRunner(workers, len(ordered)) as runner:
+        return tuple(runner.map(_analyze_frame_task, tasks))
 
 
 def choose_reference(analyses: Sequence[FrameAnalysis]) -> int:
@@ -1401,7 +1433,12 @@ def register_analyses(
     groups: dict[str | None, list[int]] = {}
     for analysis_index, analysis in enumerate(analyses):
         groups.setdefault(analysis.filter_name, []).append(analysis_index)
-    for group_indices in groups.values():
+    # Groups are independent (each writes its own indices of ``results``), so
+    # they run concurrently and share the worker budget between them.
+    group_workers = max(1, min(workers, len(groups)))
+    member_budget = max(1, workers // group_workers)
+
+    def process_group(group_indices: list[int]) -> None:
         if index in group_indices:
             anchor_index = index
         else:
@@ -1422,7 +1459,7 @@ def register_analyses(
                         results[candidate_index] = _estimate_one(
                             analyses[candidate_index], reference, selected
                         )
-                continue
+                return
 
         anchor_result = results[anchor_index]
         assert anchor_result is not None
@@ -1450,7 +1487,7 @@ def register_analyses(
 
         # Member estimates depend only on the anchor and the shared catalogs,
         # so they run concurrently; results keep input order.
-        member_workers = max(1, min(workers, len(pending)))
+        member_workers = max(1, min(member_budget, len(pending)))
         if member_workers == 1:
             estimates = [estimate_member(source_index) for source_index in pending]
         else:
@@ -1458,6 +1495,13 @@ def register_analyses(
                 estimates = list(executor.map(estimate_member, pending))
         for source_index, estimate in zip(pending, estimates, strict=True):
             results[source_index] = estimate
+
+    if group_workers == 1:
+        for group_indices in groups.values():
+            process_group(group_indices)
+    else:
+        with ThreadPoolExecutor(max_workers=group_workers) as executor:
+            list(executor.map(process_group, groups.values()))
 
     if selected.refine_full_centroids:
         reference_image = read_full_image(reference.path)
@@ -1493,8 +1537,9 @@ def register_analyses(
         for source_index, result in zip(refine_indices, refined, strict=True):
             results[source_index] = result
 
-    validated: list[FrameTransform] = []
-    for analysis, optional_result in zip(analyses, results, strict=True):
+    def validate(position: int) -> FrameTransform:
+        analysis = analyses[position]
+        optional_result = results[position]
         assert optional_result is not None
         result = optional_result
         if validate_warp and result.accepted and result.preview_matrix is not None:
@@ -1515,7 +1560,16 @@ def register_analyses(
                     "warp_valid_fraction": valid_fraction,
                 }
             )
-        validated.append(result)
+        return result
+
+    # Each frame's preview warp check reads the shared reference preview and
+    # its own result only, so the checks run concurrently in input order.
+    validate_workers = max(1, min(workers, len(analyses)))
+    if validate_workers == 1:
+        validated = [validate(position) for position in range(len(analyses))]
+    else:
+        with ThreadPoolExecutor(max_workers=validate_workers) as executor:
+            validated = list(executor.map(validate, range(len(analyses))))
     return index, tuple(validated)
 
 

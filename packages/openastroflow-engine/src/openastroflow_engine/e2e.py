@@ -37,6 +37,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import threading
 from time import perf_counter
 from typing import Any, Callable, Iterable, Mapping, Sequence
 import warnings
@@ -2444,6 +2445,7 @@ def _register_lights(
         run.analyses,
         run.transforms,
         weights,
+        workers=workers,
     )
     quality_weights = {
         str(
@@ -4832,19 +4834,53 @@ def run_e2e(
         solved_products: dict[str, Path] = {}
         all_solved = True
         _emit(progress, ProgressStage.ASTROMETRY, "started", "solving every filter", total=len(candidates))
-        for index, (filter_name, candidate) in enumerate(sorted(candidates.items()), start=1):
+        ordered_candidates = sorted(candidates.items())
+        solve_targets: dict[str, Path] = {}
+        for filter_name, _candidate in ordered_candidates:
             token = _safe_token(filter_name)
             filter_dir = products_dir / token
             filter_dir.mkdir(parents=True, exist_ok=False)
-            solved_path = filter_dir / f"master_light_{token}_wcs.fits"
+            solve_targets[filter_name] = filter_dir / f"master_light_{token}_wcs.fits"
+
+        solve_progress_lock = threading.Lock()
+        solve_completed = 0
+
+        def solve_filter(item: tuple[str, Path]) -> tuple[str, bool, list[dict[str, Any]]]:
+            nonlocal solve_completed
+            filter_name, candidate = item
             solved, attempts = _solve_one(
                 input_path=candidate,
-                output_path=solved_path,
+                output_path=solve_targets[filter_name],
                 backends=solver_backends,
                 hints=solver_hints,
                 min_matches=request.min_matches,
                 max_rms_arcsec=request.max_rms_arcsec,
             )
+            with solve_progress_lock:
+                solve_completed += 1
+                _emit(
+                    progress,
+                    ProgressStage.ASTROMETRY,
+                    "progress",
+                    f"{filter_name}: {'SOLVED' if solved else 'UNSOLVED'}",
+                    current=solve_completed,
+                    total=len(candidates),
+                )
+            return filter_name, solved, attempts
+
+        # Every filter solves in its own staging directory against read-only
+        # backends, so the filters run concurrently; records keep filter order.
+        solve_workers = max(1, min(request.workers, len(ordered_candidates)))
+        if solve_workers == 1:
+            solve_outcomes = [solve_filter(item) for item in ordered_candidates]
+        else:
+            with ThreadPoolExecutor(
+                max_workers=solve_workers, thread_name_prefix="oaf-solve"
+            ) as solve_pool:
+                solve_outcomes = list(solve_pool.map(solve_filter, ordered_candidates))
+        for filter_name, solved, attempts in solve_outcomes:
+            candidate = candidates[filter_name]
+            solved_path = solve_targets[filter_name]
             attempts = _relativize_solver_attempts(attempts, staging)
             solver_records[filter_name] = {
                 "status": "SOLVED" if solved else "UNSOLVED",
@@ -4856,14 +4892,6 @@ def run_e2e(
             if solved:
                 product_paths_staged.append(solved_path)
                 solved_products[filter_name] = solved_path
-            _emit(
-                progress,
-                ProgressStage.ASTROMETRY,
-                "progress",
-                f"{filter_name}: {'SOLVED' if solved else 'UNSOLVED'}",
-                current=index,
-                total=len(candidates),
-            )
 
         same_grid_unification: dict[str, Any] = {
             "status": "NOT_APPLICABLE",

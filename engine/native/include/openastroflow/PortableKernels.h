@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <vector>
 
 namespace openastroflow::native
 {
@@ -175,6 +176,53 @@ struct TileOffsetOutput
 // and the median residual plus its robust dispersion.  Tiles are independent
 // and run concurrently.
 void TileOffsets( const TileOffsetRequest& request, const TileOffsetOutput& output );
+
+struct RadonPeakRequest
+{
+   // Row-major Float32 residual samples and 0/1 line weights of one frame in
+   // one orientation, height*width each.  The frame is embedded in a dyadic
+   // canvas of `size` rows (a power of two, rows height..size-1 zero) whose
+   // columns are padded by `size` zeros on both sides, exactly as
+   // transient_rejection.fast_radon_levels lays it out.
+   std::span<const float> image;
+   std::span<const std::uint8_t> weight;
+   std::uint32_t width = 0;
+   std::uint32_t height = 0;
+   std::uint32_t size = 0;
+   // First reported block length: a power of two in [2, size].
+   std::uint32_t minimumRows = 0;
+   float detectionZ = 6.5F;
+   // A line is valid when its weight count reaches max(minimumCount,
+   // minimumCoverage*n) at block length n.
+   double minimumCoverage = 0.6;
+   double minimumCount = 8.0;
+   // Levels with fewer valid lines keep their unstandardised z.
+   std::uint32_t minimumScaleSamples = 64;
+   std::uint32_t threads = 1;
+
+   void Validate() const;
+};
+
+struct RadonPeak
+{
+   std::uint32_t level = 0;      // block length n
+   std::uint32_t block = 0;      // dyadic block b: rows b*n .. b*n+n-1
+   std::uint32_t shiftIndex = 0; // s + n - 1 for the column shift s
+   std::uint32_t column = 0;     // padded column x (image column x - size)
+   float z = 0;
+};
+
+// Multi-scale line peaks of transient_rejection._candidate_lines for one
+// orientation: the dyadic fast Radon transform of the samples and of the
+// weights (Float32 sums in the reference recursion order), per level the
+// standardised z of every valid line (Float32 sum/sqrt(count) divided by
+// 1.4826 times the Float32 median absolute deviation about the Float32
+// median, when at least minimumScaleSamples lines are valid), and every
+// line whose z reaches detectionZ and is the maximum of its (5 shifts x 7
+// columns) neighbourhood within the block.  Peaks are appended in level
+// order and, within a level, in (block, shiftIndex, column) row-major
+// order, which is the NumPy nonzero order of the reference.
+void RadonLinePeaks( const RadonPeakRequest& request, std::vector<RadonPeak>& peaks );
 
 // Hardware concurrency clamped to [1, 64]; never zero.
 std::uint32_t DefaultKernelThreads() noexcept;

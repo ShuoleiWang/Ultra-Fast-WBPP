@@ -540,6 +540,96 @@ void TestTileOffsetsMatchReferenceStatistics()
             "thread count must not change tile statistics" );
 }
 
+std::vector<RadonPeak> RadonPeaksOf( const std::vector<float>& image,
+                                     const std::vector<std::uint8_t>& weight,
+                                     std::uint32_t width,
+                                     std::uint32_t height,
+                                     std::uint32_t size,
+                                     std::uint32_t threads )
+{
+   RadonPeakRequest request;
+   request.image = image;
+   request.weight = weight;
+   request.width = width;
+   request.height = height;
+   request.size = size;
+   request.minimumRows = 16;
+   request.threads = threads;
+   std::vector<RadonPeak> peaks;
+   RadonLinePeaks( request, peaks );
+   return peaks;
+}
+
+void TestRadonPeaksFindTheDyadicLineAtEveryLevel()
+{
+   // A vertical line of value 2 at column 10 of a 40x64 frame on a 64-row
+   // canvas.  Every block whose rows reach into the frame with at least
+   // 60% coverage sums 2 per row, so the line is the single peak of the
+   // block at shift 0; blocks 2 and 3 of level 16 and block 1 of level 32
+   // cover 8 frame rows only and are invalid.  Most valid lines are zero,
+   // so the median absolute deviation vanishes and z stays unscaled.
+   const std::uint32_t width = 64;
+   const std::uint32_t height = 40;
+   const std::uint32_t size = 64;
+   std::vector<float> image( height*width, 0.0F );
+   std::vector<std::uint8_t> weight( height*width, 1 );
+   for ( std::uint32_t row = 0; row < height; ++row )
+      image[row*width + 10] = 2.0F;
+   const std::vector<RadonPeak> peaks = RadonPeaksOf( image, weight, width, height, size, 1 );
+   Require( peaks.size() == 4U, "radon peaks: expected one peak per covered block" );
+   const std::uint32_t expectedLevels[4] = { 16, 16, 32, 64 };
+   const std::uint32_t expectedBlocks[4] = { 0, 1, 0, 0 };
+   const float expectedRows[4] = { 16.0F, 16.0F, 32.0F, 40.0F };
+   for ( std::size_t i = 0; i < peaks.size(); ++i )
+   {
+      Require( peaks[i].level == expectedLevels[i], "radon peaks: level order" );
+      Require( peaks[i].block == expectedBlocks[i], "radon peaks: block order" );
+      Require( peaks[i].shiftIndex == peaks[i].level - 1, "radon peaks: vertical line has shift 0" );
+      Require( peaks[i].column == size + 10U, "radon peaks: padded column of the line" );
+      const float sum = 2.0F*expectedRows[i];
+      const float expectedZ = sum/std::sqrt( expectedRows[i] );
+      Require( peaks[i].z == expectedZ, "radon peaks: z is Float32 sum/sqrt(count)" );
+   }
+   const std::vector<RadonPeak> threaded = RadonPeaksOf( image, weight, width, height, size, 4 );
+   Require( threaded.size() == peaks.size(), "radon peaks: thread-invariant count" );
+   for ( std::size_t i = 0; i < peaks.size(); ++i )
+      Require( threaded[i].level == peaks[i].level && threaded[i].block == peaks[i].block
+            && threaded[i].shiftIndex == peaks[i].shiftIndex
+            && threaded[i].column == peaks[i].column && threaded[i].z == peaks[i].z,
+               "radon peaks: thread-invariant peaks" );
+
+   // The dyadic line with shift +1 over the 64 rows (column 10 for the top
+   // half, column 11 for the bottom half) is the shift-1 peak of the top
+   // level: the vertical lines through either half sum less.
+   std::fill( image.begin(), image.end(), 0.0F );
+   for ( std::uint32_t row = 0; row < height; ++row )
+      image[row*width + (row < 32 ? 10U : 11U)] = 2.0F;
+   const std::vector<RadonPeak> oblique = RadonPeaksOf( image, weight, width, height, size, 2 );
+   const RadonPeak* strongest = nullptr;
+   for ( const RadonPeak& peak : oblique )
+      if ( peak.level == 64 && (strongest == nullptr || peak.z > strongest->z) )
+         strongest = &peak;
+   Require( strongest != nullptr, "radon peaks: oblique top-level peak found" );
+   Require( strongest->shiftIndex == 63U + 1U && strongest->column == size + 10U,
+            "radon peaks: oblique line is the shift-1 top-level peak" );
+   Require( strongest->z == 80.0F/std::sqrt( 40.0F ), "radon peaks: oblique z" );
+
+   // Validation: non-power-of-two canvas, canvas smaller than the frame.
+   RadonPeakRequest bad;
+   bad.image = image;
+   bad.weight = weight;
+   bad.width = width;
+   bad.height = height;
+   bad.size = 48;
+   bad.minimumRows = 16;
+   std::vector<RadonPeak> sink;
+   RequireThrows<std::invalid_argument>( [&]() { RadonLinePeaks( bad, sink ); },
+                                         "radon peaks: canvas must be a power of two" );
+   bad.size = 32;
+   RequireThrows<std::invalid_argument>( [&]() { RadonLinePeaks( bad, sink ); },
+                                         "radon peaks: canvas must hold the frame" );
+}
+
 void TestCAbiRoundTrip()
 {
    const std::uint32_t width = 12;
@@ -802,6 +892,7 @@ int main()
       TestMadRejectionScaleModelMatchesReferenceRule();
       TestMaskedMeanAccumulatesInFrameOrder();
       TestTileOffsetsMatchReferenceStatistics();
+      TestRadonPeaksFindTheDyadicLineAtEveryLevel();
       TestCAbiRoundTrip();
       TestDynamicChunkingIsThreadAndGrainInvariant();
       std::cout << "OpenAstroFlowPortableKernelTests passed\n";
