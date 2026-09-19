@@ -45,6 +45,55 @@ impl EngineExecutable {
     }
 }
 
+const TEXT_BUSY_RETRIES: u32 = 20;
+const TEXT_BUSY_RETRY_DELAY: Duration = Duration::from_millis(50);
+
+/// Launches a sidecar command, retrying for about a second while its
+/// executable is momentarily "text busy".
+///
+/// On Unix, a fork elsewhere in this process (another sidecar launch, a
+/// test thread) inherits every open descriptor until its own exec; if one of
+/// them is a write handle on a just-installed executable, executing that
+/// file meanwhile fails with `ETXTBSY` even though the writer already closed
+/// it.  rustc, cargo and git retry the same way; any other launch error is
+/// returned at once.
+pub(crate) fn spawn_sidecar(command: &mut Command) -> std::io::Result<Child> {
+    let mut attempt = 0;
+    loop {
+        match command.spawn() {
+            Err(error) if is_text_busy(&error) && attempt < TEXT_BUSY_RETRIES => {
+                attempt += 1;
+                std::thread::sleep(TEXT_BUSY_RETRY_DELAY);
+            }
+            result => return result,
+        }
+    }
+}
+
+/// `Command::output` with the same text-busy retry as [`spawn_sidecar`].
+pub(crate) fn sidecar_output(command: &mut Command) -> std::io::Result<std::process::Output> {
+    let mut attempt = 0;
+    loop {
+        match command.output() {
+            Err(error) if is_text_busy(&error) && attempt < TEXT_BUSY_RETRIES => {
+                attempt += 1;
+                std::thread::sleep(TEXT_BUSY_RETRY_DELAY);
+            }
+            result => return result,
+        }
+    }
+}
+
+#[cfg(unix)]
+fn is_text_busy(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ETXTBSY)
+}
+
+#[cfg(not(unix))]
+fn is_text_busy(_error: &std::io::Error) -> bool {
+    false
+}
+
 #[derive(Default)]
 pub(crate) struct PipelineRegistry {
     jobs: Mutex<HashMap<String, Arc<Mutex<Child>>>>,
@@ -850,8 +899,7 @@ fn probe_runtime_with(executable: EngineExecutable) -> Result<RuntimeProbe, Stri
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut child = command
-        .spawn()
+    let mut child = spawn_sidecar(&mut command)
         .map_err(|error| format!("cannot launch scientific sidecar: {error}"))?;
     let mut stdin = child.stdin.take().ok_or("worker stdin is unavailable")?;
     let stdout = child.stdout.take().ok_or("worker stdout is unavailable")?;
@@ -982,8 +1030,7 @@ pub(crate) fn get_capabilities<R: Runtime>(app: &AppHandle<R>) -> RuntimeCapabil
 
 pub(crate) fn command_output(mut command: Command, operation: &str) -> Result<Vec<u8>, String> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let output = command
-        .output()
+    let output = sidecar_output(&mut command)
         .map_err(|error| format!("cannot launch sidecar for {operation}: {error}"))?;
     if !output.status.success() {
         let diagnostic = String::from_utf8_lossy(&output.stderr);
@@ -1535,8 +1582,7 @@ fn start_pipeline_with_probe<R: Runtime>(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
+    let mut child = spawn_sidecar(&mut command)
         .map_err(|error| format!("cannot launch scientific sidecar: {error}"))?;
     let mut stdin = child.stdin.take().ok_or("worker stdin is unavailable")?;
     let stdout = child.stdout.take().ok_or("worker stdout is unavailable")?;
@@ -1990,6 +2036,39 @@ mod tests {
             Some(PathBuf::from("/tmp/OpenAstroFlow")),
         );
         assert!(candidates.is_empty());
+    }
+
+    /// Linux refuses to execute a file that is open for writing (`ETXTBSY`);
+    /// the launcher waits for the writer to finish instead of failing at once.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sidecar_launch_waits_for_a_text_busy_executable() {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let root = std::env::temp_dir()
+            .join(new_public_identifier("text-busy-test").expect("temporary id"));
+        std::fs::create_dir(&root).expect("create test directory");
+        let script = root.join("busy-sidecar");
+        let mut writer = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .open(&script)
+            .expect("create fake sidecar");
+        writer
+            .write_all(b"#!/bin/sh\nexit 0\n")
+            .expect("write fake sidecar");
+        writer.sync_all().expect("sync fake sidecar");
+        // The writer closes only after the launcher has started retrying.
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(writer);
+        });
+        let mut command = Command::new(&script);
+        let output = sidecar_output(&mut command).expect("launch after the writer closed");
+        assert!(output.status.success());
+        release.join().expect("writer thread");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]

@@ -19,11 +19,16 @@ For interface-only work, run `make demo`. The browser preview is explicitly mark
 
 | Location | Responsibility |
 |---|---|
-| `src/App.tsx` | Application shell and workflow screens |
+| `src/App.tsx` | Window shell: toolbar, sidebar, content views, inspector |
+| `src/Toolbar.tsx`, `src/Sidebar.tsx`, `src/Inspector.tsx` | The macOS-style chrome around the content ([design](../../docs/gui-redesign-plan.md)) |
+| `src/views.tsx` | Import, screening, processing and result views, launch bar, master forms, solver setup |
 | `src/useWorkflow.ts` | Import, review, processing state, progress, and timer |
 | `src/bridge.ts` | Typed frontend calls and native events |
-| `src/FrameInventory.tsx` | Input groups and calibration status |
+| `src/FrameInventory.tsx` | Input groups, manual type hints and calibration status |
 | `src/i18n.ts` | English and Simplified Chinese interface text |
+| `src/icons.tsx` | SF Symbols-style line icons and the brand mark |
+| `src/demoAutopilot.ts` | `?demo=` stages for documentation screenshots (browser demo only) |
+| `scripts/brand_icon.py`, `scripts/screenshots.py` | Reproducible application icon and README screenshots |
 | `src-tauri/src/project.rs` | Project requests, worker execution, and result verification |
 | `src-tauri/src/sidecar.rs` | Worker discovery, integrity, and launch |
 
