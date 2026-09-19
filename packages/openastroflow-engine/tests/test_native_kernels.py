@@ -904,3 +904,81 @@ def test_rejection_sigma_floor_matches_per_row_reference(tmp_path: Path) -> None
     assert actual.usable_sigma_count == int(sampled_sigma.size)
     assert actual.sampled_sigma_median == expected_median
     assert actual.group_sigma_floor == max(REJECTION_FLOOR_ABSOLUTE, expected_median * REJECTION_FLOOR_GROUP_FRACTION)
+
+
+def _trail_preview(seed: int, height: int, width: int, frames: int = 7) -> np.ndarray:
+    """Block-mean previews with a faint diagonal trail in one frame."""
+
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[:height, :width]
+    sky = 100.0 + 0.01 * xx + 0.02 * yy
+    values = sky[None] + rng.normal(0.0, 1.0, (frames, height, width))
+    stars = rng.random((height, width)) < 0.002
+    values[:, stars] += 40.0
+    values[3][np.abs(yy - 0.6 * xx - 8) < 1.2] += 1.5
+    values[:, :, :3] = np.nan
+    return values.astype(np.float32)
+
+
+@requires_native
+@pytest.mark.parametrize("seed,height,width", [(3, 96, 150), (11, 130, 90)])
+def test_native_radon_peaks_match_numpy_candidate_lines_bitwise(
+    seed: int, height: int, width: int
+) -> None:
+    from openastroflow_engine import transient_rejection as tr
+
+    assert KERNELS is not None
+    values = _trail_preview(seed, height, width)
+    finite = np.isfinite(values)
+    common = np.sum(finite, axis=0) >= 5
+    reference = np.zeros((height, width), dtype=np.float32)
+    reference[common] = np.nanmedian(values[:, common], axis=0)
+    for index in (0, 3):
+        detect = common & finite[index]
+        residual = np.where(detect, values[index] - reference, 0.0)
+        sigma = float(1.4826 * np.median(np.abs(residual[detect])))
+        residual_z = np.where(detect, np.clip(residual / sigma, -5.0, 5.0), 0.0).astype(np.float32)
+        native = tr._candidate_lines(residual_z, detect, 16, kernels=KERNELS, threads=3)
+        numpy_path = tr._candidate_lines(residual_z, detect, 16, kernels=None)
+        assert len(native) == len(numpy_path)
+        for (z_native, p0_native, p1_native), (z_numpy, p0_numpy, p1_numpy) in zip(native, numpy_path):
+            assert z_native == z_numpy
+            assert np.array_equal(p0_native, p0_numpy)
+            assert np.array_equal(p1_native, p1_numpy)
+        if index == 3:
+            assert len(native) >= 1
+
+
+@requires_native
+def test_native_radon_peaks_reject_bad_geometry() -> None:
+    assert KERNELS is not None
+    image = np.zeros((20, 30), dtype=np.float32)
+    weight = np.ones((20, 30), dtype=np.uint8)
+    common = dict(minimum_rows=16, detection_z=6.5, minimum_coverage=0.6,
+                  minimum_count=8.0, minimum_scale_samples=64, threads=1)
+    with pytest.raises(native_kernels.NativeKernelError):
+        KERNELS.radon_line_peaks(image, weight, size=24, **common)  # not a power of two
+    with pytest.raises(native_kernels.NativeKernelError):
+        KERNELS.radon_line_peaks(image, weight, size=16, **common)  # smaller than the image
+    with pytest.raises(ValueError):
+        KERNELS.radon_line_peaks(image, weight[:10], size=32, **common)
+
+
+@requires_native
+def test_detect_transient_trails_native_and_numpy_models_match(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openastroflow_engine import transient_rejection as tr
+
+    values = _trail_preview(5, 110, 160)
+    native = tr.detect_transient_trails(values, 4, workers=3)
+    assert native.line_kernel == native_kernels.RADON_KERNEL_ID
+    monkeypatch.setenv(native_kernels.DISABLE_ENVIRONMENT_VARIABLE, "1")
+    native_kernels.reset_native_kernel_cache()
+    try:
+        reference = tr.detect_transient_trails(values, 4, workers=1)
+    finally:
+        monkeypatch.delenv(native_kernels.DISABLE_ENVIRONMENT_VARIABLE)
+        native_kernels.reset_native_kernel_cache()
+    assert reference.line_kernel == tr.NUMPY_RADON_KERNEL_ID
+    assert native.trails == reference.trails
+    assert len(native.trails) >= 1
+    assert native.serializable()["lineKernel"] == native_kernels.RADON_KERNEL_ID

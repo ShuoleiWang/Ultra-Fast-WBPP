@@ -352,6 +352,55 @@ OAF_NATIVE_API int oaf_native_cpu_tile_offsets_v1(
    char* error_message,
    size_t error_message_capacity );
 
+typedef struct OafNativeRadonPeakRequestV1
+{
+   uint32_t struct_size;
+   uint32_t width;
+   uint32_t height;
+   uint32_t size;
+   uint32_t minimum_rows;
+   uint32_t minimum_scale_samples;
+   uint32_t threads;
+   float detection_z;
+   // Row-major Float32 samples and 0/1 weights, height*width each.
+   const float* image;
+   size_t image_count;
+   const uint8_t* weight;
+   size_t weight_count;
+   double minimum_coverage;
+   double minimum_count;
+} OafNativeRadonPeakRequestV1;
+
+typedef struct OafNativeRadonPeakV1
+{
+   uint32_t level;
+   uint32_t block;
+   uint32_t shift_index;
+   uint32_t column;
+   float z;
+   uint32_t reserved;
+} OafNativeRadonPeakV1;
+
+typedef struct OafNativeRadonPeakOutputV1
+{
+   uint32_t struct_size;
+   uint32_t reserved;
+   OafNativeRadonPeakV1* peaks;
+   size_t peak_capacity;
+   // Always written: the number of peaks found. When it exceeds
+   // peak_capacity the call returns OAF_NATIVE_BUFFER_TOO_SMALL and the
+   // caller retries with that capacity.
+   size_t peak_count;
+} OafNativeRadonPeakOutputV1;
+
+// Multi-scale fast-Radon line peaks of one frame orientation (see
+// PortableKernels.h RadonLinePeaks).
+OAF_NATIVE_API int oaf_native_cpu_radon_peaks_v1(
+   const OafNativeRadonPeakRequestV1* request,
+   OafNativeRadonPeakOutputV1* output,
+   char* error_message,
+   size_t error_message_capacity );
+
 // Hardware concurrency clamped to [1, 64].
 OAF_NATIVE_API uint32_t oaf_native_default_kernel_threads_v1(void);
 

@@ -29,6 +29,25 @@ class ResidualBackgroundAlignment:
             correction = horizontal[lo] * (1-wy[:, None]) + horizontal[hi] * wy[:, None]
             values[index] += correction.astype(np.float32)
 
+    def corrections_at(self, x: NDArray[np.float64], y: NDArray[np.float64]) -> NDArray[np.float32]:
+        """Per-frame Float32 corrections at pixel coordinates ``(x[i], y[i])``.
+
+        Element for element the values ``apply_coordinates`` adds at those
+        pixels: the grid rows interpolated along x at the integer columns and
+        the same two-node blend along y.
+        """
+        columns = np.arange(int(np.max(x)) + 1, dtype=np.float64) if x.size else np.zeros(0)
+        column_index = x.astype(np.intp)
+        hi = np.clip(np.searchsorted(self.y_nodes, y, side="right"), 1, len(self.y_nodes)-1)
+        lo = hi - 1
+        wy = np.clip((y-self.y_nodes[lo])/(self.y_nodes[hi]-self.y_nodes[lo]), 0, 1)
+        result = np.empty((len(self.corrections), x.size), dtype=np.float32)
+        for index, grid in enumerate(self.corrections):
+            horizontal = np.asarray([np.interp(columns, self.x_nodes, row) for row in grid])
+            correction = horizontal[lo, column_index] * (1-wy) + horizontal[hi, column_index] * wy
+            result[index] = correction.astype(np.float32)
+        return result
+
     def apply_rows(self, values: NDArray[np.float32], first_row: int) -> None:
         self.apply_coordinates(values, np.arange(values.shape[2], dtype=np.float64),
                                np.arange(first_row, first_row+values.shape[1], dtype=np.float64))

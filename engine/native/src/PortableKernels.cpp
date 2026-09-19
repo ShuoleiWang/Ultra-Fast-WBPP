@@ -160,6 +160,89 @@ float MedianOfFinite( float* values, std::uint32_t count )
    return sum/2.0F;
 }
 
+// Sorts a short sample in place (insertion sort beats selection for the
+// frame counts of a stack) and returns the same median as MedianOfFinite.
+constexpr std::uint32_t SortedMedianMaximumCount = 64;
+
+float SortedMedianOfFinite( float* values, std::uint32_t count )
+{
+   if ( count > SortedMedianMaximumCount )
+      return MedianOfFinite( values, count );
+   for ( std::uint32_t i = 1; i < count; ++i )
+   {
+      const float value = values[i];
+      std::uint32_t j = i;
+      while ( j > 0 && values[j - 1] > value )
+      {
+         values[j] = values[j - 1];
+         --j;
+      }
+      values[j] = value;
+   }
+   const std::uint32_t half = count/2;
+   const float upper = values[half];
+   if ( (count & 1U) != 0 )
+      return upper;
+   const float sum = values[half - 1] + upper;
+   return sum/2.0F;
+}
+
+// Median absolute deviation of an ascending sample about ``center``: the
+// deviations Float32(|value - center|) grow away from the centre on either
+// side, so their k-th smallest is found by merging the two runs, the same
+// order statistic (and the same Float32(low + high)/2 for an even count)
+// MedianOfFinite returns from the deviation sample.
+float SortedMadOfFinite( const float* sorted, std::uint32_t count, float center )
+{
+   if ( count > SortedMedianMaximumCount )
+   {
+      // Not reached for sorted samples (they are short); kept for safety.
+      std::vector<float> deviations( sorted, sorted + count );
+      for ( float& value : deviations )
+      {
+         const float deviation = value - center;
+         value = std::fabs( deviation );
+      }
+      return MedianOfFinite( deviations.data(), count );
+   }
+   // Elements below the centre, walked downward from ``left``; elements at
+   // or above it, walked upward from ``right``.
+   std::int32_t left = -1;
+   std::uint32_t right = 0;
+   while ( right < count && sorted[right] < center )
+      ++right;
+   left = static_cast<std::int32_t>( right ) - 1;
+   auto deviationAt = [&]( std::uint32_t index )
+   {
+      const float deviation = sorted[index] - center;
+      return std::fabs( deviation );
+   };
+   const std::uint32_t half = count/2;
+   float previous = 0.0F;
+   float current = 0.0F;
+   for ( std::uint32_t taken = 0; taken <= half; ++taken )
+   {
+      float next;
+      if ( left >= 0
+        && (right >= count || deviationAt( static_cast<std::uint32_t>( left ) ) <= deviationAt( right )) )
+      {
+         next = deviationAt( static_cast<std::uint32_t>( left ) );
+         --left;
+      }
+      else
+      {
+         next = deviationAt( right );
+         ++right;
+      }
+      previous = current;
+      current = next;
+   }
+   if ( (count & 1U) != 0 )
+      return current;
+   const float sum = previous + current;
+   return sum/2.0F;
+}
+
 } // namespace
 
 void WarpLanczos3Request::Validate() const
@@ -381,6 +464,87 @@ bool MadRejectionRequest::UsesScaleModel() const noexcept
 namespace
 {
 
+// Median of the finite per-pixel MADs in the same-row window
+// [x - halfWidth, x + halfWidth] of consecutive pixels: the window's values
+// are kept sorted and each step removes the column that leaves and inserts
+// the one that enters, so the median is read from the middle instead of
+// being selected anew.  The value is the same order statistic MedianOfFinite
+// returns (Float32(low + high)/2 for an even count).
+class PooledMadWindow
+{
+public:
+   PooledMadWindow( const std::vector<float>& madMap,
+                    std::uint32_t width,
+                    std::size_t halfWidth )
+      : m_madMap( madMap ), m_width( width ), m_halfWidth( halfWidth )
+   {
+      m_sorted.reserve( 2*halfWidth + 2 );
+   }
+
+   float MedianAt( std::size_t pixel )
+   {
+      const std::size_t x = pixel % m_width;
+      const std::size_t rowStart = pixel - x;
+      if ( !m_valid || rowStart != m_rowStart || x < m_x || x - m_x > m_halfWidth )
+         Rebuild( rowStart, x );
+      else
+         while ( m_x < x )
+            Step();
+      const std::size_t count = m_sorted.size();
+      const std::size_t half = count/2;
+      const float upper = m_sorted[half];
+      if ( (count & 1U) != 0 )
+         return upper;
+      const float sum = m_sorted[half - 1] + upper;
+      return sum/2.0F;
+   }
+
+private:
+   void Insert( float value )
+   {
+      if ( std::isnan( value ) )
+         return;
+      m_sorted.insert( std::upper_bound( m_sorted.begin(), m_sorted.end(), value ), value );
+   }
+
+   void Remove( float value )
+   {
+      if ( std::isnan( value ) )
+         return;
+      m_sorted.erase( std::lower_bound( m_sorted.begin(), m_sorted.end(), value ) );
+   }
+
+   void Rebuild( std::size_t rowStart, std::size_t x )
+   {
+      m_sorted.clear();
+      m_rowStart = rowStart;
+      m_x = x;
+      const std::size_t first = x > m_halfWidth ? x - m_halfWidth : 0;
+      const std::size_t last = std::min<std::size_t>( m_width - 1, x + m_halfWidth );
+      for ( std::size_t column = first; column <= last; ++column )
+         Insert( m_madMap[rowStart + column] );
+      m_valid = true;
+   }
+
+   // Move the window from column m_x to m_x + 1.
+   void Step()
+   {
+      if ( m_x >= m_halfWidth )
+         Remove( m_madMap[m_rowStart + m_x - m_halfWidth] );
+      ++m_x;
+      if ( m_x + m_halfWidth < m_width )
+         Insert( m_madMap[m_rowStart + m_x + m_halfWidth] );
+   }
+
+   const std::vector<float>& m_madMap;
+   std::uint32_t m_width;
+   std::size_t m_halfWidth;
+   std::vector<float> m_sorted;
+   std::size_t m_rowStart = 0;
+   std::size_t m_x = 0;
+   bool m_valid = false;
+};
+
 // v2 scale model, phase 2: per-frame thresholds from the pooled row MADs.
 // Phase 1 (MadRejectionMask) has written the centre of every pixel and its
 // MAD (NaN when the pixel has too few finite samples for a decision).
@@ -405,7 +569,7 @@ void ScaledRejectionDecisions( const MadRejectionRequest& request,
       {
          constexpr std::size_t Block = 64;
          std::vector<float> transposed( Block*frames );
-         std::vector<float> window( 2*halfWidth + 1 );
+         PooledMadWindow window( madMap, width, halfWidth );
          std::vector<std::uint8_t> decisions( Block*frames );
          for ( std::size_t blockStart = begin; blockStart < end;
                blockStart += Block )
@@ -431,18 +595,7 @@ void ScaledRejectionDecisions( const MadRejectionRequest& request,
                      flags[frame] = std::isfinite( values[frame] ) ? 1 : 0;
                   continue;
                }
-               const std::size_t x = pixel % width;
-               const std::size_t rowStart = pixel - x;
-               const std::size_t first = x > halfWidth ? x - halfWidth : 0;
-               const std::size_t last = std::min<std::size_t>( width - 1, x + halfWidth );
-               std::uint32_t windowCount = 0;
-               for ( std::size_t column = first; column <= last; ++column )
-               {
-                  const float neighbour = madMap[rowStart + column];
-                  if ( !std::isnan( neighbour ) )
-                     window[windowCount++] = neighbour;
-               }
-               const float pooledMad = MedianOfFinite( window.data(), windowCount );
+               const float pooledMad = window.MedianAt( pixel );
                const float pixelCenter = centerData[pixel];
                const float robustSigma = 1.4826F*mad;
                const float sigmaPool = 1.4826F*pooledMad;
@@ -532,7 +685,7 @@ void MadRejectionMask( const MadRejectionRequest& request,
                      scratch[finiteCount++] = values[frame];
                float pixelCenter = nan;
                if ( finiteCount > 0 )
-                  pixelCenter = MedianOfFinite( scratch.data(), finiteCount );
+                  pixelCenter = SortedMedianOfFinite( scratch.data(), finiteCount );
                centerData[blockStart + i] = pixelCenter;
                if ( !applyRejection
                  || finiteCount < request.minimumRejectionFrames )
@@ -544,14 +697,21 @@ void MadRejectionMask( const MadRejectionRequest& request,
                      flags[frame] = std::isfinite( values[frame] ) ? 1 : 0;
                   continue;
                }
-               std::uint32_t deviationCount = 0;
-               for ( std::uint32_t frame = 0; frame < frames; ++frame )
-                  if ( std::isfinite( values[frame] ) )
-                  {
-                     const float deviation = values[frame] - pixelCenter;
-                     scratch[deviationCount++] = std::fabs( deviation );
-                  }
-               const float mad = MedianOfFinite( scratch.data(), deviationCount );
+               float mad;
+               if ( finiteCount <= SortedMedianMaximumCount )
+                  // ``scratch`` holds the ascending finite sample.
+                  mad = SortedMadOfFinite( scratch.data(), finiteCount, pixelCenter );
+               else
+               {
+                  std::uint32_t deviationCount = 0;
+                  for ( std::uint32_t frame = 0; frame < frames; ++frame )
+                     if ( std::isfinite( values[frame] ) )
+                     {
+                        const float deviation = values[frame] - pixelCenter;
+                        scratch[deviationCount++] = std::fabs( deviation );
+                     }
+                  mad = MedianOfFinite( scratch.data(), deviationCount );
+               }
                if ( scaleModel )
                {
                   madMap[blockStart + i] = mad;
@@ -689,22 +849,20 @@ void MaskedWeightedMean( const MaskedMeanRequest& request,
 namespace
 {
 
-// np.median of an ascending Float64 sample: the middle value, or the mean of
-// the two middle values (Float64 sum then division by two).
-double SortedMedian( const std::vector<double>& sorted )
-{
-   const std::size_t count = sorted.size();
-   const std::size_t half = count/2;
-   if ( (count & 1U) != 0 )
-      return sorted[half];
-   const double sum = sorted[half - 1] + sorted[half];
-   return sum/2.0;
-}
-
+// np.median of an unordered Float64 sample: the middle order statistic, or
+// the mean of the two middle ones, selected without sorting the sample.
 double MedianOf( std::vector<double> values )
 {
-   std::sort( values.begin(), values.end() );
-   return SortedMedian( values );
+   const std::size_t count = values.size();
+   const std::size_t half = count/2;
+   const auto middle = values.begin() + static_cast<std::ptrdiff_t>( half );
+   std::nth_element( values.begin(), middle, values.end() );
+   const double upper = *middle;
+   if ( (count & 1U) != 0 )
+      return upper;
+   const double lower = *std::max_element( values.begin(), middle );
+   const double sum = lower + upper;
+   return sum/2.0;
 }
 
 // np.quantile(..., method="linear") on an ascending Float64 sample:
@@ -851,6 +1009,274 @@ void TileOffsets( const TileOffsetRequest& request, const TileOffsetOutput& outp
             output.valid[tile] = 1;
          }
       } );
+}
+
+void RadonPeakRequest::Validate() const
+{
+   if ( width == 0 || height == 0 )
+      throw std::invalid_argument( "radon peaks require a non-empty image" );
+   if ( size < height || size < 2 || (size & (size - 1)) != 0 )
+      throw std::invalid_argument(
+         "radon canvas size must be a power of two not smaller than the image height" );
+   if ( size > 32768 || width > 32768 )
+      throw std::invalid_argument( "radon canvas is larger than the kernel supports" );
+   if ( minimumRows < 2 || minimumRows > size || (minimumRows & (minimumRows - 1)) != 0 )
+      throw std::invalid_argument(
+         "radon minimum rows must be a power of two between 2 and the canvas size" );
+   const std::size_t samples = CheckedMultiply( height, width, "radon image" );
+   if ( image.size() != samples || weight.size() != samples )
+      throw std::invalid_argument( "radon image and weight sizes do not match the geometry" );
+   if ( !std::isfinite( detectionZ ) || !std::isfinite( minimumCoverage )
+     || !std::isfinite( minimumCount ) || minimumCoverage < 0.0 || minimumCount < 0.0 )
+      throw std::invalid_argument( "radon detection parameters are invalid" );
+}
+
+namespace
+{
+
+// One dyadic level of the fast Radon transform restricted to the lines that
+// can touch the image: blocks whose rows reach into the image and padded
+// columns [lo, hi).  Every other entry of the reference's dense
+// (blocks, 2n-1, width + 2 size) array is an exact zero (its line never
+// meets the image), and reading such an entry yields zero here.
+struct RadonLevel
+{
+   std::uint32_t n = 1;
+   std::uint32_t activeBlocks = 0;
+   std::uint32_t shifts = 1;
+   std::uint32_t lo = 0;
+   std::uint32_t hi = 0;
+   std::vector<float> sums;
+   std::vector<std::uint16_t> counts;
+
+   std::size_t RowLength() const noexcept { return hi - lo; }
+   std::size_t Rows() const noexcept
+   {
+      return static_cast<std::size_t>( activeBlocks )*shifts;
+   }
+};
+
+// np.median of a Float32 sample: the middle value, or Float32(low + high)/2.
+// The sample is reordered.
+float Float32Median( std::vector<float>& values )
+{
+   const std::size_t count = values.size();
+   const std::size_t half = count/2;
+   std::nth_element( values.begin(), values.begin() + static_cast<std::ptrdiff_t>( half ),
+                     values.end() );
+   const float upper = values[half];
+   if ( (count & 1U) != 0 )
+      return upper;
+   const float lower = *std::max_element(
+      values.begin(), values.begin() + static_cast<std::ptrdiff_t>( half ) );
+   const float sum = lower + upper;
+   return sum/2.0F;
+}
+
+constexpr std::size_t RadonRowGrain = 4;
+
+// F_n[b, s, x] = F_h[2b, t, x] + F_h[2b+1, t, x + (s - t)] with h = n/2 and
+// t = trunc(s/2), the reference recursion, on the restricted layout.
+void NextRadonLevel( const RadonLevel& previous, RadonLevel& level,
+                     std::uint32_t height, std::uint32_t width, std::uint32_t size,
+                     std::uint32_t threads )
+{
+   const std::uint32_t n = previous.n*2;
+   const std::uint32_t half = previous.n;
+   level.n = n;
+   level.activeBlocks = (height + n - 1)/n;
+   level.shifts = 2*n - 1;
+   level.lo = size - (n - 1);
+   level.hi = std::min( size + width + n - 1, width + 2*size );
+   level.sums.assign( level.Rows()*level.RowLength(), 0.0F );
+   level.counts.assign( level.Rows()*level.RowLength(), 0 );
+   const std::size_t rowLength = level.RowLength();
+   const std::size_t previousLength = previous.RowLength();
+   const std::int64_t previousLo = previous.lo;
+   const std::int64_t previousHi = previous.hi;
+
+   ParallelRange( level.Rows(), threads, RadonRowGrain,
+      [&]( std::size_t begin, std::size_t end )
+      {
+         for ( std::size_t row = begin; row < end; ++row )
+         {
+            const std::uint32_t block = static_cast<std::uint32_t>( row/level.shifts );
+            const std::uint32_t shiftIndex = static_cast<std::uint32_t>( row % level.shifts );
+            const std::int64_t shift =
+               static_cast<std::int64_t>( shiftIndex ) - static_cast<std::int64_t>( n - 1 );
+            const std::int64_t trunc = shift/2; // C++ division truncates toward zero
+            const std::int64_t delta = shift - trunc;
+            const std::size_t previousRow =
+               static_cast<std::size_t>( trunc + static_cast<std::int64_t>( half ) - 1 );
+            const std::uint32_t topBlock = 2*block;
+            const std::uint32_t bottomBlock = 2*block + 1;
+            const float* top = nullptr;
+            const std::uint16_t* topCount = nullptr;
+            if ( topBlock < previous.activeBlocks )
+            {
+               const std::size_t offset =
+                  (static_cast<std::size_t>( topBlock )*previous.shifts + previousRow)
+                  *previousLength;
+               top = previous.sums.data() + offset;
+               topCount = previous.counts.data() + offset;
+            }
+            const float* bottom = nullptr;
+            const std::uint16_t* bottomCount = nullptr;
+            if ( bottomBlock < previous.activeBlocks )
+            {
+               const std::size_t offset =
+                  (static_cast<std::size_t>( bottomBlock )*previous.shifts + previousRow)
+                  *previousLength;
+               bottom = previous.sums.data() + offset;
+               bottomCount = previous.counts.data() + offset;
+            }
+            float* out = level.sums.data() + row*rowLength;
+            std::uint16_t* outCount = level.counts.data() + row*rowLength;
+            for ( std::size_t i = 0; i < rowLength; ++i )
+            {
+               const std::int64_t x = static_cast<std::int64_t>( level.lo + i );
+               float topValue = 0.0F;
+               std::uint16_t topN = 0;
+               if ( top != nullptr && x >= previousLo && x < previousHi )
+               {
+                  const std::size_t j = static_cast<std::size_t>( x - previousLo );
+                  topValue = top[j];
+                  topN = topCount[j];
+               }
+               const std::int64_t xb = x + delta;
+               float bottomValue = 0.0F;
+               std::uint16_t bottomN = 0;
+               if ( bottom != nullptr && xb >= previousLo && xb < previousHi )
+               {
+                  const std::size_t j = static_cast<std::size_t>( xb - previousLo );
+                  bottomValue = bottom[j];
+                  bottomN = bottomCount[j];
+               }
+               out[i] = topValue + bottomValue;
+               outCount[i] = static_cast<std::uint16_t>( topN + bottomN );
+            }
+         }
+      } );
+}
+
+// Standardised z of one level and its peaks (see RadonLinePeaks).
+void CollectLevelPeaks( const RadonLevel& level, const RadonPeakRequest& request,
+                        std::vector<float>& z, std::vector<float>& sample,
+                        std::vector<float>& deviations, std::vector<RadonPeak>& peaks )
+{
+   const std::size_t entries = level.sums.size();
+   const std::size_t rowLength = level.RowLength();
+   z.assign( entries, 0.0F );
+   // counts >= max(8, coverage*n): the reference compares Float32 counts with
+   // a Python float, which NumPy casts to Float32.
+   const double minimumCount = std::max(
+      request.minimumCount, request.minimumCoverage*static_cast<double>( level.n ) );
+   const float threshold = static_cast<float>( minimumCount );
+   ParallelRange( level.Rows(), request.threads, RadonRowGrain,
+      [&]( std::size_t begin, std::size_t end )
+      {
+         for ( std::size_t row = begin; row < end; ++row )
+         {
+            const float* sums = level.sums.data() + row*rowLength;
+            const std::uint16_t* counts = level.counts.data() + row*rowLength;
+            float* out = z.data() + row*rowLength;
+            for ( std::size_t i = 0; i < rowLength; ++i )
+            {
+               const float count = static_cast<float>( counts[i] );
+               if ( count >= threshold )
+               {
+                  const float root = std::sqrt( std::max( count, 1.0F ) );
+                  out[i] = sums[i]/root;
+               }
+            }
+         }
+      } );
+   sample.clear();
+   for ( std::size_t i = 0; i < entries; ++i )
+      if ( static_cast<float>( level.counts[i] ) >= threshold )
+         sample.push_back( z[i] );
+   if ( sample.size() >= request.minimumScaleSamples )
+   {
+      const float location = Float32Median( sample );
+      deviations.resize( sample.size() );
+      for ( std::size_t i = 0; i < sample.size(); ++i )
+      {
+         const float centered = sample[i] - location;
+         deviations[i] = std::fabs( centered );
+      }
+      const double scale = 1.4826*static_cast<double>( Float32Median( deviations ) );
+      if ( std::isfinite( scale ) && scale > 0.0 )
+      {
+         const float divisor = static_cast<float>( scale );
+         for ( float& value : z )
+            value = value/divisor;
+      }
+   }
+   const std::size_t shifts = level.shifts;
+   for ( std::size_t row = 0; row < level.Rows(); ++row )
+   {
+      const std::size_t block = row/shifts;
+      const std::size_t shiftIndex = row % shifts;
+      const float* values = z.data() + row*rowLength;
+      for ( std::size_t i = 0; i < rowLength; ++i )
+      {
+         const float value = values[i];
+         if ( !(value >= request.detectionZ) )
+            continue;
+         // Maximum of the (1, 5, 7) window in the same block; scipy's
+         // reflect border mode never introduces values from outside the
+         // clipped window, and entries outside the restricted layout are
+         // zero, so clipping to the stored rows and columns is exact.
+         const std::size_t firstShift = shiftIndex >= 2 ? shiftIndex - 2 : 0;
+         const std::size_t lastShift = std::min( shifts - 1, shiftIndex + 2 );
+         const std::size_t firstColumn = i >= 3 ? i - 3 : 0;
+         const std::size_t lastColumn = std::min( rowLength - 1, i + 3 );
+         bool peak = true;
+         for ( std::size_t s = firstShift; s <= lastShift && peak; ++s )
+         {
+            const float* neighbours = z.data() + (block*shifts + s)*rowLength;
+            for ( std::size_t c = firstColumn; c <= lastColumn; ++c )
+               if ( neighbours[c] > value )
+               {
+                  peak = false;
+                  break;
+               }
+         }
+         if ( peak )
+            peaks.push_back( RadonPeak{ level.n, static_cast<std::uint32_t>( block ),
+                                        static_cast<std::uint32_t>( shiftIndex ),
+                                        static_cast<std::uint32_t>( level.lo + i ), value } );
+      }
+   }
+}
+
+} // namespace
+
+void RadonLinePeaks( const RadonPeakRequest& request, std::vector<RadonPeak>& peaks )
+{
+   request.Validate();
+   const std::uint32_t threads = std::max( 1U, request.threads );
+   RadonLevel previous;
+   previous.n = 1;
+   previous.activeBlocks = request.height;
+   previous.shifts = 1;
+   previous.lo = request.size;
+   previous.hi = request.size + request.width;
+   previous.sums.assign( request.image.begin(), request.image.end() );
+   previous.counts.resize( request.weight.size() );
+   for ( std::size_t i = 0; i < request.weight.size(); ++i )
+      previous.counts[i] = request.weight[i] != 0 ? 1 : 0;
+   RadonLevel level;
+   std::vector<float> z;
+   std::vector<float> sample;
+   std::vector<float> deviations;
+   while ( previous.n < request.size )
+   {
+      NextRadonLevel( previous, level, request.height, request.width, request.size, threads );
+      if ( level.n >= request.minimumRows )
+         CollectLevelPeaks( level, request, z, sample, deviations, peaks );
+      std::swap( previous, level );
+   }
 }
 
 std::uint32_t DefaultKernelThreads() noexcept

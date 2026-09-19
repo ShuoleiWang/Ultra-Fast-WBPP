@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 struct OafNativeMetalExecutorV1
 {
@@ -867,6 +868,71 @@ extern "C" int oaf_native_cpu_tile_offsets_v1(
       },
       error_message, error_message_capacity,
       "unknown native tile offset failure" );
+}
+
+extern "C" int oaf_native_cpu_radon_peaks_v1(
+   const OafNativeRadonPeakRequestV1* request,
+   OafNativeRadonPeakOutputV1* output,
+   char* error_message,
+   size_t error_message_capacity )
+{
+   if ( request == nullptr || output == nullptr )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "request and output are required" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   if ( request->struct_size != sizeof( OafNativeRadonPeakRequestV1 )
+     || output->struct_size != sizeof( OafNativeRadonPeakOutputV1 )
+     || request->image == nullptr || request->weight == nullptr
+     || (output->peaks == nullptr && output->peak_capacity != 0) )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "radon peak C ABI structure version or input buffer is invalid" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   output->peak_count = 0;
+   std::vector<openastroflow::native::RadonPeak> peaks;
+   const int status = GuardedKernelCall(
+      [&]()
+      {
+         using namespace openastroflow::native;
+         RadonPeakRequest native;
+         native.image = std::span<const float>( request->image, request->image_count );
+         native.weight = std::span<const uint8_t>( request->weight, request->weight_count );
+         native.width = request->width;
+         native.height = request->height;
+         native.size = request->size;
+         native.minimumRows = request->minimum_rows;
+         native.detectionZ = request->detection_z;
+         native.minimumCoverage = request->minimum_coverage;
+         native.minimumCount = request->minimum_count;
+         native.minimumScaleSamples = request->minimum_scale_samples;
+         native.threads = request->threads;
+         RadonLinePeaks( native, peaks );
+      },
+      error_message, error_message_capacity,
+      "unknown native radon peak failure" );
+   if ( status != OAF_NATIVE_OK )
+      return status;
+   output->peak_count = peaks.size();
+   if ( peaks.size() > output->peak_capacity )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "radon peak output capacity is smaller than the number of peaks" );
+      return OAF_NATIVE_BUFFER_TOO_SMALL;
+   }
+   for ( size_t i = 0; i < peaks.size(); ++i )
+   {
+      OafNativeRadonPeakV1& out = output->peaks[i];
+      out.level = peaks[i].level;
+      out.block = peaks[i].block;
+      out.shift_index = peaks[i].shiftIndex;
+      out.column = peaks[i].column;
+      out.z = peaks[i].z;
+      out.reserved = 0;
+   }
+   return OAF_NATIVE_OK;
 }
 
 extern "C" uint32_t oaf_native_default_kernel_threads_v1(void)

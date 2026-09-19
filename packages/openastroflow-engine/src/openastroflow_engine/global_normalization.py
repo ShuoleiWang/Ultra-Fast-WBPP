@@ -26,6 +26,7 @@ matching alone cannot remove from the reference.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from functools import lru_cache
 import hashlib
 import math
 import threading
@@ -322,11 +323,20 @@ class StellarScaleHint:
         }
 
 
+@lru_cache(maxsize=4096)
 def _uniform_integer_indices(length: int, count: int) -> NDArray[np.int64]:
+    """``count`` rounded uniform positions in ``[0, length)``, shared read-only.
+
+    Every tile of a frame asks for the same few (length, count) pairs, so the
+    array is built once; callers never write to it.
+    """
+
     if count <= 1:
-        return np.zeros(1, dtype=np.int64)
-    values = np.linspace(0, length - 1, count, dtype=np.float64)
-    return np.rint(values).astype(np.int64)
+        values = np.zeros(1, dtype=np.int64)
+    else:
+        values = np.rint(np.linspace(0, length - 1, count, dtype=np.float64)).astype(np.int64)
+    values.setflags(write=False)
+    return values
 
 
 def _sample_coordinates(
@@ -420,6 +430,35 @@ def _sample_grid_points(
     return top * (1.0 - wy) + bottom * wy
 
 
+def _sample_grid_lattice(
+    grid: NDArray[np.float64],
+    x_nodes: NDArray[np.float64],
+    y_nodes: NDArray[np.float64],
+    x: NDArray[np.float64],
+    y: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """``_sample_grid_points`` on the product lattice ``y`` x ``x``.
+
+    Returns ``(len(y), len(x))`` values equal element for element to sampling
+    the meshgrid points: the node search and the weights are per axis, and
+    each point's bilinear expression is evaluated in the same order.
+    """
+
+    x_clipped = np.clip(x, x_nodes[0], x_nodes[-1])
+    y_clipped = np.clip(y, y_nodes[0], y_nodes[-1])
+    x_hi = np.clip(np.searchsorted(x_nodes, x_clipped, side="right"), 1, len(x_nodes) - 1)
+    y_hi = np.clip(np.searchsorted(y_nodes, y_clipped, side="right"), 1, len(y_nodes) - 1)
+    x_lo = x_hi - 1
+    y_lo = y_hi - 1
+    wx = ((x_clipped - x_nodes[x_lo]) / (x_nodes[x_hi] - x_nodes[x_lo]))[None, :]
+    wy = ((y_clipped - y_nodes[y_lo]) / (y_nodes[y_hi] - y_nodes[y_lo]))[:, None]
+    rows_lo = grid[y_lo]
+    rows_hi = grid[y_hi]
+    top = rows_lo[:, x_lo] * (1.0 - wx) + rows_lo[:, x_hi] * wx
+    bottom = rows_hi[:, x_lo] * (1.0 - wx) + rows_hi[:, x_hi] * wx
+    return top * (1.0 - wy) + bottom * wy
+
+
 class _ReferenceSampleCache:
     """Run-local sampled reference pixels shared by every target frame."""
 
@@ -433,6 +472,7 @@ class _ReferenceSampleCache:
             tuple[tuple[str, int], int], NDArray[np.float32]
         ] = {}
         self._rows: dict[int, NDArray[np.float32]] = {}
+        self._lattices: dict[tuple[int, int], tuple[NDArray[np.float64], NDArray[np.float64]]] = {}
         self._lock = threading.Lock()
         self.requests = 0
         self.hits = 0
@@ -490,6 +530,30 @@ class _ReferenceSampleCache:
                     self.hits += 1
                 result[position] = row
             return result
+
+    def sky_lattice(
+        self,
+        grid: NDArray[np.float64],
+        x_nodes: NDArray[np.float64],
+        y_nodes: NDArray[np.float64],
+        columns: NDArray[np.float64],
+        rows: NDArray[np.float64],
+        band: int,
+    ) -> NDArray[np.float64]:
+        """``_sample_grid_lattice`` of one sky-response grid on one tile row's
+        sampled lattice, evaluated once per group: the lattice of a tile row
+        is the same for every frame, and so is the shared response grid."""
+
+        key = (id(grid), band)
+        with self._lock:
+            cached = self._lattices.get(key)
+        if cached is not None and cached[0] is grid:
+            return cached[1]
+        values = _sample_grid_lattice(grid, x_nodes, y_nodes, columns, rows)
+        values.setflags(write=False)
+        with self._lock:
+            self._lattices.setdefault(key, (grid, values))
+        return values
 
     def serializable(self) -> dict[str, Any]:
         return {
@@ -844,34 +908,81 @@ def _tile_backgrounds(
     column are decoded, so a frame costs a few megabytes of reads.  Within a
     tile the samples between the lower and upper background quantiles are
     kept and their median is the tile level, mirroring the paired selection.
+
+    Tiles whose samples are all finite are evaluated together per tile row:
+    each tile's samples are sorted once, the quantiles come from the same
+    NumPy linear interpolation on the sorted rows, the kept samples are the
+    sorted run inside the bounds, and the median is its middle order
+    statistic (the mean of the two middle values for an even count), exactly
+    the values the per-tile evaluation yields.  Tiles touching NaN samples
+    take the per-tile path.
     """
 
     height, width = frame.shape
     tile = parameters.offset_tile_size_pixels
+    stride = parameters.sky_response_column_stride
     rows: list[NDArray[np.int64]] = []
     for grid_y in range(len(y_nodes)):
         y0 = grid_y * tile
         y1 = min(height, y0 + tile)
         rows.append(_uniform_integer_indices(y1 - y0, min(y1 - y0, parameters.sky_response_rows_per_tile)) + y0)
     y_indices = np.concatenate(rows)
-    sampled = frame.read_sampled_rows(y_indices)[:, :: parameters.sky_response_column_stride]
-    columns = np.arange(0, width, parameters.sky_response_column_stride)
+    sampled = frame.read_sampled_rows(y_indices)[:, ::stride]
     levels = np.full((len(y_nodes), len(x_nodes)), np.nan, dtype=np.float64)
-    row_start = 0
     minimum = max(16, parameters.minimum_samples_per_offset_tile // 8)
+    minimum_kept = max(8, minimum // 2)
+    quantiles = (parameters.lower_quantile, parameters.upper_quantile)
+    # Column slice of every tile among the sampled (strided) columns.
+    column_starts = [-(-grid_x * tile // stride) for grid_x in range(len(x_nodes))]
+    column_stops = [-(-min(width, grid_x * tile + tile) // stride) for grid_x in range(len(x_nodes))]
+
+    def per_tile(selected: NDArray[np.float64]) -> float:
+        selected = selected[np.isfinite(selected)]
+        if selected.size < minimum:
+            return math.nan
+        bounds = np.quantile(selected, quantiles)
+        background = selected[(selected >= bounds[0]) & (selected <= bounds[1])]
+        if background.size >= minimum_kept:
+            return float(np.median(background))
+        return math.nan
+
+    row_start = 0
     for grid_y, band_rows in enumerate(rows):
-        band = sampled[row_start : row_start + len(band_rows)]
+        band = sampled[row_start : row_start + len(band_rows)].astype(np.float64)
         row_start += len(band_rows)
-        for grid_x in range(len(x_nodes)):
-            x0 = grid_x * tile
-            selected = band[:, (columns >= x0) & (columns < min(width, x0 + tile))].ravel()
-            selected = selected[np.isfinite(selected)].astype(np.float64)
-            if selected.size < minimum:
+        widths = [column_stops[grid_x] - column_starts[grid_x] for grid_x in range(len(x_nodes))]
+        finite_columns = np.all(np.isfinite(band), axis=0)
+        for tile_width in sorted(set(widths)):
+            members = [grid_x for grid_x in range(len(x_nodes)) if widths[grid_x] == tile_width]
+            samples_per_tile = band.shape[0] * tile_width
+            vectorised = [
+                grid_x for grid_x in members
+                if samples_per_tile >= minimum
+                and bool(np.all(finite_columns[column_starts[grid_x]:column_stops[grid_x]]))
+            ]
+            for grid_x in members:
+                if grid_x not in vectorised:
+                    levels[grid_y, grid_x] = per_tile(
+                        band[:, column_starts[grid_x]:column_stops[grid_x]].ravel()
+                    )
+            if not vectorised:
                 continue
-            bounds = np.quantile(selected, (parameters.lower_quantile, parameters.upper_quantile))
-            background = selected[(selected >= bounds[0]) & (selected <= bounds[1])]
-            if background.size >= max(8, minimum // 2):
-                levels[grid_y, grid_x] = float(np.median(background))
+            block = np.stack(
+                [band[:, column_starts[grid_x]:column_stops[grid_x]].ravel() for grid_x in vectorised]
+            )
+            ordered = np.sort(block, axis=1)
+            bounds = np.quantile(ordered, quantiles, axis=1)
+            first = np.count_nonzero(ordered < bounds[0][:, None], axis=1)
+            last = np.count_nonzero(ordered <= bounds[1][:, None], axis=1)
+            count = last - first
+            middle = first + count // 2
+            upper = np.take_along_axis(ordered, middle[:, None], axis=1)[:, 0]
+            lower = np.take_along_axis(ordered, np.maximum(middle - 1, 0)[:, None], axis=1)[:, 0]
+            median = np.where(count % 2 == 1, upper, (lower + upper) / 2)
+            usable = count >= minimum_kept
+            for position, grid_x in enumerate(vectorised):
+                if usable[position]:
+                    levels[grid_y, grid_x] = float(median[position])
     return levels
 
 
@@ -1635,6 +1746,10 @@ def _fit_additive_offset_grid(
         target_band = target.read_rows(int(y0), int(y1))
         sampled_target = target_band[y_indices - y0]
         sampled_reference = reference_cache.rows(y_indices)
+        band_columns = np.concatenate(x_indices_by_tile)
+        column_starts = np.concatenate(
+            ([0], np.cumsum([indices.size for indices in x_indices_by_tile]))
+        )
         if correct_sky:
             # The sky terms of the whole band's sampled lattice at once; each
             # tile then takes its own columns, so the per-tile samples are
@@ -1642,38 +1757,26 @@ def _fit_additive_offset_grid(
             assert sky_response is not None and sky_response.grid is not None
             reference_term = reference_response or sky_response
             assert reference_term.grid is not None
-            band_columns = np.concatenate(x_indices_by_tile)
-            band_y, band_x = np.meshgrid(
-                y_indices.astype(np.float64), band_columns.astype(np.float64), indexing="ij"
+            band_rows = y_indices.astype(np.float64)
+            target_term = target_sky * reference_cache.sky_lattice(
+                sky_response.grid, sky_response.x_nodes, sky_response.y_nodes,
+                band_columns.astype(np.float64), band_rows, grid_y,
             )
-            target_term = (
-                target_sky
-                * _sample_grid_points(
-                    sky_response.grid, sky_response.x_nodes, sky_response.y_nodes,
-                    band_x.ravel(), band_y.ravel(),
-                )
-            ).reshape(band_y.shape)
-            reference_sky_term = (
-                reference_sky_level
-                * _sample_grid_points(
-                    reference_term.grid, reference_term.x_nodes, reference_term.y_nodes,
-                    band_x.ravel(), band_y.ravel(),
-                )
-            ).reshape(band_y.shape)
-            column_starts = np.concatenate(
-                ([0], np.cumsum([indices.size for indices in x_indices_by_tile]))
+            reference_sky_term = reference_sky_level * reference_cache.sky_lattice(
+                reference_term.grid, reference_term.x_nodes, reference_term.y_nodes,
+                band_columns.astype(np.float64), band_rows, grid_y,
             )
-        for grid_x, x_indices in enumerate(x_indices_by_tile):
-            tile_target = np.asarray(
-                sampled_target[:, x_indices], dtype=np.float64
-            ).ravel()
-            tile_reference = np.asarray(
-                sampled_reference[:, x_indices], dtype=np.float64
-            ).ravel()
-            if correct_sky:
-                columns = slice(int(column_starts[grid_x]), int(column_starts[grid_x + 1]))
-                tile_target = tile_target - target_term[:, columns].ravel()
-                tile_reference = tile_reference - reference_sky_term[:, columns].ravel()
+        # The band's sampled columns are gathered once; each tile's samples
+        # are its contiguous run, in the same row-major order.
+        band_target = np.asarray(sampled_target[:, band_columns], dtype=np.float64)
+        band_reference = np.asarray(sampled_reference[:, band_columns], dtype=np.float64)
+        if correct_sky:
+            band_target = band_target - target_term
+            band_reference = band_reference - reference_sky_term
+        for grid_x in range(len(x_indices_by_tile)):
+            columns = slice(int(column_starts[grid_x]), int(column_starts[grid_x + 1]))
+            tile_target = band_target[:, columns].ravel()
+            tile_reference = band_reference[:, columns].ravel()
             if kernels is None:
                 fit = _tile_offset(tile_target, tile_reference, scale, parameters)
                 if fit is None:

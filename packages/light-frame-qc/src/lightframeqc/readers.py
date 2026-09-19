@@ -270,20 +270,32 @@ def _block_mean_preview(
                 f"row reader returned {band.shape}, expected {expected_shape}"
             )
 
-        for output_y in range(output_y0, output_y1):
-            local_y0 = (output_y - output_y0) * block_size
-            local_y1 = min(band.shape[0], local_y0 + block_size)
-            source_block = band[local_y0:local_y1]
-            finite = np.isfinite(source_block)
+        # Every complete block row of the band reduces at once; the vertical
+        # sums accumulate the block's rows in order and the column segments
+        # reduce in order, exactly as the one-row-at-a-time loop did, so the
+        # means are value-identical.  A trailing partial block row (image
+        # height not a multiple of the block size) takes the same path alone.
+        rows_in_band = band.shape[0]
+        complete_rows = rows_in_band // block_size
+        pieces = []
+        if complete_rows:
+            pieces.append(band[: complete_rows * block_size].reshape(complete_rows, block_size, width))
+        if complete_rows * block_size < rows_in_band:
+            pieces.append(band[complete_rows * block_size :][None, :, :])
+        next_output_y = output_y0
+        for source_blocks in pieces:
+            finite = np.isfinite(source_blocks)
             vertical_sum = np.sum(
-                np.where(finite, source_block, 0.0), axis=0, dtype=np.float64
+                np.where(finite, source_blocks, 0.0), axis=1, dtype=np.float64
             )
-            vertical_count = np.sum(finite, axis=0, dtype=np.int64)
-            block_sum = np.add.reduceat(vertical_sum, x_starts)
-            block_count = np.add.reduceat(vertical_count, x_starts)
-            reduced = np.full(output_width, np.nan, dtype=np.float64)
+            vertical_count = np.sum(finite, axis=1, dtype=np.int64)
+            block_sum = np.add.reduceat(vertical_sum, x_starts, axis=1)
+            block_count = np.add.reduceat(vertical_count, x_starts, axis=1)
+            reduced = np.full(block_sum.shape, np.nan, dtype=np.float64)
             np.divide(block_sum, block_count, out=reduced, where=block_count > 0)
-            output[output_y] = reduced.astype(np.float32, copy=False)
+            count = reduced.shape[0]
+            output[next_output_y : next_output_y + count] = reduced.astype(np.float32, copy=False)
+            next_output_y += count
 
     return np.ascontiguousarray(output)
 

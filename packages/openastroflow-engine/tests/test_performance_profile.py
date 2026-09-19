@@ -13,9 +13,9 @@ def test_m3_pro_36gb_selects_measured_profile() -> None:
         hardware, logical_cores=12, physical_memory_bytes=36 * GIB
     )
     assert tuning.profile_id == "apple-m3-pro-tuned-v1"
-    assert tuning.cpu_workers == 8
+    assert tuning.cpu_workers == 12
     assert tuning.qc_workers == 8
-    assert tuning.kernel_threads == 8
+    assert tuning.kernel_threads == 12
     assert tuning.gpu_inflight_buffers == 2
     assert tuning.integration_tile_rows == 64
     assert tuning.evidence_class == "performance-validated-m3-pro"

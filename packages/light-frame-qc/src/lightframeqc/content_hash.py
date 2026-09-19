@@ -4,10 +4,18 @@ Every stage of the pipeline binds its receipts to the bytes of the source
 frames, and several stages used to hash the same 100 MB files again. The
 digest is a function of the bytes, so it is cached here under the file's
 stat identity (device, inode, size, mtime and ctime in nanoseconds): a file
-that is rewritten in place changes at least its ctime and is hashed again,
+that is rewritten in place changes at least its mtime and is hashed again,
 and a hit costs one ``stat``. Callers that need the race-aware
 before/during/after checks keep them (``lightframeqc.identity``); they only
 skip the read when the identity is already known.
+
+A file whose mtime is younger than ``RACY_WINDOW_NS`` is never cached: a
+same-size rewrite landing in the same file-system timestamp tick as the
+original write (Windows advances file times in clock ticks, and its
+``st_ctime`` is the creation time) would keep the identity and hand out the
+old digest.  Any later rewrite of a file older than the window carries a
+newer mtime, so the cache stays correct; the sources a run hashes are old
+files, and the intermediates it writes are hashed by their writers.
 """
 
 from __future__ import annotations
@@ -17,11 +25,13 @@ import hashlib
 import os
 from pathlib import Path
 import threading
+import time
 
 __all__ = ["file_sha256", "cache_size", "clear_cache", "record_sha256", "stat_identity"]
 
 DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024
 MAXIMUM_ENTRIES = 8192
+RACY_WINDOW_NS = 2_000_000_000
 
 _LOCK = threading.Lock()
 _DIGESTS: OrderedDict[tuple[int, int, int, int, int], str] = OrderedDict()
@@ -46,8 +56,14 @@ def _lookup(identity: tuple[int, int, int, int, int]) -> str | None:
 
 
 def record_sha256(identity: tuple[int, int, int, int, int], digest: str) -> None:
-    """Remember a digest computed elsewhere for a file with this identity."""
+    """Remember a digest computed elsewhere for a file with this identity.
 
+    Identities whose mtime lies within ``RACY_WINDOW_NS`` of now are not
+    remembered (see the module docstring).
+    """
+
+    if time.time_ns() - identity[3] < RACY_WINDOW_NS:
+        return
     with _LOCK:
         _DIGESTS[identity] = digest
         _DIGESTS.move_to_end(identity)

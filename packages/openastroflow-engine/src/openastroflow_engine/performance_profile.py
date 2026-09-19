@@ -144,17 +144,20 @@ def select_execution_tuning(
     }
 
     if hardware.m3_pro_tuned and memory >= 24 * GIB:
-        # Measured on the M3 Pro: eight kernel threads (its six performance
-        # cores plus two efficiency cores) were the validated optimum.
+        # Measured on the M3 Pro (6 performance + 6 efficiency cores): with
+        # the kernels' dynamic chunking, one Light per logical core (the
+        # registration budget holds twelve decoded Lights above 24 GiB) and a
+        # kernel thread per logical core warp 20% more frames per second
+        # than the earlier eight; results do not depend on either count.
         return ExecutionTuning(
             profile_id="apple-m3-pro-tuned-v1",
-            cpu_workers=min(8, cores),
+            cpu_workers=min(12, cores),
             qc_workers=min(8, cores),
             integration_tile_rows=64,
             gpu_inflight_buffers=2,
             local_normalization_sample_stride=2,
             evidence_class="performance-validated-m3-pro",
-            kernel_threads=min(8, cores),
+            kernel_threads=min(12, cores),
             **facts,
         )
 
