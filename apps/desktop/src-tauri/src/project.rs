@@ -1224,7 +1224,7 @@ fn start_with<R: Runtime>(
         .arg("--progress-json")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = match command.spawn() {
+    let mut child = match crate::sidecar::spawn_sidecar(&mut command) {
         Ok(value) => value,
         Err(error) => {
             let _ = std::fs::remove_file(&request_path);

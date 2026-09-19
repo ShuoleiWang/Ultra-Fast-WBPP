@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime};
 
 use crate::platform;
-use crate::sidecar::{command_output, discover_engine, EngineExecutable};
+use crate::sidecar::{
+    command_output, discover_engine, sidecar_output, spawn_sidecar, EngineExecutable,
+};
 
 const PROGRESS_EVENT: &str = "openastroflow://catalog-progress";
 const COMPLETE_EVENT: &str = "openastroflow://catalog-complete";
@@ -116,8 +118,7 @@ fn catalog_command_output(
     command.arg("--json");
     if command_name == "doctor" {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let output = command
-            .output()
+        let output = sidecar_output(&mut command)
             .map_err(|error| format!("cannot launch sidecar for catalog doctor: {error}"))?;
         return parse_catalog_doctor_output(output);
     }
@@ -333,8 +334,7 @@ fn start_install_with<R: Runtime>(
     if let Some(value) = request.field_of_view_degrees {
         command.args(["--field-of-view", &value.to_string()]);
     }
-    let mut child = command
-        .spawn()
+    let mut child = spawn_sidecar(&mut command)
         .map_err(|error| format!("cannot launch catalog installer: {error}"))?;
     let stdout = child
         .stdout
