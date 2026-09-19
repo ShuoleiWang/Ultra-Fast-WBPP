@@ -439,6 +439,7 @@ def measure_frame(
             settings=MeasurementSettings.from_config(selected_config),
             thumbnail_path=thumbnail_path,
         )
+        measurement.native_psf = _native_psf_summary(path, measurement)
     except Exception as error:
         try:
             verify_file_identity_stat(path, identity)
@@ -456,6 +457,27 @@ def measure_frame(
         ) from error
     measurement.identity = identity
     return measurement
+
+
+def _native_psf_summary(
+    path: str | os.PathLike[str], measurement: FrameMeasurement
+) -> dict[str, Any] | None:
+    """Native-resolution PSF of the brightest stars; failures become evidence."""
+
+    if not measurement.stars or measurement.preview_scale_x is None or measurement.preview_scale_y is None:
+        return None
+    try:
+        from .native_psf import measure_native_psf
+
+        summary = measure_native_psf(
+            str(path),
+            measurement.stars,
+            float(measurement.preview_scale_x),
+            float(measurement.preview_scale_y),
+        )
+    except Exception as error:  # measurement evidence, never a batch failure
+        return {"error": f"{type(error).__name__}: {error}"}
+    return summary.serializable()
 
 
 def _error_measurement(path: str | os.PathLike[str], error: Exception) -> FrameMeasurement:

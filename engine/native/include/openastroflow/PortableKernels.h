@@ -122,6 +122,11 @@ struct MaskedMeanRequest
    std::span<const float> frameMajorSamples;
    std::span<const std::uint8_t> frameMajorAccepted;
    std::span<const double> frameWeights;
+   // Optional frame-major per-sample weights with the layout of the samples
+   // (empty = every sample weighs 1). The effective weight of a sample is the
+   // Float64 product frameWeight*sampleWeight; region weight maps of the
+   // unattended selection use this to blend out occluded or cloudy areas.
+   std::span<const float> frameMajorSampleWeights;
    std::uint32_t frameCount = 0;
    std::uint32_t rowCount = 0;
    std::uint32_t width = 0;
@@ -139,8 +144,11 @@ struct MaskedMeanOutput
 };
 
 // Exact full-stack weighted mean with Float64 accumulation in frame order.
-// Pixels without accepted samples are NaN. rejectedSamples counts finite
-// samples that were not accepted; nonfinite samples count in neither total.
+// Pixels without accepted samples (or without positive effective weight) are
+// NaN. rejectedSamples counts finite samples that were not accepted; nonfinite
+// samples count in neither total. Without sample weights the arithmetic is
+// value-identical to the NumPy reference reduction; with them the reference is
+// numerator = sum(where(accepted, value, 0)*(frameWeight*sampleWeight)).
 void MaskedWeightedMean( const MaskedMeanRequest& request,
                          const MaskedMeanOutput& output );
 

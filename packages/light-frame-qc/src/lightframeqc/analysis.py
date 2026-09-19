@@ -889,6 +889,14 @@ def _populate_morphology(
         features.p90_fwhm_preview_pixels = percentile(fwhm, 90)
         features.median_ellipticity = median(ellipticity)
         features.p90_ellipticity = percentile(ellipticity, 90)
+        native = measurement.native_psf or {}
+        if isinstance(native, dict) and native.get("r50Pixels") is not None:
+            features.psf_r50_native_pixels = float(native["r50Pixels"])
+            features.psf_fwhm_native_pixels = float(native["fwhmPixels"])
+            features.psf_wing_fraction = (
+                float(native["wingFraction"]) if native.get("wingFraction") is not None else None
+            )
+            features.psf_native_star_count = int(native.get("starCount") or 0)
 
 
 def _robust_center_scale(values: list[float | None]) -> tuple[float | None, float | None]:

@@ -21,7 +21,7 @@ from pathlib import Path
 import re
 import tempfile
 import time
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence, Callable
 
 from astropy.io import fits
 import numpy as np
@@ -947,9 +947,15 @@ class FrameExpression:
     offset_grid_y: tuple[float, ...] = ()
     subtract_scale: float = 1.0
     subtract_scales: tuple[float, ...] = ()
+    # Optional per-frame region weight map: node values in [0, 1] at pixel
+    # coordinates ``weight_grid_x`` x ``weight_grid_y`` (bilinear, edge-clamped)
+    # multiply the frame weight sample by sample during the weighted mean.
+    weight_grid: tuple[tuple[float, ...], ...] = ()
+    weight_grid_x: tuple[float, ...] = ()
+    weight_grid_y: tuple[float, ...] = ()
 
     def serializable(self) -> dict[str, Any]:
-        return {
+        record = {
             "source": self.source_path,
             "subtract": self.subtract_path,
             "subtractScale": self.subtract_scale,
@@ -962,6 +968,11 @@ class FrameExpression:
             "offsetGridX": list(self.offset_grid_x),
             "offsetGridY": list(self.offset_grid_y),
         }
+        if self.weight_grid:
+            record["weightGrid"] = [list(row) for row in self.weight_grid]
+            record["weightGridX"] = list(self.weight_grid_x)
+            record["weightGridY"] = list(self.weight_grid_y)
+        return record
 
 
 @lru_cache(maxsize=64)
@@ -1041,6 +1052,55 @@ def _add_offset_grid_rows(
         result[local_row] += np.asarray(
             top * (1.0 - wy) + bottom * wy, dtype=np.float32
         )
+
+
+def evaluate_weight_grid_points(
+    grid_value: Sequence[Sequence[float]],
+    x_nodes: Sequence[float],
+    y_nodes: Sequence[float],
+    rows: Sequence[int] | NDArray[np.integer],
+    columns: Sequence[int] | NDArray[np.integer],
+) -> NDArray[np.float32]:
+    """Bilinear evaluation of a node grid at every (row, column) of two index sets.
+
+    Coordinates beyond the outer nodes clamp to the edge value, the convention
+    of the normalization offset grids, so a map covers the whole frame.
+    """
+
+    grid = np.asarray(grid_value, dtype=np.float64)
+    x = np.asarray(x_nodes, dtype=np.float64)
+    y = np.asarray(y_nodes, dtype=np.float64)
+    if grid.ndim != 2 or grid.shape != (y.size, x.size) or x.size < 2 or y.size < 2:
+        raise ValueError("weight grid shape does not match its node coordinates")
+    column_values = np.clip(np.asarray(columns, dtype=np.float64), x[0], x[-1])
+    x_hi = np.clip(np.searchsorted(x, column_values, side="right"), 1, x.size - 1)
+    x_lo = x_hi - 1
+    wx = (column_values - x[x_lo]) / (x[x_hi] - x[x_lo])
+    row_values = np.clip(np.asarray(rows, dtype=np.float64), y[0], y[-1])
+    y_hi = np.clip(np.searchsorted(y, row_values, side="right"), 1, y.size - 1)
+    y_lo = y_hi - 1
+    wy = (row_values - y[y_lo]) / (y[y_hi] - y[y_lo])
+    horizontal = grid[:, x_lo] * (1.0 - wx)[None, :] + grid[:, x_hi] * wx[None, :]
+    result = horizontal[y_lo] * (1.0 - wy)[:, None] + horizontal[y_hi] * wy[:, None]
+    return np.asarray(result, dtype=np.float32)
+
+
+def evaluate_weight_grid_rows(
+    grid_value: Sequence[Sequence[float]],
+    x_nodes: Sequence[float],
+    y_nodes: Sequence[float],
+    y0: int,
+    y1: int,
+    width: int,
+) -> NDArray[np.float32]:
+    """Bilinear evaluation of a node grid on rows ``y0..y1`` of a ``width``-wide frame.
+
+    Used for the per-sample region weights of the weighted mean.
+    """
+
+    return evaluate_weight_grid_points(
+        grid_value, x_nodes, y_nodes, np.arange(y0, y1), np.arange(width)
+    )
 
 
 def _expression_rows(
@@ -1187,6 +1247,11 @@ def _canonical_expression(expression: FrameExpression) -> FrameExpression:
         ),
         offset_grid_x=tuple(float(item) for item in expression.offset_grid_x),
         offset_grid_y=tuple(float(item) for item in expression.offset_grid_y),
+        weight_grid=tuple(
+            tuple(float(item) for item in row) for row in expression.weight_grid
+        ),
+        weight_grid_x=tuple(float(item) for item in expression.weight_grid_x),
+        weight_grid_y=tuple(float(item) for item in expression.weight_grid_y),
     )
     if (
         not math.isfinite(result.scale)
@@ -1234,6 +1299,30 @@ def _canonical_expression(expression: FrameExpression) -> FrameExpression:
             raise CalibrationError(
                 "FRAME_EXPRESSION_OFFSET_GRID_INVALID",
                 "offset grid must be finite, strictly ordered, and match its nodes",
+                path=result.source_path,
+            )
+    if result.weight_grid or result.weight_grid_x or result.weight_grid_y:
+        grid = np.asarray(result.weight_grid, dtype=np.float64)
+        x_nodes = np.asarray(result.weight_grid_x, dtype=np.float64)
+        y_nodes = np.asarray(result.weight_grid_y, dtype=np.float64)
+        if (
+            grid.ndim != 2
+            or x_nodes.ndim != 1
+            or y_nodes.ndim != 1
+            or len(x_nodes) < 2
+            or len(y_nodes) < 2
+            or grid.shape != (len(y_nodes), len(x_nodes))
+            or not np.all(np.isfinite(grid))
+            or np.any(grid < 0.0)
+            or np.any(grid > 1.0)
+            or not np.all(np.isfinite(x_nodes))
+            or not np.all(np.isfinite(y_nodes))
+            or np.any(np.diff(x_nodes) <= 0)
+            or np.any(np.diff(y_nodes) <= 0)
+        ):
+            raise CalibrationError(
+                "FRAME_EXPRESSION_WEIGHT_GRID_INVALID",
+                "weight grid must be finite within [0, 1], strictly ordered, and match its nodes",
                 path=result.source_path,
             )
     return result
@@ -2165,6 +2254,28 @@ def _frame_noise_estimates(
         sampled = _expression_sampled_rows(
             expression, sources, rows, division_floor=parameters.division_floor
         )
+        map_values: NDArray[np.float32] | None = None
+        if expression.weight_grid:
+            # Region-weighted frames: the noise is that of the frame's clean
+            # area.  Samples under a blanked or attenuated part of the map
+            # leave the estimate (a low-noise blocked area, or an attenuated
+            # patch, would otherwise inflate the frame's weight everywhere);
+            # the mask relaxes when too little of the frame is clean.
+            map_values = evaluate_weight_grid_points(
+                expression.weight_grid,
+                expression.weight_grid_x,
+                expression.weight_grid_y,
+                rows,
+                np.arange(width),
+            )
+            unmasked = sampled
+            for floor in (0.9, 0.5):
+                candidate = np.array(unmasked, dtype=np.float32, copy=True)
+                candidate[map_values < floor] = np.nan
+                finite = np.count_nonzero(np.isfinite(candidate[:, x_indices]))
+                if finite >= 2 * NOISE_WEIGHT_MINIMUM_DIFFERENCES:
+                    sampled = candidate
+                    break
         bands = sampled.reshape(band_starts.size, rows_per_band, width)
         lattice = bands[:, :, x_indices].astype(np.float64, copy=False)
         with np.errstate(invalid="ignore"):
@@ -2323,12 +2434,16 @@ def integrate_expressions(
     map_paths: IntegrationMapPaths | None = None,
     native_threads: int | None = None,
     durable: bool = True,
+    tile_observer: Callable[[Any], None] | None = None,
 ) -> IntegrationResult:
     """Robustly integrate expressions without materializing full input images.
 
     ``native_threads`` bounds the threads used by the native rejection and
     reduction kernels (and the transient-preparation readers); the result does
     not depend on it.  ``durable`` selects whether outputs are fsynced.
+    ``tile_observer`` receives one ``TileObservation`` per integrated band
+    (samples, rejection mask, weights, integrated rows); it never changes the
+    output and is used for the selection counterfactual.
     """
 
     parameters = parameters or IntegrationParameters()
@@ -2359,6 +2474,13 @@ def integrate_expressions(
             spatial_applicable = (parameters.transient_rejection
                                   and len(canonical) >= 5 and min(shape) >= 512)
             sample_bytes = 16 if spatial_applicable else 12
+            # Frames with a region weight map add one Float32 per sample: the
+            # interpolated per-sample weight of the band.
+            weight_grid_indices = tuple(
+                index for index, item in enumerate(canonical) if item.weight_grid
+            )
+            if weight_grid_indices:
+                sample_bytes += 4
             bytes_per_row = width * (sample_bytes * len(canonical) + 64)
             if bytes_per_row > parameters.max_memory_bytes:
                 raise CalibrationError(
@@ -2391,6 +2513,11 @@ def integrate_expressions(
             timing["transients"] = time.perf_counter() - phase_started
             timing.update({"readExpressions": 0.0, "rejection": 0.0, "reduction": 0.0, "write": 0.0})
             kernels = load_native_kernels()
+            native_sample_weights = bool(
+                weight_grid_indices
+                and kernels is not None
+                and getattr(kernels, "has_sample_weight_support", False)
+            )
             stats = _StatsAccumulator()
             accepted_total = 0
             rejected_total = 0
@@ -2467,18 +2594,39 @@ def integrate_expressions(
                 )
                 timing["rejection"] += time.perf_counter() - band_started
                 band_started = time.perf_counter()
-                if kernels is not None:
+                sample_weights: NDArray[np.float32] | None = None
+                if weight_grid_indices:
+                    sample_weights = np.ones(stack_values.shape, dtype=np.float32)
+                    for index in weight_grid_indices:
+                        item = canonical[index]
+                        sample_weights[index] = evaluate_weight_grid_rows(
+                            item.weight_grid,
+                            item.weight_grid_x,
+                            item.weight_grid_y,
+                            y0,
+                            y1,
+                            width,
+                        )
+                if kernels is not None and (sample_weights is None or native_sample_weights):
                     result, accepted_map, rejected_map = kernels.masked_weighted_mean(
-                        stack_values, accepted, weights, threads=native_threads
+                        stack_values,
+                        accepted,
+                        weights,
+                        threads=native_threads,
+                        sample_weights=sample_weights,
                     )
                     accepted_per_pixel = accepted_map.astype(np.float32)
                     rejected_per_pixel = rejected_map.astype(np.float32)
                 else:
-                    weighted = accepted * weights[:, None, None]
+                    effective = (
+                        weights[:, None, None]
+                        if sample_weights is None
+                        else weights[:, None, None] * sample_weights
+                    )
+                    weighted = accepted * effective
                     denominator = np.sum(weighted, axis=0, dtype=np.float64)
                     numerator = np.sum(
-                        np.where(accepted, stack_values, 0.0)
-                        * weights[:, None, None],
+                        np.where(accepted, stack_values, 0.0) * effective,
                         axis=0,
                         dtype=np.float64,
                     )
@@ -2497,6 +2645,23 @@ def integrate_expressions(
                         finite & ~accepted, axis=0, dtype=np.uint16
                     ).astype(np.float32)
                 timing["reduction"] += time.perf_counter() - band_started
+                if tile_observer is not None:
+                    from .selection.counterfactual import TileObservation
+
+                    band_started = time.perf_counter()
+                    tile_observer(
+                        TileObservation(
+                            first_row=y0,
+                            samples=stack_values,
+                            accepted=np.asarray(accepted, dtype=bool),
+                            weights=np.asarray(weights, dtype=np.float64),
+                            integrated=result,
+                            sample_weights=sample_weights,
+                        )
+                    )
+                    timing["counterfactual"] = (
+                        timing.get("counterfactual", 0.0) + time.perf_counter() - band_started
+                    )
                 band_started = time.perf_counter()
                 accepted_count = int(np.count_nonzero(accepted))
                 finite_count = int(np.count_nonzero(finite))
@@ -2508,9 +2673,21 @@ def integrate_expressions(
                     map_writers["acceptedSampleCount"].write_rows(
                         y0, accepted_per_pixel
                     )
-                    map_writers["coverageFraction"].write_rows(
-                        y0, accepted_per_pixel / np.float32(len(canonical))
-                    )
+                    if sample_weights is None:
+                        coverage_rows = accepted_per_pixel / np.float32(len(canonical))
+                    else:
+                        # Effective coverage: accepted samples weighted by
+                        # their region weight, as a fraction of the frame count.
+                        coverage_rows = np.asarray(
+                            np.sum(
+                                np.where(accepted, sample_weights, np.float32(0)),
+                                axis=0,
+                                dtype=np.float64,
+                            )
+                            / float(len(canonical)),
+                            dtype=np.float32,
+                        )
+                    map_writers["coverageFraction"].write_rows(y0, coverage_rows)
                     map_writers["rejectionCount"].write_rows(
                         y0, rejected_per_pixel
                     )
@@ -2560,6 +2737,21 @@ def integrate_expressions(
                 },
                 "noiseWeights": frame_noise.serializable(),
                 "reducer": _reduction_kernel_id(),
+                **(
+                    {
+                        "regionWeights": {
+                            "frames": len(weight_grid_indices),
+                            "reducer": (
+                                "native-cpu-masked-mean-v2"
+                                if native_sample_weights
+                                else "numpy-reference"
+                            ),
+                            "coverage": "effective-weight-fraction",
+                        }
+                    }
+                    if weight_grid_indices
+                    else {}
+                ),
                 "nativeThreads": native_threads,
                 "timingSeconds": {key: round(value, 3) for key, value in timing.items()},
                 "fastMath": False,

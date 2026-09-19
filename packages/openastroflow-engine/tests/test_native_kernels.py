@@ -982,3 +982,36 @@ def test_detect_transient_trails_native_and_numpy_models_match(monkeypatch: pyte
     assert native.trails == reference.trails
     assert len(native.trails) >= 1
     assert native.serializable()["lineKernel"] == native_kernels.RADON_KERNEL_ID
+
+
+def test_masked_mean_sample_weights_match_numpy_reference() -> None:
+    kernels = native_kernels.load_native_kernels()
+    if kernels is None:
+        pytest.skip("native kernels unavailable")
+    if not getattr(kernels, "has_sample_weight_support", False):
+        pytest.skip("native library predates masked mean V2 (rebuild to enable)")
+    rng = np.random.default_rng(11)
+    frames, rows, width = 7, 12, 40
+    samples = rng.normal(500.0, 20.0, (frames, rows, width)).astype(np.float32)
+    accepted = rng.random(samples.shape) > 0.1
+    weights = rng.random(frames) + 0.2
+    sample_weights = rng.random(samples.shape).astype(np.float32)
+    sample_weights[2, :, 5:9] = 0.0
+    sample_weights[:, 3, :] = 0.0  # a row without effective weight -> NaN
+    integrated, accepted_count, rejected_count = kernels.masked_weighted_mean(
+        samples, accepted, weights, threads=2, sample_weights=sample_weights
+    )
+    effective = weights[:, None, None] * sample_weights
+    numerator = np.sum(np.where(accepted, samples, 0.0) * effective, axis=0, dtype=np.float64)
+    denominator = np.sum(accepted * effective, axis=0, dtype=np.float64)
+    expected = np.full((rows, width), np.nan, dtype=np.float32)
+    np.divide(numerator, denominator, out=expected, where=denominator > 0, casting="unsafe")
+    np.testing.assert_array_equal(integrated, expected)
+    np.testing.assert_array_equal(accepted_count, np.sum(accepted, axis=0).astype(np.uint16))
+    assert np.all(np.isnan(integrated[3]))
+    # Without sample weights the V1 path is unchanged.
+    plain, _, _ = kernels.masked_weighted_mean(samples, accepted, weights, threads=2)
+    unit, _, _ = kernels.masked_weighted_mean(
+        samples, accepted, weights, threads=2, sample_weights=np.ones(samples.shape, dtype=np.float32)
+    )
+    np.testing.assert_array_equal(plain, unit)

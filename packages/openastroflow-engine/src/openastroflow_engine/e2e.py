@@ -94,6 +94,20 @@ from .pixel_pipeline import (
 )
 from .local_normalization import normalize_registered_group
 from .global_normalization import StellarScaleHint
+from .selection import (
+    CounterfactualReport,
+    FrameSelectionFeatures,
+    LeaveOneOutAccumulator,
+    SelectionDecision,
+    SelectionParameters,
+    annotate_with_counterfactual,
+    confirmed_harmful,
+    decide,
+    exclude_confirmed,
+    extract_features,
+)
+from .selection.policy import selection_receipt
+from .selection.region import RegionWeightMap, region_weight_maps
 from .xisf_pixels import convert_xisf_to_fits, preflight_xisf_header
 from .preview import render_auto_stretch_preview
 from .solver import (
@@ -342,6 +356,7 @@ class E2ERequest:
     qc_config: QcConfig = field(default_factory=lambda: DEFAULT_CONFIG)
     gate_policy: GatePolicy = field(default_factory=GatePolicy)
     pipeline_parameters: PipelineParameters = field(default_factory=PipelineParameters)
+    selection: SelectionParameters = field(default_factory=SelectionParameters)
     drizzle: DrizzleOptions = field(default_factory=DrizzleOptions)
     ra_hint_degrees: float | None = None
     dec_hint_degrees: float | None = None
@@ -877,6 +892,13 @@ def _review_approval_request_digest(
             "config": request.qc_config.serializable(),
             "gatePolicy": request.gate_policy.serializable(),
             "gatePolicyDigest": request.gate_policy.canonical_digest(),
+            # The selection policy changes admission, so an unattended policy
+            # is bound into the approval digest; the legacy digest is unchanged.
+            **(
+                {"selection": request.selection.serializable()}
+                if request.selection.unattended
+                else {}
+            ),
         },
         "pipeline": request.pipeline_parameters.serializable(),
         "recipeDigest": request.recipe_digest,
@@ -4449,25 +4471,66 @@ def run_e2e(
             )
         )
         qc_manifest["manualReviewApprovals"] = {
-            "defaultDisposition": "EXCLUDED",
+            "defaultDisposition": (
+                "DECIDED_BY_SELECTION_POLICY" if request.selection.unattended else "EXCLUDED"
+            ),
             "requestDigest": approval_request_digest,
             "gatePolicyDigest": request.gate_policy.canonical_digest(),
             "accepted": approval_evidence,
         }
+        selection_features: list[FrameSelectionFeatures] = []
+        selection_decisions: list[SelectionDecision] = []
+        selection_confidence: dict[str, float] = {}
+        selection_region_maps: dict[str, RegionWeightMap] = {}
+        if request.selection.unattended:
+            selection_features = extract_features(
+                frame_results,
+                measurements,
+                night_boundary_hours=request.gate_policy.night_boundary_hours,
+                observing_timezone=request.qc_config.observing_timezone,
+            )
+            if request.selection.region_weights:
+                # Region weight maps come from the QC grid alone, so they are
+                # built before the decisions that depend on them.
+                selection_region_maps = region_weight_maps(frame_results)
+            selection_decisions = decide(
+                selection_features,
+                request.selection,
+                approved_paths=approved_review_paths,
+                region_maps=selection_region_maps,
+            )
+            selection_confidence = {
+                item.path: item.weight_multiplier for item in selection_decisions if item.admitted
+            }
+            qc_manifest["selection"] = selection_receipt(
+                request.selection,
+                selection_features,
+                selection_decisions,
+                region_maps=selection_region_maps,
+            )
         _write_json(qc_dir / "manifest.json", qc_manifest)
         gate_by_path = {
             str(Path(result.path).resolve(strict=True)): result.quality_gate
             for result in frame_results
         }
-        passed = tuple(
-            path
-            for path in lights
-            if gate_by_path.get(str(path)) is not None
-            and (
-                gate_by_path[str(path)].disposition is GateDisposition.PASS
-                or str(path) in approved_review_paths
+        if request.selection.unattended:
+            decision_by_path = {item.path: item for item in selection_decisions}
+            passed = tuple(
+                path
+                for path in lights
+                if decision_by_path.get(str(path)) is not None
+                and decision_by_path[str(path)].admitted
             )
-        )
+        else:
+            passed = tuple(
+                path
+                for path in lights
+                if gate_by_path.get(str(path)) is not None
+                and (
+                    gate_by_path[str(path)].disposition is GateDisposition.PASS
+                    or str(path) in approved_review_paths
+                )
+            )
         passed_set = set(passed)
         excluded = tuple(path for path in lights if path not in passed_set)
         screening = _screening_summary(frame_results, passed, approved_review_paths, review_previews)
@@ -4486,8 +4549,14 @@ def run_e2e(
             progress,
             ProgressStage.QUALITY_CONTROL,
             "completed",
-            f"{len(passed)} admitted ({len(approved_review_paths)} explicitly approved REVIEW); "
-            f"{len(excluded)} REVIEW/HARD_FAIL excluded",
+            (
+                f"{len(passed)} admitted by selection policy {request.selection.policy} "
+                f"({sum(1 for item in selection_decisions if item.admitted and item.confidence < 1.0)} "
+                f"with reduced weight); {len(excluded)} excluded"
+                if request.selection.unattended
+                else f"{len(passed)} admitted ({len(approved_review_paths)} explicitly approved REVIEW); "
+                f"{len(excluded)} REVIEW/HARD_FAIL excluded"
+            ),
         )
         panel_counts: dict[tuple[str, str], list[int]] = {}
         for frame in frame_results:
@@ -4609,6 +4678,16 @@ def run_e2e(
                 for path in staged_inputs["LIGHT"]
             },
         )
+        if selection_confidence:
+            # Reduced-confidence frames keep their registration quality weight
+            # scaled by the selection confidence; excluded frames never reach here.
+            registration = replace(
+                registration,
+                quality_weights={
+                    path: float(weight) * float(selection_confidence.get(path, 1.0))
+                    for path, weight in registration.quality_weights.items()
+                },
+            )
         _write_json(receipts_dir / "registration.json", registration.receipt)
         _emit(
             progress,
@@ -4718,65 +4797,335 @@ def run_e2e(
                 ),
                 internal_source_identities=trusted_source_identities,
             )
-        staged_pipeline_transforms = {
-            str(staged): pipeline_transforms[
-                str(registration_source_aliases[str(staged)].resolve(strict=True))
-            ]
-            for staged in staged_inputs["LIGHT"]
-        }
-        staged_quality_weights = {
-            str(staged): registration.quality_weights[
-                str(registration_source_aliases[str(staged)].resolve(strict=True))
-            ]
-            for staged in staged_inputs["LIGHT"]
-        }
-        staged_light_by_original = {
-            str(registration_source_aliases[str(staged)].resolve(strict=True)): staged
-            for staged in staged_inputs["LIGHT"]
-        }
-        staged_stellar_scale_hints: dict[str, StellarScaleHint] = {}
-        for original, staged in staged_light_by_original.items():
-            hint = registration.stellar_scale_hints[original]
-            reference_staged = staged_light_by_original.get(
-                str(Path(hint.reference_path).resolve(strict=True))
-            )
-            if reference_staged is None:
-                raise E2EError(
-                    "STELLAR_SCALE_HINT_REFERENCE_MISMATCH",
-                    "registration stellar scale reference is absent from the pixel Light set",
-                    path=hint.reference_path,
+        def _staged_pixel_maps(
+            light_subset: Sequence[Path],
+        ) -> tuple[dict[str, Any], dict[str, float], dict[str, StellarScaleHint]]:
+            transforms_map = {
+                str(staged): pipeline_transforms[
+                    str(registration_source_aliases[str(staged)].resolve(strict=True))
+                ]
+                for staged in light_subset
+            }
+            weights_map = {
+                str(staged): registration.quality_weights[
+                    str(registration_source_aliases[str(staged)].resolve(strict=True))
+                ]
+                for staged in light_subset
+            }
+            light_by_original = {
+                str(registration_source_aliases[str(staged)].resolve(strict=True)): staged
+                for staged in light_subset
+            }
+            hints_map: dict[str, StellarScaleHint] = {}
+            for original, staged in light_by_original.items():
+                hint = registration.stellar_scale_hints[original]
+                reference_staged = light_by_original.get(
+                    str(Path(hint.reference_path).resolve(strict=True))
                 )
-            staged_stellar_scale_hints[str(staged)] = replace(
-                hint,
-                source_path=str(staged),
-                reference_path=str(reference_staged),
+                if reference_staged is None:
+                    raise E2EError(
+                        "STELLAR_SCALE_HINT_REFERENCE_MISMATCH",
+                        "registration stellar scale reference is absent from the pixel Light set",
+                        path=hint.reference_path,
+                    )
+                hints_map[str(staged)] = replace(
+                    hint,
+                    source_path=str(staged),
+                    reference_path=str(reference_staged),
+                )
+            return transforms_map, weights_map, hints_map
+
+        selection_observers: dict[str, LeaveOneOutAccumulator] = {}
+
+        def _selection_observer_factory(
+            filter_name: str, ordered_paths: Sequence[str]
+        ) -> LeaveOneOutAccumulator | None:
+            if not request.selection.unattended or request.selection.counterfactual != "analytic":
+                return None
+            originals = [
+                str(registration_source_aliases[str(staged)].resolve(strict=True))
+                for staged in ordered_paths
+            ]
+            accumulator = LeaveOneOutAccumulator(originals)
+            selection_observers[filter_name] = accumulator
+            return accumulator
+
+        def _original_of(staged: Path) -> str:
+            return str(registration_source_aliases[str(staged)].resolve(strict=True))
+
+        result_by_original = {
+            str(Path(frame.path).resolve(strict=True)): frame for frame in frame_results
+        }
+        measurement_by_original = {
+            str(Path(item.metadata.path).resolve(strict=True)): item for item in measurements
+        }
+
+        def _registered_region_maps(light_subset: Sequence[Path]) -> dict[str, RegionWeightMap]:
+            """Region maps resampled from the QC reference frame into the pipeline's.
+
+            The QC grid lives in the QC reference's preview frame; registered
+            Lights live in the pixel pipeline's reference frame.  For a Light
+            ``f`` a registered pixel maps to the QC reference through
+            ``S Q_f S^-1 T_f^-1`` (``T_f``: source to pipeline reference in
+            native pixels, ``Q_f``: source to QC reference in preview pixels,
+            ``S``: preview to native scale), so each frame's own matrices
+            carry it across, including a meridian flip between nights.
+            """
+
+            registered: dict[str, RegionWeightMap] = {}
+            for staged in light_subset:
+                original = _original_of(staged)
+                qc_map = selection_region_maps.get(original)
+                if qc_map is None:
+                    continue
+                frame = result_by_original.get(original)
+                measurement = measurement_by_original.get(original)
+                transform = pipeline_transforms.get(original)
+                if (
+                    frame is None
+                    or measurement is None
+                    or transform is None
+                    or frame.registration.matrix is None
+                    or measurement.preview_scale_x is None
+                    or measurement.preview_scale_y is None
+                    or not measurement.metadata.width
+                    or not measurement.metadata.height
+                ):
+                    continue
+                try:
+                    scale = np.diag(
+                        [float(measurement.preview_scale_x), float(measurement.preview_scale_y), 1.0]
+                    )
+                    qc_matrix = np.asarray(frame.registration.matrix, dtype=np.float64)
+                    pipeline_matrix = np.asarray(transform, dtype=np.float64)
+                    if qc_matrix.shape != (3, 3) or pipeline_matrix.shape != (3, 3):
+                        continue
+                    composite = (
+                        scale @ qc_matrix @ np.linalg.inv(scale) @ np.linalg.inv(pipeline_matrix)
+                    )
+                    registered[str(staged)] = qc_map.transformed(
+                        composite,
+                        int(measurement.metadata.height),
+                        int(measurement.metadata.width),
+                    )
+                except (ValueError, np.linalg.LinAlgError):
+                    continue
+            return registered
+
+        light_subset: list[Path] = list(staged_inputs["LIGHT"])
+        selection_reports: dict[str, CounterfactualReport] = {}
+        selection_receipt_path: str | None = None
+        selection_reintegration: dict[str, Any] | None = None
+        reintegration_passes: list[dict[str, Any]] = []
+        admitted_at_start = len(light_subset)
+        pass_index = 0
+        while True:
+            pass_index += 1
+            pass_root = pipeline_root if pass_index == 1 else work / f"pixel-pipeline-pass{pass_index}"
+            staged_pipeline_transforms, staged_quality_weights, staged_stellar_scale_hints = (
+                _staged_pixel_maps(light_subset)
             )
-        try:
-            pipeline_result = _run_portable_pipeline_fits(
-                bias_files=staged_inputs["BIAS"],
-                dark_files=staged_inputs["DARK"],
-                flat_files=staged_inputs["FLAT"],
-                master_bias_file=(
-                    staged_inputs["MASTER_BIAS"][0]
-                    if staged_inputs["MASTER_BIAS"]
-                    else None
-                ),
-                master_dark_files=staged_inputs["MASTER_DARK"],
-                master_flat_files=staged_inputs["MASTER_FLAT"],
-                light_files=staged_inputs["LIGHT"],
-                output_directory=pipeline_root,
-                transforms=staged_pipeline_transforms,
-                quality_weights=staged_quality_weights,
-                stellar_scale_hints=staged_stellar_scale_hints,
-                parameters=pipeline_parameters,
-                _source_aliases=registration_source_aliases,
-                _xisf_conversions=xisf_conversions,
-                _trusted_generated_calibration=trusted_generated_calibration,
-                _source_identity_seed=pixel_identity_seed,
+            selection_observers.clear()
+            try:
+                pipeline_result = _run_portable_pipeline_fits(
+                    bias_files=staged_inputs["BIAS"],
+                    dark_files=staged_inputs["DARK"],
+                    flat_files=staged_inputs["FLAT"],
+                    master_bias_file=(
+                        staged_inputs["MASTER_BIAS"][0]
+                        if staged_inputs["MASTER_BIAS"]
+                        else None
+                    ),
+                    master_dark_files=staged_inputs["MASTER_DARK"],
+                    master_flat_files=staged_inputs["MASTER_FLAT"],
+                    light_files=light_subset,
+                    output_directory=pass_root,
+                    transforms=staged_pipeline_transforms,
+                    quality_weights=staged_quality_weights,
+                    stellar_scale_hints=staged_stellar_scale_hints,
+                    parameters=pipeline_parameters,
+                    _source_aliases=registration_source_aliases,
+                    _xisf_conversions=xisf_conversions,
+                    _trusted_generated_calibration=trusted_generated_calibration,
+                    _source_identity_seed=pixel_identity_seed,
+                    _integration_tile_observers=(
+                        _selection_observer_factory if request.selection.unattended else None
+                    ),
+                    region_weight_maps=(
+                        _registered_region_maps(light_subset) or None
+                        if selection_region_maps
+                        else None
+                    ),
+                )
+            except CalibrationError as error:
+                raise E2EError(error.code, str(error), path=error.path) from error
+            if not request.selection.unattended:
+                break
+            fwhm_by_path = {item.path: item.fwhm_native for item in selection_features}
+            selection_reports = {
+                group_name: accumulator.finalize(
+                    fwhm_by_frame=[fwhm_by_path.get(path) for path in accumulator.paths]
+                )
+                for group_name, accumulator in selection_observers.items()
+            }
+            annotated = list(selection_decisions)
+            for report in selection_reports.values():
+                annotated = annotate_with_counterfactual(annotated, report, request.selection)
+            selection_decisions = annotated
+            harmful = confirmed_harmful(selection_decisions)
+            if (
+                pass_index >= request.selection.max_integration_passes
+                or request.selection.counterfactual_action != "exclude"
+                or not harmful
+            ):
+                break
+            # A confirmed-harmful frame is removed and its groups integrated once
+            # more without it; frames that other frames' normalization hints
+            # reference, and frames whose removal would leave a panel below the
+            # registration minimum, stay (recorded as such).
+            reference_originals = {
+                str(Path(hint.reference_path).resolve(strict=True))
+                for hint in registration.stellar_scale_hints.values()
+            }
+            removable: list[str] = []
+            kept_reasons: dict[str, str] = {}
+            for item in harmful:
+                if item.path in reference_originals:
+                    kept_reasons[item.path] = "normalization reference of its group"
+                    continue
+                removable.append(item.path)
+            remaining_by_panel: dict[tuple[str, str], int] = {}
+            for staged in light_subset:
+                original = _original_of(staged)
+                result_for = next(
+                    (
+                        frame
+                        for frame in frame_results
+                        if str(Path(frame.path).resolve(strict=True)) == original
+                    ),
+                    None,
+                )
+                if result_for is None:
+                    continue
+                key = (
+                    result_for.metadata.target.strip().upper(),
+                    result_for.metadata.filter_name.strip().upper(),
+                )
+                remaining_by_panel[key] = remaining_by_panel.get(key, 0) + (
+                    0 if original in removable else 1
+                )
+            for item in harmful:
+                if item.path not in removable:
+                    continue
+                result_for = next(
+                    frame
+                    for frame in frame_results
+                    if str(Path(frame.path).resolve(strict=True)) == item.path
+                )
+                key = (
+                    result_for.metadata.target.strip().upper(),
+                    result_for.metadata.filter_name.strip().upper(),
+                )
+                if remaining_by_panel.get(key, 0) < 2:
+                    removable.remove(item.path)
+                    remaining_by_panel[key] = remaining_by_panel.get(key, 0) + 1
+                    kept_reasons[item.path] = "fewer than 2 Lights would remain in its panel"
+            # Cumulative counterfactual exclusions stay under the soft guard.
+            already_removed = admitted_at_start - len(light_subset)
+            allowed = int(request.selection.soft_exclusion_fraction_guard * admitted_at_start) - already_removed
+            if len(removable) > max(0, allowed):
+                for path in removable[max(0, allowed):]:
+                    kept_reasons[path] = "cumulative exclusions would exceed the soft-exclusion guard"
+                removable = removable[: max(0, allowed)]
+            # The confirming counterfactual numbers travel with the record:
+            # the next pass measures only the remaining frames.
+            harmful_evidence = {
+                item.path: item.counterfactual.serializable()
+                for item in harmful
+                if item.counterfactual is not None
+            }
+            if not removable:
+                selection_reintegration = {
+                    "status": "NOT_APPLIED",
+                    "pass": pass_index,
+                    "confirmedHarmful": [item.path for item in harmful],
+                    "keptBecause": kept_reasons,
+                    "evidence": harmful_evidence,
+                }
+                reintegration_passes.append(selection_reintegration)
+                break
+            selection_decisions = exclude_confirmed(selection_decisions, removable)
+            removed_set = set(removable)
+            light_subset = [staged for staged in light_subset if _original_of(staged) not in removed_set]
+            passed = tuple(path for path in passed if str(path) not in removed_set)
+            passed_set = set(passed)
+            excluded = tuple(path for path in lights if path not in passed_set)
+            if trusted_generated_calibration is not None:
+                # The generated calibration set is bound to the exact pixel
+                # input manifest, so it is captured again for the reduced set.
+                trusted_generated_calibration = _capture_single_field_generated_calibration(
+                    plan=calibration_plan,
+                    generated_directory=work / "registration-calibration",
+                    upstream_receipt_path=registration_calibration_receipt_path,
+                    staged_inputs={**staged_inputs, "LIGHT": tuple(light_subset)},
+                    source_aliases=registration_source_aliases,
+                    pipeline_parameters=request.pipeline_parameters,
+                    consumer_source_groups=(
+                        ("BIAS", biases),
+                        ("DARK", darks),
+                        ("FLAT", flats),
+                        ("MASTER_BIAS", master_biases),
+                        ("MASTER_DARK", master_darks),
+                        ("MASTER_FLAT", master_flats),
+                        ("LIGHT", passed),
+                    ),
+                    internal_source_identities=trusted_source_identities,
+                )
+            screening = _screening_summary(
+                frame_results, passed, approved_review_paths, review_previews
             )
-        except CalibrationError as error:
-            raise E2EError(error.code, str(error), path=error.path) from error
-        _verify_staged_pixel_inputs(staged_input_digests, identities)
+            selection_reintegration = {
+                "status": "APPLIED",
+                "pass": pass_index,
+                "excluded": sorted(removable),
+                "keptBecause": kept_reasons,
+                "evidence": harmful_evidence,
+                "discardedPass": pass_root.name,
+            }
+            reintegration_passes.append(selection_reintegration)
+            _emit(
+                progress,
+                ProgressStage.INTEGRATION,
+                "running",
+                f"{len(removable)} frame(s) measured harmful by the counterfactual; "
+                "integrating again without them",
+            )
+            shutil.rmtree(pass_root, ignore_errors=True)
+        pipeline_root = pass_root
+        if request.selection.unattended:
+            selection_block = selection_receipt(
+                request.selection,
+                selection_features,
+                selection_decisions,
+                selection_reports,
+                region_maps=selection_region_maps,
+            )
+            if selection_reintegration is not None:
+                applied = [item for item in reintegration_passes if item.get("status") == "APPLIED"]
+                kept: dict[str, str] = {}
+                for item in reintegration_passes:
+                    kept.update(item.get("keptBecause", {}))
+                selection_block["reintegration"] = {
+                    "status": "APPLIED" if applied else selection_reintegration["status"],
+                    "excluded": sorted(path for item in applied for path in item.get("excluded", [])),
+                    "keptBecause": kept,
+                    "passes": reintegration_passes,
+                }
+            else:
+                selection_block["reintegration"] = None
+            selection_block["integrationPasses"] = pass_index
+            _write_json(qc_dir / "selection.json", selection_block)
+            selection_receipt_path = "qc/selection.json"
         shutil.copyfile(pipeline_result.receipt_path, receipts_dir / "pixel-pipeline.json")
         pixel_pipeline_receipt = json.loads(
             Path(pipeline_result.receipt_path).read_text(encoding="utf-8")
@@ -4988,6 +5337,8 @@ def run_e2e(
                 "passedLights": len(passed),
                 "excludedLights": len(excluded),
                 "screening": screening,
+                "selectionPolicy": request.selection.policy,
+                "selection": selection_receipt_path,
             },
             "registration": {
                 "receipt": "receipts/registration.json",

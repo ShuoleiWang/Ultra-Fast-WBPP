@@ -257,6 +257,9 @@ class FrameMeasurement:
     # extraction provenance. None identifies imported/legacy measurements.
     raw_stars: list[Star] | None = None
     raw_detected_source_count: int | None = None
+    # Native-resolution PSF of the brightest stars (half-flux radius, FWHM as
+    # 2 r50, wing fraction beyond one FWHM); None for imported measurements.
+    native_psf: dict[str, Any] | None = None
 
 
 @dataclass
@@ -308,6 +311,10 @@ class FrameFeatures:
     fragmented_trail_occupied_cells: int | None = None
     fragmented_trail_spatial_minor_fraction: float | None = None
     nightly_extinction_residual: float | None = None
+    psf_r50_native_pixels: float | None = None
+    psf_fwhm_native_pixels: float | None = None
+    psf_wing_fraction: float | None = None
+    psf_native_star_count: int | None = None
     background_z: float | None = None
     noise_z: float | None = None
     cloud_score: int = 0

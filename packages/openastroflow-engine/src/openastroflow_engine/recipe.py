@@ -7,6 +7,7 @@ import re
 from typing import Any, Mapping
 
 from .calibration_policy import STRICT, WORKFLOWS
+from .selection.parameters import SelectionParameters
 
 
 class RecipeError(ValueError):
@@ -404,8 +405,31 @@ class LocalNormalizationRecipe:
 
 
 @dataclass(frozen=True, slots=True)
+class SelectionRecipe:
+    """The optional ``selection`` block: unattended Light selection policy."""
+
+    parameters: SelectionParameters = field(default_factory=SelectionParameters)
+    present: bool = False
+
+    @classmethod
+    def from_dict(cls, raw: Any) -> SelectionRecipe:
+        if raw is None:
+            return cls()
+        if not isinstance(raw, Mapping):
+            raise RecipeError("selection must be an object")
+        try:
+            return cls(parameters=SelectionParameters.from_mapping(raw), present=True)
+        except ValueError as error:
+            raise RecipeError(str(error)) from error
+
+    def serializable(self) -> dict[str, Any]:
+        return self.parameters.serializable()
+
+
+@dataclass(frozen=True, slots=True)
 class Recipe:
     calibration: CalibrationRecipe = field(default_factory=CalibrationRecipe)
+    selection: SelectionRecipe = field(default_factory=SelectionRecipe)
     solver: SolverRecipe = field(default_factory=SolverRecipe)
     drizzle: DrizzleRecipe = field(default_factory=DrizzleRecipe)
     local_normalization: LocalNormalizationRecipe = field(
@@ -432,6 +456,7 @@ class Recipe:
                 "overwrite",
                 "reviewApprovals",
                 "rawFrameMetadataOverrides",
+                "selection",
             },
             "recipe",
         )
@@ -473,6 +498,7 @@ class Recipe:
             overwrite=overwrite,
             review_approvals=approvals,
             raw_frame_metadata_overrides=raw_frame_overrides,
+            selection=SelectionRecipe.from_dict(value.get("selection")),
             schema_version=1,
         )
 
@@ -491,6 +517,9 @@ class Recipe:
             "rawFrameMetadataOverrides": [
                 item.serializable() for item in self.raw_frame_metadata_overrides
             ],
+            # Only an explicit selection block takes part in the recipe digest,
+            # so recipes written before the block existed keep their digest.
+            **({"selection": self.selection.serializable()} if self.selection.present else {}),
         }
 
 

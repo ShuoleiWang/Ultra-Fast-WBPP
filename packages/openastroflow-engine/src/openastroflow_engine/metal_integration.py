@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 import math
 import os
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence, Callable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -888,6 +888,7 @@ def _cpu_with_receipt(
     map_paths: IntegrationMapPaths | None,
     durable: bool = True,
     selection_policy: str = "fallback",
+    tile_observer: Callable[[Any], None] | None = None,
 ) -> IntegrationResult:
     result = integrate_expressions(
         expressions,
@@ -898,6 +899,7 @@ def _cpu_with_receipt(
         map_paths=map_paths,
         native_threads=max(1, tuning.cpu_workers),
         durable=durable,
+        tile_observer=tile_observer,
     )
     return replace(
         result,
@@ -944,6 +946,7 @@ def integrate_registered_group(
     quality_weights: Sequence[float] | None = None,
     map_paths: IntegrationMapPaths | None = None,
     durable: bool = True,
+    tile_observer: Callable[[Any], None] | None = None,
 ) -> IntegrationResult:
     """Integrate one registered Light group with explicit, audited fallback.
 
@@ -967,6 +970,11 @@ def integrate_registered_group(
     )
     if requested_backend == "auto" and load_native_kernels() is not None:
         selected, selection_note = "portable-cpu", NATIVE_CPU_AUTO_REASON
+    if selected != "portable-cpu" and any(item.weight_grid for item in canonical):
+        selected, selection_note = (
+            "portable-cpu",
+            "per-sample region weights are reduced by the portable CPU path only",
+        )
     if selected == "portable-cpu":
         return _cpu_with_receipt(
             canonical,
@@ -979,6 +987,7 @@ def integrate_registered_group(
             fallback_reason=selection_note,
             quality_weights=quality_weights,
             map_paths=map_paths,
+            tile_observer=tile_observer,
             durable=durable,
             selection_policy=(
                 "native-cpu-kernels-preferred"
@@ -1001,6 +1010,7 @@ def integrate_registered_group(
             ),
             quality_weights=quality_weights,
             map_paths=map_paths,
+            tile_observer=tile_observer,
             durable=durable,
         )
 
@@ -1029,6 +1039,7 @@ def integrate_registered_group(
                 fallback_reason=metal_unavailable_reason,
                 quality_weights=quality_weights,
                 map_paths=map_paths,
+                tile_observer=tile_observer,
             )
         if executor is None:
             try:
@@ -1049,6 +1060,7 @@ def integrate_registered_group(
                     fallback_reason=str(error),
                     quality_weights=quality_weights,
                     map_paths=map_paths,
+                    tile_observer=tile_observer,
                 )
 
         try:
@@ -1443,6 +1455,7 @@ def integrate_registered_group(
                 fallback_reason=f"Metal execution rejected: {error}",
                 quality_weights=quality_weights,
                 map_paths=map_paths,
+                tile_observer=tile_observer,
             )
     finally:
         if temporary.exists():

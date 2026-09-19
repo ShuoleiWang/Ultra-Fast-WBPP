@@ -374,6 +374,7 @@ def build_e2e_request(
             for item in recipe.review_approvals
         ),
         recipe_digest=_recipe_sha256(recipe),
+        selection=recipe.selection.parameters,
     )
 
 

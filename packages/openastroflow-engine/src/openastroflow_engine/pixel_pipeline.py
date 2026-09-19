@@ -24,7 +24,7 @@ import shutil
 import sys
 import tempfile
 import time
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence, Callable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -1701,6 +1701,52 @@ def _resolve_quality_weights(
     return result
 
 
+def _resolve_region_weight_maps(
+    light_paths: tuple[Path, ...],
+    maps: Mapping[str, Any] | None,
+) -> dict[Path, Any]:
+    """Bind optional region weight maps to admitted Lights (unknown keys fail)."""
+
+    if not maps:
+        return {}
+    canonical = {os.path.normcase(str(path)): path for path in light_paths}
+    result: dict[Path, Any] = {}
+    for key, region_map in maps.items():
+        if not isinstance(key, str) or not key:
+            raise CalibrationError(
+                "REGION_WEIGHT_KEY_INVALID", "region weight map keys must be non-empty strings"
+            )
+        try:
+            path = Path(key).expanduser().resolve(strict=True)
+        except OSError as error:
+            raise CalibrationError(
+                "REGION_WEIGHT_INPUT_UNKNOWN",
+                "region weight map does not bind an existing Light",
+                path=key,
+            ) from error
+        bound = canonical.get(os.path.normcase(str(path)))
+        if bound is None:
+            raise CalibrationError(
+                "REGION_WEIGHT_INPUT_UNKNOWN",
+                "region weight map does not bind an integration Light",
+                path=str(path),
+            )
+        if not hasattr(region_map, "nodes") or not hasattr(region_map, "pixel_nodes"):
+            raise CalibrationError(
+                "REGION_WEIGHT_MAP_INVALID",
+                "region weight maps must provide nodes and pixel_nodes()",
+                path=str(path),
+            )
+        if bound in result:
+            raise CalibrationError(
+                "REGION_WEIGHT_KEY_CONFLICT",
+                "multiple region weight map keys bind the same Light",
+                path=str(path),
+            )
+        result[bound] = region_map
+    return result
+
+
 def _resolve_stellar_scale_hints(
     light_paths: tuple[Path, ...],
     light_info: Mapping[Path, FrameInfo],
@@ -2953,8 +2999,19 @@ def _run_portable_pipeline_fits(
     _xisf_conversions: Sequence[Mapping[str, Any]] = (),
     _trusted_generated_calibration: _TrustedGeneratedCalibrationSet | None = None,
     _source_identity_seed: Mapping[str, tuple[str, Mapping[str, int]]] | None = None,
+    _integration_tile_observers: Callable[[str, Sequence[str]], Any] | None = None,
+    region_weight_maps: Mapping[str, Any] | None = None,
 ) -> PipelineResult:
     """Run raw or pre-integrated calibration through unsolved linear masters.
+
+    ``_integration_tile_observers(filter_name, ordered_light_paths)`` may
+    return a tile observer for that group's ordinary integration (selection
+    counterfactual); observers never change the products.
+
+    ``region_weight_maps`` binds Lights (by path) to their selection region
+    weight maps (``RegionWeightMap``: node values in normalized reference
+    coordinates); a bound Light's samples are weighted by the map during the
+    ordinary weighted mean.  Lights without a map keep unit sample weights.
 
     ``_source_identity_seed`` maps canonical original paths to a content
     digest and the stat identity that digest was captured with.  Seeded
@@ -3282,6 +3339,7 @@ def _run_portable_pipeline_fits(
 
     resolved_transforms = _resolve_transforms(lights, transforms)
     resolved_quality_weights = _resolve_quality_weights(lights, quality_weights)
+    resolved_region_weight_maps = _resolve_region_weight_maps(lights, region_weight_maps)
     resolved_stellar_scale_hints = _resolve_stellar_scale_hints(
         lights,
         light_info,
@@ -4148,6 +4206,36 @@ def _run_portable_pipeline_fits(
                 rejection_count=work_dir / f"rejection_count_{token}.fits",
             )
             group_timing["normalization"] = time.perf_counter() - group_started
+            region_mapped_lights: list[dict[str, Any]] = []
+            if resolved_region_weight_maps:
+                attached_expressions: list[FrameExpression] = []
+                for path, expression in zip(paths, integration_expressions, strict=True):
+                    region_map = resolved_region_weight_maps.get(path)
+                    if region_map is None:
+                        attached_expressions.append(expression)
+                        continue
+                    height, width = light_info[path].shape
+                    x_nodes, y_nodes = region_map.pixel_nodes(height, width)
+                    attached_expressions.append(
+                        replace(
+                            expression,
+                            weight_grid=tuple(
+                                tuple(float(value) for value in row) for row in region_map.nodes
+                            ),
+                            weight_grid_x=tuple(float(value) for value in x_nodes),
+                            weight_grid_y=tuple(float(value) for value in y_nodes),
+                        )
+                    )
+                    region_mapped_lights.append(
+                        {
+                            "path": str(display_path(path)),
+                            "frame": str(region_map.evidence.get("frame", "qc-reference")),
+                            "zeroFraction": float(region_map.zero_fraction),
+                            "minimumWeight": float(region_map.minimum_weight),
+                            "meanWeight": float(region_map.mean_weight),
+                        }
+                    )
+                integration_expressions = attached_expressions
             integration_started = time.perf_counter()
             integration = integrate_registered_group(
                 integration_expressions,
@@ -4175,6 +4263,11 @@ def _run_portable_pipeline_fits(
                 quality_weights=[resolved_quality_weights[path] for path in paths],
                 map_paths=full_maps,
                 durable=parameters.durable_intermediates,
+                tile_observer=(
+                    _integration_tile_observers(filter_name, [str(path) for path in paths])
+                    if _integration_tile_observers is not None
+                    else None
+                ),
             )
             fallback_reason = str(integration.execution.get("fallbackReason") or "")
             if (
@@ -4333,6 +4426,7 @@ def _run_portable_pipeline_fits(
             }
             integration_groups[filter_name] = {
                 "integration": integration_record,
+                "regionWeightMaps": region_mapped_lights,
                 "localNormalization": local_normalization_record,
                 "globalNormalization": global_normalization_record,
                 "exposureNormalization": {
