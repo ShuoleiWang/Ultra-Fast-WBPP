@@ -6,8 +6,8 @@ The engine describes each backend with independent `available` and `executionRea
 - `executionReady` means Ultra-Fast WBPP has a tested adapter that can execute the stage and verify its output.
 
 QC and the portable FITS calibration/registration/integration composition are
-probed at their actual callable entry points. STScI Drizzle is ready only when
-its required array API is present. ASTAP, astrometry.net, and Siril descriptors
+probed at their actual callable entry points. Drizzle is ready only when the
+native kernel library exports the drizzle entry point. ASTAP, astrometry.net, and Siril descriptors
 come from bounded real process probes, including required command-line options;
 a PATH match alone is insufficient.
 

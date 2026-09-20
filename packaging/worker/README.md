@@ -53,7 +53,7 @@ Before PyInstaller runs, the builder performs a real canonical app-core v1
 handshake (envelope, session, sequence, worker capabilities) against the source
 launcher and runs the repository public-tree audit. It then
 freezes `openastroflow_engine`, `lightframeqc`,
-`openastroflow_registration`, `astropy`, `drizzle`, `reproject`, and `shapely`, omitting tests,
+`openastroflow_registration`, `astropy`, `reproject`, and `shapely`, omitting tests,
 downloaded catalogs, raw astronomical frames, and user data. The frozen runtime
 must pass the same handshake before it can be published.
 

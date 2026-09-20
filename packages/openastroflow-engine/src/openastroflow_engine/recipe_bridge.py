@@ -60,8 +60,8 @@ _SOLVER_CATALOG_BACKENDS = {
     "astap-offline": "astap",
 }
 _NATIVE_SOLVER_PROJECTIONS = {"TAN"}
-_NATIVE_DRIZZLE_SCALES = {1, 2, 3}
-_NATIVE_DRIZZLE_KERNELS = {"square"}
+_NATIVE_DRIZZLE_SCALES = {1, 2, 3, 4}
+_NATIVE_DRIZZLE_KERNELS = {"square", "circular", "gaussian", "point"}
 _F32_TOLERANCE = 8.0 * 1.1920928955078125e-7
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
@@ -520,10 +520,11 @@ def bridge_recipe(raw: Mapping[str, Any]) -> RecipeBridge:
             )
     python_drizzle = DrizzleRecipe(
         enabled=drizzle_stage_enabled,
-        backend="stsci-drizzle-cpu" if drizzle_stage_enabled else "auto",
+        backend="native-drizzle" if drizzle_stage_enabled else "auto",
         scale=integral_scale,
         drop_shrink=drizzle.drop_shrink,
         cfa_drizzle=False,
+        kernel=drizzle.kernel.casefold() if drizzle_stage_enabled else "square",
     )
 
     calibration_enabled = _stage_enabled(stages, "calibration")

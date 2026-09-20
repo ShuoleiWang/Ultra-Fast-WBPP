@@ -27,7 +27,6 @@ VERSIONS = {
     "pyinstaller": "6.15.0",
     "packages": {
         "astropy": "8.0.1",
-        "drizzle": "2.2.0",
         "light-frame-qc": "0.3.0",
         "openastroflow-engine": "0.1.0",
         "openastroflow-registration": "0.1.0a1",
@@ -195,7 +194,7 @@ def test_resource_policy_excludes_tests_catalogs_raw_frames_and_local_paths() ->
     assert resource_policy.validate_resource_members(
         [
             "astropy/config/data/astropy.cfg",
-            "drizzle/cdrizzle.cpython-312-darwin.so",
+            "reproject/mosaicking/__init__.py",
             "openastroflow_engine/py.typed",
             "_internal/resources/catalogs/astrometry-net-4107-4112-v1.json",
         ]
@@ -367,7 +366,7 @@ def test_packaging_spec_declares_every_required_collection() -> None:
         "lightframeqc",
         "openastroflow_registration",
         "astropy",
-        "drizzle",
+        "reproject",
     ):
         assert package_name in policy_text
 

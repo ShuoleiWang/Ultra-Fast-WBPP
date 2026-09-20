@@ -128,7 +128,11 @@ export interface RawFrameMetadataOverride {
   confirmed: boolean;
 }
 
-export interface ProjectRecipeOptions { balanced: true; drizzleEnabled: boolean; localNormalizationEnabled: boolean; solverRequired: true; calibrationWorkflow: "mono-standard-v1"; }
+export type DrizzleScale = 1 | 2 | 3 | 4;
+export type DrizzleKernel = "square" | "circular" | "gaussian" | "point";
+export const DRIZZLE_SCALES: readonly DrizzleScale[] = [1, 2, 3, 4];
+export const DRIZZLE_KERNELS: readonly DrizzleKernel[] = ["square", "circular", "gaussian", "point"];
+export interface ProjectRecipeOptions { balanced: true; drizzleEnabled: boolean; drizzleScale: DrizzleScale; drizzleDropShrink: number; drizzleKernel: DrizzleKernel; localNormalizationEnabled: boolean; solverRequired: true; calibrationWorkflow: "mono-standard-v1"; }
 export interface ReviewApprovalSelection { sourceSha256: string; gatePolicyDigest: string; }
 export interface RunSource { sourceId: string; role: FrameRole; paths: string[]; recursive: boolean; }
 export interface RunRequest {

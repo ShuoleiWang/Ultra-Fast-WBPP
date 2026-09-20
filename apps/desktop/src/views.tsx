@@ -1,10 +1,12 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { useState } from "react";
 import type { Translator } from "./i18n";
 import { CalibrationGroups, FrameInventory } from "./FrameInventory";
 import type { InventoryTab } from "./Sidebar";
 import { dispositionLabel } from "./Inspector";
 import { BrandMark, CheckIcon, CpuIcon, FileIcon, FolderIcon, PlayIcon, RevealIcon, SparkIcon } from "./icons";
-import type { GateDisposition, InspectedLightQuality, MasterMetadataOverride, OutputArtifact, OutputArtifactKind, ScreeningSummary } from "./types";
+import { DRIZZLE_KERNELS, DRIZZLE_SCALES } from "./types";
+import type { DrizzleKernel, DrizzleScale, GateDisposition, InspectedLightQuality, MasterMetadataOverride, OutputArtifact, OutputArtifactKind, ScreeningSummary } from "./types";
 import type { useWorkflow } from "./useWorkflow";
 
 export type Workflow = ReturnType<typeof useWorkflow>;
@@ -63,6 +65,18 @@ export function MetadataConfirmations({ workflow, t }: { workflow: Workflow; t: 
   </div>;
 }
 
+/** Drop shrink is typed freely and clamped to the engine's [0.1, 1] range when the field is left. */
+function DropShrinkField({ value, disabled, onCommit, t }: { value: number; disabled: boolean; onCommit: (value: number) => void; t: Translator }) {
+  const [text, setText] = useState(String(value));
+  const commit = () => {
+    const parsed = Number(text);
+    const clamped = Number.isFinite(parsed) ? Math.min(1, Math.max(0.1, Math.round(parsed * 100) / 100)) : value;
+    onCommit(clamped);
+    setText(String(clamped));
+  };
+  return <div className="field-row"><label htmlFor="drizzle-drop-shrink">{t("drizzleDropShrink")}</label><input id="drizzle-drop-shrink" type="number" inputMode="decimal" min={0.1} max={1} step={0.05} value={text} disabled={disabled} onChange={(event) => setText(event.target.value)} onBlur={commit} onKeyDown={(event) => { if (event.key === "Enter") commit(); }} /></div>;
+}
+
 /** Output path entry, the advanced options with solver setup, and what still blocks a start. */
 export function LaunchSettings({ mode, workflow, outputPathText, setOutputPathText, t }: { mode: "import" | "inspect"; workflow: Workflow; outputPathText: string; setOutputPathText: (value: string) => void; t: Translator }) {
   const catalogFraction = workflow.catalogProgress?.sizeBytes ? Math.min(1, workflow.catalogProgress.downloadedBytes / workflow.catalogProgress.sizeBytes) : 0;
@@ -71,6 +85,11 @@ export function LaunchSettings({ mode, workflow, outputPathText, setOutputPathTe
       {workflow.nativeRuntime && <details className="disclosure"><summary><span>{t("enterOutputPath")}</span></summary><form className="details-content" onSubmit={(event) => { event.preventDefault(); workflow.useOutputParentPath(outputPathText); }}><div className="field-row"><label htmlFor="output-parent-path">{t("outputPathLabel")}</label><input id="output-parent-path" value={outputPathText} disabled={workflow.runNavigationLocked} spellCheck={false} aria-describedby="output-path-hint" onChange={(event) => setOutputPathText(event.target.value)} /><p id="output-path-hint" className="hint">{t("outputPathHint")}</p></div><div className="row-actions"><button type="submit" className="btn small" disabled={workflow.runNavigationLocked || !outputPathText.trim()}>{t("useOutputPath")}</button></div></form></details>}
       <details className="disclosure" open={!workflow.solverSetupReady && workflow.nativeRuntime}><summary><span>{t("advanced")}</span><small>Drizzle · LN · WCS</small></summary><div className="details-content">
         <label className={`toggle ${workflow.drizzleEnabled ? "enabled" : ""}`}><input type="checkbox" checked={workflow.drizzleEnabled} disabled={!workflow.capabilities?.drizzleAvailable} onChange={(event) => workflow.setDrizzleEnabled(event.target.checked)} /><span><strong>{t("drizzle")}</strong><small>{t("drizzleHint")}</small></span></label>
+        {workflow.drizzleEnabled && <div className="option-grid" aria-label={t("drizzleOptions")}>
+          <div className="field-row"><label htmlFor="drizzle-scale">{t("drizzleScale")}</label><select id="drizzle-scale" value={workflow.drizzleScale} disabled={workflow.runNavigationLocked} onChange={(event) => workflow.setDrizzleScale(Number(event.target.value) as DrizzleScale)}>{DRIZZLE_SCALES.map((scale) => <option key={scale} value={scale}>{scale}×</option>)}</select></div>
+          <div className="field-row"><label htmlFor="drizzle-kernel">{t("drizzleKernel")}</label><select id="drizzle-kernel" value={workflow.drizzleKernel} disabled={workflow.runNavigationLocked} onChange={(event) => workflow.setDrizzleKernel(event.target.value as DrizzleKernel)}>{DRIZZLE_KERNELS.map((kernel) => <option key={kernel} value={kernel}>{t(`drizzleKernel_${kernel}` as const)}</option>)}</select></div>
+          <DropShrinkField value={workflow.drizzleDropShrink} disabled={workflow.runNavigationLocked} onCommit={workflow.setDrizzleDropShrink} t={t} />
+        </div>}
         <label className={`toggle ${workflow.localNormalizationEnabled ? "enabled" : ""}`}><input type="checkbox" checked={workflow.localNormalizationEnabled} onChange={(event) => workflow.setLocalNormalizationEnabled(event.target.checked)} /><span><strong>{t("localNormalization")}</strong><small>{t("localNormalizationHint")}</small></span></label>
         <section className="panel" aria-labelledby="solver-title"><div className="panel-heading"><span id="solver-title">{t("solverSetup")}</span><div className="setup-actions"><small>{workflow.solverSetupReady ? t("ready") : t("actionRequired")}</small>{workflow.nativeRuntime && <button type="button" className="btn small" disabled={workflow.solverSetupBusy || workflow.catalogStatus === "DOWNLOADING" || workflow.catalogStatus === "VERIFYING"} onClick={() => void workflow.recheckSolverSetup()}>{workflow.solverSetupBusy ? t("checkingSetup") : t("recheckSetup")}</button>}</div></div>
           <div className="panel-body">

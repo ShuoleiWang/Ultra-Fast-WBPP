@@ -11,7 +11,6 @@ Original Ultra-Fast WBPP code is licensed under MIT. The Python runtime no longe
 - scikit-image — BSD family and MIT component notices.
 - Astroalign — MIT. The adapted triangle bootstrap retains its upstream copyright and permission notice; a complete copy is in [LICENSES/astroalign-MIT.txt](LICENSES/astroalign-MIT.txt).
 - Pillow — MIT-CMU.
-- STScI `drizzle` — BSD-3-Clause when enabled.
 - `reproject`, Dask, and Shapely — BSD-3-Clause; Zarr — MIT. Shapely wheels also bundle GEOS under LGPL-2.1. These optional mosaic components and their transitive dependencies retain their own terms; inventory the exact distributed artifacts and include their complete notices rather than treating the whole dependency closure as BSD-licensed.
 - PyInstaller bootloader and build tooling — GPL-2.0-or-later with the PyInstaller bootloader exception, which allows the frozen worker to be distributed under the project's own terms.
 - OpenSSL 3 — Apache-2.0. The macOS 14 arm64 compatibility overlay is bound to an exact official Homebrew bottle manifest and blob digest.

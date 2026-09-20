@@ -304,6 +304,8 @@ def _recipe_from_args(args: argparse.Namespace) -> Recipe:
         drizzle["scale"] = args.drizzle_scale
     if getattr(args, "drop_shrink", None) is not None:
         drizzle["dropShrink"] = args.drop_shrink
+    if getattr(args, "drizzle_kernel", None) is not None:
+        drizzle["kernel"] = args.drizzle_kernel
     if getattr(args, "cfa_drizzle", False):
         drizzle["cfaDrizzle"] = True
     mode = getattr(args, "mode", None)
@@ -392,6 +394,7 @@ def _build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--drizzle-backend")
     plan.add_argument("--drizzle-scale", type=int)
     plan.add_argument("--drop-shrink", type=float)
+    plan.add_argument("--drizzle-kernel", choices=("square", "circular", "gaussian", "point"))
     plan.add_argument("--cfa-drizzle", action="store_true")
     plan.add_argument("--output", help="write JSON to a new file")
     plan.add_argument("--compact", action="store_true")
@@ -432,6 +435,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--drizzle-backend")
     run.add_argument("--drizzle-scale", type=int)
     run.add_argument("--drop-shrink", type=float)
+    run.add_argument("--drizzle-kernel", choices=("square", "circular", "gaussian", "point"))
 
     run_project = subparsers.add_parser(
         "run-project",
@@ -455,6 +459,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run_project.add_argument("--drizzle-backend")
     run_project.add_argument("--drizzle-scale", type=int)
     run_project.add_argument("--drop-shrink", type=float)
+    run_project.add_argument("--drizzle-kernel", choices=("square", "circular", "gaussian", "point"))
 
     catalog = subparsers.add_parser(
         "catalog",

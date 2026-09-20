@@ -1388,7 +1388,6 @@ def run_project_e2e(
     *,
     solver_backends: Sequence[SolverBackend],
     progress: ProgressCallback | None = None,
-    drizzle_provider: Any | None = None,
     mosaic_provider: ReprojectProvider | None = None,
     panel_runner: PanelRunner = run_e2e,
     mosaic_builder: MosaicBuilder = build_solved_panel_mosaic,
@@ -1511,7 +1510,6 @@ def run_project_e2e(
                 sub_request,
                 solver_backends=solver_backends,
                 progress=panel_progress,
-                drizzle_provider=drizzle_provider,
             )
             passed.extend(sub_result.passed_light_paths)
             excluded.extend(sub_result.excluded_light_paths)

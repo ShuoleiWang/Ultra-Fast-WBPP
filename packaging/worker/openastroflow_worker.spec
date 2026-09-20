@@ -58,7 +58,6 @@ datas.extend(
 # broad collect_all/collect_submodules calls made the first launch validate
 # hundreds of Astropy/Pillow modules that the product can never execute.
 hidden_imports = [
-    "drizzle.resample",
     "reproject.mosaicking",
     "reproject.interpolation.high_level",
     "shapely",

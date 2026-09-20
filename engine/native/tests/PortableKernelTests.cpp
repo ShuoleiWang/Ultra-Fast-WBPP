@@ -839,6 +839,260 @@ void TestCAbiRoundTrip()
             "cpu features must reject an unexpected struct size" );
 }
 
+struct DrizzleOutput
+{
+   std::vector<double> sum;
+   std::vector<double> weight;
+   std::vector<std::uint8_t> touched;
+};
+
+DrizzleOutput DrizzleWhole( DrizzleRequest request, std::uint32_t outputWidth,
+                            std::uint32_t outputHeight, std::uint32_t threads,
+                            std::uint32_t bandRows = 0 )
+{
+   DrizzleOutput output;
+   output.sum.assign( static_cast<std::size_t>( outputWidth )*outputHeight, 0.0 );
+   output.weight.assign( output.sum.size(), 0.0 );
+   output.touched.assign( output.sum.size(), 0 );
+   request.outputWidth = outputWidth;
+   request.threads = threads;
+   const std::uint32_t rows = bandRows == 0 ? outputHeight : bandRows;
+   for ( std::uint32_t row0 = 0; row0 < outputHeight; row0 += rows )
+   {
+      const std::uint32_t count = std::min( rows, outputHeight - row0 );
+      const std::size_t offset = static_cast<std::size_t>( row0 )*outputWidth;
+      const std::size_t length = static_cast<std::size_t>( count )*outputWidth;
+      request.outputRow0 = row0;
+      request.outputRows = count;
+      request.outputSum = std::span<double>( output.sum.data() + offset, length );
+      request.outputWeight = std::span<double>( output.weight.data() + offset, length );
+      request.outputTouched = std::span<std::uint8_t>( output.touched.data() + offset, length );
+      DrizzleBand( request );
+   }
+   return output;
+}
+
+void TestDrizzleBandDropsExactAreasAndIsBandAndThreadInvariant()
+{
+   const std::uint32_t width = 23;
+   const std::uint32_t height = 17;
+   std::vector<float> source( width*height );
+   std::mt19937 generator( 11 );
+   std::uniform_real_distribution<float> values( 10.0F, 20.0F );
+   for ( float& value : source )
+      value = values( generator );
+   source[5*width + 7] = Nan;
+
+   // Identity map, unit drops at 1x: every output pixel is a copy of its
+   // input pixel with weight exactly 1, and the NaN sample leaves a hole.
+   DrizzleRequest request;
+   request.source = source;
+   request.sourceWidth = width;
+   request.sourceRows = height;
+   request.scale = 1;
+   request.pixfrac = 1.0;
+   request.kernel = DrizzleKernel::Square;
+   request.frameWeight = 1.0F;
+   const DrizzleOutput identity = DrizzleWhole( request, width, height, 1 );
+   for ( std::uint32_t y = 0; y < height; ++y )
+      for ( std::uint32_t x = 0; x < width; ++x )
+      {
+         const std::size_t index = static_cast<std::size_t>( y )*width + x;
+         if ( std::isnan( source[index] ) )
+         {
+            Require( identity.weight[index] == 0.0 && identity.touched[index] == 0,
+                     "drizzle: a NaN sample carries no weight" );
+            continue;
+         }
+         Require( std::fabs( identity.weight[index] - 1.0 ) < 1.0e-12
+               && std::fabs( identity.sum[index] - source[index] ) < 1.0e-9
+               && identity.touched[index] == 1,
+                  "drizzle: identity 1x square drop copies the pixel" );
+      }
+
+   // 2x with a rotated, translated map: the drop areas are exact, so the
+   // total dropped weight equals the number of finite pixels that land
+   // fully inside the output (interior pixels), scaled by pixfrac^2.
+   const double angle = 0.31;
+   const double c = std::cos( angle ), s = std::sin( angle );
+   const double scale = 2.0;
+   const double forward[9] = { scale*c, -scale*s, scale*(8.4), scale*s, scale*c, scale*(2.6), 0.0, 0.0, 1.0 };
+   std::copy( forward, forward + 9, request.forward );
+   request.scale = 2;
+   request.pixfrac = 0.7;
+   const std::uint32_t outputWidth = 2*(width + 12);
+   const std::uint32_t outputHeight = 2*(height + 14);
+   const DrizzleOutput single = DrizzleWhole( request, outputWidth, outputHeight, 1 );
+   double totalWeight = 0.0, totalSum = 0.0, expectedWeight = 0.0, expectedSum = 0.0;
+   for ( std::size_t i = 0; i < single.weight.size(); ++i )
+   {
+      totalWeight += single.weight[i];
+      totalSum += single.sum[i];
+   }
+   for ( std::uint32_t y = 0; y < height; ++y )
+      for ( std::uint32_t x = 0; x < width; ++x )
+      {
+         const float value = source[y*width + x];
+         if ( !std::isfinite( value ) )
+            continue;
+         const double u = forward[0]*x + forward[1]*y + forward[2];
+         const double v = forward[3]*x + forward[4]*y + forward[5];
+         Require( u > 2.0 && v > 2.0 && u < outputWidth - 3.0 && v < outputHeight - 3.0,
+                  "drizzle test geometry keeps every drop inside the output" );
+         const double area = (0.7*scale)*(0.7*scale);
+         expectedWeight += area;
+         expectedSum += area*value;
+      }
+   Require( std::fabs( totalWeight - expectedWeight ) < 1.0e-6*expectedWeight,
+            "drizzle: exact square drops conserve the dropped weight" );
+   Require( std::fabs( totalSum - expectedSum ) < 1.0e-6*expectedSum,
+            "drizzle: exact square drops conserve the dropped flux" );
+
+   for ( std::uint32_t threads : { 2U, 3U, 5U, 64U } )
+      for ( std::uint32_t bandRows : { 0U, 7U, 16U } )
+      {
+         const DrizzleOutput parallel = DrizzleWhole( request, outputWidth, outputHeight, threads, bandRows );
+         Require( parallel.sum == single.sum && parallel.weight == single.weight
+               && parallel.touched == single.touched,
+                  "drizzle: output must not depend on the thread count or the band split" );
+      }
+   for ( DrizzleKernel kernel : { DrizzleKernel::Circular, DrizzleKernel::Gaussian, DrizzleKernel::Point } )
+   {
+      request.kernel = kernel;
+      const DrizzleOutput serial = DrizzleWhole( request, outputWidth, outputHeight, 1 );
+      const DrizzleOutput threaded = DrizzleWhole( request, outputWidth, outputHeight, 4, 5 );
+      Require( serial.sum == threaded.sum && serial.weight == threaded.weight,
+               "drizzle: every kernel is thread and band invariant" );
+      double kernelWeight = 0.0;
+      for ( double w : serial.weight )
+         kernelWeight += w;
+      Require( kernelWeight > 0.0, "drizzle: every kernel drops weight" );
+      if ( kernel == DrizzleKernel::Point )
+         Require( std::fabs( kernelWeight - (width*height - 1.0) ) < 1.0e-9,
+                  "drizzle: point drops carry unit weight per finite pixel" );
+      if ( kernel == DrizzleKernel::Gaussian )
+         Require( std::fabs( kernelWeight - expectedWeight ) < 1.0e-6*expectedWeight,
+                  "drizzle: Gaussian drops are normalized to the square drop's area" );
+      if ( kernel == DrizzleKernel::Circular )
+         Require( std::fabs( kernelWeight - expectedWeight*3.141592653589793/4.0 ) < 1.0e-6*expectedWeight,
+                  "drizzle: circular drops carry the exact disc area" );
+   }
+   request.kernel = DrizzleKernel::Square;
+
+   // The rejection mask lives on the reference grid and is sampled at the
+   // rounded reference position of each dropped pixel; the normalization is
+   // applied in Float32 exactly as the integration does; the CFA channel
+   // selection keeps only the pattern's pixels.
+   const std::uint32_t maskWidth = width + 12, maskHeight = height + 14;
+   std::vector<std::uint8_t> mask( static_cast<std::size_t>( maskWidth )*maskHeight, 1 );
+   const double maskedX = std::round( (forward[0]*4 + forward[1]*3 + forward[2])/scale );
+   const double maskedY = std::round( (forward[3]*4 + forward[4]*3 + forward[5])/scale );
+   mask[static_cast<std::size_t>( maskedY )*maskWidth + static_cast<std::size_t>( maskedX )] = 0;
+   request.mask = mask;
+   request.maskWidth = maskWidth;
+   request.maskHeight = maskHeight;
+   request.normalizationScale = 1.5F;
+   request.normalizationOffset = -2.25F;
+   request.frameWeight = 0.5F;
+   const DrizzleOutput masked = DrizzleWhole( request, outputWidth, outputHeight, 3 );
+   double maskedWeight = 0.0, maskedSum = 0.0, expectedMaskedSum = 0.0, expectedMaskedWeight = 0.0;
+   std::uint32_t rejected = 0;
+   for ( std::size_t i = 0; i < masked.weight.size(); ++i )
+   {
+      maskedWeight += masked.weight[i];
+      maskedSum += masked.sum[i];
+   }
+   for ( std::uint32_t y = 0; y < height; ++y )
+      for ( std::uint32_t x = 0; x < width; ++x )
+      {
+         const float value = source[y*width + x];
+         if ( !std::isfinite( value ) )
+            continue;
+         const double rx = std::round( (forward[0]*x + forward[1]*y + forward[2])/scale );
+         const double ry = std::round( (forward[3]*x + forward[4]*y + forward[5])/scale );
+         if ( mask[static_cast<std::size_t>( ry )*maskWidth + static_cast<std::size_t>( rx )] == 0 )
+         {
+            ++rejected;
+            continue;
+         }
+         const float normalized = (value*1.5F) + (-2.25F);
+         expectedMaskedWeight += 0.5*(0.7*scale)*(0.7*scale);
+         expectedMaskedSum += 0.5*(0.7*scale)*(0.7*scale)*static_cast<double>( normalized );
+      }
+   Require( rejected == 1, "drizzle test: exactly one input pixel lands on the masked reference pixel" );
+   Require( std::fabs( maskedWeight - expectedMaskedWeight ) < 1.0e-6*expectedMaskedWeight,
+            "drizzle: the rejected pixel drops nothing and the frame weight scales the rest" );
+   Require( std::fabs( maskedSum - expectedMaskedSum ) < 1.0e-6*std::fabs( expectedMaskedSum ),
+            "drizzle: normalization is applied before dropping" );
+
+   request.mask = {};
+   request.maskWidth = request.maskHeight = 0;
+   request.normalizationScale = 1.0F;
+   request.normalizationOffset = 0.0F;
+   request.frameWeight = 1.0F;
+   const std::uint8_t pattern[4] = { 0, 1, 1, 2 };
+   std::copy( pattern, pattern + 4, request.cfaPattern );
+   double channelWeight[3] = { 0.0, 0.0, 0.0 };
+   for ( std::uint8_t channel = 0; channel < 3; ++channel )
+   {
+      request.channel = channel;
+      const DrizzleOutput plane = DrizzleWhole( request, outputWidth, outputHeight, 2 );
+      for ( double w : plane.weight )
+         channelWeight[channel] += w;
+   }
+   Require( std::fabs( channelWeight[0] + channelWeight[1] + channelWeight[2] - expectedWeight )
+               < 1.0e-6*expectedWeight,
+            "drizzle: the three CFA planes partition the mosaic" );
+   Require( channelWeight[1] > channelWeight[0] && channelWeight[1] > channelWeight[2],
+            "drizzle: the green plane holds half of the Bayer pixels" );
+   request.channel = 255;
+
+   // C ABI round trip against the direct kernel.
+   OafNativeDrizzleRequestV1 abi{};
+   abi.struct_size = sizeof( abi );
+   abi.source_width = width;
+   abi.source_rows = height;
+   abi.scale = 2;
+   abi.kernel = OAF_NATIVE_DRIZZLE_KERNEL_SQUARE;
+   abi.output_width = outputWidth;
+   abi.output_rows = outputHeight;
+   abi.threads = 3;
+   std::copy( pattern, pattern + 4, abi.cfa_pattern );
+   abi.channel = 255;
+   abi.normalization_scale = 1.0F;
+   abi.frame_weight = 1.0F;
+   abi.pixfrac = 0.7;
+   std::copy( forward, forward + 9, abi.forward );
+   abi.source = source.data();
+   abi.source_count = source.size();
+   std::vector<double> abiSum( single.sum.size(), 0.0 ), abiWeight( single.sum.size(), 0.0 );
+   std::vector<std::uint8_t> abiTouched( single.sum.size(), 0 );
+   abi.output_sum = abiSum.data();
+   abi.output_weight = abiWeight.data();
+   abi.output_count = abiSum.size();
+   abi.output_touched = abiTouched.data();
+   std::array<char, 256> error{};
+   Require( oaf_native_cpu_drizzle_v1( &abi, error.data(), error.size() ) == OAF_NATIVE_OK,
+            error.data() );
+   Require( abiSum == single.sum && abiWeight == single.weight && abiTouched == single.touched,
+            "drizzle: C ABI equals the direct kernel" );
+   abi.scale = 9;
+   Require( oaf_native_cpu_drizzle_v1( &abi, error.data(), error.size() ) == OAF_NATIVE_INVALID_ARGUMENT,
+            "drizzle: C ABI rejects an unsupported scale" );
+   abi.scale = 2;
+   abi.output_count = abiSum.size() - 1;
+   Require( oaf_native_cpu_drizzle_v1( &abi, error.data(), error.size() ) == OAF_NATIVE_INVALID_ARGUMENT,
+            "drizzle: C ABI rejects mismatched accumulators" );
+
+   request.pixfrac = 0.0;
+   RequireThrows<std::invalid_argument>( [&]() { DrizzleWhole( request, outputWidth, outputHeight, 1 ); },
+                                         "drizzle: pixfrac must be positive" );
+   request.pixfrac = 0.7;
+   request.channel = 3;
+   RequireThrows<std::invalid_argument>( [&]() { DrizzleWhole( request, outputWidth, outputHeight, 1 ); },
+                                         "drizzle: channel must be 0, 1, 2 or 255" );
+}
+
 // Dynamic chunking: results of every kernel must not depend on how the
 // range is split among threads. Row/pixel counts that are not multiples
 // of the chunk grains exercise the last, partial chunk on several threads.
@@ -946,6 +1200,7 @@ int main()
       TestTileOffsetsMatchReferenceStatistics();
       TestRadonPeaksFindTheDyadicLineAtEveryLevel();
       TestCAbiRoundTrip();
+      TestDrizzleBandDropsExactAreasAndIsBandAndThreadInvariant();
       TestDynamicChunkingIsThreadAndGrainInvariant();
       std::cout << "OpenAstroFlowPortableKernelTests passed\n";
       return 0;

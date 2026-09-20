@@ -15,7 +15,6 @@ REQUIRED_COLLECTIONS = (
     "lightframeqc",
     "openastroflow_registration",
     "astropy",
-    "drizzle",
     "reproject",
     "shapely",
 )
@@ -25,7 +24,6 @@ DISTRIBUTION_NAMES = {
     "lightframeqc": "light-frame-qc",
     "openastroflow_registration": "openastroflow-registration",
     "astropy": "astropy",
-    "drizzle": "drizzle",
     "reproject": "reproject",
     "shapely": "shapely",
 }

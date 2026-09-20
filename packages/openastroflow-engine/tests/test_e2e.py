@@ -22,12 +22,7 @@ REGISTRATION_SOURCE = Path(__file__).resolve().parents[3] / "engine" / "native" 
 if str(REGISTRATION_SOURCE) not in sys.path:
     sys.path.insert(0, str(REGISTRATION_SOURCE))
 
-from openastroflow_engine.drizzle_execution import (
-    DrizzleExecutionRequest,
-    DrizzleFrameInput,
-    DrizzleProvider,
-    execute_drizzle,
-)
+from openastroflow_engine.native_kernels import load_native_kernels
 from openastroflow_engine.e2e import (
     DrizzleOptions,
     E2ERequest,
@@ -41,8 +36,6 @@ from openastroflow_engine.e2e import (
     E2EError,
     _SolverHints,
     _build_registration_masters,
-    _build_drizzle_rejection_masks,
-    _drizzle_output_to_input_matrix,
     _drizzle_sampling_evidence,
     _inferred_solver_hints,
     _register_lights,
@@ -391,67 +384,6 @@ class FailingSolver:
         return False
 
 
-class NumpyPointAccumulator:
-    def __init__(
-        self,
-        *,
-        out_shape: tuple[int, int],
-        kernel: str,
-        fillval: str,
-        disable_ctx: bool = True,
-    ) -> None:
-        assert kernel == "point"
-        assert fillval == "NaN"
-        assert disable_ctx is True
-        self._sum = np.zeros(out_shape, dtype=np.float64)
-        self._weight = np.zeros(out_shape, dtype=np.float32)
-
-    @property
-    def out_wht(self) -> np.ndarray:
-        return self._weight
-
-    @property
-    def out_img(self) -> np.ndarray:
-        output = np.full(self._weight.shape, np.nan, dtype=np.float32)
-        selected = self._weight > 0
-        output[selected] = (self._sum[selected] / self._weight[selected]).astype(np.float32)
-        return output
-
-    def add_image(
-        self,
-        data: np.ndarray,
-        exptime: float,
-        pixmap: np.ndarray,
-        *,
-        weight_map: np.ndarray,
-        wht_scale: float,
-        pixfrac: float,
-        pixel_scale_ratio: float,
-        in_units: str,
-    ) -> None:
-        del exptime, pixfrac, pixel_scale_ratio
-        assert in_units == "cps"
-        x = np.floor(pixmap[..., 0] + 0.5).astype(np.int64)
-        y = np.floor(pixmap[..., 1] + 0.5).astype(np.int64)
-        weights = np.asarray(weight_map, dtype=np.float64) * wht_scale
-        valid = (
-            np.isfinite(data)
-            & np.isfinite(pixmap[..., 0])
-            & np.isfinite(pixmap[..., 1])
-            & (weights > 0)
-            & (x >= 0)
-            & (x < self._weight.shape[1])
-            & (y >= 0)
-            & (y < self._weight.shape[0])
-        )
-        np.add.at(self._sum, (y[valid], x[valid]), data[valid] * weights[valid])
-        np.add.at(self._weight, (y[valid], x[valid]), weights[valid].astype(np.float32))
-
-
-def _drizzle_provider() -> DrizzleProvider:
-    return DrizzleProvider("numpy-e2e-oracle", "test-v1", NumpyPointAccumulator)
-
-
 def _request(
     project: dict[str, tuple[Path, ...]],
     output: Path,
@@ -471,7 +403,7 @@ def _request(
         dec_hint_degrees=20.0,
         field_of_view_degrees=3.0,
         search_radius_degrees=5.0,
-        drizzle=DrizzleOptions(scale=2, pixfrac=1.0, kernel="point", tile_rows=64),
+        drizzle=DrizzleOptions(scale=2, pixfrac=0.9, kernel="square", tile_rows=64),
     )
 
 
@@ -1900,6 +1832,7 @@ def test_cross_filter_wcs_direct_grid_gate_rejects_geometry_drift(
     assert comparison["tolerancePixels"] == 0.05
 
 
+@pytest.mark.skipif(load_native_kernels() is None, reason="native kernel library is not built in this checkout")
 def test_drizzle_branch_produces_coverage_then_solves_the_drizzled_master(
     tmp_path: Path,
     synthetic_project: dict[str, tuple[Path, ...]],
@@ -1910,7 +1843,6 @@ def test_drizzle_branch_produces_coverage_then_solves_the_drizzled_master(
     result = run_e2e(
         _request(synthetic_project, output, mode=IntegrationMode.DRIZZLE),
         solver_backends=(solver,),
-        drizzle_provider=_drizzle_provider(),
     )
 
     assert result.success is True
@@ -1919,68 +1851,61 @@ def test_drizzle_branch_produces_coverage_then_solves_the_drizzled_master(
     coverage = json.loads((output / "coverage" / "coverage.json").read_text(encoding="utf-8"))
     assert coverage["mode"] == "drizzle"
     assert coverage["options"]["scale"] == 2
+    assert coverage["options"]["kernel"] == "square"
     drizzle_receipt = coverage["filters"]["R"]
+    assert drizzle_receipt["status"] == "succeeded"
+    assert drizzle_receipt["backend"]["id"] == "native-cpu-drizzle-v1"
+    assert drizzle_receipt["statistics"]["inputFrames"] == 8
     assert drizzle_receipt["statistics"]["coverageFraction"] >= 0.90
-    assert drizzle_receipt["statistics"]["nullPixelFraction"] <= 0.10
-    assert drizzle_receipt["statistics"]["rejectionMasksProvided"] == 8
-    assert drizzle_receipt["statistics"]["allFramesHaveRejectionMasks"] is True
-    assert drizzle_receipt["scienceGate"]["dither"]["distinctPhaseCount"] >= 3
-    assert drizzle_receipt["scienceGate"]["dither"]["spanXPixels"] >= 0.35
-    assert drizzle_receipt["scienceGate"]["dither"]["spanYPixels"] >= 0.35
-    assert coverage["sampling"]["status"] == "PASS_UNDERSAMPLED"
-    mask_directory = output / "coverage" / "rejection-masks" / "R"
-    assert len(tuple(mask_directory.glob("*_rejection.fits"))) == 8
-    mask_manifest = json.loads(
-        (mask_directory / "manifest.json").read_text(encoding="utf-8")
-    )
-    assert len(mask_manifest["frames"]) == 8
-    assert mask_manifest["totalRejectedPixels"] == 0
+    assert all(item["rejectionMask"] for item in drizzle_receipt["inputs"])
+    assert drizzle_receipt["coverageGate"]["status"] == "PASS"
+    assert drizzle_receipt["science"]["dither"]["distinctPhaseBins"] >= 1
+    assert coverage["sampling"]["status"] in {"PASS_UNDERSAMPLED", "WELL_SAMPLED", "UNKNOWN_SAMPLING"}
+    assert coverage["sampling"]["advisory"] is True
     assert (output / "receipts" / "drizzle_R.json").is_file()
     with fits.open(result.product_paths[0]) as hdul:
         assert [item.name for item in hdul] == ["SCI", "WHT", "COVERAGE"]
         assert hdul[0].header["CTYPE1"] == "RA---TAN"
+        assert hdul[0].header["OAFDRZSC"] == 2
         assert hdul["COVERAGE"].data.shape == (256, 256)
+        science = np.asarray(hdul[0].data, dtype=np.float64)
+        weights = np.asarray(hdul["WHT"].data, dtype=np.float64)
+        finite = np.isfinite(science)
+        assert finite.mean() >= 0.90
+        assert np.all(weights[finite] > 0)
+        assert np.all(weights[~finite] == 0)
 
 
-def test_sampling_gate_blocks_well_sampled_and_reviews_unknown_twox_data() -> None:
+def test_sampling_evidence_is_advisory_for_twox_data() -> None:
     metadata = SimpleNamespace(header={})
     unknown = SimpleNamespace(
-        features=SimpleNamespace(
-            median_fwhm_native_pixels=None,
-            nina_hfr_pixels=None,
-        ),
+        features=SimpleNamespace(median_fwhm_native_pixels=None, nina_hfr_pixels=None),
         metadata=metadata,
     )
-    with pytest.raises(E2EError) as unknown_error:
-        _drizzle_sampling_evidence((unknown,), DrizzleOptions(scale=2))
-    assert unknown_error.value.code == "DRIZZLE_SAMPLING_REVIEW_REQUIRED"
+    evidence = _drizzle_sampling_evidence((unknown,), DrizzleOptions(scale=2))
+    assert evidence["status"] == "UNKNOWN_SAMPLING" and evidence["advisory"] is True
 
     well_sampled = SimpleNamespace(
-        features=SimpleNamespace(
-            median_fwhm_native_pixels=3.4,
-            nina_hfr_pixels=None,
-        ),
+        features=SimpleNamespace(median_fwhm_native_pixels=3.4, nina_hfr_pixels=None),
         metadata=metadata,
     )
-    with pytest.raises(E2EError) as sampled_error:
-        _drizzle_sampling_evidence((well_sampled,), DrizzleOptions(scale=2))
-    assert sampled_error.value.code == "DRIZZLE_UPSCALE_NOT_RECOMMENDED"
+    evidence = _drizzle_sampling_evidence((well_sampled,), DrizzleOptions(scale=2))
+    assert evidence["status"] == "WELL_SAMPLED"
+    assert "recommendation" in evidence
 
-    conflicting = SimpleNamespace(
-        features=SimpleNamespace(
-            median_fwhm_native_pixels=2.0,
-            nina_hfr_pixels=2.0,
-        ),
+    undersampled = SimpleNamespace(
+        features=SimpleNamespace(median_fwhm_native_pixels=1.8, nina_hfr_pixels=0.9),
         metadata=metadata,
     )
-    with pytest.raises(E2EError) as conflicting_error:
-        _drizzle_sampling_evidence((conflicting,), DrizzleOptions(scale=2))
-    assert conflicting_error.value.code == "DRIZZLE_SAMPLING_REVIEW_REQUIRED"
+    evidence = _drizzle_sampling_evidence((undersampled,), DrizzleOptions(scale=2))
+    assert evidence["status"] == "PASS_UNDERSAMPLED"
+    assert _drizzle_sampling_evidence((undersampled,), DrizzleOptions(scale=1))["status"] == "NOT_APPLICABLE"
 
 
-def test_drizzle_options_expose_fail_closed_production_defaults() -> None:
+def test_drizzle_options_expose_production_defaults() -> None:
     options = DrizzleOptions()
 
+    assert (options.scale, options.pixfrac, options.kernel) == (2, 0.9, "square")
     assert options.minimum_coverage_fraction == 0.90
     assert options.maximum_null_fraction == 0.10
     assert options.minimum_distinct_dither_phases == 3
@@ -1989,125 +1914,6 @@ def test_drizzle_options_expose_fail_closed_production_defaults() -> None:
     assert options.maximum_fwhm_for_upsampling_pixels == 3.0
     assert options.rejection_minimum_frames == 3
     options.validate()
-
-
-def test_tiled_mad_masks_reject_a_real_per_frame_outlier(
-    tmp_path: Path,
-) -> None:
-    calibrated: dict[str, Path] = {}
-    transforms: dict[str, tuple[tuple[float, float, float], ...]] = {}
-    analyses: dict[str, tuple[int, Any]] = {}
-    paths: list[Path] = []
-    identity = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
-    for index in range(3):
-        source = tmp_path / "sources" / f"light-{index}.fits"
-        source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_bytes(f"source-{index}".encode("ascii"))
-        path = source.resolve(strict=True)
-        calibrated_path = tmp_path / "calibrated" / f"light-{index}.fits"
-        calibrated_path.parent.mkdir(parents=True, exist_ok=True)
-        values = np.full((8, 8), 10.0, dtype=np.float32)
-        if index == 2:
-            values[3, 4] = 1000.0
-        fits.writeto(calibrated_path, values, overwrite=False)
-        canonical = str(path)
-        paths.append(path)
-        calibrated[canonical] = calibrated_path
-        transforms[canonical] = identity
-        analyses[canonical] = (
-            index,
-            SimpleNamespace(total_integrated_flux=1000.0),
-        )
-
-    mask_paths, manifest = _build_drizzle_rejection_masks(
-        calibrated=calibrated,
-        transforms=transforms,
-        paths=tuple(paths),
-        analysis_by_path=analyses,
-        reference_shape=(8, 8),
-        directory=tmp_path / "masks",
-        options=DrizzleOptions(scale=1, tile_rows=3),
-        source_exposure_seconds={str(path): 60.0 for path in paths},
-    )
-
-    with fits.open(mask_paths[str(paths[2])]) as hdul:
-        assert hdul["MASK"].data[3, 4] == 1
-    assert manifest["totalRejectedPixels"] >= 1
-    frames = tuple(
-        DrizzleFrameInput(
-            calibrated_path=str(calibrated[str(path)]),
-            output_to_input_projective=identity,
-            rejection_mask_path=str(mask_paths[str(path)]),
-            rejection_mask_hdu="MASK",
-        )
-        for path in paths
-    )
-    drizzle_request = DrizzleExecutionRequest(
-        frames=frames,
-        output_path=str(tmp_path / "drizzle" / "master.fits"),
-        receipt_path=str(tmp_path / "drizzle" / "receipt.json"),
-        output_shape=(8, 8),
-        scale=1,
-        pixfrac=1.0,
-        kernel="point",
-        tile_rows=3,
-        minimum_distinct_dither_phases=1,
-        minimum_dither_span_pixels=0.0,
-    )
-    result = execute_drizzle(drizzle_request, provider=_drizzle_provider())
-
-    assert result.completed is True
-    with fits.open(result.output_path) as hdul:
-        assert hdul["SCI"].data[3, 4] == pytest.approx(10.0)
-    assert result.receipt is not None
-    assert result.receipt["statistics"]["rejectionMaskPixels"] >= 1
-    assert result.receipt["inputs"][2]["rejection"]["maskRejectedPixels"] >= 1
-
-
-def test_drizzle_rejection_does_not_double_apply_mixed_exposure_scaling(
-    tmp_path: Path,
-) -> None:
-    calibrated: dict[str, Path] = {}
-    transforms: dict[str, tuple[tuple[float, float, float], ...]] = {}
-    analyses: dict[str, tuple[int, Any]] = {}
-    exposures: dict[str, float] = {}
-    paths: list[Path] = []
-    identity = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
-    for index, exposure in enumerate((60.0, 300.0, 300.0)):
-        source = tmp_path / "mixed-sources" / f"light-{index}.fits"
-        source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_bytes(f"source-{index}".encode("ascii"))
-        path = source.resolve(strict=True)
-        calibrated_path = tmp_path / "mixed-calibrated" / f"light-{index}.fits"
-        calibrated_path.parent.mkdir(parents=True, exist_ok=True)
-        y, x = np.indices((8, 8), dtype=np.float32)
-        fits.writeto(calibrated_path, 10.0 + x + 2.0 * y, overwrite=False)
-        canonical = str(path)
-        paths.append(path)
-        calibrated[canonical] = calibrated_path
-        transforms[canonical] = identity
-        analyses[canonical] = (
-            index,
-            SimpleNamespace(total_integrated_flux=1000.0 * exposure),
-        )
-        exposures[canonical] = exposure
-
-    mask_paths, manifest = _build_drizzle_rejection_masks(
-        calibrated=calibrated,
-        transforms=transforms,
-        paths=tuple(paths),
-        analysis_by_path=analyses,
-        reference_shape=(8, 8),
-        directory=tmp_path / "mixed-masks",
-        options=DrizzleOptions(scale=1, tile_rows=3),
-        source_exposure_seconds=exposures,
-    )
-
-    assert manifest["totalRejectedPixels"] == 0
-    assert [item["photometricScale"] for item in manifest["frames"]] == [1.0, 1.0, 1.0]
-    for path in paths:
-        with fits.open(mask_paths[str(path)]) as hdul:
-            assert int(np.count_nonzero(hdul["MASK"].data)) == 0
 
 
 def test_projective_registration_is_never_silently_truncated_for_ordinary_pipeline(
@@ -2148,21 +1954,6 @@ def test_projective_registration_is_never_silently_truncated_for_ordinary_pipeli
             allow_projective=False,
         )
 
-    # The drizzle bridge preserves the same full homography and composes only
-    # the requested output scale.  Verify the mapping on an arbitrary point.
-    output_to_input = np.asarray(
-        _drizzle_output_to_input_matrix(projective, scale=2), dtype=np.float64
-    )
-    source = np.asarray([41.5, 73.25, 1.0])
-    reference = projective @ source
-    reference /= reference[2]
-    high_resolution_output = np.asarray(
-        [2.0 * reference[0], 2.0 * reference[1], 1.0]
-    )
-    recovered = output_to_input @ high_resolution_output
-    recovered /= recovered[2]
-    np.testing.assert_allclose(recovered, source, rtol=0.0, atol=1e-10)
-    assert not np.allclose(output_to_input[2], (0.0, 0.0, 1.0))
 
 
 def test_default_e2e_registration_uses_full_resolution_affine_for_ordinary(

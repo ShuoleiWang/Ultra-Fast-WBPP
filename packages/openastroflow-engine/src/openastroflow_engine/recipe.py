@@ -338,13 +338,14 @@ class DrizzleRecipe:
     scale: int = 2
     drop_shrink: float = 0.9
     cfa_drizzle: bool = False
+    kernel: str = "square"
 
     @classmethod
     def from_dict(cls, raw: Any) -> DrizzleRecipe:
         value = _mapping(raw, "drizzle")
         _unknown(
             value,
-            {"enabled", "backend", "scale", "dropShrink", "cfaDrizzle"},
+            {"enabled", "backend", "scale", "dropShrink", "cfaDrizzle", "kernel"},
             "drizzle",
         )
         enabled = value.get("enabled", False)
@@ -357,8 +358,11 @@ class DrizzleRecipe:
         if not isinstance(backend, str) or not backend.strip():
             raise RecipeError("drizzle.backend must be a non-empty string")
         scale = value.get("scale", 2)
-        if isinstance(scale, bool) or not isinstance(scale, int) or scale < 1:
-            raise RecipeError("drizzle.scale must be a positive integer")
+        if isinstance(scale, bool) or not isinstance(scale, int) or not 1 <= scale <= 4:
+            raise RecipeError("drizzle.scale must be an integer from 1 to 4")
+        kernel = value.get("kernel", "square")
+        if not isinstance(kernel, str) or kernel not in {"square", "circular", "gaussian", "point"}:
+            raise RecipeError("drizzle.kernel must be square, circular, gaussian or point")
         drop_shrink = value.get("dropShrink", 0.9)
         if isinstance(drop_shrink, bool) or not isinstance(drop_shrink, (int, float)):
             raise RecipeError("drizzle.dropShrink must be numeric")
@@ -371,6 +375,7 @@ class DrizzleRecipe:
             scale=scale,
             drop_shrink=drop_shrink,
             cfa_drizzle=cfa_drizzle,
+            kernel=kernel,
         )
 
     def serializable(self) -> dict[str, Any]:
@@ -380,6 +385,7 @@ class DrizzleRecipe:
             "scale": self.scale,
             "dropShrink": self.drop_shrink,
             "cfaDrizzle": self.cfa_drizzle,
+            "kernel": self.kernel,
         }
 
 

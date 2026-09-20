@@ -204,7 +204,7 @@ def test_explicit_cfa_light_cannot_be_overridden_to_mono(
 def test_drizzle_capability_mismatch_blocks_contract(nina_project: Path) -> None:
     inventory = inventory_project([nina_project])
     recipe = Recipe.from_dict(
-        {"drizzle": {"enabled": True, "scale": 4, "backend": "stsci-drizzle-cpu"}}
+        {"drizzle": {"enabled": True, "scale": 2, "dropShrink": 0.05, "backend": "native-drizzle"}}
     )
     plan = build_plan(inventory, recipe)
 
@@ -301,7 +301,14 @@ def test_published_recipe_examples_parse() -> None:
         assert recipe.schema_version == 1
 
 
-def test_drizzle_provider_implements_typed_protocol() -> None:
+def test_native_drizzle_backend_reports_scales_kernels_and_cfa() -> None:
+    from openastroflow_engine.native_kernels import load_native_kernels
+
     backend = drizzle_backends()[0]
     assert isinstance(backend, DrizzleBackend)
-    assert backend.descriptor.execution_ready is False
+    assert backend.descriptor.execution_ready is (load_native_kernels() is not None)
+    assert backend.drizzle_capabilities.scales == (1, 2, 3, 4)
+    assert backend.drizzle_capabilities.supports_cfa_drizzle
+    assert backend.validate_options({"scale": 5}) != ()
+    assert backend.validate_options({"kernel": "lanczos3"}) != ()
+    assert backend.validate_options({"scale": 3, "kernel": "circular", "dropShrink": 0.7}) == ()

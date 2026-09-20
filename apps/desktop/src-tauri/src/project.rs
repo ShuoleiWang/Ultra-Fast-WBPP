@@ -139,6 +139,12 @@ pub(crate) struct UiRunSource {
 pub(crate) struct UiRecipeOptions {
     balanced: bool,
     drizzle_enabled: bool,
+    #[serde(default = "default_drizzle_scale")]
+    drizzle_scale: u32,
+    #[serde(default = "default_drizzle_drop_shrink")]
+    drizzle_drop_shrink: f64,
+    #[serde(default = "default_drizzle_kernel")]
+    drizzle_kernel: String,
     local_normalization_enabled: bool,
     solver_required: bool,
     #[serde(default = "default_calibration_workflow")]
@@ -147,6 +153,40 @@ pub(crate) struct UiRecipeOptions {
 
 fn default_calibration_workflow() -> String {
     "strict-v1".to_owned()
+}
+
+fn default_drizzle_scale() -> u32 {
+    2
+}
+
+fn default_drizzle_drop_shrink() -> f64 {
+    0.9
+}
+
+fn default_drizzle_kernel() -> String {
+    "square".to_owned()
+}
+
+const DRIZZLE_KERNELS: [&str; 4] = ["square", "circular", "gaussian", "point"];
+
+/// The engine recipe rejects the same values; checking here keeps the error
+/// next to the control instead of a failed run.
+fn validate_drizzle_options(recipe: &UiRecipeOptions) -> Result<(), String> {
+    if !recipe.drizzle_enabled {
+        return Ok(());
+    }
+    if !(1..=4).contains(&recipe.drizzle_scale) {
+        return Err("drizzle scale must be 1, 2, 3 or 4".to_owned());
+    }
+    if !(recipe.drizzle_drop_shrink.is_finite()
+        && (0.1..=1.0).contains(&recipe.drizzle_drop_shrink))
+    {
+        return Err("drizzle drop shrink must be between 0.1 and 1".to_owned());
+    }
+    if !DRIZZLE_KERNELS.contains(&recipe.drizzle_kernel.as_str()) {
+        return Err("drizzle kernel must be square, circular, gaussian or point".to_owned());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -623,6 +663,7 @@ fn project_request_json(
     ) {
         return Err("unsupported calibration workflow".to_owned());
     }
+    validate_drizzle_options(&request.recipe)?;
     for item in &request.master_metadata_overrides {
         validate_master_override(item)?;
     }
@@ -712,7 +753,11 @@ fn project_request_json(
                 "masterMetadataOverrides": request.master_metadata_overrides,
             },
             "solver": { "policy": "REQUIRED", "backend": "astrometry-net", "searchRadiusDegrees": 15.0 },
-            "drizzle": { "enabled": request.recipe.drizzle_enabled, "backend": "auto", "scale": 2, "dropShrink": 0.9, "cfaDrizzle": false },
+            "drizzle": {
+                "enabled": request.recipe.drizzle_enabled, "backend": "auto",
+                "scale": request.recipe.drizzle_scale, "dropShrink": request.recipe.drizzle_drop_shrink,
+                "kernel": request.recipe.drizzle_kernel, "cfaDrizzle": false,
+            },
             "localNormalization": { "enabled": request.recipe.local_normalization_enabled, "tileSizePixels": 256 },
             "outputFormat": "FITS", "overwrite": false, "reviewApprovals": [],
             "rawFrameMetadataOverrides": request.raw_frame_metadata_overrides,
@@ -1782,6 +1827,9 @@ sys.exit(1)
                 recipe: UiRecipeOptions {
                     balanced: true,
                     drizzle_enabled: false,
+                    drizzle_scale: default_drizzle_scale(),
+                    drizzle_drop_shrink: default_drizzle_drop_shrink(),
+                    drizzle_kernel: default_drizzle_kernel(),
                     local_normalization_enabled: false,
                     solver_required: true,
                     calibration_workflow: default_calibration_workflow(),
@@ -1876,6 +1924,9 @@ sys.exit(1)
             recipe: UiRecipeOptions {
                 balanced: true,
                 drizzle_enabled: false,
+                drizzle_scale: default_drizzle_scale(),
+                drizzle_drop_shrink: default_drizzle_drop_shrink(),
+                drizzle_kernel: default_drizzle_kernel(),
                 local_normalization_enabled: false,
                 solver_required: true,
                 calibration_workflow: "mono-standard-v1".into(),
@@ -1909,6 +1960,76 @@ sys.exit(1)
         assert!(project_request_json(&request, &output)
             .unwrap_err()
             .contains("unsupported calibration workflow"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn drizzle_options_travel_with_the_recipe_and_are_range_checked() {
+        let root = std::env::temp_dir().join(format!(
+            "drizzle-recipe-wire-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let light = root.join("light.fits");
+        std::fs::write(&light, b"light input").unwrap();
+        let recipe: UiRecipeOptions = serde_json::from_value(serde_json::json!({
+            "balanced": true, "drizzleEnabled": true, "drizzleScale": 3,
+            "drizzleDropShrink": 0.7, "drizzleKernel": "gaussian",
+            "localNormalizationEnabled": false, "solverRequired": true,
+            "calibrationWorkflow": "strict-v1"
+        }))
+        .unwrap();
+        let mut request = ProjectRunRequest {
+            sources: vec![UiRunSource {
+                source_id: "light-1".into(),
+                role: "LIGHT".into(),
+                paths: vec![light.to_string_lossy().into_owned()],
+                recursive: false,
+            }],
+            project_name: "Drizzle".into(),
+            run_label: String::new(),
+            recipe,
+            master_metadata_overrides: vec![],
+            raw_frame_metadata_overrides: vec![],
+            review_selections: vec![],
+            output_parent_directory: root.to_string_lossy().into_owned(),
+        };
+        let output = root.join("new-output");
+        let value = project_request_json(&request, &output).unwrap();
+        assert_eq!(value["recipe"]["drizzle"]["enabled"], true);
+        assert_eq!(value["recipe"]["drizzle"]["scale"], 3);
+        assert_eq!(value["recipe"]["drizzle"]["dropShrink"], 0.7);
+        assert_eq!(value["recipe"]["drizzle"]["kernel"], "gaussian");
+        // Older front ends that omit the geometry keep the 2x square defaults.
+        let legacy: UiRecipeOptions = serde_json::from_value(serde_json::json!({
+            "balanced": true, "drizzleEnabled": true, "localNormalizationEnabled": false,
+            "solverRequired": true
+        }))
+        .unwrap();
+        assert_eq!(legacy.drizzle_scale, 2);
+        assert_eq!(legacy.drizzle_drop_shrink, 0.9);
+        assert_eq!(legacy.drizzle_kernel, "square");
+        request.recipe.drizzle_scale = 5;
+        assert!(project_request_json(&request, &output)
+            .unwrap_err()
+            .contains("drizzle scale"));
+        request.recipe.drizzle_scale = 2;
+        request.recipe.drizzle_drop_shrink = 0.0;
+        assert!(project_request_json(&request, &output)
+            .unwrap_err()
+            .contains("drop shrink"));
+        request.recipe.drizzle_drop_shrink = 0.9;
+        request.recipe.drizzle_kernel = "lanczos".into();
+        assert!(project_request_json(&request, &output)
+            .unwrap_err()
+            .contains("drizzle kernel"));
+        // Disabled drizzle never blocks a run on stale geometry values.
+        request.recipe.drizzle_enabled = false;
+        assert!(project_request_json(&request, &output).is_ok());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2083,6 +2204,9 @@ print(json.dumps({"success":True,"code":"PROJECT_MONO_SUCCEEDED","state":"SOLVED
                 recipe: UiRecipeOptions {
                     balanced: true,
                     drizzle_enabled: false,
+                    drizzle_scale: default_drizzle_scale(),
+                    drizzle_drop_shrink: default_drizzle_drop_shrink(),
+                    drizzle_kernel: default_drizzle_kernel(),
                     local_normalization_enabled: true,
                     solver_required: true,
                     calibration_workflow: default_calibration_workflow(),

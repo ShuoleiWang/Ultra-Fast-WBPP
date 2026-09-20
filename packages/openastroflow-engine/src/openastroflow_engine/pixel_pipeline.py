@@ -75,6 +75,7 @@ from .global_normalization import (
     fit_registered_group_global_normalization,
 )
 from .xisf_pixels import XisfDecodePolicy, convert_xisf_to_fits
+from .drizzle_native import DrizzleFrame, DrizzleGroupInputs
 
 
 PIPELINE_VERSION = "portable-pixel-pipeline-v1"
@@ -294,6 +295,12 @@ class PipelineParameters:
     # are written to disk only when a consumer (Drizzle, the public portable
     # pipeline) needs them; the ordinary E2E path keeps them transient.
     materialize_calibrated_lights: bool = True
+    # Drizzle consumes the ordinary integration's per-frame products: with
+    # this flag every group also keeps its calibrated paths, transforms,
+    # normalization coefficients, weights and packed rejection masks in the
+    # result (``PipelineResult.drizzle_groups``).  Requires materialized
+    # calibrated Lights.
+    capture_drizzle_inputs: bool = False
     # Cosmetic correction of hot pixels: pixels of the subtracted master dark
     # that lie more than this many robust sigmas above its median are
     # replaced in every calibrated Light by the median of their eight
@@ -317,6 +324,10 @@ class PipelineParameters:
             raise ValueError("cosmetic_hot_pixel_sigma must be None or a finite value >= 1")
         if not isinstance(self.materialize_calibrated_lights, bool):
             raise ValueError("materialize_calibrated_lights must be a boolean")
+        if not isinstance(self.capture_drizzle_inputs, bool):
+            raise ValueError("capture_drizzle_inputs must be a boolean")
+        if self.capture_drizzle_inputs and not self.materialize_calibrated_lights:
+            raise ValueError("capture_drizzle_inputs requires materialize_calibrated_lights")
         if not isinstance(self.durable_intermediates, bool):
             raise ValueError("durable_intermediates must be a boolean")
         self.integration.validate()
@@ -384,6 +395,7 @@ class PipelineParameters:
                 item.serializable() for item in self.raw_frame_metadata_overrides
             ],
             "materializeCalibratedLights": self.materialize_calibrated_lights,
+            "captureDrizzleInputs": self.capture_drizzle_inputs,
             "cosmeticHotPixelSigma": self.cosmetic_hot_pixel_sigma,
             "durableIntermediates": self.durable_intermediates,
         }
@@ -396,6 +408,9 @@ class PipelineResult:
     state: str
     master_light_paths: tuple[str, ...]
     preview_paths: tuple[str, ...]
+    # Per filter, the drizzle inputs captured by ``capture_drizzle_inputs``
+    # (in-memory rejection masks; not part of the serializable receipt).
+    drizzle_groups: Mapping[str, DrizzleGroupInputs] = field(default_factory=dict)
 
     def serializable(self) -> dict[str, Any]:
         return {
@@ -2256,6 +2271,36 @@ def _register_frame(
     )
 
 
+class _RejectionMaskRecorder:
+    """Tile observer that keeps every frame's accepted-sample mask as packed
+    row bits on the reference grid, the form the drizzle stage reads."""
+
+    def __init__(self, frame_count: int, shape: tuple[int, int]) -> None:
+        height, width = shape
+        self.bits = [
+            np.zeros((height, (width + 7) // 8), dtype=np.uint8) for _ in range(frame_count)
+        ]
+
+    def __call__(self, observation: Any) -> None:
+        accepted = np.asarray(observation.accepted, dtype=bool)
+        first_row = int(observation.first_row)
+        rows = accepted.shape[1]
+        for index, frame_bits in enumerate(self.bits):
+            frame_bits[first_row : first_row + rows] = np.packbits(accepted[index], axis=1)
+
+
+def _compose_tile_observers(*observers: Any) -> Callable[[Any], None] | None:
+    active = [observer for observer in observers if observer is not None]
+    if not active:
+        return None
+
+    def observe(observation: Any) -> None:
+        for observer in active:
+            observer(observation)
+
+    return observe
+
+
 @dataclass(frozen=True, slots=True)
 class _LightJob:
     """One Light's fused calibrate-in-memory then register work item."""
@@ -3756,6 +3801,7 @@ def _run_portable_pipeline_fits(
         hardware_profile = detect_hardware()
         execution_tuning = select_execution_tuning(hardware_profile)
         registered: dict[Path, Path] = {}
+        calibrated_lights: dict[Path, Path] = {}
         registration_records: dict[str, Any] = {}
         light_jobs: list[_LightJob] = []
         calibrated_details: list[dict[str, Any]] = []
@@ -3952,6 +3998,7 @@ def _run_portable_pipeline_fits(
             )
             registered[path] = job.destination
             if job.calibrated_path is not None:
+                calibrated_lights[path] = job.calibrated_path
                 artifacts.append(
                     _artifact_record(
                         staging,
@@ -4026,6 +4073,7 @@ def _run_portable_pipeline_fits(
                 metal_unavailable_reason = str(error)
 
         master_lights: list[Path] = []
+        drizzle_groups: dict[str, DrizzleGroupInputs] = {}
         previews: list[Path] = []
         integration_groups: dict[str, Any] = {}
         # Every group of this run was registered onto the same reference grid.
@@ -4237,6 +4285,21 @@ def _run_portable_pipeline_fits(
                     )
                 integration_expressions = attached_expressions
             integration_started = time.perf_counter()
+            mask_recorder = (
+                _RejectionMaskRecorder(len(paths), light_info[paths[0]].shape)
+                if parameters.capture_drizzle_inputs
+                else None
+            )
+            if mask_recorder is not None and any(path not in calibrated_lights for path in paths):
+                raise CalibrationError(
+                    "DRIZZLE_INPUTS_UNAVAILABLE",
+                    "drizzle inputs need materialized calibrated Lights",
+                )
+            if mask_recorder is not None and parameters.local_normalization.enabled:
+                raise CalibrationError(
+                    "DRIZZLE_LOCAL_NORMALIZATION_UNSUPPORTED",
+                    "drizzle reads the global normalization coefficients; disable local normalization",
+                )
             integration = integrate_registered_group(
                 integration_expressions,
                 full_master,
@@ -4263,12 +4326,58 @@ def _run_portable_pipeline_fits(
                 quality_weights=[resolved_quality_weights[path] for path in paths],
                 map_paths=full_maps,
                 durable=parameters.durable_intermediates,
-                tile_observer=(
-                    _integration_tile_observers(filter_name, [str(path) for path in paths])
-                    if _integration_tile_observers is not None
-                    else None
+                tile_observer=_compose_tile_observers(
+                    (
+                        _integration_tile_observers(filter_name, [str(path) for path in paths])
+                        if _integration_tile_observers is not None
+                        else None
+                    ),
+                    mask_recorder,
                 ),
             )
+            if mask_recorder is not None:
+                drizzle_groups[filter_name] = DrizzleGroupInputs(
+                    filter_name=filter_name,
+                    frames=tuple(
+                        DrizzleFrame(
+                            calibrated_path=str(calibrated_lights[path]),
+                            source_path=str(display_path(path)),
+                            input_to_reference=tuple(
+                                tuple(float(value) for value in row)
+                                for row in resolved_transforms[path].validated_matrix()
+                            ),
+                            weight=float(weight),
+                            exposure_seconds=float(light_info[path].exposure_seconds),
+                            normalization_scale=float(expression.scale),
+                            normalization_offset=float(expression.offset),
+                            offset_grid=expression.offset_grid,
+                            offset_grid_x=expression.offset_grid_x,
+                            offset_grid_y=expression.offset_grid_y,
+                            weight_grid=expression.weight_grid,
+                            weight_grid_x=expression.weight_grid_x,
+                            weight_grid_y=expression.weight_grid_y,
+                            accepted_mask_bits=bits,
+                        )
+                        for path, expression, weight, bits in zip(
+                            paths,
+                            integration_expressions,
+                            integration.weights,
+                            mask_recorder.bits,
+                            strict=True,
+                        )
+                    ),
+                    reference_shape=light_info[paths[0]].shape,
+                    metadata={
+                        "IMAGETYP": "Master Light",
+                        "FILTER": filter_name,
+                        "EXPTIME": reference_exposure,
+                        "OAFINTTM": total_exposure,
+                        "OAFSTATE": OUTPUT_STATE,
+                        "OAFWCS": "UNSOLVED",
+                        "OAFNORM": normalization_method,
+                        **_numeric_domain_metadata(light_domain_references[filter_name]),
+                    },
+                )
             fallback_reason = str(integration.execution.get("fallbackReason") or "")
             if (
                 metal_executor is not None
@@ -4567,6 +4676,23 @@ def _run_portable_pipeline_fits(
                 str(output / path.relative_to(staging)) for path in master_lights
             ),
             preview_paths=tuple(str(output / path.relative_to(staging)) for path in previews),
+            drizzle_groups={
+                name: DrizzleGroupInputs(
+                    filter_name=group.filter_name,
+                    frames=tuple(
+                        replace(
+                            frame,
+                            calibrated_path=str(
+                                output / Path(frame.calibrated_path).relative_to(staging)
+                            ),
+                        )
+                        for frame in group.frames
+                    ),
+                    reference_shape=group.reference_shape,
+                    metadata=group.metadata,
+                )
+                for name, group in drizzle_groups.items()
+            },
         )
     finally:
         if metal_executor is not None:

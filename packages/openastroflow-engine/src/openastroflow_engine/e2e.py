@@ -19,13 +19,11 @@ from . import platform as platform_services
 from .platform import NoReplaceError
 from .calibration_policy import apply_mono_workflow, bias_from_header, MONO_STANDARD, can_omit_bias, conflicting_profile_fields, workflow_receipt
 
-from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from datetime import datetime, timezone
 from enum import StrEnum
 import ctypes
 import errno
-import gc
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
@@ -40,7 +38,6 @@ import tempfile
 import threading
 from time import perf_counter
 from typing import Any, Callable, Iterable, Mapping, Sequence
-import warnings
 
 from .quality_cache import quality_cache_directory
 from .review_preview import (
@@ -72,12 +69,12 @@ from .calibration import (
     read_frame_info,
     robust_location,
 )
-from .drizzle_execution import (
-    DrizzleExecutionRequest,
-    DrizzleFrameInput,
-    DrizzleProvider,
-    execute_drizzle,
-    verify_drizzle_result,
+from .drizzle_native import (
+    SUPPORTED_KERNELS as DRIZZLE_KERNELS_SUPPORTED,
+    SUPPORTED_SCALES as DRIZZLE_SCALES_SUPPORTED,
+    DrizzleGroupRequest,
+    drizzle_group,
+    verify_drizzle_receipt,
 )
 from .pixel_pipeline import (
     PipelineParameters,
@@ -92,7 +89,6 @@ from .pixel_pipeline import (
     _capture_trusted_generated_calibration_set,
     _run_portable_pipeline_fits,
 )
-from .local_normalization import normalize_registered_group
 from .global_normalization import StellarScaleHint
 from .selection import (
     CounterfactualReport,
@@ -201,8 +197,9 @@ class ReviewApproval:
 @dataclass(frozen=True, slots=True)
 class DrizzleOptions:
     scale: int = 2
-    pixfrac: float = 0.8
+    pixfrac: float = 0.9
     kernel: str = "square"
+    cfa_drizzle: bool = False
     tile_rows: int = 256
     max_tile_bytes: int = 256 * 1024**2
     max_output_pixels: int = 128 * 1024**2
@@ -217,26 +214,20 @@ class DrizzleOptions:
     rejection_minimum_frames: int = 3
 
     def validate(self) -> None:
-        if isinstance(self.scale, bool) or self.scale not in {1, 2, 3}:
-            raise E2EError("DRIZZLE_SCALE_INVALID", "drizzle scale must be 1, 2, or 3")
+        if isinstance(self.scale, bool) or self.scale not in DRIZZLE_SCALES_SUPPORTED:
+            raise E2EError(
+                "DRIZZLE_SCALE_INVALID",
+                f"drizzle scale must be one of {DRIZZLE_SCALES_SUPPORTED}",
+            )
         if not math.isfinite(self.pixfrac) or not 0.1 <= self.pixfrac <= 1.0:
             raise E2EError("DRIZZLE_PIXFRAC_INVALID", "pixfrac must be in [0.1, 1]")
-        if self.kernel not in {
-            "square",
-            "point",
-            "turbo",
-            "gaussian",
-            "lanczos2",
-            "lanczos3",
-        }:
-            raise E2EError("DRIZZLE_KERNEL_INVALID", "unsupported drizzle kernel")
-        if self.kernel.startswith("lanczos") and (
-            self.scale != 1 or not math.isclose(self.pixfrac, 1.0)
-        ):
+        if self.kernel not in DRIZZLE_KERNELS_SUPPORTED:
             raise E2EError(
-                "DRIZZLE_KERNEL_GEOMETRY_UNSAFE",
-                "Lanczos requires scale=1 and pixfrac=1",
+                "DRIZZLE_KERNEL_INVALID",
+                f"drizzle kernel must be one of {DRIZZLE_KERNELS_SUPPORTED}",
             )
+        if not isinstance(self.cfa_drizzle, bool):
+            raise E2EError("DRIZZLE_CFA_INVALID", "cfa_drizzle must be boolean")
         for name in (
             "tile_rows",
             "max_tile_bytes",
@@ -324,6 +315,7 @@ class DrizzleOptions:
             "scale": self.scale,
             "pixfrac": self.pixfrac,
             "kernel": self.kernel,
+            "cfaDrizzle": self.cfa_drizzle,
             "tileRows": self.tile_rows,
             "maxTileBytes": self.max_tile_bytes,
             "maxOutputPixels": self.max_output_pixels,
@@ -1723,35 +1715,38 @@ def _drizzle_sampling_evidence(
         "provenance": provenance,
         "maximumFwhmForUpsamplingPixels": options.maximum_fwhm_for_upsampling_pixels,
     }
+    # The sampling evidence is advisory, as in WBPP: the user chose the scale;
+    # the receipt records whether upsampling is expected to gain resolution.
+    evidence["advisory"] = True
     if options.scale == 1:
         evidence["status"] = "NOT_APPLICABLE"
         return evidence
     if median_fwhm is None:
-        evidence["status"] = "REVIEW"
-        raise E2EError(
-            "DRIZZLE_SAMPLING_REVIEW_REQUIRED",
-            "QC could not establish native PSF sampling; refusing to assume that "
-            f"{options.scale}x drizzle is beneficial",
+        evidence["status"] = "UNKNOWN_SAMPLING"
+        evidence["recommendation"] = (
+            "QC could not establish the native PSF sampling; the benefit of "
+            f"{options.scale}x drizzle is unknown"
         )
+        return evidence
     if (
         direct_median is not None
         and hfr_median is not None
         and (direct_median >= options.maximum_fwhm_for_upsampling_pixels)
         != (hfr_median >= options.maximum_fwhm_for_upsampling_pixels)
     ):
-        evidence["status"] = "REVIEW_CONFLICTING_SAMPLING"
-        raise E2EError(
-            "DRIZZLE_SAMPLING_REVIEW_REQUIRED",
-            "QC PSF FWHM and NINA HFR disagree across the adequately-sampled "
-            "boundary; refusing automatic 2x/3x drizzle",
+        evidence["status"] = "CONFLICTING_SAMPLING"
+        evidence["recommendation"] = (
+            "QC PSF FWHM and NINA HFR disagree across the adequately-sampled boundary"
         )
+        return evidence
     if median_fwhm >= options.maximum_fwhm_for_upsampling_pixels:
-        evidence["status"] = "BLOCKED_WELL_SAMPLED"
-        raise E2EError(
-            "DRIZZLE_UPSCALE_NOT_RECOMMENDED",
+        evidence["status"] = "WELL_SAMPLED"
+        evidence["recommendation"] = (
             f"QC median native FWHM is {median_fwhm:.3f} px, at or above the "
-            f"{options.maximum_fwhm_for_upsampling_pixels:.3f} px adequately-sampled threshold",
+            f"{options.maximum_fwhm_for_upsampling_pixels:.3f} px threshold: "
+            f"{options.scale}x drizzle mainly gains sub-pixel sampling, not resolution"
         )
+        return evidence
     evidence["status"] = "PASS_UNDERSAMPLED"
     return evidence
 
@@ -2542,652 +2537,88 @@ def _register_lights(
     )
 
 
-def _pipeline_calibrated_paths(pipeline_root: Path) -> dict[str, Path]:
-    receipt = json.loads((pipeline_root / "receipt.json").read_text(encoding="utf-8"))
-    result: dict[str, Path] = {}
-    for artifact in receipt.get("outputs", []):
-        if artifact.get("kind") != "CALIBRATED_LIGHT":
-            continue
-        details = artifact.get("details", {})
-        source = details.get("source")
-        relative = artifact.get("path")
-        if not isinstance(source, str) or not isinstance(relative, str):
-            raise E2EError("PIPELINE_RECEIPT_INVALID", "calibrated artifact lacks source binding")
-        canonical_source = str(Path(source).resolve(strict=True))
-        calibrated = (pipeline_root / relative).resolve(strict=True)
-        try:
-            calibrated.relative_to(pipeline_root.resolve(strict=True))
-        except ValueError as error:
-            raise E2EError("PIPELINE_RECEIPT_INVALID", "artifact escapes pipeline directory") from error
-        result[canonical_source] = calibrated
-    return result
-
-
-def _drizzle_output_to_input_matrix(
-    input_to_reference: Sequence[Sequence[float]], scale: int
-) -> tuple[tuple[float, float, float], ...]:
-    matrix = np.asarray(input_to_reference, dtype=np.float64)
-    if matrix.shape != (3, 3) or not np.all(np.isfinite(matrix)):
-        raise E2EError("REGISTRATION_MATRIX_INVALID", "drizzle transform must be finite 3x3")
-    norm = float(np.linalg.norm(matrix, ord=np.inf))
-    determinant = float(np.linalg.det(matrix))
-    if norm == 0.0 or not math.isfinite(determinant) or abs(determinant) <= 1e-12 * norm**3:
-        raise E2EError("REGISTRATION_MATRIX_INVALID", "drizzle transform is singular")
-    scale_to_base = np.diag((1.0 / scale, 1.0 / scale, 1.0))
-    # input -> reference is M; high-resolution output -> reference is S^-1.
-    # Therefore output -> input is M^-1 S^-1.  Keep the full homography.
-    output_to_input = np.linalg.inv(matrix) @ scale_to_base
-    return tuple(tuple(float(value) for value in row) for row in output_to_input)
-
-
-def _projective_coordinates(
-    matrix: np.ndarray, x: np.ndarray, y: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    denominator = matrix[2, 0] * x + matrix[2, 1] * y + matrix[2, 2]
-    valid = np.isfinite(denominator) & (np.abs(denominator) > 1e-12)
-    safe = np.where(valid, denominator, 1.0)
-    mapped_x = (matrix[0, 0] * x + matrix[0, 1] * y + matrix[0, 2]) / safe
-    mapped_y = (matrix[1, 0] * x + matrix[1, 1] * y + matrix[1, 2]) / safe
-    valid &= np.isfinite(mapped_x) & np.isfinite(mapped_y)
-    return mapped_x, mapped_y, valid
-
-
-def _bilinear_sample(
-    image: np.ndarray, x: np.ndarray, y: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    height, width = image.shape
-    inside = (
-        np.isfinite(x)
-        & np.isfinite(y)
-        & (x >= 0.0)
-        & (x <= width - 1.0)
-        & (y >= 0.0)
-        & (y <= height - 1.0)
-    )
-    safe_x = np.clip(np.where(inside, x, 0.0), 0.0, width - 1.0)
-    safe_y = np.clip(np.where(inside, y, 0.0), 0.0, height - 1.0)
-    x0 = np.floor(safe_x).astype(np.int64)
-    y0 = np.floor(safe_y).astype(np.int64)
-    x1 = np.minimum(x0 + 1, width - 1)
-    y1 = np.minimum(y0 + 1, height - 1)
-    tx = safe_x - x0
-    ty = safe_y - y0
-    p00 = np.asarray(image[y0, x0], dtype=np.float32)
-    p10 = np.asarray(image[y0, x1], dtype=np.float32)
-    p01 = np.asarray(image[y1, x0], dtype=np.float32)
-    p11 = np.asarray(image[y1, x1], dtype=np.float32)
-    finite = (
-        inside
-        & np.isfinite(p00)
-        & np.isfinite(p10)
-        & np.isfinite(p01)
-        & np.isfinite(p11)
-    )
-    sampled = (
-        p00 * (1.0 - tx) * (1.0 - ty)
-        + p10 * tx * (1.0 - ty)
-        + p01 * (1.0 - tx) * ty
-        + p11 * tx * ty
-    ).astype(np.float32, copy=False)
-    sampled[~finite] = np.nan
-    return sampled, finite
-
-
-def _mask_sample_any(mask: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    height, width = mask.shape
-    inside = (
-        np.isfinite(x)
-        & np.isfinite(y)
-        & (x >= 0.0)
-        & (x <= width - 1.0)
-        & (y >= 0.0)
-        & (y <= height - 1.0)
-    )
-    safe_x = np.clip(np.where(inside, x, 0.0), 0.0, width - 1.0)
-    safe_y = np.clip(np.where(inside, y, 0.0), 0.0, height - 1.0)
-    x0 = np.floor(safe_x).astype(np.int64)
-    y0 = np.floor(safe_y).astype(np.int64)
-    x1 = np.minimum(x0 + 1, width - 1)
-    y1 = np.minimum(y0 + 1, height - 1)
-    selected = (
-        (mask[y0, x0] != 0)
-        | (mask[y0, x1] != 0)
-        | (mask[y1, x0] != 0)
-        | (mask[y1, x1] != 0)
-    )
-    return inside & selected
-
-
-def _frame_normalization(
-    image: np.ndarray, photometric_scale: float
-) -> tuple[float, float, float]:
-    maximum_samples = 262_144
-    stride = max(1, int(math.ceil(math.sqrt(image.size / maximum_samples))))
-    sampled = np.asarray(image[::stride, ::stride], dtype=np.float64).reshape(-1)
-    sampled = sampled[np.isfinite(sampled)]
-    if sampled.size < 16:
-        raise E2EError(
-            "DRIZZLE_REJECTION_DATA_INVALID",
-            "calibrated frame has too few finite pixels for robust rejection",
-        )
-    background = float(np.median(sampled))
-    noise = float(1.4826 * np.median(np.abs(sampled - background)))
-    if not math.isfinite(noise) or noise <= 0:
-        noise = max(abs(background) * 1e-6, np.finfo(np.float32).eps)
-    scale = float(photometric_scale)
-    if not math.isfinite(scale) or scale <= 0:
-        scale = 1.0
-    return background, noise, scale
-
-
-def _build_drizzle_rejection_masks(
-    *,
-    calibrated: Mapping[str, Path],
-    transforms: Mapping[str, Sequence[Sequence[float]]],
-    paths: Sequence[Path],
-    analysis_by_path: Mapping[str, tuple[int, Any]],
-    reference_shape: tuple[int, int],
-    directory: Path,
-    options: DrizzleOptions,
-    source_exposure_seconds: Mapping[str, float],
-) -> tuple[dict[str, Path], dict[str, Any]]:
-    """Create independent per-frame robust rejection masks with bounded tiles.
-
-    Pass one registers each calibrated frame into native reference tiles and
-    computes a cross-frame median/MAD decision.  Pass two projects each
-    frame's reference-space decisions back to its own detector pixels, which
-    is the coordinate system required by ``DrizzleFrameInput``.
-    """
-
-    if len(paths) < options.rejection_minimum_frames:
-        raise E2EError(
-            "DRIZZLE_REJECTION_BASELINE_INSUFFICIENT",
-            f"filter has {len(paths)} frames; robust rejection requires at least "
-            f"{options.rejection_minimum_frames}",
-        )
-    directory.mkdir(parents=True, exist_ok=False)
-    canonical_paths = [str(path.resolve(strict=True)) for path in paths]
-    matrices: list[np.ndarray] = []
-    inverse_matrices: list[np.ndarray] = []
-    fluxes: list[float] = []
-    exposures: list[float] = []
-    for canonical in canonical_paths:
-        if canonical not in transforms or canonical not in calibrated:
-            raise E2EError(
-                "PIPELINE_RECEIPT_INVALID",
-                "rejection mask input lacks calibrated data or registration",
-                path=canonical,
-            )
-        matrix = np.asarray(transforms[canonical], dtype=np.float64)
-        if matrix.shape != (3, 3) or not np.all(np.isfinite(matrix)):
-            raise E2EError(
-                "REGISTRATION_MATRIX_INVALID", "mask transform is not finite 3x3"
-            )
-        matrices.append(matrix)
-        inverse_matrices.append(np.linalg.inv(matrix))
-        _, analysis = analysis_by_path[canonical]
-        flux = float(getattr(analysis, "total_integrated_flux", float("nan")))
-        fluxes.append(flux if math.isfinite(flux) and flux > 0 else float("nan"))
-        exposure = float(source_exposure_seconds.get(canonical, float("nan")))
-        if not math.isfinite(exposure) or exposure <= 0:
-            raise E2EError(
-                "LIGHT_EXPOSURE_UNKNOWN",
-                "drizzle rejection requires the original positive Light exposure",
-                path=canonical,
-            )
-        exposures.append(exposure)
-    # Calibrated pixel data has already been multiplied by
-    # referenceExposure/sourceExposure.  Registration flux still describes
-    # the raw exposure, so only flux/exposure estimates residual throughput.
-    # Dividing by raw flux here would apply the exposure term twice and mark a
-    # scientifically identical 60/300/300 second stack as an outlier.
-    flux_rates = [
-        flux / exposure if math.isfinite(flux) and flux > 0 else float("nan")
-        for flux, exposure in zip(fluxes, exposures, strict=True)
-    ]
-    finite_rates = [value for value in flux_rates if math.isfinite(value) and value > 0]
-    rate_center = float(np.median(finite_rates)) if finite_rates else 1.0
-    photometric_scales = [
-        min(max(value / rate_center, 0.25), 4.0)
-        if math.isfinite(value) and value > 0
-        else 1.0
-        for value in flux_rates
-    ]
-
-    mask_paths: dict[str, Path] = {}
-    mask_counts: dict[str, int] = {}
-    normalizations: list[tuple[float, float, float]] = []
-    reference_height, reference_width = reference_shape
-    with ExitStack() as stack:
-        images: list[np.ndarray] = []
-        for index, canonical in enumerate(canonical_paths):
-            try:
-                hdul = stack.enter_context(
-                    fits.open(
-                        calibrated[canonical],
-                        mode="readonly",
-                        memmap=True,
-                        lazy_load_hdus=False,
-                    )
-                )
-            except (OSError, ValueError, TypeError) as error:
-                raise E2EError(
-                    "DRIZZLE_REJECTION_DATA_INVALID",
-                    f"cannot open calibrated frame: {error}",
-                    path=str(calibrated[canonical]),
-                ) from error
-            data = hdul[0].data
-            if data is None or data.ndim != 2 or min(data.shape) < 2:
-                raise E2EError(
-                    "DRIZZLE_REJECTION_DATA_INVALID",
-                    "calibrated frame must be a two-dimensional image",
-                    path=str(calibrated[canonical]),
-                )
-            image = np.asanyarray(data)
-            images.append(image)
-            normalizations.append(
-                _frame_normalization(image, photometric_scales[index])
-            )
-
-        frame_count = len(images)
-        bytes_per_reference_row = max(
-            reference_width * (frame_count * 12 + 64), 1
-        )
-        if bytes_per_reference_row > options.max_tile_bytes:
-            raise E2EError(
-                "DRIZZLE_REJECTION_TILE_LIMIT",
-                "one robust-rejection tile row exceeds max_tile_bytes; reduce "
-                "the frame group or raise the explicit memory limit",
-            )
-        tile_rows = max(
-            1,
-            min(
-                options.tile_rows,
-                int(options.max_tile_bytes // bytes_per_reference_row),
-            ),
-        )
-        normalized_noises = [noise / scale for _, noise, scale in normalizations]
-        noise_floor = max(
-            float(np.median(normalized_noises)), np.finfo(np.float32).eps
-        )
-
-        with tempfile.TemporaryDirectory(
-            prefix=".rejection-mask-work-", dir=directory
-        ) as temporary_name:
-            temporary = Path(temporary_name)
-            reference_masks = [
-                np.memmap(
-                    temporary / f"reference-{index:05d}.u8",
-                    dtype=np.uint8,
-                    mode="w+",
-                    shape=reference_shape,
-                )
-                for index in range(frame_count)
-            ]
-            for row_start in range(0, reference_height, tile_rows):
-                row_stop = min(reference_height, row_start + tile_rows)
-                y_reference, x_reference = np.indices(
-                    (row_stop - row_start, reference_width), dtype=np.float64
-                )
-                y_reference += row_start
-                registered_values: list[np.ndarray] = []
-                registered_valid: list[np.ndarray] = []
-                for image, inverse, normalization in zip(
-                    images, inverse_matrices, normalizations, strict=True
-                ):
-                    input_x, input_y, transform_valid = _projective_coordinates(
-                        inverse, x_reference, y_reference
-                    )
-                    sampled, sample_valid = _bilinear_sample(image, input_x, input_y)
-                    background, _, scale = normalization
-                    normalized = (sampled - background) / scale
-                    valid = transform_valid & sample_valid & np.isfinite(normalized)
-                    normalized[~valid] = np.nan
-                    registered_values.append(normalized.astype(np.float32, copy=False))
-                    registered_valid.append(valid)
-                stack_values = np.stack(registered_values, axis=0)
-                valid_stack = np.stack(registered_valid, axis=0)
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", category=RuntimeWarning)
-                    center = np.nanmedian(stack_values, axis=0)
-                    absolute_deviation = np.abs(stack_values - center[None, ...])
-                    robust_sigma = 1.4826 * np.nanmedian(
-                        absolute_deviation, axis=0
-                    )
-                threshold = options.rejection_sigma * np.maximum(
-                    robust_sigma, noise_floor
-                ) + _DRIZZLE_REJECTION_RELATIVE_SIGNAL_FLOOR * np.abs(center)
-                gradient_y = (
-                    np.gradient(center, axis=0)
-                    if center.shape[0] > 1
-                    else np.zeros_like(center)
-                )
-                gradient_x = np.gradient(center, axis=1)
-                threshold += _DRIZZLE_REJECTION_GRADIENT_FLOOR * (
-                    np.abs(gradient_x) + np.abs(gradient_y)
-                )
-                baseline_valid = (
-                    np.count_nonzero(valid_stack, axis=0)
-                    >= options.rejection_minimum_frames
-                )
-                outliers = (
-                    valid_stack
-                    & baseline_valid[None, ...]
-                    & (absolute_deviation > threshold[None, ...])
-                )
-                for index, reference_mask in enumerate(reference_masks):
-                    reference_mask[row_start:row_stop] = outliers[index].astype(
-                        np.uint8, copy=False
-                    )
-            for reference_mask in reference_masks:
-                reference_mask.flush()
-
-            for index, (canonical, image, matrix, reference_mask) in enumerate(
-                zip(
-                    canonical_paths,
-                    images,
-                    matrices,
-                    reference_masks,
-                    strict=True,
-                )
-            ):
-                mask_path = directory / f"{index + 1:05d}_rejection.fits"
-                raw_input_mask = np.memmap(
-                    temporary / f"input-{index:05d}.u8",
-                    dtype=np.uint8,
-                    mode="w+",
-                    shape=image.shape,
-                )
-                rejected = 0
-                for row_start in range(0, image.shape[0], tile_rows):
-                    row_stop = min(image.shape[0], row_start + tile_rows)
-                    y_input, x_input = np.indices(
-                        (row_stop - row_start, image.shape[1]), dtype=np.float64
-                    )
-                    y_input += row_start
-                    reference_x, reference_y, transform_valid = (
-                        _projective_coordinates(matrix, x_input, y_input)
-                    )
-                    selected = transform_valid & _mask_sample_any(
-                        reference_mask, reference_x, reference_y
-                    )
-                    raw_input_mask[row_start:row_stop] = selected.astype(
-                        np.uint8, copy=False
-                    )
-                    rejected += int(np.count_nonzero(selected))
-                raw_input_mask.flush()
-                header = fits.Header()
-                header["OAFPROD"] = ("REJECTION_MASK", "Ultra-Fast WBPP product role")
-                header["OAFALGO"] = ("TILED_MAD_SIGMA", "Independent rejection method")
-                header["OAFSIGMA"] = (options.rejection_sigma, "Sigma threshold")
-                header["NREJECT"] = (
-                    rejected,
-                    "Pixels rejected by independent robust stack",
-                )
-                compressed = fits.CompImageHDU(
-                    data=raw_input_mask,
-                    header=header,
-                    name="MASK",
-                    compression_type="RICE_1",
-                    tile_shape=(min(tile_rows, image.shape[0]), image.shape[1]),
-                )
-                mask_hdul = fits.HDUList([fits.PrimaryHDU(), compressed])
-                try:
-                    mask_hdul.writeto(mask_path, overwrite=False, checksum=True)
-                finally:
-                    mask_hdul.close()
-                mapped_input = getattr(raw_input_mask, "_mmap", None)
-                if mapped_input is not None:
-                    mapped_input.close()
-                del compressed, mask_hdul, raw_input_mask
-                with mask_path.open("r+b") as stream:
-                    os.fsync(stream.fileno())
-                mask_paths[canonical] = mask_path
-                mask_counts[canonical] = rejected
-            while reference_masks:
-                reference_mask = reference_masks.pop()
-                mapped_file = getattr(reference_mask, "_mmap", None)
-                if mapped_file is not None:
-                    mapped_file.close()
-                del reference_mask
-            # Windows will not remove a mapped file while even a closed mmap
-            # wrapper remains reachable. Drop every wrapper before the
-            # TemporaryDirectory cleanup attempts to unlink its work files.
-            gc.collect()
-
-    manifest = {
-        "schemaVersion": 1,
-        "stage": "drizzle-rejection-masks",
-        "algorithm": {
-            "id": "TILED_REGISTERED_MEDIAN_MAD_SIGMA",
-            "sigma": options.rejection_sigma,
-            "minimumFrames": options.rejection_minimum_frames,
-            "tileRows": tile_rows,
-            "photometricNormalization": "registration-catalog-flux-per-source-exposure",
-            "calibratedPixelsAlreadyExposureNormalized": True,
-            "relativeSignalFloor": _DRIZZLE_REJECTION_RELATIVE_SIGNAL_FLOOR,
-            "gradientFloor": _DRIZZLE_REJECTION_GRADIENT_FLOOR,
-            "maskCompression": "FITS_RICE_1",
-            "maskHdu": "MASK",
-        },
-        "frames": [
-            {
-                "source": canonical,
-                "path": mask_paths[canonical].name,
-                "hdu": "MASK",
-                "sha256": _sha256(mask_paths[canonical]),
-                "sizeBytes": mask_paths[canonical].stat().st_size,
-                "rejectedPixels": mask_counts[canonical],
-                "photometricScale": photometric_scales[index],
-                "photometricScaleEvidence": {
-                    "registrationIntegratedFlux": fluxes[index],
-                    "sourceExposureSeconds": exposures[index],
-                    "integratedFluxPerSecond": flux_rates[index],
-                    "medianIntegratedFluxPerSecond": rate_center,
-                    "calibratedExposureScaleAlreadyApplied": True,
-                },
-            }
-            for index, canonical in enumerate(canonical_paths)
-        ],
-        "totalRejectedPixels": sum(mask_counts.values()),
-    }
-    _write_json(directory / "manifest.json", manifest)
-    return mask_paths, manifest
-
-
 def _drizzle_candidates(
     *,
     staging: Path,
-    pipeline_root: Path,
-    lights: tuple[Path, ...],
-    registration: _RegistrationProducts,
+    work: Path,
+    pipeline_result: Any,
     options: DrizzleOptions,
     sampling_evidence: Mapping[str, Any],
-    provider: DrizzleProvider | None,
-    local_normalization: Any,
-    light_infos: Mapping[str, FrameInfo],
+    threads: int | None,
 ) -> tuple[dict[str, Path], dict[str, Any]]:
-    calibrated = _pipeline_calibrated_paths(pipeline_root)
-    analysis_by_path = {
-        registration.source_aliases.get(
-            str(Path(item.path).resolve(strict=True)),
-            str(Path(item.path).resolve(strict=True)),
-        ): (index, item)
-        for index, item in enumerate(registration.run.analyses)
-    }
-    weights = registration.receipt["qualityWeights"]
-    reference = registration.run.analyses[registration.run.reference_index]
-    output_shape = (
-        int(reference.source_height) * options.scale,
-        int(reference.source_width) * options.scale,
-    )
-    groups: dict[str, list[Path]] = {}
-    for path in lights:
-        canonical = str(path.resolve(strict=True))
-        info = light_infos.get(canonical)
-        if info is None:
-            raise E2EError(
-                "STAGED_LIGHT_INFO_MISSING",
-                "drizzle requires the preflighted staged Light metadata",
-                path=canonical,
-            )
-        groups.setdefault(info.filter_name, []).append(path)
+    """Drizzle every filter group from the ordinary integration's products.
+
+    The pixel pipeline hands over, per group, the calibrated (unregistered)
+    Lights, their registration matrices, the normalization coefficients, the
+    integration weights and the per-sample rejection masks; the native drizzle
+    reproduces the group's integration on the finer grid from exactly those.
+    """
+
+    groups = getattr(pipeline_result, "drizzle_groups", None) or {}
+    if not groups:
+        raise E2EError(
+            "DRIZZLE_INPUTS_MISSING",
+            "the pixel pipeline did not capture drizzle inputs for any filter group",
+        )
     candidates: dict[str, Path] = {}
     receipts: dict[str, Any] = {}
-    for filter_name, paths in sorted(groups.items()):
+    for filter_name, group in sorted(groups.items()):
         token = _safe_token(filter_name)
-        target_dir = staging / "work" / "drizzle" / token
+        target_dir = work / "drizzle" / token
         target_dir.mkdir(parents=True, exist_ok=False)
-        selected_calibrated = dict(calibrated)
-        local_normalization_evidence: dict[str, Any] = {
-            "status": "DISABLED",
-            "parameters": local_normalization.serializable(),
-        }
-        if local_normalization.enabled:
-            canonical_group = [str(path.resolve(strict=True)) for path in paths]
-            reference_index = max(
-                range(len(canonical_group)),
-                key=lambda item: float(
-                    registration.quality_weights[canonical_group[item]]
-                ),
-            )
-            normalization_result = normalize_registered_group(
-                [str(calibrated[path]) for path in canonical_group],
-                staging / "work" / "drizzle-local-normalization" / token,
-                input_to_reference=[
-                    registration.transforms[path] for path in canonical_group
-                ],
-                reference_index=reference_index,
-                parameters=local_normalization,
-            )
-            for canonical, normalized in zip(
-                canonical_group,
-                normalization_result.normalized_paths,
-                strict=True,
-            ):
-                selected_calibrated[canonical] = Path(normalized)
-            local_normalization_evidence = {
-                "status": "APPLIED",
-                "receipt": str(
-                    Path(normalization_result.receipt_path).relative_to(staging)
-                ),
-                "receiptSha256": _sha256(Path(normalization_result.receipt_path)),
-                "evidence": normalization_result.receipt,
+        cfa_pattern = None
+        if options.cfa_drizzle:
+            patterns = {
+                str(value).upper()
+                for value in (getattr(group.metadata, "get", lambda *_: None)("OAFCFA"),)
+                if value
             }
-        mask_directory = staging / "coverage" / "rejection-masks" / token
-        mask_paths, mask_manifest = _build_drizzle_rejection_masks(
-            calibrated=selected_calibrated,
-            transforms=registration.transforms,
-            paths=paths,
-            analysis_by_path=analysis_by_path,
-            reference_shape=(
-                int(reference.source_height),
-                int(reference.source_width),
-            ),
-            directory=mask_directory,
-            options=options,
-            source_exposure_seconds={
-                str(path.resolve(strict=True)): float(
-                    light_infos[str(path.resolve(strict=True))].exposure_seconds
+            cfa_pattern = next(iter(patterns), None)
+            if cfa_pattern is None:
+                raise E2EError(
+                    "DRIZZLE_CFA_PATTERN_MISSING",
+                    f"CFA drizzle of filter {filter_name} needs the frames' Bayer pattern",
                 )
-                for path in paths
-                if light_infos[str(path.resolve(strict=True))].exposure_seconds
-                is not None
-            },
-        )
-        frames: list[DrizzleFrameInput] = []
-        for path in paths:
-            canonical = str(path.resolve(strict=True))
-            if canonical not in calibrated or canonical not in registration.transforms:
-                raise E2EError("PIPELINE_RECEIPT_INVALID", "missing calibrated frame or transform", path=canonical)
-            output_to_input = _drizzle_output_to_input_matrix(
-                registration.transforms[canonical], options.scale
-            )
-            index, _ = analysis_by_path[canonical]
-            info = light_infos[canonical]
-            if info.exposure_seconds is None or info.exposure_seconds <= 0:
-                raise E2EError("LIGHT_EXPOSURE_UNKNOWN", "Light requires positive EXPTIME", path=canonical)
-            quality_weight = max(float(weights[index]), 0.05)
-            frames.append(
-                DrizzleFrameInput(
-                    calibrated_path=str(selected_calibrated[canonical]),
-                    output_to_input_projective=output_to_input,
-                    rejection_mask_path=str(mask_paths[canonical]),
-                    rejection_mask_hdu="MASK",
-                    exposure_seconds=info.exposure_seconds,
-                    weight_scale=quality_weight,
-                )
-            )
-        output = target_dir / f"master_light_{token}_drizzle_unsolved.fits"
-        receipt_path = target_dir / "receipt.json"
-        drizzle_request = DrizzleExecutionRequest(
-            frames=tuple(frames),
-            output_path=str(output),
-            receipt_path=str(receipt_path),
-            output_shape=output_shape,
+        request = DrizzleGroupRequest(
+            frames=group.frames,
+            reference_shape=tuple(int(value) for value in group.reference_shape),
+            output_path=str(target_dir / f"master_light_{token}_drizzle_unsolved.fits"),
+            receipt_path=str(target_dir / "receipt.json"),
             scale=options.scale,
             pixfrac=options.pixfrac,
             kernel=options.kernel,
-            tile_rows=options.tile_rows,
-            max_tile_bytes=options.max_tile_bytes,
-            max_output_pixels=options.max_output_pixels,
-            max_working_set_bytes=options.max_working_set_bytes,
-            minimum_coverage_fraction=options.minimum_coverage_fraction,
-            maximum_null_fraction=options.maximum_null_fraction,
-            minimum_distinct_dither_phases=options.minimum_distinct_dither_phases,
-            minimum_dither_phase_separation_pixels=options.minimum_dither_phase_separation_pixels,
-            minimum_dither_span_pixels=options.minimum_dither_span_pixels,
-            median_fwhm_native_pixels=sampling_evidence.get(
-                "medianNativeFwhmPixels"
-            ),
-            maximum_fwhm_for_upsampling_pixels=options.maximum_fwhm_for_upsampling_pixels,
-            pixel_scale_arcsec=sampling_evidence.get("pixelScaleArcsec"),
+            cfa_pattern=cfa_pattern,
+            metadata={**dict(group.metadata), "OAFCROP": "NONE"},
+            max_accumulator_bytes=options.max_working_set_bytes,
+            threads=threads,
+            durable=False,
         )
-        result = execute_drizzle(drizzle_request, provider=provider)
-        if not result.completed or result.output_path is None or result.receipt is None:
-            raise E2EError(result.code, result.message)
         try:
-            verified_receipt = verify_drizzle_result(drizzle_request, result)
-        except Exception as error:
-            code = getattr(error, "code", "DRIZZLE_VERIFICATION_FAILED")
-            raise E2EError(code, str(error)) from error
+            result = drizzle_group(request)
+            verified = verify_drizzle_receipt(result.receipt_path)
+        except CalibrationError as error:
+            raise E2EError(error.code, str(error), path=error.path) from error
+        statistics = verified.get("statistics", {})
+        coverage_status = "PASS"
+        if float(statistics.get("coverageFraction", 0.0)) < options.minimum_coverage_fraction:
+            coverage_status = "LOW_COVERAGE"
         candidates[filter_name] = Path(result.output_path).resolve(strict=True)
-        receipt_with_mask_evidence = dict(verified_receipt)
-        receipt_with_mask_evidence["e2eRejectionMaskEvidence"] = {
-            "manifest": str(
-                (mask_directory / "manifest.json").relative_to(staging)
-            ),
-            "manifestSha256": _sha256(mask_directory / "manifest.json"),
-            "totalRejectedPixels": mask_manifest["totalRejectedPixels"],
+        receipts[filter_name] = {
+            **dict(verified),
+            "coverageGate": {
+                "status": coverage_status,
+                "minimumCoverageFraction": float(options.minimum_coverage_fraction),
+                "observedCoverageFraction": float(statistics.get("coverageFraction", 0.0)),
+                "advisory": True,
+            },
+            "localNormalization": {"status": "NOT_APPLICABLE", "reason": "drizzle applies the global normalization coefficients"},
         }
-        receipt_with_mask_evidence["localNormalization"] = local_normalization_evidence
-        receipts[filter_name] = receipt_with_mask_evidence
-    preserved_local_normalization = _preserve_local_normalization_evidence(
-        staging / "work" / "drizzle-local-normalization",
-        staging,
-        namespace="drizzle",
-    )
-    for filter_name, receipt in receipts.items():
-        normalization = receipt.get("localNormalization")
-        if not isinstance(normalization, dict) or normalization.get("status") != "APPLIED":
-            continue
-        preserved = preserved_local_normalization.get("groups", {}).get(
-            _safe_token(filter_name)
-        )
-        if not isinstance(preserved, dict):
-            raise E2EError(
-                "LOCAL_NORMALIZATION_EVIDENCE_MISSING",
-                "Drizzle local-normalization models were not preserved",
-            )
-        normalization["receipt"] = preserved["manifest"]
-        normalization["receiptSha256"] = preserved["manifestSha256"]
-        normalization["normalizedFramesTransient"] = True
     return candidates, {
         "mode": IntegrationMode.DRIZZLE.value,
         "options": options.serializable(),
         "sampling": dict(sampling_evidence),
         "filters": receipts,
-        "localNormalizationEvidence": preserved_local_normalization,
+        "localNormalizationEvidence": {"status": "NOT_APPLICABLE", "groups": {}},
     }
 
 
@@ -3585,41 +3016,96 @@ def _accepted_solve_rms_pixels(record: Mapping[str, Any]) -> float:
     return math.inf
 
 
+def _same_grid_signatures(
+    *,
+    integration_mode: IntegrationMode,
+    pixel_pipeline_receipt: Mapping[str, Any],
+    coverage: Mapping[str, Any],
+) -> dict[str, list[int]]:
+    """Describe the pixel grid each filter master occupies, by construction.
+
+    Ordinary masters share their grid when they were cropped to one rectangle
+    of the shared reference frame; drizzled masters share it when the drizzle
+    placed them on the same scaled reference grid.  Filters without evidence
+    are left out, which keeps the unification from touching them.
+    """
+
+    signatures: dict[str, list[int]] = {}
+    if integration_mode is IntegrationMode.DRIZZLE:
+        filters = coverage.get("filters", {})
+        if not isinstance(filters, Mapping):
+            return signatures
+        for filter_name, receipt in filters.items():
+            if not isinstance(receipt, Mapping):
+                continue
+            geometry = receipt.get("geometry", {})
+            recipe = receipt.get("recipe", {})
+            if not isinstance(geometry, Mapping) or not isinstance(recipe, Mapping):
+                continue
+            values = [
+                recipe.get("scale"),
+                geometry.get("referenceHeight"),
+                geometry.get("referenceWidth"),
+                geometry.get("outputHeight"),
+                geometry.get("outputWidth"),
+            ]
+            if all(isinstance(value, int) and not isinstance(value, bool) for value in values):
+                signatures[str(filter_name)] = [int(value) for value in values]
+        return signatures
+    groups = pixel_pipeline_receipt.get("statistics", {}).get("integrationGroups", {})
+    if not isinstance(groups, Mapping):
+        return signatures
+    for filter_name, group in groups.items():
+        crop = group.get("crop") if isinstance(group, Mapping) else None
+        if isinstance(crop, list) and len(crop) == 4:
+            signatures[str(filter_name)] = [int(value) for value in crop]
+    return signatures
+
+
 def _unify_same_grid_solutions(
     products: Mapping[str, Path],
     *,
-    pixel_pipeline_receipt: Mapping[str, Any],
     solver_records: Mapping[str, Any],
     tolerance_pixels: float,
+    pixel_pipeline_receipt: Mapping[str, Any] | None = None,
+    grid_signatures: Mapping[str, Sequence[int]] | None = None,
 ) -> dict[str, Any]:
     """Share one fresh solve between masters that occupy one pixel grid.
 
-    The ordinary pixel pipeline registers every filter of a run onto the same
-    reference frame and crops all masters to one common rectangle, so the
+    The pixel pipeline registers every filter of a run onto the same reference
+    frame and crops all ordinary masters to one common rectangle, and the
+    drizzle places every filter on the same scaled reference grid, so the
     masters are the same grid by construction.  Each still received its own
     fresh solve; those independent solutions verify the shared grid at solver
     precision, and the lowest-RMS solution is then written to every master so
     the products describe one sky mapping exactly.  Pixel values are untouched.
-    Runs whose masters do not share their grid are left unchanged.
+    Runs whose masters do not share their grid are left unchanged.  The grid
+    evidence comes from ``grid_signatures`` (see ``_same_grid_signatures``) or,
+    for ordinary masters, from the pixel pipeline receipt's crops.
     """
 
-    groups = pixel_pipeline_receipt.get("statistics", {}).get("integrationGroups", {})
-    crops: dict[str, tuple[int, ...]] = {}
+    if grid_signatures is None:
+        grid_signatures = _same_grid_signatures(
+            integration_mode=IntegrationMode.ORDINARY,
+            pixel_pipeline_receipt=pixel_pipeline_receipt or {},
+            coverage={},
+        )
+    signatures: dict[str, tuple[int, ...]] = {}
     headers: dict[str, fits.Header] = {}
     shapes: dict[str, tuple[int, int]] = {}
     for filter_name, path in sorted(products.items()):
-        crop = groups.get(filter_name, {}).get("crop") if isinstance(groups, Mapping) else None
-        if not isinstance(crop, list) or len(crop) != 4:
-            return {"status": "NOT_APPLICABLE", "reason": f"{filter_name} has no crop evidence"}
-        crops[filter_name] = tuple(int(value) for value in crop)
+        signature = grid_signatures.get(filter_name)
+        if not isinstance(signature, (list, tuple)) or not signature:
+            return {"status": "NOT_APPLICABLE", "reason": f"{filter_name} has no grid evidence"}
+        signatures[filter_name] = tuple(int(value) for value in signature)
         header, shape = _read_image_header(path)
         headers[filter_name] = header
         shapes[filter_name] = shape
-    if len(set(crops.values())) != 1 or len(set(shapes.values())) != 1:
+    if len(set(signatures.values())) != 1 or len(set(shapes.values())) != 1:
         return {
             "status": "NOT_APPLICABLE",
-            "reason": "filter masters do not share one registration crop",
-            "crops": {name: list(value) for name, value in crops.items()},
+            "reason": "filter masters do not share one registration grid",
+            "grids": {name: list(value) for name, value in signatures.items()},
             "shapes": {name: list(value) for name, value in shapes.items()},
         }
     shape = next(iter(shapes.values()))
@@ -3639,7 +3125,7 @@ def _unify_same_grid_solutions(
         "adoptedFilter": adopted,
         "adoptedRmsPixels": adopted_rms,
         "tolerancePixels": tolerance_pixels,
-        "crop": list(crops[adopted]),
+        "grid": list(signatures[adopted]),
         "imageShape": list(shape),
         "filters": {},
     }
@@ -3755,7 +3241,9 @@ def _validate_cross_filter_wcs(
     Centre/scale/parity summaries cannot detect a 90-degree rotation or
     edge-only SIP drift.  Registered filter masters are required to describe
     the same pixel grid, so this gate compares centre, corners, and edge
-    midpoints through each celestial transform in both directions.
+    midpoints through each celestial transform in both directions.  The
+    tolerance is in the masters' own pixels; callers scale it for drizzled
+    grids, whose pixels are a fraction of a native pixel.
     """
 
     if not math.isfinite(tolerance_pixels) or tolerance_pixels <= 0:
@@ -4305,7 +3793,6 @@ def run_e2e(
     *,
     solver_backends: Sequence[SolverBackend],
     progress: ProgressCallback | None = None,
-    drizzle_provider: DrizzleProvider | None = None,
 ) -> E2EResult:
     """Run the complete workflow and atomically publish only verified WCS products.
 
@@ -4698,18 +4185,10 @@ def run_e2e(
 
         _emit(progress, ProgressStage.INTEGRATION, "started", "calibrating, registering, and integrating PASS frames")
         pipeline_root = work / "pixel-pipeline"
-        if request.integration_mode is IntegrationMode.DRIZZLE:
-            # This pipeline invocation is the current public calibration-only
-            # bridge.  Its registered/integrated products are not promoted;
-            # exact projective matrices go to drizzle below.  Supplying a
-            # complete explicit identity map prevents the pixel pipeline's
-            # missing-key identity fallback from hiding a registration gap.
-            identity = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
-            pipeline_transforms: Mapping[str, Sequence[Sequence[float]]] = {
-                str(path): identity for path in passed
-            }
-        else:
-            pipeline_transforms = registration.transforms
+        # Drizzle mode runs the same registered integration: its per-frame
+        # normalization, weights and rejection masks are what the drizzle
+        # applies to the calibrated Lights on the finer grid.
+        pipeline_transforms: Mapping[str, Sequence[Sequence[float]]] = registration.transforms
         if set(pipeline_transforms) != {str(path) for path in passed}:
             raise E2EError(
                 "REGISTRATION_TRANSFORM_SET_INCOMPLETE",
@@ -4738,6 +4217,9 @@ def run_e2e(
             # Ordinary integration consumes calibrated Lights in memory; only
             # Drizzle reads them back from the pipeline directory.
             materialize_calibrated_lights=(
+                request.integration_mode is IntegrationMode.DRIZZLE
+            ),
+            capture_drizzle_inputs=(
                 request.integration_mode is IntegrationMode.DRIZZLE
             ),
             # The whole pipeline directory lives in the transient work tree;
@@ -5146,14 +4628,11 @@ def run_e2e(
             _emit(progress, ProgressStage.DRIZZLE, "started", "executing per-filter drizzle")
             candidates, coverage = _drizzle_candidates(
                 staging=staging,
-                pipeline_root=pipeline_root,
-                lights=passed,
-                registration=registration,
+                work=work,
+                pipeline_result=pipeline_result,
                 options=request.drizzle,
                 sampling_evidence=drizzle_sampling,
-                provider=drizzle_provider,
-                local_normalization=request.pipeline_parameters.local_normalization,
-                light_infos=staged_light_infos,
+                threads=None,
             )
             for filter_name in sorted(candidates):
                 source_receipt = work / "drizzle" / _safe_token(filter_name) / "receipt.json"
@@ -5242,25 +4721,36 @@ def run_e2e(
                 product_paths_staged.append(solved_path)
                 solved_products[filter_name] = solved_path
 
+        # WCS tolerances are expressed in native pixels; drizzled masters have
+        # ``scale`` pixels per native pixel, so the same angular agreement is
+        # ``scale`` times as many of their own pixels.
+        grid_pixels_per_native = (
+            float(request.drizzle.scale)
+            if request.integration_mode is IntegrationMode.DRIZZLE
+            else 1.0
+        )
         same_grid_unification: dict[str, Any] = {
             "status": "NOT_APPLICABLE",
-            "reason": "single filter or drizzle geometry",
+            "reason": "single filter",
         }
-        if (
-            all_solved
-            and len(solved_products) > 1
-            and request.integration_mode is IntegrationMode.ORDINARY
-        ):
+        if all_solved and len(solved_products) > 1:
             same_grid_unification = _unify_same_grid_solutions(
                 solved_products,
-                pixel_pipeline_receipt=pixel_pipeline_receipt,
                 solver_records=solver_records,
-                tolerance_pixels=float(request.same_grid_wcs_tolerance_pixels),
+                tolerance_pixels=float(request.same_grid_wcs_tolerance_pixels)
+                * grid_pixels_per_native,
+                grid_signatures=_same_grid_signatures(
+                    integration_mode=request.integration_mode,
+                    pixel_pipeline_receipt=pixel_pipeline_receipt,
+                    coverage=coverage,
+                ),
             )
             if same_grid_unification["status"] == "MISMATCH":
                 all_solved = False
         cross_filter_validation = (
-            _validate_cross_filter_wcs(solved_products)
+            _validate_cross_filter_wcs(
+                solved_products, tolerance_pixels=0.05 * grid_pixels_per_native
+            )
             if all_solved
             else WcsValidation(
                 False,

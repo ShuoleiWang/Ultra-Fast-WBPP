@@ -82,8 +82,10 @@ contracts; it is not the transport used for every desktop operation. See
    background tilt is moved to the flattest non-negative mix of the frames'
    own tilts, so gradients of different nights cancel where they disagree.
    The filter masters of one run are cropped to one common rectangle so
-   they share their pixel grid. Drizzle follows a separate
-   coverage/rejection contract.
+   they share their pixel grid. With drizzle enabled, each group is then
+   integrated a second time on a 1x-4x grid by the native drizzle kernel
+   from the same calibrated frames, matrices, normalization, weights and
+   per-sample rejection decisions (see `docs/recipes/drizzle.md`).
 6. Solve every channel product independently; masters that share a grid
    verify each other's solutions at solver precision and then carry one of
    them, so the project copies them onto the reference grid without any

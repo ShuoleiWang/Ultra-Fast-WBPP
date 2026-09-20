@@ -272,47 +272,59 @@ def _runtime_backends() -> tuple[RuntimeStageBackend, ...]:
     )
 
 
-def _stsci_drizzle_backend() -> RuntimeStageBackend:
-    from .drizzle_execution import stsci_drizzle_capability
+def _native_drizzle_backend() -> RuntimeStageBackend:
+    from .drizzle_native import SUPPORTED_KERNELS, SUPPORTED_SCALES
+    from .native_kernels import DRIZZLE_KERNEL_ID, describe_native_kernels, load_native_kernels
 
-    capability = stsci_drizzle_capability()
+    kernels = load_native_kernels()
+    ready = kernels is not None and hasattr(kernels, "drizzle_band")
+    description = describe_native_kernels()
+
     def validate(options: dict[str, Any]) -> tuple[str, ...]:
         errors: list[str] = []
         scale = options.get("scale", 2)
         drop_shrink = options.get("dropShrink", 0.9)
-        if isinstance(scale, bool) or scale not in {1, 2, 3}:
-            errors.append("scale must be 1, 2, or 3")
+        kernel = options.get("kernel", "square")
+        if isinstance(scale, bool) or scale not in SUPPORTED_SCALES:
+            errors.append(f"scale must be one of {list(SUPPORTED_SCALES)}")
         if (
             isinstance(drop_shrink, bool)
             or not isinstance(drop_shrink, (int, float))
             or not 0.1 <= float(drop_shrink) <= 1.0
         ):
             errors.append("dropShrink must be numeric and in [0.1, 1]")
-        if options.get("cfaDrizzle") is True:
-            errors.append("CFA drizzle is not connected to the E2E executor")
+        if not isinstance(kernel, str) or kernel not in SUPPORTED_KERNELS:
+            errors.append(f"kernel must be one of {list(SUPPORTED_KERNELS)}")
+        if not isinstance(options.get("cfaDrizzle", False), bool):
+            errors.append("cfaDrizzle must be boolean")
         return tuple(errors)
 
     return RuntimeStageBackend(
         BackendDescriptor(
-            backend_id=capability.backend_id,
+            backend_id="native-drizzle",
             stage=StageKind.DRIZZLE,
-            display_name="STScI Drizzle CPU",
-            version=capability.version or "unavailable",
-            available=capability.available,
-            execution_ready=capability.execution_ready,
+            display_name="Ultra-Fast WBPP Native Drizzle",
+            version=DRIZZLE_KERNEL_ID,
+            available=ready,
+            execution_ready=ready,
             devices=(DeviceKind.CPU,),
             capabilities=(
-                "projective-pixel-maps",
-                "rejection-masks",
-                "coverage-gate",
-                "science-receipt-v2",
+                "square-circular-gaussian-point-kernels",
+                "scale-1-to-4",
+                "drop-shrink",
+                "integration-rejection-masks",
+                "integration-normalization-and-weights",
+                "cfa-drizzle",
+                "science-receipt-v3",
             )
-            if capability.execution_ready
+            if ready
             else (),
-            reason=capability.reason,
-            metadata={"probe": capability.serializable()},
+            reason=None if ready else (
+                str(description.get("reason") or "the native kernel library is not loaded")
+            ),
+            metadata={"nativeKernels": description},
         ),
-        accepted_options=frozenset({"scale", "dropShrink", "cfaDrizzle"}),
+        accepted_options=frozenset({"scale", "dropShrink", "kernel", "cfaDrizzle"}),
         option_validator=validate,
     )
 
@@ -325,7 +337,7 @@ def default_registry() -> BackendRegistry:
     return BackendRegistry(
         [
             *_runtime_backends(),
-            _stsci_drizzle_backend(),
+            _native_drizzle_backend(),
             *solver_backends(),
             SirilBackend(),
         ]
@@ -806,6 +818,7 @@ def build_plan(
                 "scale": recipe.drizzle.scale,
                 "dropShrink": recipe.drizzle.drop_shrink,
                 "cfaDrizzle": recipe.drizzle.cfa_drizzle,
+                "kernel": recipe.drizzle.kernel,
             }
             option_errors = backend.validate_options(options)
             if option_errors:
