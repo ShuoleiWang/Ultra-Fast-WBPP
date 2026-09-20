@@ -252,7 +252,7 @@ def test_drizzle_group_writes_verified_products(tmp_path: Path) -> None:
     receipt = verify_drizzle_receipt(result.receipt_path)
     assert receipt["algorithm"] == DRIZZLE_ALGORITHM
     assert receipt["recipe"] == {
-        "scale": 2, "pixfrac": 0.9, "kernel": "square", "cfaPattern": None,
+        "scale": 2, "pixfrac": 0.9, "kernel": "square", "cfaPattern": None, "cfaChannel": None,
         "inputUnits": "normalized-integration-frame",
     }
     assert receipt["geometry"]["outputHeight"] == 48 and receipt["geometry"]["outputWidth"] == 64

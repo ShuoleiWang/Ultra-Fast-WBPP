@@ -63,7 +63,7 @@ The hosted Windows matrix is configured for Python 3.11/3.12, Rust app-core/Taur
 Define the supported scope before applying this gate. Unsupported or explicitly experimental features may stay outside a mono macOS release; they must not be advertised as validated stable features. The requirements below apply to each feature and platform included in that release.
 
 - Mono L/R/G/B and arbitrary narrowband filters across at least two cameras and two independent datasets.
-- If OSC/CFA is introduced: calibration, registration, CFA Drizzle and color reconstruction with independent validation. The current mono-only release excludes this scope.
+- OSC/CFA: calibration with per-channel flat scaling, luminance-based QC/registration, debayered channel groups, Bayer drizzle and RGB reconstruction are implemented and validated on a synthetic RGGB set derived from real mono Lights; a real OSC data set (real colour filter array, real OSC flats) is still required before the scope is advertised as validated.
 - Raw and supplied-master Bias/Dark/Flat combinations, exposure/temperature/readout mismatch failures, and no double bias subtraction.
 - Ordinary and Drizzle integration with science, weight, coverage/context, rejection and null-pixel evidence.
 - Final WCS after the last geometry-changing stage, including SIP or a documented bounded linear-model residual.

@@ -8,7 +8,7 @@ Drag the acquisition root into the Import page. Ultra-Fast WBPP reads FITS/XISF 
 
 For observing-night QC, N.I.N.A. `DATE-LOC` is preferred over its UTC `DATE-OBS`; a timezone-less `DATE-LOC` is treated as the observatory's local wall clock, so one evening is not split at a UTC-derived boundary. If a non-N.I.N.A. dataset has only UTC timestamps, set `observing_timezone` in the Quality Gate configuration to an IANA zone such as `Asia/Shanghai` or a fixed offset such as `+08:00`. The selected value is included in the policy digest, so changing it invalidates earlier REVIEW approvals.
 
-Some mono-camera N.I.N.A. files omit `BAYERPAT`. The desktop explicitly selects the standard monochrome workflow, so those files need no per-file declaration. An explicit Bayer pattern still blocks this mono-only pipeline. The selected convention is recorded in the recipe and receipts rather than written into original files.
+Some mono-camera N.I.N.A. files omit `BAYERPAT`. The desktop explicitly selects the standard monochrome workflow, so those files need no per-file declaration. An explicit Bayer pattern runs the one-shot-colour path instead (see [OSC / CFA](osc-cfa.md)). The selected convention is recorded in the recipe and receipts rather than written into original files.
 
 The optional `strict-v1` CLI workflow retains SHA-bound per-source mono declarations for existing strict recipes. They are no longer the normal desktop interaction.
 

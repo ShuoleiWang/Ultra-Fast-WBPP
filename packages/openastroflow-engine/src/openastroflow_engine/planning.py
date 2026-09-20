@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from lightframeqc.cfa import is_cfa_pattern
 from .calibration_policy import STRICT, MONO_STANDARD, same_metadata, cfa_for_workflow, metadata_changes
 
 from dataclasses import dataclass, field, replace
@@ -387,7 +388,10 @@ def _base_compatible(light: FrameAsset, calibration: FrameAsset, workflow: str =
         and light.channels == calibration.channels
         and all(same_metadata(getattr(light, name), getattr(calibration, name), workflow) for name in ("binning_x", "binning_y", "camera", "gain", "offset", "readout_mode"))
         and same_metadata(cfa_for_workflow(light.cfa_pattern, workflow), cfa_for_workflow(calibration.cfa_pattern, workflow), workflow, required=True)
-        and (workflow != MONO_STANDARD or cfa_for_workflow(light.cfa_pattern, workflow) == "NONE")
+        and (
+            cfa_for_workflow(light.cfa_pattern, workflow) == "NONE"
+            or is_cfa_pattern(cfa_for_workflow(light.cfa_pattern, workflow))
+        )
     )
 
 

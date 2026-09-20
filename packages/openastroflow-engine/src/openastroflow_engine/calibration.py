@@ -25,6 +25,7 @@ from typing import Any, Iterable, Mapping, Sequence, Callable
 
 from astropy.io import fits
 import numpy as np
+from lightframeqc.cfa import CFA_PATTERNS, normalize_pattern as normalize_cfa_pattern
 from numpy.typing import NDArray
 
 from .native_kernels import (
@@ -267,6 +268,14 @@ class FrameInfo:
             "numericDomainEvidence": dict(self.numeric_domain_evidence),
             "biasIncluded": self.bias_included,
         }
+
+
+def cfa_metadata(info: Any) -> dict[str, str]:
+    """``BAYERPAT`` for a master built from Bayer frames, so the master's
+    previews and stamps are read as a mosaic like the Lights it calibrates."""
+
+    pattern = normalize_cfa_pattern(getattr(info, "cfa_pattern", None))
+    return {"BAYERPAT": pattern} if pattern in CFA_PATTERNS else {}
 
 
 class FitsFrame:
@@ -953,6 +962,11 @@ class FrameExpression:
     weight_grid: tuple[tuple[float, ...], ...] = ()
     weight_grid_x: tuple[float, ...] = ()
     weight_grid_y: tuple[float, ...] = ()
+    # Optional multiplier by Bayer tile position ((0,0), (0,1), (1,0), (1,1)
+    # of the frame), applied right after the division: a CFA Light's colour
+    # channels are each scaled by their own master-flat level (PixInsight's
+    # "separate CFA flat scaling factors").  Empty for mono frames.
+    pattern_scales: tuple[float, float, float, float] | tuple[()] = ()
 
     def serializable(self) -> dict[str, Any]:
         record = {
@@ -972,7 +986,27 @@ class FrameExpression:
             record["weightGrid"] = [list(row) for row in self.weight_grid]
             record["weightGridX"] = list(self.weight_grid_x)
             record["weightGridY"] = list(self.weight_grid_y)
+        if self.pattern_scales:
+            record["patternScales"] = list(self.pattern_scales)
         return record
+
+
+def _apply_pattern_scales(
+    result: NDArray[np.float32],
+    pattern_scales: tuple[float, ...],
+    absolute_rows: NDArray[np.int64] | range,
+) -> None:
+    """Multiply each pixel by its Bayer tile position's scale (in place).
+
+    ``absolute_rows`` are the frame rows of ``result``'s rows; the column
+    parity is the frame's since rows are always complete.
+    """
+
+    rows = np.asarray(list(absolute_rows), dtype=np.int64)
+    row_parity = (rows & 1)[:, None]
+    column_parity = (np.arange(result.shape[1], dtype=np.int64) & 1)[None, :]
+    scales = np.asarray(pattern_scales, dtype=np.float32)[(row_parity << 1) | column_parity]
+    result *= scales
 
 
 @lru_cache(maxsize=64)
@@ -1134,6 +1168,8 @@ def _expression_rows(
         valid = np.isfinite(divisor) & (divisor > division_floor)
         np.divide(result, divisor, out=result, where=valid)
         result[~valid] = np.nan
+    if expression.pattern_scales:
+        _apply_pattern_scales(result, expression.pattern_scales, range(y0, y1))
     if expression.scale != 1.0:
         result *= np.float32(expression.scale)
     if expression.offset_grid:
@@ -1186,6 +1222,8 @@ def _expression_sampled_rows(
         valid = np.isfinite(divisor) & (divisor > division_floor)
         np.divide(result, divisor, out=result, where=valid)
         result[~valid] = np.nan
+    if expression.pattern_scales:
+        _apply_pattern_scales(result, expression.pattern_scales, rows)
     if expression.scale != 1.0:
         result *= np.float32(expression.scale)
     if expression.offset_grid:
@@ -1252,7 +1290,15 @@ def _canonical_expression(expression: FrameExpression) -> FrameExpression:
         ),
         weight_grid_x=tuple(float(item) for item in expression.weight_grid_x),
         weight_grid_y=tuple(float(item) for item in expression.weight_grid_y),
+        pattern_scales=tuple(float(item) for item in expression.pattern_scales),  # type: ignore[arg-type]
     )
+    if result.pattern_scales and (
+        len(result.pattern_scales) != 4
+        or any(not math.isfinite(value) or value <= 0 for value in result.pattern_scales)
+    ):
+        raise CalibrationError(
+            "EXPRESSION_INVALID", "pattern scales need four finite positive values"
+        )
     if (
         not math.isfinite(result.scale)
         or not math.isfinite(result.offset)

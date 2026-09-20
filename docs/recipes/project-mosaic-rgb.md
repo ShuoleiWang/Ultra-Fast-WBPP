@@ -37,4 +37,4 @@ PixInsight names an opened image after its file stem, so `L.fits` opens as the v
 
 The outer receipt includes a share-safe panel matrix, hashes of shared-calibration and child receipts, mosaic/final-solve/alignment evidence, and `finalProducts.guiArtifacts[]` with relative path, SHA-256, size, final gate, and managed astrometric quality. Published JSON contains no absolute host path or inode/device/mtime values.
 
-v1 is mono-camera only. A Light whose CFA pattern is not `NONE` fails before pixel work; Bayer-as-mono processing is never called CFA Drizzle.
+A Bayer (one-shot-colour) Light set is one target's R, G and B panels: the pixel pipeline debayers each Light into the three channel groups (see [OSC / CFA](osc-cfa.md)); Bayer-as-mono processing never happens, and a Bayer set cannot share a target with mono R/G/B Lights.

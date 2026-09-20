@@ -22,6 +22,7 @@ from numpy.typing import NDArray
 
 from .models import Star
 from .xisf import XISF
+from .cfa import is_cfa_pattern, luminance, normalize_pattern, shifted_pattern
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,7 @@ class NativeImage:
         bscale: float = 1.0,
         bzero: float = 0.0,
         blank: int | float | None = None,
+        cfa_pattern: str | None = None,
     ) -> None:
         if layout == "mono":
             height, width = int(data.shape[0]), int(data.shape[1])
@@ -76,9 +78,29 @@ class NativeImage:
         self.bscale = float(bscale)
         self.bzero = float(bzero)
         self.blank = blank
+        # A Bayer mosaic returns the bilinear-debayered luminance of each
+        # stamp, so star profiles are measured on a smooth image instead of
+        # the colour checkerboard.
+        self.cfa_pattern = cfa_pattern if layout == "mono" and is_cfa_pattern(cfa_pattern) else None
 
     def __getitem__(self, key: tuple[slice, slice]) -> NDArray[np.float64]:
         rows, columns = key
+        if self._layout == "mono" and self.cfa_pattern is not None:
+            height, width = self.shape
+            y0, y1, _ = rows.indices(height)
+            x0, x1, _ = columns.indices(width)
+            # One pixel of halo so the edge pixels of the stamp interpolate
+            # from real neighbours; frame edges are replicated by the debayer.
+            hy0, hy1 = max(0, y0 - 1), min(height, y1 + 1)
+            hx0, hx1 = max(0, x0 - 1), min(width, x1 + 1)
+            raw = np.asanyarray(self._data[hy0:hy1, hx0:hx1])
+            values = np.asarray(raw, dtype=np.float64)
+            if self.blank is not None and np.issubdtype(raw.dtype, np.integer):
+                values[np.asarray(raw) == self.blank] = np.nan
+            if self.bscale != 1.0 or self.bzero != 0.0:
+                values = values * self.bscale + self.bzero
+            lum = luminance(values, shifted_pattern(self.cfa_pattern, hy0, hx0))
+            return np.asarray(lum[y0 - hy0 : y1 - hy0, x0 - hx0 : x1 - hx0], dtype=np.float64)
         if self._layout == "mono":
             raw = np.asanyarray(self._data[rows, columns])
             values = np.asarray(raw, dtype=np.float64)
@@ -155,13 +177,20 @@ def open_native_image(path: str) -> Iterator[NativeImage | None]:
                 offset=int(offset),
                 shape=(channels, height, width),
             )
+            pattern = _xisf_cfa_pattern(image_metadata) if channels == 1 else None
             try:
-                yield NativeImage(mapped, "channels_first")
+                if channels == 1:
+                    yield NativeImage(mapped[0], "mono", cfa_pattern=pattern)
+                else:
+                    yield NativeImage(mapped, "channels_first")
             finally:
                 del mapped
             return
         decoded = np.asarray(document.read_image(0, data_format="channels_last"))
-        yield NativeImage(decoded, "channels_last")
+        if channels == 1:
+            yield NativeImage(decoded[:, :, 0], "mono", cfa_pattern=_xisf_cfa_pattern(image_metadata))
+        else:
+            yield NativeImage(decoded, "channels_last")
         return
     with fits.open(
         path,
@@ -187,9 +216,35 @@ def open_native_image(path: str) -> Iterator[NativeImage | None]:
                 bscale=float(hdu.header.get("BSCALE", 1.0) or 1.0),
                 bzero=float(hdu.header.get("BZERO", 0.0) or 0.0),
                 blank=hdu.header.get("BLANK"),
+                cfa_pattern=_fits_cfa_pattern(hdu.header),
             )
             return
         yield None
+
+
+def _fits_cfa_pattern(header: Any) -> str | None:
+    for key in ("BAYERPAT", "BAYERPATN", "CFAPAT", "CFAPATTERN"):
+        value = header.get(key)
+        if value is not None and str(value).strip():
+            return normalize_pattern(value)
+    return None
+
+
+def _xisf_cfa_pattern(image_metadata: Any) -> str | None:
+    keywords = image_metadata.get("FITSKeywords", {}) if isinstance(image_metadata, dict) else {}
+    for key in ("BAYERPAT", "BAYERPATN", "CFAPAT", "CFAPATTERN"):
+        entries = keywords.get(key) if isinstance(keywords, dict) else None
+        if entries:
+            value = entries[0].get("value") if isinstance(entries[0], dict) else entries[0]
+            if value is not None and str(value).strip():
+                return normalize_pattern(value)
+    properties = image_metadata.get("XISFProperties", {}) if isinstance(image_metadata, dict) else {}
+    if isinstance(properties, dict):
+        entry = properties.get("PCL:CFASourcePattern")
+        value = entry.get("value") if isinstance(entry, dict) else entry
+        if value is not None and str(value).strip():
+            return normalize_pattern(value)
+    return None
 
 
 def _xisf_dtype(image_metadata: Any) -> np.dtype[Any] | None:

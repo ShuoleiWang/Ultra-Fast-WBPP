@@ -95,7 +95,7 @@ A local `.app` with the Python runtime bundled: `make desktop-build-macos-prerel
 ## Status and requirements
 
 - **Alpha, under active development.** Target: Apple Silicon, macOS 14+. Real-data runs are checked on an M3 Pro; other Macs need acceptance testing. Local builds are ad-hoc signed, not notarized. Windows has build and test targets but no supported installer.
-- **Monochrome only.** OSC/Bayer data is not processed. Drizzle, LocalNormalization, RGB/LRGB and mosaics need broader real-data validation; LocalNormalization does not promise gradient-free output.
+- **Mono validated on real data; one-shot colour on synthetic data only.** Bayer (RGGB/BGGR/GRBG/GBRG) Lights are calibrated as mosaics, debayered into R/G/B channel masters and combined into RGB ([recipe](docs/recipes/osc-cfa.md)), but no real OSC data set has been processed yet. Drizzle, LocalNormalization, RGB/LRGB and mosaics need broader real-data validation; LocalNormalization does not promise gradient-free output.
 - **Plate solving** needs a separately installed Astrometry.net `solve-field` and local indexes: follow [solver setup](docs/recipes/offline-solver-catalogs.md), then **Recheck setup** in the app.
 - Disk space for full-resolution intermediate frames.
 

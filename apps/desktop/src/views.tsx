@@ -51,8 +51,8 @@ export function RunElapsed({ seconds, label }: { seconds: number; label: string 
   return <div className="run-elapsed"><span>{label}</span><output role="timer" aria-label={label}>{formatElapsed(seconds)}</output></div>;
 }
 
-export function Alert({ title, tone = "warn", children }: { title: string; tone?: "warn" | "stop"; children: React.ReactNode }) {
-  return <aside className={`callout ${tone}`} role="alert"><span className="symbol">!</span><div><strong>{title}</strong><p>{children}</p></div></aside>;
+export function Alert({ title, tone = "warn", children }: { title: string; tone?: "warn" | "stop" | "info"; children: React.ReactNode }) {
+  return <aside className={`callout ${tone}`} role={tone === "info" ? "note" : "alert"}><span className="symbol">{tone === "info" ? "i" : "!"}</span><div><strong>{title}</strong><p>{children}</p></div></aside>;
 }
 
 /** Monochrome defaults, the CFA block and the advanced master settings. */
@@ -60,7 +60,8 @@ export function MetadataConfirmations({ workflow, t }: { workflow: Workflow; t: 
   if (!workflow.assets.length && !workflow.masterOverrides.length) return null;
   return <div id="metadata-confirmations" className="stack" style={{ padding: 0 }}>
     {workflow.assets.length > 0 && <p className="status-note">{t("monoStandardDefaults")}</p>}
-    {workflow.cfaBlockedAssets.length > 0 && <Alert tone="stop" title={t("cfaBlockedTitle")}>{t("cfaBlockedBody", { count: workflow.cfaBlockedAssets.length })}</Alert>}
+    {workflow.cfaAssets.length > 0 && <Alert tone="info" title={t("cfaDetectedTitle")}>{t("cfaDetectedBody", { count: workflow.cfaAssets.length, pattern: workflow.cfaPattern ?? "" })}</Alert>}
+    {workflow.cfaBlockedAssets.length > 0 && <Alert tone="stop" title={t("cfaSelectedBlocked")}>{t("blockerCfaUnknownPattern")}</Alert>}
     {workflow.masterOverrides.length > 0 && <div className="panel"><details className="disclosure master-section"><summary><span>{t("masterTitle")}</span><small>{t("optionalOverrides")}</small></summary><div className="details-content"><p className="hint">{t("masterBody")}</p><div className="master-form-grid">{workflow.masterOverrides.map((item) => <MasterForm key={item.sourceSha256} item={item} update={(patch) => workflow.updateMasterOverride(item.sourceSha256, patch)} confirm={() => workflow.confirmMasterOverride(item.sourceSha256)} reset={() => workflow.resetMasterOverride(item.sourceSha256)} t={t} />)}</div></div></details></div>}
   </div>;
 }
@@ -102,7 +103,7 @@ export function LaunchSettings({ mode, workflow, outputPathText, setOutputPathTe
         <div className="compute" aria-label={t("computeBackend")}><CpuIcon /><strong>{workflow.capabilities?.chip ?? t("detectingHardware")}</strong><span>{workflow.capabilities?.cpuBackend ?? "Portable CPU"} · {workflow.capabilities?.gpuBackend ?? "GPU probe"} · {workflow.capabilities?.platform === "browser" ? t("demoNoCompute") : workflow.capabilities?.platform === "windows" ? t("windowsBoundary") : workflow.capabilities?.optimizationTier === "M3_PRO_TUNED" ? t("m3Optimized") : t("appleGeneric")}</span></div>
       </div></details>
     </div>
-    {!workflow.canStart && !workflow.demoMode && <div className="blockers" role="status"><strong>{t("blockers")}</strong><ul>{!workflow.capabilities?.available && <li>{workflow.capabilities?.unavailableReason ?? t("blockerEngine")}</li>}{!workflow.calibrationReady && <li>{t("blockerCalibration")}</li>}{!workflow.allRequiredConfirmed && <li>{t("blockerTypes")}</li>}{workflow.matrix.length === 0 && <li>{t("blockerLights")}</li>}{workflow.insufficientPanels.map((cell) => <li key={cell.panelId}>{t("insufficientPanelLights", { target: cell.target, filter: cell.filter, count: workflow.qualityReady ? cell.admittedCount : cell.lightCount, required: workflow.minimumAdmittedLights })}</li>)}{!workflow.solverSetupReady && <li>{t("blockerSolver")}</li>}{!workflow.outputParent && <li>{t("blockerOutput")}</li>}{!workflow.masterOverridesReady && <li>{t("blockerMaster")}</li>}{workflow.cfaBlockedAssets.length > 0 && <li>{t("blockerOsc")}</li>}</ul>{workflow.qualityReady && workflow.insufficientPanels.length > 0 && mode !== "inspect" && <button type="button" className="btn small" onClick={() => workflow.setStep("inspect")}>{t("reviewLightAdmission")}</button>}</div>}
+    {!workflow.canStart && !workflow.demoMode && <div className="blockers" role="status"><strong>{t("blockers")}</strong><ul>{!workflow.capabilities?.available && <li>{workflow.capabilities?.unavailableReason ?? t("blockerEngine")}</li>}{!workflow.calibrationReady && <li>{t("blockerCalibration")}</li>}{!workflow.allRequiredConfirmed && <li>{t("blockerTypes")}</li>}{workflow.matrix.length === 0 && <li>{t("blockerLights")}</li>}{workflow.insufficientPanels.map((cell) => <li key={cell.panelId}>{t("insufficientPanelLights", { target: cell.target, filter: cell.filter, count: workflow.qualityReady ? cell.admittedCount : cell.lightCount, required: workflow.minimumAdmittedLights })}</li>)}{!workflow.solverSetupReady && <li>{t("blockerSolver")}</li>}{!workflow.outputParent && <li>{t("blockerOutput")}</li>}{!workflow.masterOverridesReady && <li>{t("blockerMaster")}</li>}{workflow.cfaBlockedAssets.length > 0 && <li>{t("blockerCfaUnknownPattern")}</li>}</ul>{workflow.qualityReady && workflow.insufficientPanels.length > 0 && mode !== "inspect" && <button type="button" className="btn small" onClick={() => workflow.setStep("inspect")}>{t("reviewLightAdmission")}</button>}</div>}
   </div>;
 }
 
