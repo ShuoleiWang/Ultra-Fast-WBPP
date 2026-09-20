@@ -3651,21 +3651,29 @@ def _solve_one(
     return False, attempts
 
 
-def _artifact_records(staging: Path, roots: Sequence[Path]) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
+def _artifact_records(staging: Path, roots: Sequence[Path], *, workers: int = 4) -> list[dict[str, Any]]:
+    """Digest every artifact under ``roots`` in a stable order; the files are
+    independent and hashing releases the GIL, so they are digested concurrently."""
+
+    paths: list[Path] = []
     for root in roots:
         if not root.exists():
             continue
-        paths = [root] if root.is_file() else sorted(path for path in root.rglob("*") if path.is_file())
-        for path in paths:
-            records.append(
-                {
-                    "path": str(path.relative_to(staging)),
-                    "sha256": _sha256(path),
-                    "sizeBytes": path.stat().st_size,
-                }
-            )
-    return records
+        paths.extend([root] if root.is_file() else sorted(path for path in root.rglob("*") if path.is_file()))
+    count = max(1, min(int(workers), len(paths)))
+    if count <= 1:
+        digests = [_sha256(path) for path in paths]
+    else:
+        with ThreadPoolExecutor(max_workers=count, thread_name_prefix="oaf-artifacts") as pool:
+            digests = list(pool.map(_sha256, paths))
+    return [
+        {
+            "path": str(path.relative_to(staging)),
+            "sha256": digest,
+            "sizeBytes": path.stat().st_size,
+        }
+        for path, digest in zip(paths, digests, strict=True)
+    ]
 
 
 def _relativize_solver_attempts(

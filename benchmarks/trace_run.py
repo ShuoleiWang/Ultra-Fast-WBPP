@@ -154,7 +154,7 @@ class Tracer:
     on Windows, where ``time.monotonic`` ticks every 15.6 ms.
     """
 
-    def __init__(self, epoch_ns: int) -> None:
+    def __init__(self, epoch_ns: int, profile_labels: frozenset[str] = frozenset()) -> None:
         self.epoch_ns = epoch_ns
         self.events: list[dict[str, Any]] = []
         self.lock = threading.Lock()
@@ -165,6 +165,13 @@ class Tracer:
         self.stage_open: dict[str, tuple[float, int]] = {}
         self.stage_records: list[dict[str, Any]] = []
         self._rusage_at_stage: dict[str, tuple[float, float]] = {}
+        # Timers whose calls run under cProfile (one profiler per call, so
+        # concurrent threads never share one); statistics merge per label.
+        self.profile_labels = profile_labels
+        self.profiles: dict[str, Any] = {}
+        # One interpreter-wide profiler at a time (Python 3.12 refuses a
+        # second active tool): a call is profiled only when no other is.
+        self.profile_lock = threading.Lock()
 
     def now_us(self) -> float:
         return (time.perf_counter_ns() - self.epoch_ns) / 1000.0
@@ -173,6 +180,8 @@ class Tracer:
     def wrap(self, function: Callable[..., Any], label: str, category: str) -> Callable[..., Any]:
         tracer = self
 
+        profiled = label in self.profile_labels
+
         @functools.wraps(function)
         def traced(*args: Any, **kwargs: Any) -> Any:
             start = tracer.now_us()
@@ -180,9 +189,25 @@ class Tracer:
             if stack is None:
                 stack = tracer.local.stack = []
             stack.append(0.0)  # children's inclusive time
+            profiler = None
+            if profiled and tracer.profile_lock.acquire(blocking=False):
+                import cProfile
+
+                try:
+                    profiler = cProfile.Profile()
+                    profiler.enable()
+                except Exception:
+                    profiler = None
+                    tracer.profile_lock.release()
             try:
                 return function(*args, **kwargs)
             finally:
+                if profiler is not None:
+                    try:
+                        profiler.disable()
+                        tracer.add_profile(label, profiler)
+                    finally:
+                        tracer.profile_lock.release()
                 end = tracer.now_us()
                 children = stack.pop()
                 duration = end - start
@@ -204,6 +229,27 @@ class Tracer:
 
         traced.__oaf_traced__ = True  # type: ignore[attr-defined]
         return traced
+
+    def add_profile(self, label: str, profiler: Any) -> None:
+        import pstats
+
+        with self.lock:
+            stats = self.profiles.get(label)
+            if stats is None:
+                self.profiles[label] = pstats.Stats(profiler)
+            else:
+                stats.add(profiler)
+
+    def profile_report(self, lines: int = 25) -> str:
+        import io
+
+        chunks = []
+        for label, stats in self.profiles.items():
+            buffer = io.StringIO()
+            stats.stream = buffer
+            stats.sort_stats("cumulative").print_stats(lines)
+            chunks.append(f"== cProfile of {label} (all calls merged)\n{buffer.getvalue()}")
+        return "\n".join(chunks)
 
     def install(self, targets: tuple[tuple[str, str, str, str], ...] = TARGETS) -> None:
         import importlib
@@ -510,6 +556,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--summary", help="summary JSON to write (stages, timers, environment)")
     parser.add_argument("--sample-interval", type=float, default=0.25, help="CPU/RSS sample interval in seconds")
     parser.add_argument("--top", type=int, default=40, help="timers shown in the stderr table")
+    parser.add_argument(
+        "--profile",
+        action="append",
+        default=[],
+        metavar="TIMER",
+        help=(
+            "run this timer's calls under cProfile and print the merged statistics (repeatable); "
+            "only one call is profiled at a time, so concurrent calls are sampled"
+        ),
+    )
+    parser.add_argument("--profile-lines", type=int, default=25, help="functions listed per profiled timer")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="engine CLI command and arguments (after --)")
     args = parser.parse_args(argv)
     command = list(args.command)
@@ -527,7 +584,7 @@ def main(argv: list[str] | None = None) -> int:
     os.environ[TRACE_DIR_VARIABLE] = str(trace_dir)
     os.environ[TRACE_EPOCH_VARIABLE] = str(epoch_ns)
 
-    tracer = Tracer(epoch_ns)
+    tracer = Tracer(epoch_ns, frozenset(args.profile))
     tracer.install()
     tracer.install_stage_hook()
     stop_sampler = tracer.start_sampler(args.sample_interval)
@@ -537,7 +594,14 @@ def main(argv: list[str] | None = None) -> int:
     from openastroflow_engine.hardware import detect_hardware
 
     started = time.perf_counter()
-    code = cli.main(command)
+    code = 1
+    failure: BaseException | None = None
+    try:
+        code = cli.main(command)
+    except SystemExit as exit_request:
+        code = exit_request.code if isinstance(exit_request.code, int) else (0 if exit_request.code is None else 1)
+    except BaseException as error:  # the trace is written even when the run crashes
+        failure = error
     total_wall = time.perf_counter() - started
     stop_sampler.set()
 
@@ -548,6 +612,7 @@ def main(argv: list[str] | None = None) -> int:
     metadata = {
         "command": command,
         "exitCode": code,
+        "failure": repr(failure) if failure is not None else None,
         "totalWallSeconds": round(total_wall, 3),
         "selfCpuSeconds": round(self_cpu_seconds(), 3),
         "childrenCpuSeconds": round(children_cpu_seconds(), 3),
@@ -572,6 +637,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     if tracer.missing:
         sys.stderr.write("timers not installed: " + ", ".join(tracer.missing) + "\n")
+    if tracer.profiles:
+        sys.stderr.write(tracer.profile_report(args.profile_lines) + "\n")
+    if failure is not None:
+        raise failure
     return code
 
 
