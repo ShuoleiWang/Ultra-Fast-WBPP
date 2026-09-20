@@ -64,6 +64,8 @@ const known = (value: string | undefined | null) => Boolean(value?.trim() && !["
 const numberKnown = (value: number | undefined | null) => typeof value === "number" && Number.isFinite(value);
 const monoCfa = (value: string) => ["NONE", "MONO", "MONOCHROME"].includes(value.trim().toUpperCase());
 const unknownCfa = (value: string | undefined | null) => !value?.trim() || ["UNKNOWN", "UNSPECIFIED"].includes(value.trim().toUpperCase());
+const BAYER_PATTERNS = ["RGGB", "BGGR", "GRBG", "GBRG"];
+const bayerCfa = (value: string) => BAYER_PATTERNS.includes(value.trim().toUpperCase());
 const safeSourceId = (role: FrameRole, index: number) => `${role.toLowerCase().replaceAll("_", "-")}-${String(index + 1).padStart(4, "0")}`;
 const OUTPUT_PARENT_STORAGE_KEY = "ultra-fast-wbpp.outputParent";
 /** The output folder chosen last time, so a returning user only drops files and starts. */
@@ -657,7 +659,11 @@ export function useWorkflow(t: Translator) {
   const allRequiredConfirmed = sources.filter((source) => source.paths.length).every((source) => source.confirmed);
   const calibrationReady = Boolean(calibrationInspection?.calibrationReady && calibrationInspection.status === "READY");
   const masterOverridesReady = masterOverrides.every((item) => item.confirmed);
-  const cfaBlockedAssets = assets.filter((asset) => !unknownCfa(asset.cfaPattern) && !monoCfa(asset.cfaPattern));
+  // Bayer (one-shot-colour) frames are processed as colour channel groups;
+  // only a pattern the engine does not know blocks the run.
+  const cfaAssets = assets.filter((asset) => bayerCfa(asset.cfaPattern));
+  const cfaBlockedAssets = assets.filter((asset) => !unknownCfa(asset.cfaPattern) && !monoCfa(asset.cfaPattern) && !bayerCfa(asset.cfaPattern));
+  const cfaPattern = cfaAssets[0]?.cfaPattern.trim().toUpperCase();
   const solveField = solverDoctor?.backends.find((backend) => backend.backendId === "astrometry-net");
   const astap = solverDoctor?.backends.find((backend) => backend.backendId === "astap");
   const solverSetupReady = Boolean(catalogDoctor?.ok && solveField?.executionReady);
@@ -684,7 +690,7 @@ export function useWorkflow(t: Translator) {
     importPaths, confirmRole, loadDemo, clearSources, runInspection, startRun, cancelRun, canInspect, allRequiredConfirmed, importedTotal, nativeRuntime,
     browserDemoAvailable: !nativeRuntime, pickFiles, pickDirectories, chooseOutputParent, useOutputParentPath, outputParent, outputDirectory, canStart, inventoryBusy, inputBusy, errorMessage, calibrationReady,
     firstSolved, demoMode, projectName, matrix, masterOverrides, updateMasterOverride, resetMasterOverride, confirmMasterOverride, masterOverridesReady, runNavigationLocked,
-    cfaBlockedAssets,
+    cfaBlockedAssets, cfaAssets, cfaPattern,
     qualityInspection, qualityBusy, qualityElapsedSeconds, qualityReady, approvedReviewDigests: validApprovedReviewDigests, toggleReviewApproval, canApproveReview,
     insufficientQualityPanels, insufficientPanels, minimumAdmittedLights,
     calibrationInspection, calibrationBusy, calibrationError, recheckCalibration,

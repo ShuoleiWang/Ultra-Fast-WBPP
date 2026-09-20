@@ -970,10 +970,10 @@ def integrate_registered_group(
     )
     if requested_backend == "auto" and load_native_kernels() is not None:
         selected, selection_note = "portable-cpu", NATIVE_CPU_AUTO_REASON
-    if selected != "portable-cpu" and any(item.weight_grid for item in canonical):
+    if selected != "portable-cpu" and any(item.weight_grid or item.pattern_scales for item in canonical):
         selected, selection_note = (
             "portable-cpu",
-            "per-sample region weights are reduced by the portable CPU path only",
+            "per-sample region weights and Bayer pattern scales are reduced by the portable CPU path only",
         )
     if selected == "portable-cpu":
         return _cpu_with_receipt(

@@ -92,6 +92,10 @@ class DrizzleGroupInputs:
     frames: tuple[DrizzleFrame, ...]
     reference_shape: tuple[int, int]
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    # A colour channel group of a Bayer filter: the calibrated frames are the
+    # mosaics and only the pixels of ``channel`` (0 R, 1 G, 2 B) are dropped.
+    cfa_pattern: str | None = None
+    channel: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,7 +107,11 @@ class DrizzleGroupRequest:
     scale: int = 2
     pixfrac: float = 0.9
     kernel: str = "square"
+    # Bayer drizzle: ``cfa_pattern`` alone drops the mosaic's pixels into
+    # three colour planes; with ``channel`` (0 R, 1 G, 2 B) only that colour
+    # is dropped, onto a single plane (a colour channel group).
     cfa_pattern: str | None = None
+    channel: int | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
     max_accumulator_bytes: int = DEFAULT_ACCUMULATOR_BYTES
     threads: int | None = None
@@ -120,6 +128,8 @@ class DrizzleGroupRequest:
             raise DrizzleError("DRIZZLE_KERNEL_INVALID", f"drizzle kernel must be one of {SUPPORTED_KERNELS}")
         if self.cfa_pattern is not None and self.cfa_pattern.upper() not in CFA_PATTERNS:
             raise DrizzleError("DRIZZLE_CFA_PATTERN_INVALID", f"CFA pattern must be one of {tuple(CFA_PATTERNS)}")
+        if self.channel is not None and (self.cfa_pattern is None or self.channel not in (0, 1, 2)):
+            raise DrizzleError("DRIZZLE_CFA_CHANNEL_INVALID", "a colour channel needs a CFA pattern and must be 0, 1 or 2")
         height, width = self.reference_shape
         if height < 1 or width < 1:
             raise DrizzleError("DRIZZLE_GEOMETRY_INVALID", "reference shape must be positive")
@@ -224,7 +234,7 @@ def drizzle_group(request: DrizzleGroupRequest) -> DrizzleGroupResult:
     scale = int(request.scale)
     height, width = request.reference_shape
     output_height, output_width = height * scale, width * scale
-    channels = 3 if request.cfa_pattern else 1
+    channels = 3 if request.cfa_pattern and request.channel is None else 1
     pattern = CFA_PATTERNS[request.cfa_pattern.upper()] if request.cfa_pattern else (0, 1, 1, 2)
     threads = default_kernel_threads() if request.threads is None else max(1, int(request.threads))
     bytes_per_row = output_width * 16 * channels
@@ -307,7 +317,11 @@ def drizzle_group(request: DrizzleGroupRequest) -> DrizzleGroupResult:
                         weight_grid_y_nodes=np.asarray(frame.weight_grid_y, dtype=np.float64) if frame.weight_grid else None,
                         mask=mask,
                         cfa_pattern=pattern,
-                        channel=channel if channels == 3 else 255,
+                        channel=(
+                            channel if channels == 3
+                            else request.channel if request.channel is not None
+                            else 255
+                        ),
                         frame_weight=frame.weight,
                         threads=threads,
                         output_touched=touched,
@@ -343,6 +357,8 @@ def drizzle_group(request: DrizzleGroupRequest) -> DrizzleGroupResult:
     }
     if request.cfa_pattern:
         header_metadata["OAFDRZCF"] = request.cfa_pattern.upper()
+    if request.channel is not None:
+        header_metadata["OAFDRZCH"] = ("R", "G", "B")[request.channel]
     primary = fits.PrimaryHDU(science[0] if channels == 1 else science)
     primary.name = "SCI"
     for key, value in header_metadata.items():
@@ -375,6 +391,7 @@ def drizzle_group(request: DrizzleGroupRequest) -> DrizzleGroupResult:
                 "pixfrac": float(request.pixfrac),
                 "kernel": request.kernel,
                 "cfaPattern": request.cfa_pattern.upper() if request.cfa_pattern else None,
+                "cfaChannel": ("R", "G", "B")[request.channel] if request.channel is not None else None,
                 "inputUnits": "normalized-integration-frame",
             },
             "geometry": {

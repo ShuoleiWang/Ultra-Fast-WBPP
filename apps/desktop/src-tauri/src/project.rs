@@ -669,12 +669,15 @@ fn project_request_json(
     }
     let mut raw_override_digests = HashSet::new();
     for item in &request.raw_frame_metadata_overrides {
+        // A confirmation names the sensor: mono (NONE) or one of the Bayer
+        // patterns the engine processes as one-shot colour.
+        let pattern = item.cfa_pattern.trim().to_ascii_uppercase();
         if !checked_source_sha256(&item.source_sha256)
-            || !item.cfa_pattern.trim().eq_ignore_ascii_case("NONE")
+            || !matches!(pattern.as_str(), "NONE" | "RGGB" | "BGGR" | "GRBG" | "GBRG")
             || !raw_override_digests.insert(item.source_sha256.as_str())
         {
             return Err(
-                "rawFrameMetadataOverrides must contain unique SHA-bound NONE declarations"
+                "rawFrameMetadataOverrides must contain unique SHA-bound NONE or Bayer pattern declarations"
                     .to_owned(),
             );
         }

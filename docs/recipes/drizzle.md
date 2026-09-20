@@ -21,7 +21,7 @@ Nothing is re-estimated on the drizzled grid, so the drizzled master is the ordi
 | `drizzle.scale` | `1`, `2`, `3`, `4` | `2` | Output pixels per reference pixel. `1` is a drizzle onto the reference grid itself (no interpolation, exact drop areas) |
 | `drizzle.dropShrink` | `0.1`–`1.0` | `0.9` | Drop shrink (pixfrac): the side of the square drop in input pixels. PixInsight WBPP uses 0.9 for mono and 1.0 for CFA |
 | `drizzle.kernel` | `square`, `circular`, `gaussian`, `point` | `square` | Drop shape. Square and circular drops are exact area overlaps (polygon clipping, disc–rectangle area); the Gaussian kernel has FWHM equal to the drop width and carries the square drop's area; point drops the whole pixel on one output pixel |
-| `drizzle.cfaDrizzle` | `true`/`false` | `false` | Bayer drizzle: three colour planes dropped from the mosaic's own pixels (`RGGB`, `BGGR`, `GRBG`, `GBRG`). Requires CFA Lights, which the mono pipeline does not admit yet |
+| `drizzle.cfaDrizzle` | `true`/`false` | `false` | Accepted for compatibility; Bayer Lights are always Bayer-drizzled: each colour channel group drops the mosaics' own samples of that colour (see [OSC / CFA](osc-cfa.md)) |
 | `drizzle.backend` | `auto`, `native-drizzle` | `auto` | The multithreaded native kernel is the only backend |
 
 The desktop exposes the same scale, kernel and drop-shrink controls under *Advanced options*; the CLI takes `--mode drizzle --drizzle-scale N --drop-shrink F --drizzle-kernel K`.

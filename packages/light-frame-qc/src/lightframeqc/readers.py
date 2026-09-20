@@ -25,7 +25,8 @@ import numpy as np
 from numpy.typing import NDArray
 from .xisf import XISF
 
-from .metadata import normalize_metadata
+from .cfa import even_block_size, is_cfa_pattern
+from .metadata import _header_lookup, normalize_metadata
 from .models import FrameMetadata
 
 
@@ -239,6 +240,21 @@ def _block_size(width: int, height: int, max_long_edge: int) -> int:
     return max(1, math.ceil(max(width, height) / max_long_edge))
 
 
+_CFA_HEADER_KEYS = ("BAYERPAT", "BAYERPATN", "CFAPAT", "CFAPATTERN", "PCL:CFASourcePattern")
+
+
+def _preview_block_size(width: int, height: int, max_long_edge: int, header: Mapping[str, Any]) -> int:
+    """Block size of a preview; even for a Bayer mosaic so every preview
+    pixel averages the same number of red, green and blue samples and the
+    preview is a luminance image rather than a colour-aliased one."""
+
+    factor = _block_size(width, height, max_long_edge)
+    pattern = _header_lookup({str(k): v for k, v in header.items()}, _CFA_HEADER_KEYS)
+    if is_cfa_pattern(pattern):
+        return even_block_size(factor)
+    return factor
+
+
 RowsReader = Callable[[int, int], NDArray[np.float64]]
 
 
@@ -429,7 +445,8 @@ def _read_fits_preview(
             if data is None:
                 raise FrameReadError("NO_IMAGE", path, "selected FITS HDU has no data")
             width, height, channels, layout = _fits_layout(tuple(data.shape), path)
-            factor = _block_size(width, height, max_long_edge)
+            header = _fits_header_dict(hdu.header)
+            factor = _preview_block_size(width, height, max_long_edge, header)
             bscale = float(hdu.header.get("BSCALE", 1.0) or 1.0)
             bzero = float(hdu.header.get("BZERO", 0.0) or 0.0)
             blank = hdu.header.get("BLANK")
@@ -462,7 +479,6 @@ def _read_fits_preview(
                 height=height,
                 block_size=factor,
             )
-            header = _fits_header_dict(hdu.header)
             metadata = normalize_metadata(
                 FrameMetadata(
                     path=str(path),
@@ -581,7 +597,8 @@ def _read_xisf_preview(
             )
         dtype = _xisf_file_dtype(image_metadata)
         decoded_bytes = width * height * channels * dtype.itemsize
-        factor = _block_size(width, height, max_long_edge)
+        header = _xisf_header_dict(image_metadata)
+        factor = _preview_block_size(width, height, max_long_edge, header)
         location = tuple(image_metadata["location"])
         direct_attachment = location and location[0] == "attachment" and "compression" not in image_metadata
 
@@ -658,7 +675,6 @@ def _read_xisf_preview(
             )
             backend = "xisf-python-full-decode"
 
-        header = _xisf_header_dict(image_metadata)
         metadata = normalize_metadata(
             FrameMetadata(
                 path=str(path),

@@ -15,6 +15,7 @@ rename, so a successful receipt can never describe a partial output tree.
 from __future__ import annotations
 
 from lightframeqc.content_hash import file_sha256
+from lightframeqc.cfa import is_cfa_pattern
 from . import platform as platform_services
 from .platform import NoReplaceError
 from .calibration_policy import apply_mono_workflow, bias_from_header, MONO_STANDARD, can_omit_bias, conflicting_profile_fields, workflow_receipt
@@ -61,6 +62,7 @@ from lightframeqc.readers import probe_frame_metadata
 
 from .astap_backend import verify_solver_execution_result
 from .calibration import (
+    cfa_metadata,
     CalibrationError,
     FrameExpression,
     FrameInfo,
@@ -1883,6 +1885,7 @@ def _build_registration_masters(
             metadata={
                 "IMAGETYP": "Master Bias",
                 "OAFSTATE": "UNSOLVED_WORKING",
+                **cfa_metadata(reference_bias),
                 **_numeric_domain_metadata(reference_bias),
             },
             parameters=parameters,
@@ -1949,6 +1952,7 @@ def _build_registration_masters(
                 "EXPTIME": exposure,
                 "OAFSTATE": "UNSOLVED_WORKING",
                 "OAFBIAS": "INCLUDED",
+                **cfa_metadata(reference_dark),
                 **_numeric_domain_metadata(reference_dark),
             },
             parameters=parameters,
@@ -2119,6 +2123,7 @@ def _build_registration_masters(
                 "OAFBIAS": "SUBTRACTED",
                 "OAFNDOM": "DIMENSIONLESS_RESPONSE",
                 "OAFNSCL": 1.0,
+                **cfa_metadata(flat_infos[flat_groups[filter_name][0]]),
             },
             parameters=parameters,
         )
@@ -2566,19 +2571,9 @@ def _drizzle_candidates(
         token = _safe_token(filter_name)
         target_dir = work / "drizzle" / token
         target_dir.mkdir(parents=True, exist_ok=False)
-        cfa_pattern = None
-        if options.cfa_drizzle:
-            patterns = {
-                str(value).upper()
-                for value in (getattr(group.metadata, "get", lambda *_: None)("OAFCFA"),)
-                if value
-            }
-            cfa_pattern = next(iter(patterns), None)
-            if cfa_pattern is None:
-                raise E2EError(
-                    "DRIZZLE_CFA_PATTERN_MISSING",
-                    f"CFA drizzle of filter {filter_name} needs the frames' Bayer pattern",
-                )
+        # A colour channel group of a Bayer filter is a Bayer drizzle: the
+        # calibrated mosaics' own samples of that colour are dropped, with the
+        # channel group's normalization, weights and rejection.
         request = DrizzleGroupRequest(
             frames=group.frames,
             reference_shape=tuple(int(value) for value in group.reference_shape),
@@ -2587,7 +2582,8 @@ def _drizzle_candidates(
             scale=options.scale,
             pixfrac=options.pixfrac,
             kernel=options.kernel,
-            cfa_pattern=cfa_pattern,
+            cfa_pattern=group.cfa_pattern,
+            channel=group.channel,
             metadata={**dict(group.metadata), "OAFCROP": "NONE"},
             max_accumulator_bytes=options.max_working_set_bytes,
             threads=threads,
@@ -3896,10 +3892,10 @@ def run_e2e(
                     f"raw {expected_role} CFA metadata is unknown; add a hash-bound rawFrameMetadataOverrides confirmation",
                     path=str(path),
                 )
-            if cfa != "NONE":
+            if cfa != "NONE" and not is_cfa_pattern(cfa):
                 raise E2EError(
-                    "CFA_PIXEL_PIPELINE_UNSUPPORTED",
-                    f"CFA/Bayer raw {expected_role} is blocked until phase-preserving calibration, registration, and color reconstruction are implemented",
+                    "CFA_PATTERN_UNSUPPORTED",
+                    f"CFA pattern {cfa!r} of raw {expected_role} is not supported (RGGB, BGGR, GRBG, GBRG are)",
                     path=str(path),
                 )
     _emit(progress, ProgressStage.INVENTORY, "completed", f"validated {len(identities)} source files")

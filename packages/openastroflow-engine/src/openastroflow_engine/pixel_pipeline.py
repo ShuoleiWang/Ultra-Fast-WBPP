@@ -29,9 +29,17 @@ from typing import Any, Iterable, Mapping, Sequence, Callable
 import numpy as np
 from numpy.typing import NDArray
 
+from lightframeqc.cfa import (
+    CFA_PATTERNS,
+    CHANNEL_NAMES,
+    bilinear_debayer,
+    channel_medians,
+    normalize_pattern as normalize_cfa_pattern,
+)
 from lightframeqc.content_hash import file_sha256
 from .calibration_policy import (STRICT, MONO_STANDARD, WORKFLOWS, apply_mono_workflow, metadata_changes, same_metadata, cfa_for_workflow, resolve_dark_bias, workflow_receipt, can_omit_bias, conflicting_profile_fields, acquisition_receipt)
 from .calibration import (
+    cfa_metadata,
     CalibrationError,
     FitsFloatWriter,
     FitsFrame,
@@ -801,9 +809,13 @@ def _assert_compatible(
         left = getattr(reference, name)
         right = getattr(candidate, name)
         if name == "cfa_pattern":
+            # Mono frames and Bayer frames of one pattern each match among
+            # themselves; a mosaic can only be calibrated by masters of the
+            # same pattern (the dark/bias are pixel-wise, the flat per colour).
             left, right = cfa_for_workflow(left, workflow), cfa_for_workflow(right, workflow)
-            if left != "NONE" or right != "NONE":
-                mismatches[name] = [left, right]
+            for value in (left, right):
+                if value not in {"NONE", "UNKNOWN", "UNSPECIFIED", ""} and normalize_cfa_pattern(value) not in CFA_PATTERNS:
+                    mismatches[name] = [left, right]
         if not same_metadata(left, right, workflow):
             mismatches[name] = [left, right]
     if compare_filter and _required_mismatch(
@@ -2302,6 +2314,16 @@ def _compose_tile_observers(*observers: Any) -> Callable[[Any], None] | None:
 
 
 @dataclass(frozen=True, slots=True)
+class _ChannelDestination:
+    """One registered output of a Light: its group and, for a Bayer Light,
+    the colour channel (0 R, 1 G, 2 B) debayered before the warp."""
+
+    group: str
+    channel: int | None
+    path: Path
+
+
+@dataclass(frozen=True, slots=True)
 class _LightJob:
     """One Light's fused calibrate-in-memory then register work item."""
 
@@ -2309,7 +2331,7 @@ class _LightJob:
     expression: FrameExpression
     calibrated_path: Path | None
     calibrated_metadata: Mapping[str, Any]
-    destination: Path
+    destinations: tuple[_ChannelDestination, ...]
     transform: AffineTransform
     info: FrameInfo
     source_exposure_seconds: float | None
@@ -2317,16 +2339,36 @@ class _LightJob:
     # detection threshold; ``None`` leaves the calibrated pixels untouched.
     hot_pixel_master: str | None = None
     hot_pixel_sigma: float | None = None
+    # Bayer pattern of the Light (None for mono): the calibrated mosaic is
+    # debayered into the channels the destinations ask for.
+    cfa_pattern: str | None = None
+
+    @property
+    def channel_count(self) -> int:
+        return 3 if self.cfa_pattern is not None else 1
+
+
+@dataclass(frozen=True, slots=True)
+class _RegisteredOutput:
+    group: str
+    channel: int | None
+    path: Path
+    statistics: PixelStatistics
+    sha256: str | None
+    execution: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
 class _LightJobResult:
     calibrated_statistics: PixelStatistics
     calibrated_sha256: str | None
-    registered_statistics: PixelStatistics
-    registered_sha256: str | None
-    execution: dict[str, Any]
+    registered: tuple[_RegisteredOutput, ...]
     cosmetic: dict[str, Any] | None = None
+    debayer: dict[str, Any] | None = None
+
+    @property
+    def execution(self) -> dict[str, Any]:
+        return self.registered[0].execution if self.registered else {}
 
 
 class _MasterCache:
@@ -2398,17 +2440,26 @@ def _hot_pixel_map(
 
 
 def _replace_hot_pixels(
-    image: NDArray[np.float32], rows: NDArray[np.int64], columns: NDArray[np.int64]
+    image: NDArray[np.float32],
+    rows: NDArray[np.int64],
+    columns: NDArray[np.int64],
+    *,
+    cfa: bool = False,
 ) -> None:
-    """Replace the listed pixels in place by the median of their eight neighbours."""
+    """Replace the listed pixels in place by the median of their eight neighbours.
+
+    On a Bayer mosaic the neighbours are the eight same-colour pixels two
+    steps away, so a hot pixel never takes on another colour's value.
+    """
 
     if rows.size == 0:
         return
     height, width = image.shape
+    step = 2 if cfa else 1
     neighbours = np.empty((8, rows.size), dtype=np.float32)
     index = 0
-    for dy in (-1, 0, 1):
-        for dx in (-1, 0, 1):
+    for dy in (-step, 0, step):
+        for dx in (-step, 0, step):
             if dy == 0 and dx == 0:
                 continue
             neighbours[index] = image[
@@ -2472,9 +2523,13 @@ def _process_light_job(
     cosmetic: dict[str, Any] | None = None
     if job.hot_pixel_master is not None and job.hot_pixel_sigma is not None:
         rows, columns, evidence = master_cache.hot_pixels(job.hot_pixel_master, job.hot_pixel_sigma)
-        _replace_hot_pixels(calibrated, rows, columns)
+        _replace_hot_pixels(calibrated, rows, columns, cfa=job.cfa_pattern is not None)
         cosmetic = {
-            "algorithm": "master-dark-hot-pixel-neighbour-median-v1",
+            "algorithm": (
+                "master-dark-hot-pixel-same-colour-neighbour-median-v1"
+                if job.cfa_pattern is not None
+                else "master-dark-hot-pixel-neighbour-median-v1"
+            ),
             "replacedPixels": int(rows.size),
             **evidence,
         }
@@ -2491,37 +2546,71 @@ def _process_light_job(
         calibrated_sha256 = _write_float_fits(
             calibrated, job.calibrated_path, job.calibrated_metadata, durable=durable
         )
-    memory_frame = _MemoryFrame(
-        calibrated, job.info, job.calibrated_path or job.source_path
-    )
-    execution: dict[str, Any] = {}
+    # A Bayer Light is debayered once; each colour plane is then registered
+    # like a mono Light of its own filter group.  The mosaic itself stays the
+    # materialized calibrated frame (the drizzle drops its real samples).
+    planes: NDArray[np.float32] | None = None
+    debayer: dict[str, Any] | None = None
+    if job.cfa_pattern is not None:
+        debayer_started = time.perf_counter()
+        planes = bilinear_debayer(calibrated, job.cfa_pattern)
+        debayer = {
+            "algorithm": "bilinear-same-colour-neighbours-v1",
+            "pattern": job.cfa_pattern,
+            "seconds": round(time.perf_counter() - debayer_started, 3),
+        }
+    occupied = calibrated.nbytes + (planes.nbytes if planes is not None else 0)
     # The calibrated image already occupies its share; leave the rest of the
     # worker budget to warp tiles, but always allow at least one NumPy row.
     warp_budget = max(
-        max_memory_bytes - calibrated.nbytes,
+        max_memory_bytes - occupied,
         calibrated.shape[1]
         * _registration_bytes_per_pixel(job.transform, resampler, calibrated.shape),
     )
-    registered_statistics = _register_frame(
-        memory_frame,
-        job.destination,
-        job.transform,
-        job.info,
-        max_memory_bytes=warp_budget,
-        resampler=resampler,
-        source_exposure_seconds=job.source_exposure_seconds,
-        native_threads=native_threads,
-        execution=execution,
-        durable=durable,
-    )
-    registered_sha256 = execution.pop("sha256", None)
+    registered: list[_RegisteredOutput] = []
+    for destination in job.destinations:
+        if destination.channel is None:
+            source_values = calibrated
+        else:
+            if planes is None:
+                raise CalibrationError(
+                    "CFA_CHANNEL_WITHOUT_PATTERN",
+                    "a colour channel destination needs the Light's Bayer pattern",
+                    path=str(job.source_path),
+                )
+            source_values = planes[destination.channel]
+        memory_frame = _MemoryFrame(
+            source_values, job.info, job.calibrated_path or job.source_path
+        )
+        execution: dict[str, Any] = {}
+        registered_statistics = _register_frame(
+            memory_frame,
+            destination.path,
+            job.transform,
+            job.info,
+            max_memory_bytes=warp_budget,
+            resampler=resampler,
+            source_exposure_seconds=job.source_exposure_seconds,
+            native_threads=native_threads,
+            execution=execution,
+            durable=durable,
+        )
+        registered.append(
+            _RegisteredOutput(
+                group=destination.group,
+                channel=destination.channel,
+                path=destination.path,
+                statistics=registered_statistics,
+                sha256=execution.pop("sha256", None),
+                execution=execution,
+            )
+        )
     return _LightJobResult(
         calibrated_statistics=calibrated_statistics,
         calibrated_sha256=calibrated_sha256,
-        registered_statistics=registered_statistics,
-        registered_sha256=registered_sha256,
-        execution=execution,
+        registered=tuple(registered),
         cosmetic=cosmetic,
+        debayer=debayer,
     )
 
 
@@ -2531,7 +2620,9 @@ def _fused_job_bytes(job: _LightJob, resampler: str) -> int:
         NATIVE_WARP_BYTES_PER_PIXEL,
         _registration_bytes_per_pixel(job.transform, resampler, job.info.shape),
     )
-    return height * width * FUSED_LIGHT_BYTES_PER_PIXEL + per_row
+    # A Bayer Light also holds its three debayered planes while it is warped.
+    planes = 3 * height * width * 4 if job.cfa_pattern is not None else 0
+    return height * width * FUSED_LIGHT_BYTES_PER_PIXEL + planes + per_row
 
 
 def _fused_worker_count(
@@ -3256,6 +3347,51 @@ def _run_portable_pipeline_fits(
     light_domain_references = {
         filter_name: light_info[paths[0]] for filter_name, paths in light_groups.items()
     }
+    # Output (integration) groups.  A mono filter group is its own output
+    # group; a Bayer filter group is debayered into the three colour channel
+    # groups R, G and B, each holding every Light of the filter, so the rest
+    # of the pipeline treats a colour channel exactly like a filter.
+    output_groups: dict[str, list[Path]] = {}
+    group_filter: dict[str, str] = {}
+    group_channel: dict[str, int | None] = {}
+    group_cfa_pattern: dict[str, str | None] = {}
+    light_cfa_pattern: dict[str, str | None] = {}
+    for filter_name, paths in light_groups.items():
+        pattern = normalize_cfa_pattern(
+            cfa_for_workflow(light_info[paths[0]].cfa_pattern, parameters.calibration_workflow)
+        )
+        if pattern in CFA_PATTERNS:
+            light_cfa_pattern[filter_name] = pattern
+            for channel, channel_name in enumerate(CHANNEL_NAMES):
+                if channel_name in output_groups:
+                    raise CalibrationError(
+                        "CFA_CHANNEL_GROUP_COLLISION",
+                        f"colour channel {channel_name} of Bayer filter {filter_name!r} collides with "
+                        f"filter or channel group {group_filter[channel_name]!r}; one run integrates one "
+                        "Bayer filter and no mono R/G/B filters alongside it",
+                    )
+                output_groups[channel_name] = list(paths)
+                group_filter[channel_name] = filter_name
+                group_channel[channel_name] = channel
+                group_cfa_pattern[channel_name] = pattern
+        else:
+            if pattern not in {"NONE", "UNKNOWN", "UNSPECIFIED", ""}:
+                raise CalibrationError(
+                    "CFA_PATTERN_UNSUPPORTED",
+                    f"Bayer pattern {pattern!r} of filter {filter_name!r} is not supported "
+                    f"(supported: {', '.join(sorted(CFA_PATTERNS))})",
+                )
+            light_cfa_pattern[filter_name] = None
+            if filter_name in output_groups:
+                raise CalibrationError(
+                    "CFA_CHANNEL_GROUP_COLLISION",
+                    f"filter {filter_name!r} collides with a colour channel group of Bayer filter "
+                    f"{group_filter[filter_name]!r}",
+                )
+            output_groups[filter_name] = list(paths)
+            group_filter[filter_name] = filter_name
+            group_channel[filter_name] = None
+            group_cfa_pattern[filter_name] = None
     for filter_name, paths in flat_groups.items():
         reference = flat_info[paths[0]]
         for path in paths[1:]:
@@ -3272,7 +3408,7 @@ def _run_portable_pipeline_fits(
             f"no raw Flat group or MasterFlat for Light filters: {', '.join(missing_flats)}",
         )
     tokens: dict[str, str] = {}
-    for filter_name in {*flat_groups, *supplied_flats, *light_groups}:
+    for filter_name in {*flat_groups, *supplied_flats, *light_groups, *output_groups}:
         token = _safe_token(filter_name)
         if token in tokens and tokens[token] != filter_name:
             raise CalibrationError(
@@ -3469,6 +3605,7 @@ def _run_portable_pipeline_fits(
                     "IMAGETYP": "Master Bias",
                     "OAFSTATE": OUTPUT_STATE,
                     "OAFBIAS": "MASTER",
+                    **cfa_metadata(reference_bias),
                     **_numeric_domain_metadata(reference_bias),
                 },
                 parameters=parameters.integration,
@@ -3559,6 +3696,7 @@ def _run_portable_pipeline_fits(
                         "EXPTIME": exposure,
                         "OAFSTATE": OUTPUT_STATE,
                         "OAFBIAS": "INCLUDED",
+                        **cfa_metadata(dark_reference),
                         **_numeric_domain_metadata(dark_reference),
                     },
                     parameters=parameters.integration,
@@ -3746,6 +3884,7 @@ def _run_portable_pipeline_fits(
                     "OAFNORM": "ROBUST_MEDIAN",
                     "OAFNDOM": "DIMENSIONLESS_RESPONSE",
                     "OAFNSCL": 1.0,
+                    **cfa_metadata(flat_info[paths[0]]),
                 },
                 parameters=parameters.integration,
                 durable=parameters.durable_intermediates,
@@ -3798,13 +3937,47 @@ def _run_portable_pipeline_fits(
                 "applicationNormalization": location,
             }
 
+        # Separate flat scaling factors for the colour channels of a Bayer
+        # filter: each channel is divided by the master flat normalized to its
+        # own channel median, so the flat's colour response does not tint the
+        # calibrated frame (PixInsight's "separate CFA flat scaling factors").
+        flat_pattern_scales: dict[str, tuple[float, float, float, float]] = {}
+        flat_channel_medians: dict[str, tuple[float, float, float]] = {}
+        for filter_name, pattern in light_cfa_pattern.items():
+            if pattern is None:
+                continue
+            with FitsFrame(master_flats[filter_name]) as flat_frame:
+                medians = channel_medians(flat_frame.full_values(), pattern)
+            if any(not math.isfinite(value) or value <= parameters.integration.division_floor for value in medians):
+                raise CalibrationError(
+                    "FLAT_SIGNAL_INVALID",
+                    f"the master flat of Bayer filter {filter_name!r} has a colour channel without positive signal",
+                    path=str(master_flats[filter_name]),
+                )
+            flat_channel_medians[filter_name] = medians
+            layout = CFA_PATTERNS[pattern]
+            reference_level = flat_application_scales[filter_name]
+            flat_pattern_scales[filter_name] = tuple(  # type: ignore[assignment]
+                medians[layout[position]] / reference_level for position in range(4)
+            )
+            stage_statistics[f"masterFlat:{filter_name}"]["cfaChannelMedians"] = {
+                "pattern": pattern,
+                "R": medians[0],
+                "G": medians[1],
+                "B": medians[2],
+                "separateChannelScaling": True,
+            }
+
         hardware_profile = detect_hardware()
         execution_tuning = select_execution_tuning(hardware_profile)
-        registered: dict[Path, Path] = {}
+        registered: dict[tuple[Path, str], Path] = {}
         calibrated_lights: dict[Path, Path] = {}
         registration_records: dict[str, Any] = {}
         light_jobs: list[_LightJob] = []
         calibrated_details: list[dict[str, Any]] = []
+        groups_of_filter: dict[str, list[str]] = {}
+        for group_name, source_filter in group_filter.items():
+            groups_of_filter.setdefault(source_filter, []).append(group_name)
         for index, path in enumerate(lights, start=1):
             info = light_info[path]
             filter_name = info.filter_name
@@ -3878,7 +4051,19 @@ def _run_portable_pipeline_fits(
                 if parameters.materialize_calibrated_lights
                 else None
             )
-            registered_path = registered_dir / f"{index:05d}_{stem}.fits"
+            cfa_pattern = light_cfa_pattern[filter_name]
+            destinations = tuple(
+                _ChannelDestination(
+                    group=group_name,
+                    channel=group_channel[group_name],
+                    path=(
+                        registered_dir / f"{index:05d}_{stem}.fits"
+                        if group_channel[group_name] is None
+                        else registered_dir / f"{index:05d}_{stem}_{_safe_token(group_name)}.fits"
+                    ),
+                )
+                for group_name in groups_of_filter[filter_name]
+            )
             expression = FrameExpression(
                 source_path=str(path),
                 subtract_path=str(subtract_path),
@@ -3892,6 +4077,7 @@ def _run_portable_pipeline_fits(
                     / float(info.exposure_seconds)
                     * light_domain_scale
                 ),
+                pattern_scales=flat_pattern_scales.get(filter_name, ()),
             )
             calibrated_metadata = {
                 "IMAGETYP": "Calibrated Light",
@@ -3903,6 +4089,7 @@ def _run_portable_pipeline_fits(
                 / float(info.exposure_seconds),
                 "OAFSTATE": OUTPUT_STATE,
                 "OAFBIAS": bias_mode,
+                **({"BAYERPAT": cfa_pattern, "OAFCFA": cfa_pattern} if cfa_pattern else {}),
                 **_numeric_domain_metadata(light_output_domain),
             }
             calibrated_details.append(
@@ -3940,6 +4127,15 @@ def _run_portable_pipeline_fits(
                     "flatApplicationNormalization": flat_application_scales[
                         filter_name
                     ],
+                    **(
+                        {
+                            "cfaPattern": cfa_pattern,
+                            "cfaFlatChannelMedians": list(flat_channel_medians[filter_name]),
+                            "cfaFlatPatternScales": list(flat_pattern_scales[filter_name]),
+                        }
+                        if cfa_pattern
+                        else {}
+                    ),
                     "exposureNormalization": {
                         "sourceSeconds": info.exposure_seconds,
                         "referenceSeconds": reference_exposures[filter_name],
@@ -3954,7 +4150,7 @@ def _run_portable_pipeline_fits(
                     expression=expression,
                     calibrated_path=calibrated_path,
                     calibrated_metadata=calibrated_metadata,
-                    destination=registered_path,
+                    destinations=destinations,
                     transform=resolved_transforms[path],
                     info=replace(
                         info,
@@ -3970,6 +4166,7 @@ def _run_portable_pipeline_fits(
                         else None
                     ),
                     hot_pixel_sigma=parameters.cosmetic_hot_pixel_sigma,
+                    cfa_pattern=cfa_pattern,
                 )
             )
 
@@ -3996,7 +4193,6 @@ def _run_portable_pipeline_fits(
             resampling = _registration_provenance(
                 transform, job.info.shape, parameters.registration_resampler
             )
-            registered[path] = job.destination
             if job.calibrated_path is not None:
                 calibrated_lights[path] = job.calibrated_path
                 artifacts.append(
@@ -4009,22 +4205,30 @@ def _run_portable_pipeline_fits(
                         sha256=result.calibrated_sha256,
                     )
                 )
-            artifacts.append(
-                _artifact_record(
-                    staging,
-                    job.destination,
-                    "REGISTERED_LIGHT",
-                    statistics=result.registered_statistics,
-                    details={
-                        "source": str(display_path(path)),
-                        "transformInputToOutput": transform.serializable(),
-                        **resampling,
-                        "warpBackend": result.execution.get("warpBackend"),
-                        "warpKernel": result.execution.get("warpKernel"),
-                    },
-                    sha256=result.registered_sha256,
+            for registered_output in result.registered:
+                registered[(path, registered_output.group)] = registered_output.path
+                artifacts.append(
+                    _artifact_record(
+                        staging,
+                        registered_output.path,
+                        "REGISTERED_LIGHT",
+                        statistics=registered_output.statistics,
+                        details={
+                            "source": str(display_path(path)),
+                            "group": registered_output.group,
+                            **(
+                                {"cfaChannel": CHANNEL_NAMES[registered_output.channel], "cfaPattern": job.cfa_pattern}
+                                if registered_output.channel is not None
+                                else {}
+                            ),
+                            "transformInputToOutput": transform.serializable(),
+                            **resampling,
+                            "warpBackend": registered_output.execution.get("warpBackend"),
+                            "warpKernel": registered_output.execution.get("warpKernel"),
+                        },
+                        sha256=registered_output.sha256,
+                    )
                 )
-            )
             registration_records[str(display_path(path))] = {
                 "transformInputToOutput": transform.serializable(),
                 "identity": transform.is_identity,
@@ -4034,7 +4238,16 @@ def _run_portable_pipeline_fits(
                     "materialized": job.calibrated_path is not None,
                     "statistics": result.calibrated_statistics.serializable(),
                     "cosmetic": result.cosmetic or {"algorithm": None, "replacedPixels": 0},
+                    **({"debayer": result.debayer} if result.debayer else {}),
                     **details,
+                },
+                "outputs": {
+                    registered_output.group: {
+                        "path": str(registered_output.path.relative_to(staging)),
+                        "channel": CHANNEL_NAMES[registered_output.channel] if registered_output.channel is not None else None,
+                        "statistics": registered_output.statistics.serializable(),
+                    }
+                    for registered_output in result.registered
                 },
                 "execution": dict(result.execution),
             }
@@ -4095,17 +4308,32 @@ def _run_portable_pipeline_fits(
             "autoCrop": round(time.perf_counter() - crop_started, 3),
             "groups": {},
         }
-        for filter_name, paths in sorted(light_groups.items()):
+        for filter_name, paths in sorted(output_groups.items()):
+            # ``filter_name`` names the output group (a filter, or a colour
+            # channel of a Bayer filter); ``source_filter`` is the Lights' own
+            # filter, which owns the flats, exposures and numeric domain.
+            source_filter = group_filter[filter_name]
+            cfa_channel = group_channel[filter_name]
+            cfa_pattern = group_cfa_pattern[filter_name]
+            group_cfa_metadata = (
+                {
+                    "OAFCFA": cfa_pattern,
+                    "OAFCFACH": CHANNEL_NAMES[cfa_channel],
+                    "OAFCFAF": source_filter,
+                }
+                if cfa_channel is not None
+                else {}
+            )
             group_timing: dict[str, float] = {}
             group_started = time.perf_counter()
             exposures = {
                 info.exposure_seconds for path, info in light_info.items() if path in paths
             }
-            reference_exposure = reference_exposures[filter_name]
+            reference_exposure = reference_exposures[source_filter]
             total_exposure = sum(
                 float(light_info[path].exposure_seconds) for path in paths
             )
-            registered_paths = [registered[path] for path in paths]
+            registered_paths = [registered[(path, filter_name)] for path in paths]
             reference_index, reference_selection = _normalization_reference_index(
                 paths, resolved_stellar_scale_hints, resolved_quality_weights
             )
@@ -4311,8 +4539,9 @@ def _run_portable_pipeline_fits(
                     "EXPTIME": reference_exposure,
                     "OAFINTTM": total_exposure,
                     "OAFNORM": normalization_method,
+                    **group_cfa_metadata,
                     **_numeric_domain_metadata(
-                        light_domain_references[filter_name]
+                        light_domain_references[source_filter]
                     ),
                 },
                 parameters=parameters.integration,
@@ -4338,6 +4567,8 @@ def _run_portable_pipeline_fits(
             if mask_recorder is not None:
                 drizzle_groups[filter_name] = DrizzleGroupInputs(
                     filter_name=filter_name,
+                    cfa_pattern=cfa_pattern,
+                    channel=cfa_channel,
                     frames=tuple(
                         DrizzleFrame(
                             calibrated_path=str(calibrated_lights[path]),
@@ -4375,7 +4606,8 @@ def _run_portable_pipeline_fits(
                         "OAFSTATE": OUTPUT_STATE,
                         "OAFWCS": "UNSOLVED",
                         "OAFNORM": normalization_method,
-                        **_numeric_domain_metadata(light_domain_references[filter_name]),
+                        **group_cfa_metadata,
+                        **_numeric_domain_metadata(light_domain_references[source_filter]),
                     },
                 )
             fallback_reason = str(integration.execution.get("fallbackReason") or "")
@@ -4424,8 +4656,9 @@ def _run_portable_pipeline_fits(
                     "OAFCROP": "AUTO" if parameters.auto_crop else "NONE",
                     "OAFNFRM": len(paths),
                     "OAFNORM": normalization_method,
+                    **group_cfa_metadata,
                     **_numeric_domain_metadata(
-                        light_domain_references[filter_name]
+                        light_domain_references[source_filter]
                     ),
                 },
                 max_memory_bytes=parameters.integration.max_memory_bytes,
@@ -4545,8 +4778,11 @@ def _run_portable_pipeline_fits(
                     "method": "LINEAR_REFERENCE_EXPOSURE",
                 },
                 "crop": [top, left, bottom, right],
-                "groupCrop": list(group_crops.get(filter_name, crop)),
-                "cropSharedAcrossFilters": len(light_groups) > 1,
+                "groupCrop": list(group_crops.get(source_filter, crop)),
+                "cropSharedAcrossFilters": len(output_groups) > 1,
+                "sourceFilter": source_filter,
+                "cfaChannel": CHANNEL_NAMES[cfa_channel] if cfa_channel is not None else None,
+                "cfaPattern": cfa_pattern,
                 "masterStatistics": master_stats.serializable(),
                 "mapStatistics": map_statistics,
             }
@@ -4677,8 +4913,8 @@ def _run_portable_pipeline_fits(
             ),
             preview_paths=tuple(str(output / path.relative_to(staging)) for path in previews),
             drizzle_groups={
-                name: DrizzleGroupInputs(
-                    filter_name=group.filter_name,
+                name: replace(
+                    group,
                     frames=tuple(
                         replace(
                             frame,
@@ -4688,8 +4924,6 @@ def _run_portable_pipeline_fits(
                         )
                         for frame in group.frames
                     ),
-                    reference_shape=group.reference_shape,
-                    metadata=group.metadata,
                 )
                 for name, group in drizzle_groups.items()
             },

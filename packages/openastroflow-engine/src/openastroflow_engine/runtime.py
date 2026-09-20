@@ -9,6 +9,7 @@ runtime probes.  Unsupported recipe semantics fail before any pixel work.
 from __future__ import annotations
 
 from lightframeqc.content_hash import file_sha256
+from lightframeqc.cfa import is_cfa_pattern
 from .calibration_policy import MONO_STANDARD
 
 from dataclasses import replace
@@ -210,10 +211,10 @@ def validate_e2e_inventory(inventory: ProjectInventory, recipe: Recipe) -> None:
         digest = _file_sha256(asset.path)
         confirmed = raw_overrides.get(digest)
         if asset.cfa_explicit:
-            if observed != "NONE":
+            if observed != "NONE" and not is_cfa_pattern(observed):
                 raise RuntimeConfigurationError(
-                    "CFA_PIXEL_PIPELINE_UNSUPPORTED",
-                    f"explicit CFA/Bayer metadata on raw {asset.role.value} requires a phase-preserving pipeline that is not implemented",
+                    "CFA_PATTERN_UNSUPPORTED",
+                    f"CFA pattern {observed!r} on raw {asset.role.value} is not supported (RGGB, BGGR, GRBG, GBRG are)",
                 )
             if confirmed is not None and confirmed != observed:
                 raise RuntimeConfigurationError(
@@ -228,10 +229,10 @@ def validate_e2e_inventory(inventory: ProjectInventory, recipe: Recipe) -> None:
                     "CFA_CONFIRMATION_REQUIRED",
                     f"raw {asset.role.value} CFA metadata is absent; confirm mono/CFA with a hash-bound rawFrameMetadataOverrides entry",
                 )
-            if confirmed != "NONE":
+            if confirmed != "NONE" and not is_cfa_pattern(confirmed):
                 raise RuntimeConfigurationError(
-                    "CFA_PIXEL_PIPELINE_UNSUPPORTED",
-                    f"confirmed CFA/Bayer raw {asset.role.value} is not supported by the v1 pixel pipeline",
+                    "CFA_PATTERN_UNSUPPORTED",
+                    f"confirmed CFA pattern {confirmed!r} on raw {asset.role.value} is not supported (RGGB, BGGR, GRBG, GBRG are)",
                 )
     if not (
         _ready_assets(inventory, AssetRole.FLAT)

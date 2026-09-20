@@ -198,7 +198,20 @@ def test_explicit_cfa_light_cannot_be_overridden_to_mono(
     )
     with pytest.raises(RuntimeConfigurationError) as blocked:
         build_e2e_request(inventory, recipe, tmp_path / "explicit-cfa")
-    assert blocked.value.code == "CFA_PIXEL_PIPELINE_UNSUPPORTED"
+    assert blocked.value.code == "RAW_CFA_OVERRIDE_CONFLICT"
+
+
+def test_unsupported_cfa_pattern_is_rejected_before_execution(
+    nina_project: Path, tmp_path: Path
+) -> None:
+    light = next((nina_project / "LIGHT").glob("*.fits"))
+    fits.setval(light, "BAYERPAT", value="CYGM")
+    inventory = inventory_project(
+        [nina_project / role for role in ("LIGHT", "FLAT", "DARK", "BIAS")]
+    )
+    with pytest.raises(RuntimeConfigurationError) as blocked:
+        build_e2e_request(inventory, Recipe.from_dict({}), tmp_path / "cygm")
+    assert blocked.value.code == "CFA_PATTERN_UNSUPPORTED"
 
 
 def test_drizzle_capability_mismatch_blocks_contract(nina_project: Path) -> None:

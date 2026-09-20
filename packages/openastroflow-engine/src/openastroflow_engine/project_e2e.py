@@ -21,6 +21,7 @@ solution.  A failed final solve publishes only ``<output>.unsolved`` evidence.
 
 from __future__ import annotations
 
+from lightframeqc.cfa import CHANNEL_NAMES, is_cfa_pattern, normalize_pattern as normalize_cfa_pattern
 from .calibration_policy import MONO_STANDARD, workflow_receipt
 
 from contextlib import ExitStack
@@ -113,6 +114,11 @@ class SciencePanel:
     filter_name: str
     filter_key: str
     light_files: tuple[str, ...]
+    # A colour channel panel of a Bayer (OSC) Light set: the Lights' own
+    # filter and the channel the panel's master carries.  None for mono.
+    source_filter: str | None = None
+    cfa_channel: str | None = None
+    cfa_pattern: str | None = None
 
     @property
     def panel_id(self) -> str:
@@ -126,6 +132,15 @@ class SciencePanel:
             "filter": self.filter_name,
             "filterKey": self.filter_key,
             "lightFiles": list(self.light_files),
+            **(
+                {
+                    "sourceFilter": self.source_filter,
+                    "cfaChannel": self.cfa_channel,
+                    "cfaPattern": self.cfa_pattern,
+                }
+                if self.cfa_channel is not None
+                else {}
+            ),
         }
 
 
@@ -165,7 +180,11 @@ class ProjectLayout:
                 target_key=target_key,
                 filter_name="+".join(panel.filter_name for panel in panels),
                 filter_key="+".join(panel.filter_key for panel in panels),
-                light_files=tuple(path for panel in panels for path in panel.light_files),
+                # The colour channel panels of a Bayer Light set share their
+                # Lights; the run receives each file once.
+                light_files=tuple(
+                    dict.fromkeys(path for panel in panels for path in panel.light_files)
+                ),
             )
             groups.append((descriptor, panels))
         return tuple(groups)
@@ -403,17 +422,38 @@ def classify_project_layout(inventory: ProjectInventory) -> ProjectLayout:
             )
         target, target_key = _science_target(asset)
         filter_name, filter_key = _science_filter(asset)
-        group = grouped.setdefault(
-            (target_key, filter_key),
-            {
-                "target": target,
-                "targetKey": target_key,
-                "filter": filter_name,
-                "filterKey": filter_key,
-                "lights": [],
-            },
-        )
-        group["lights"].append(asset.path)
+        pattern = normalize_cfa_pattern(asset.cfa_pattern)
+        # A Bayer (OSC) Light yields the three colour channel panels R, G and
+        # B of its target; the pixel pipeline debayers it into those groups.
+        if is_cfa_pattern(pattern):
+            expansions = [
+                (channel, _normalized_token(channel), filter_name, channel, pattern)
+                for channel in CHANNEL_NAMES
+            ]
+        else:
+            expansions = [(filter_name, filter_key, None, None, None)]
+        for panel_filter, panel_key, source_filter, channel, panel_pattern in expansions:
+            group = grouped.setdefault(
+                (target_key, panel_key),
+                {
+                    "target": target,
+                    "targetKey": target_key,
+                    "filter": panel_filter,
+                    "filterKey": panel_key,
+                    "sourceFilter": source_filter,
+                    "cfaChannel": channel,
+                    "cfaPattern": panel_pattern,
+                    "lights": [],
+                },
+            )
+            if (group["cfaChannel"], group["sourceFilter"], group["cfaPattern"]) != (channel, source_filter, panel_pattern):
+                raise ProjectE2EError(
+                    "CFA_CHANNEL_FILTER_COLLISION",
+                    f"target {target} mixes a Bayer Light set with mono {panel_filter} Lights or a second "
+                    "Bayer filter; one target takes one Bayer filter and no mono R/G/B filters beside it",
+                    path=asset.path,
+                )
+            group["lights"].append(asset.path)
     if not grouped:
         raise ProjectE2EError("NO_LIGHTS", "project inventory contains no READY Lights")
     panels = tuple(
@@ -423,6 +463,9 @@ def classify_project_layout(inventory: ProjectInventory) -> ProjectLayout:
             filter_name=value["filter"],
             filter_key=value["filterKey"],
             light_files=tuple(sorted(value["lights"], key=str.casefold)),
+            source_filter=value["sourceFilter"],
+            cfa_channel=value["cfaChannel"],
+            cfa_pattern=value["cfaPattern"],
         )
         for _, value in sorted(grouped.items())
     )

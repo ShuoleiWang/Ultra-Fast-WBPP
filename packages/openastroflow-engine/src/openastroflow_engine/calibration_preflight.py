@@ -6,6 +6,7 @@ It cannot establish that an old Flat still describes the current optical train.
 
 from __future__ import annotations
 
+from lightframeqc.cfa import is_cfa_pattern
 from .calibration_policy import MONO_STANDARD, workflow_receipt, resolve_dark_bias, bias_from_header, can_omit_bias, conflicting_profile_fields
 
 from dataclasses import replace
@@ -107,8 +108,8 @@ def inspect_calibration(paths: list[str], recipe: Recipe | None = None) -> dict[
         cfa = confirmations.get(asset.path, asset.cfa_pattern.strip().upper())
         if not asset.cfa_explicit and asset.path not in confirmations and workflow != MONO_STANDARD:
             issue("CFA_CONFIRMATION_REQUIRED", "Missing raw CFA metadata requires an explicit mono/CFA confirmation.", affected=(asset,))
-        elif cfa not in ({"NONE", "UNKNOWN", "UNSPECIFIED", ""} if workflow == MONO_STANDARD else {"NONE"}):
-            issue("CFA_PIXEL_PIPELINE_UNSUPPORTED", "Bayer/CFA raw processing is not supported by this pixel pipeline.", affected=(asset,))
+        elif cfa not in ({"NONE", "UNKNOWN", "UNSPECIFIED", ""} if workflow == MONO_STANDARD else {"NONE"}) and not is_cfa_pattern(cfa):
+            issue("CFA_PATTERN_UNSUPPORTED", "This Bayer pattern is not supported; RGGB, BGGR, GRBG and GBRG are.", affected=(asset,))
 
     effective_inventory = replace(inventory, assets=assets)
     # Overrides have already been applied and verified above.

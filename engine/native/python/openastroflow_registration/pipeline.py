@@ -14,7 +14,7 @@ from pathlib import Path
 import math
 import threading
 import time
-from typing import Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import astroalign
 from astropy.io import fits
@@ -29,6 +29,7 @@ from skimage.transform import (
     ProjectiveTransform,
     SimilarityTransform,
 )
+from lightframeqc.cfa import is_cfa_pattern, luminance as cfa_luminance, normalize_pattern as normalize_cfa_pattern
 from lightframeqc.xisf import XISF
 
 from lightframeqc.parallel import FrameRunner
@@ -1627,8 +1628,24 @@ def run_registration(
     )
 
 
+_CFA_HEADER_KEYS = ("BAYERPAT", "BAYERPATN", "CFAPAT", "CFAPATTERN")
+
+
+def _cfa_luminance_if_mosaic(data: FloatImage, pattern: Any) -> FloatImage:
+    """A Bayer mosaic is measured on its debayered luminance, whose star
+    profiles are smooth at the mosaic's own pixel coordinates."""
+
+    if is_cfa_pattern(pattern):
+        return np.ascontiguousarray(cfa_luminance(data, normalize_cfa_pattern(pattern)), dtype=np.float32)
+    return data
+
+
 def read_full_image(path: str) -> FloatImage:
-    """Decode the first mono FITS/XISF image as native contiguous Float32."""
+    """Decode the first mono FITS/XISF image as native contiguous Float32.
+
+    A Bayer mosaic (``BAYERPAT`` or the PixInsight CFA property) comes back
+    as its full-resolution luminance so centroids are unbiased.
+    """
 
     source = Path(path).expanduser().resolve(strict=True)
     folded = source.name.casefold()
@@ -1652,11 +1669,26 @@ def read_full_image(path: str) -> FloatImage:
             bzero = float(hdu.header.get("BZERO", 0.0) or 0.0)
             if bscale != 1.0 or bzero != 0.0:
                 data = data * np.float32(bscale) + np.float32(bzero)
-            return np.ascontiguousarray(data, dtype=np.float32)
+            pattern = next((hdu.header.get(key) for key in _CFA_HEADER_KEYS if hdu.header.get(key)), None)
+            return _cfa_luminance_if_mosaic(np.ascontiguousarray(data, dtype=np.float32), pattern)
     if folded.endswith(".xisf"):
-        data = np.asarray(XISF(str(source)).read_image(0, data_format="channels_last"))
+        document = XISF(str(source))
+        data = np.asarray(document.read_image(0, data_format="channels_last"))
         data = np.squeeze(data)
         if data.ndim != 2:
             raise ValueError(f"expected mono image, got {data.shape}")
-        return np.ascontiguousarray(data, dtype=np.float32)
+        pattern = None
+        images = document.get_images_metadata()
+        if images:
+            keywords = images[0].get("FITSKeywords", {}) if isinstance(images[0], dict) else {}
+            for key in _CFA_HEADER_KEYS:
+                entries = keywords.get(key) if isinstance(keywords, dict) else None
+                if entries:
+                    pattern = entries[0].get("value") if isinstance(entries[0], dict) else entries[0]
+                    break
+            if pattern is None:
+                properties = images[0].get("XISFProperties", {}) if isinstance(images[0], dict) else {}
+                entry = properties.get("PCL:CFASourcePattern") if isinstance(properties, dict) else None
+                pattern = entry.get("value") if isinstance(entry, dict) else entry
+        return _cfa_luminance_if_mosaic(np.ascontiguousarray(data, dtype=np.float32), pattern)
     raise ValueError(f"unsupported image format: {source}")

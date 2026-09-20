@@ -468,10 +468,10 @@ describe("native product workflow", () => {
     expect(native.cancelRun).toHaveBeenCalledWith("run-native-1"); expect(await screen.findByRole("heading", { name: "运行已安全取消" })).toBeInTheDocument(); expect(screen.queryByText(/最终门禁 · WCS 已解算/)).not.toBeInTheDocument();
   });
 
-  it("blocks CFA/OSC before recipe execution", async () => {
+  it("admits Bayer/OSC Lights and explains the colour channel processing", async () => {
     native.cfa = true; render(<App />); await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ })); await userEvent.click(await screen.findByRole("button", { name: /先看筛片结果（1 张 Light/ }));
-    expect(screen.getByText(/当前版本不处理 CFA/)).toBeInTheDocument(); expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
-    expect(screen.getByText("当前不支持 CFA / OSC。")).toBeInTheDocument();
+    expect(screen.getByText("彩色相机（Bayer）亮场")).toBeInTheDocument(); expect(screen.getByText(/RGGB Bayer 图案/)).toBeInTheDocument();
+    expect(screen.queryByText(/无法识别的 CFA 图案/)).not.toBeInTheDocument();
   });
 
   it("marks the noninteractive toolbar subtree as draggable without capturing language controls", () => {

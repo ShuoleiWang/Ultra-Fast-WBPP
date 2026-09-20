@@ -288,6 +288,8 @@ progress::-webkit-progress-value { background: var(--accent); }
 .callout { display: flex; gap: 10px; padding: 10px 12px; border-radius: var(--radius-card); background: var(--warn-bg); font-size: 12px; }
 .callout.stop { background: var(--stop-bg); }
 .callout.ok { background: var(--ok-bg); }
+.callout.info { background: var(--control); }
+.callout.info .symbol { background: var(--accent); }
 .callout .symbol { width: 18px; height: 18px; border-radius: 50%; background: var(--warn); color: #fff; font-weight: 700; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 18px; }
 .callout.stop .symbol { background: var(--stop); }
 .callout strong { display: block; margin-bottom: 2px; }

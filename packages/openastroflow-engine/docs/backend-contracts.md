@@ -32,9 +32,8 @@ inventory
 
 The mono FITS chain above is connected to `run_e2e()` and the public `run`
 command. Plans now report these stages as `READY` or `BLOCKED` from real probes;
-they are never labeled contract-only. XISF pixel execution, prebuilt calibration
-masters, CFA Drizzle, RGB combination, and mosaic execution remain explicit
-fail-closed gaps in this path.
+they are never labeled contract-only. Bayer Lights run through the same chain as
+three colour channel groups (debayered, or Bayer-drizzled from the mosaic).
 
 ## Adding a Windows backend
 

@@ -10,6 +10,7 @@ from astropy.coordinates import Angle
 import astropy.units as u
 
 from .models import FrameMetadata, FrameRole
+from .cfa import normalize_pattern as normalize_cfa_pattern
 
 
 _FILTER_ALIASES = {
@@ -185,15 +186,7 @@ def _normalize_role(metadata: FrameMetadata) -> None:
 
 
 def _normalize_cfa_pattern(value: Any | None) -> str:
-    text = _clean_text(value)
-    if text is None:
-        return "UNKNOWN"
-    compact = re.sub(r"[^A-Z0-9]+", "", text.upper())
-    if compact in {"", "UNKNOWN", "AUTO"}:
-        return "UNKNOWN"
-    if compact in {"NONE", "NOCFA", "MONO", "FALSE", "0"}:
-        return "NONE"
-    return compact
+    return normalize_cfa_pattern(_clean_text(value))
 
 
 def _positive_binning(value: Any | None) -> int | None:
