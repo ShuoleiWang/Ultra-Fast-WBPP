@@ -61,7 +61,7 @@ The 1× channel masters are photometrically the mono master times the channel
 gain; bilinear debayering widens stars by 5 % (G) to 10 % (R, B) and the
 apertures lose 1–3 % accordingly. The 2× Bayer drizzle recovers the sensor's
 resolution in every channel (3 % *sharper* than the Lanczos-3 mono master, as
-the mono drizzle is) with exact photometry. The project run took 110 s (1×)
-and 156 s (2× drizzle) on the M3 Pro. Real one-shot-colour data has not been
+the mono drizzle is) with exact photometry. The project run takes 79 s (1×,
+with the native debayer kernel) and 127 s (2× Bayer drizzle) on the M3 Pro. Real one-shot-colour data has not been
 processed yet; the synthetic set exercises every code path but not a real
 colour filter array's crosstalk or a real OSC flat.

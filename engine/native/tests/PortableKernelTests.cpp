@@ -1093,6 +1093,62 @@ void TestDrizzleBandDropsExactAreasAndIsBandAndThreadInvariant()
                                          "drizzle: channel must be 0, 1, 2 or 255" );
 }
 
+void TestDebayerBilinearMatchesTheReferenceRules()
+{
+   // A 4x5 RGGB mosaic with one missing (NaN) green sample.
+   const std::uint32_t width = 5, height = 4;
+   std::vector<float> mosaic( width*height );
+   for ( std::uint32_t y = 0; y < height; ++y )
+      for ( std::uint32_t x = 0; x < width; ++x )
+         mosaic[y*width + x] = static_cast<float>( 10*y + x );
+   mosaic[1*width + 2] = Nan; // (1,2) is green in RGGB (row odd, column even)
+   DebayerRequest request;
+   request.mosaic = mosaic;
+   request.width = width;
+   request.height = height;
+   const std::uint8_t pattern[4] = { 0, 1, 1, 2 };
+   std::copy( pattern, pattern + 4, request.pattern );
+   std::vector<float> planes( 3*width*height );
+   request.planes = planes;
+   request.threads = 1;
+   DebayerBilinear( request );
+   auto plane = [&]( int channel, std::uint32_t y, std::uint32_t x ) { return planes[channel*width*height + y*width + x]; };
+   // Known samples are copied.
+   Require( plane( 0, 0, 0 ) == 0.0F && plane( 1, 0, 1 ) == 1.0F && plane( 2, 1, 1 ) == 11.0F,
+            "debayer: known samples are copied" );
+   // Red at (0,1): left/right red neighbours (0,0) and (0,2) -> (0 + 2)/2.
+   Require( plane( 0, 0, 1 ) == 1.0F, "debayer: row neighbours interpolate" );
+   // Red at (1,0): up/down red neighbours (0,0) and (2,0) -> (0 + 20)/2.
+   Require( plane( 0, 1, 0 ) == 10.0F, "debayer: column neighbours interpolate" );
+   // Red at (1,1): no 4-neighbour is red; diagonals (0,0),(0,2),(2,0),(2,2) -> 11.
+   Require( plane( 0, 1, 1 ) == 11.0F, "debayer: diagonal neighbours interpolate" );
+   // Green at (1,1) (a blue position): neighbours (1,0) green, (1,2) green but NaN,
+   // (0,1) green, (2,1) green -> (10 + 1 + 21)/3 = 32/3 rounded to Float32.
+   Require( plane( 1, 1, 1 ) == static_cast<float>( (10.0 + 0.0 + (1.0 + 21.0))/3.0 ),
+            "debayer: a NaN sample is left out of the mean" );
+   // The NaN green sample's own pixel has no green 4-neighbour (its
+   // neighbours are red and blue positions) and takes its green diagonals
+   // (0,1), (0,3), (2,1), (2,3) -> (1 + 3 + 21 + 23)/4.
+   Require( plane( 1, 1, 2 ) == 12.0F, "debayer: a missing checkerboard sample is filled from its diagonals" );
+   // Edge clamping: blue at (0,0) has no blue 4-neighbour (clamped up/left are
+   // itself); its clamped diagonals are (0,1) [row neighbour], (1,1) and (1,1)
+   // -> mean of the known blue ones = (11 + 11)/2 with (0,1) not blue.
+   Require( plane( 2, 0, 0 ) == 11.0F, "debayer: edge diagonals clamp like NumPy's edge padding" );
+   for ( std::uint32_t threads : { 2U, 3U, 8U } )
+   {
+      std::vector<float> threaded( planes.size() );
+      request.planes = threaded;
+      request.threads = threads;
+      DebayerBilinear( request );
+      for ( std::size_t i = 0; i < planes.size(); ++i )
+         Require( SameOrBothNan( threaded[i], planes[i] ), "debayer: thread-invariant" );
+   }
+   request.planes = planes;
+   request.pattern[0] = 3;
+   RequireThrows<std::invalid_argument>( [&]() { DebayerBilinear( request ); },
+                                         "debayer: pattern channels must be 0..2" );
+}
+
 // Dynamic chunking: results of every kernel must not depend on how the
 // range is split among threads. Row/pixel counts that are not multiples
 // of the chunk grains exercise the last, partial chunk on several threads.
@@ -1201,6 +1257,7 @@ int main()
       TestRadonPeaksFindTheDyadicLineAtEveryLevel();
       TestCAbiRoundTrip();
       TestDrizzleBandDropsExactAreasAndIsBandAndThreadInvariant();
+      TestDebayerBilinearMatchesTheReferenceRules();
       TestDynamicChunkingIsThreadAndGrainInvariant();
       std::cout << "OpenAstroFlowPortableKernelTests passed\n";
       return 0;

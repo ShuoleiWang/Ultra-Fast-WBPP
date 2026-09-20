@@ -1072,6 +1072,40 @@ extern "C" int oaf_native_cpu_drizzle_v1(
       "unknown native drizzle failure" );
 }
 
+extern "C" int oaf_native_cpu_debayer_bilinear_v1(
+   const OafNativeDebayerRequestV1* request,
+   char* error_message,
+   size_t error_message_capacity )
+{
+   if ( request == nullptr )
+   {
+      CopyError( error_message, error_message_capacity, "request is required" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   if ( request->struct_size != sizeof( OafNativeDebayerRequestV1 )
+     || request->mosaic == nullptr || request->planes == nullptr )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "debayer C ABI structure version or input buffer is invalid" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   return GuardedKernelCall(
+      [&]()
+      {
+         using namespace openastroflow::native;
+         DebayerRequest native;
+         native.mosaic = std::span<const float>( request->mosaic, request->mosaic_count );
+         native.width = request->width;
+         native.height = request->height;
+         std::copy( request->pattern, request->pattern + 4, native.pattern );
+         native.planes = std::span<float>( request->planes, request->plane_count );
+         native.threads = request->threads;
+         DebayerBilinear( native );
+      },
+      error_message, error_message_capacity,
+      "unknown native debayer failure" );
+}
+
 extern "C" uint32_t oaf_native_default_kernel_threads_v1(void)
 {
    return openastroflow::native::DefaultKernelThreads();

@@ -24,6 +24,7 @@ from __future__ import annotations
 from lightframeqc.cfa import CHANNEL_NAMES, is_cfa_pattern, normalize_pattern as normalize_cfa_pattern
 from .calibration_policy import MONO_STANDARD, workflow_receipt
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -497,15 +498,27 @@ def _write_json(path: Path, value: Mapping[str, Any]) -> None:
         os.fsync(stream.fileno())
 
 
-def _artifact(path: Path, root: Path, kind: str) -> dict[str, Any]:
+def _artifact(path: Path, root: Path, kind: str, *, digests: Mapping[Path, str] | None = None) -> dict[str, Any]:
     info = path.stat()
+    digest = digests.get(path) if digests is not None else None
     return {
         "path": path.relative_to(root).as_posix(),
         "relativePath": path.relative_to(root).as_posix(),
         "kind": kind,
-        "sha256": _sha256(path),
+        "sha256": digest if digest is not None else _sha256(path),
         "sizeBytes": info.st_size,
     }
+
+
+def _sha256_many(paths: Sequence[Path], *, workers: int = 4) -> dict[Path, str]:
+    """Digest independent files concurrently; hashing releases the GIL, so the
+    final products (a gigabyte-scale RGB cube beside the masters) overlap."""
+
+    unique = list(dict.fromkeys(paths))
+    if len(unique) <= 1 or workers <= 1:
+        return {path: _sha256(path) for path in unique}
+    with ThreadPoolExecutor(max_workers=min(workers, len(unique)), thread_name_prefix="oaf-digest") as pool:
+        return dict(zip(unique, pool.map(_sha256, unique), strict=True))
 
 
 def _screening_record(receipt_path: Path, staging: Path, target: str) -> dict[str, Any] | None:
@@ -1890,8 +1903,19 @@ def run_project_e2e(
             },
         )
         final_artifacts = []
+        final_digests = _sha256_many(
+            [
+                *(path for _key, path in sorted(mono_paths.items())),
+                *(
+                    (color_paths["linearRgb"], color_paths["previewTiff"], color_paths["previewPng"])
+                    if color_result is not None
+                    else ()
+                ),
+                *preview_paths,
+            ]
+        )
         for key, path in sorted(mono_paths.items()):
-            artifact = _artifact(path, staging, "SOLVED_MONO_FITS")
+            artifact = _artifact(path, staging, "SOLVED_MONO_FITS", digests=final_digests)
             artifact["filter"] = final_sources[key][0]
             artifact["astrometry"] = _astrometry_gui_evidence(
                 path, output_quality[key]
@@ -1916,7 +1940,7 @@ def run_project_e2e(
                 (color_paths["previewTiff"], "RGB_PREVIEW_TIFF_16"),
                 (color_paths["previewPng"], "RGB_PREVIEW_PNG_16"),
             ):
-                final_artifacts.append(_artifact(path, staging, kind))
+                final_artifacts.append(_artifact(path, staging, kind, digests=final_digests))
                 product_paths.append(path)
             rgb_artifact = next(
                 item for item in final_artifacts if item["kind"] == "LINEAR_RGB_FITS"
@@ -1937,7 +1961,7 @@ def run_project_e2e(
                 "propagatedReferenceWcsVerified": True,
             }
         for path in preview_paths:
-            final_artifacts.append(_artifact(path, staging, "MONO_PREVIEW_PNG"))
+            final_artifacts.append(_artifact(path, staging, "MONO_PREVIEW_PNG", digests=final_digests))
 
         code = "PROJECT_COLOR_SUCCEEDED" if color_result is not None else "PROJECT_MONO_SUCCEEDED"
         receipt_core = {

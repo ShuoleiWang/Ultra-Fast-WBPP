@@ -16,7 +16,7 @@ becomes a smooth image whose star shapes are those of the sensor.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -182,6 +182,22 @@ def _fill_plane(
 
 DEBAYER_BAND_ROWS = 256
 
+# Optional accelerated implementation with the same values (the engine's
+# native kernel registers itself here); ``(mosaic float32, layout) -> planes``.
+DebayerAccelerator = Callable[[NDArray[np.float32], tuple[int, int, int, int]], NDArray[np.float32]]
+_DEBAYER_ACCELERATOR: DebayerAccelerator | None = None
+
+
+def set_debayer_accelerator(accelerator: DebayerAccelerator | None) -> None:
+    """Install (or remove) a value-identical accelerated debayer."""
+
+    global _DEBAYER_ACCELERATOR
+    _DEBAYER_ACCELERATOR = accelerator
+
+
+def debayer_backend() -> str:
+    return "accelerated" if _DEBAYER_ACCELERATOR is not None else "numpy"
+
 
 def bilinear_debayer(mosaic: NDArray[Any], pattern: str) -> NDArray[np.float32]:
     """Reconstruct the ``(3, H, W)`` R/G/B planes of a Bayer mosaic.
@@ -196,6 +212,8 @@ def bilinear_debayer(mosaic: NDArray[Any], pattern: str) -> NDArray[np.float32]:
     if values.ndim != 2:
         raise ValueError("a Bayer mosaic must be a 2-D array")
     layout = pattern_layout(pattern)
+    if _DEBAYER_ACCELERATOR is not None and values.size:
+        return _DEBAYER_ACCELERATOR(np.ascontiguousarray(values, dtype=np.float32), layout)
     height, width = values.shape
     planes = np.empty((3, height, width), dtype=np.float32)
     for row0 in range(0, height, DEBAYER_BAND_ROWS):
@@ -255,12 +273,14 @@ __all__ = [
     "channel_mask",
     "channel_medians",
     "channel_offsets",
+    "debayer_backend",
     "even_block_size",
     "is_cfa_pattern",
     "luminance",
     "normalize_pattern",
     "pattern_layout",
     "pattern_scale_map",
+    "set_debayer_accelerator",
     "shifted_pattern",
     "superpixel_luminance",
 ]

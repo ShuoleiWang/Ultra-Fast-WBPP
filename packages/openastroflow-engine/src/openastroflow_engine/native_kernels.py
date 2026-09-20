@@ -43,6 +43,7 @@ MEAN_KERNEL_ID = "native-cpu-masked-mean-v1"
 TILE_OFFSET_KERNEL_ID = "native-cpu-tile-offsets-v1"
 RADON_KERNEL_ID = "native-cpu-radon-peaks-v1"
 DRIZZLE_KERNEL_ID = "native-cpu-drizzle-v1"
+DEBAYER_KERNEL_ID = "native-cpu-debayer-bilinear-v1"
 DRIZZLE_KERNELS = {"square": 0, "circular": 1, "gaussian": 2, "point": 3}
 _MAXIMUM_KERNEL_THREADS = 64
 
@@ -287,6 +288,20 @@ class _RadonPeakOutputV1(ctypes.Structure):
     ]
 
 
+class _DebayerRequestV1(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32),
+        ("width", ctypes.c_uint32),
+        ("height", ctypes.c_uint32),
+        ("threads", ctypes.c_uint32),
+        ("pattern", ctypes.c_uint8 * 4),
+        ("mosaic", ctypes.POINTER(ctypes.c_float)),
+        ("mosaic_count", ctypes.c_size_t),
+        ("planes", ctypes.POINTER(ctypes.c_float)),
+        ("plane_count", ctypes.c_size_t),
+    ]
+
+
 class _DrizzleRequestV1(ctypes.Structure):
     _fields_ = [
         ("struct_size", ctypes.c_uint32),
@@ -356,6 +371,7 @@ _REQUIRED_SYMBOLS = (
     "oaf_native_cpu_tile_offsets_v1",
     "oaf_native_cpu_radon_peaks_v1",
     "oaf_native_cpu_drizzle_v1",
+    "oaf_native_cpu_debayer_bilinear_v1",
     "oaf_native_default_kernel_threads_v1",
 )
 
@@ -887,6 +903,42 @@ class NativeKernels:
             )
         return levels
 
+    def debayer_bilinear(
+        self,
+        mosaic: NDArray[np.float32],
+        pattern: Sequence[int],
+        *,
+        threads: int | None = None,
+    ) -> NDArray[np.float32]:
+        """Bilinear demosaic into ``(3, H, W)`` planes, value-identical to
+        ``lightframeqc.cfa.bilinear_debayer``; ``pattern`` gives the channel
+        (0 R, 1 G, 2 B) of the tile positions (0,0), (0,1), (1,0), (1,1)."""
+
+        samples = np.ascontiguousarray(mosaic, dtype=np.float32)
+        if samples.ndim != 2 or samples.size == 0:
+            raise ValueError("debayer needs a nonempty 2-D mosaic")
+        layout = tuple(int(value) for value in pattern)
+        if len(layout) != 4 or any(value not in (0, 1, 2) for value in layout):
+            raise ValueError("debayer pattern needs four channel indices in 0..2")
+        planes = np.empty((3,) + samples.shape, dtype=np.float32)
+        request = _DebayerRequestV1()
+        request.struct_size = ctypes.sizeof(_DebayerRequestV1)
+        request.width = int(samples.shape[1])
+        request.height = int(samples.shape[0])
+        request.threads = _thread_count(threads)
+        request.pattern = (ctypes.c_uint8 * 4)(*layout)
+        request.mosaic = samples.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        request.mosaic_count = samples.size
+        request.planes = planes.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        request.plane_count = planes.size
+        error = ctypes.create_string_buffer(_ERROR_BYTES)
+        status = int(
+            self._library.oaf_native_cpu_debayer_bilinear_v1(ctypes.byref(request), error, ctypes.sizeof(error))
+        )
+        if status != 0:
+            self._raise(error, status, "native debayer")
+        return planes
+
     def drizzle_band(
         self,
         source: NDArray[np.float32],
@@ -1050,7 +1102,24 @@ def load_native_kernels(
             except NativeKernelError:
                 continue
         _CACHE[key] = loaded
+        if loaded is not None:
+            _install_debayer_accelerator(loaded)
         return loaded
+
+
+def _install_debayer_accelerator(kernels: NativeKernels) -> None:
+    """Let ``lightframeqc.cfa.bilinear_debayer`` run on the native kernel; the
+    kernel reproduces the NumPy reference value for value."""
+
+    try:
+        from lightframeqc import cfa
+    except Exception:  # pragma: no cover - lightframeqc is a hard dependency
+        return
+
+    def accelerated(mosaic: NDArray[np.float32], layout: tuple[int, int, int, int]) -> NDArray[np.float32]:
+        return kernels.debayer_bilinear(mosaic, layout)
+
+    cfa.set_debayer_accelerator(accelerated)
 
 
 def reset_native_kernel_cache() -> None:
@@ -1058,6 +1127,12 @@ def reset_native_kernel_cache() -> None:
 
     with _LOCK:
         _CACHE.clear()
+    try:
+        from lightframeqc import cfa
+
+        cfa.set_debayer_accelerator(None)
+    except Exception:  # pragma: no cover
+        pass
 
 
 def describe_native_kernels() -> dict[str, Any]:

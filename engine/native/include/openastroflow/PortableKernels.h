@@ -301,6 +301,29 @@ struct DrizzleRequest
    void Validate() const;
 };
 
+struct DebayerRequest
+{
+   // Row-major Float32 Bayer mosaic (non-finite samples are missing).
+   std::span<const float> mosaic;
+   std::uint32_t width = 0;
+   std::uint32_t height = 0;
+   // Channel (0 R, 1 G, 2 B) of the tile positions (0,0), (0,1), (1,0), (1,1).
+   std::uint8_t pattern[4] = { 0, 1, 1, 2 };
+   // Three planes R, G, B of width*height Float32 each, written in full.
+   std::span<float> planes;
+   std::uint32_t threads = 1;
+
+   void Validate() const;
+};
+
+// Bilinear demosaic of a Bayer mosaic into three colour planes, value for
+// value the NumPy reference `lightframeqc.cfa.bilinear_debayer`: every
+// missing sample is the Float64 mean of its known same-colour 4-neighbours
+// (else diagonal neighbours, else NaN) with clamped edges, rounded to
+// Float32 once.  Rows are independent, so the result never depends on the
+// thread count.
+void DebayerBilinear( const DebayerRequest& request );
+
 // Drizzles one frame band onto one output band.  Output rows are split
 // across threads and every thread visits the input pixels whose drops can
 // touch its rows in row-major order, so the accumulators never depend on

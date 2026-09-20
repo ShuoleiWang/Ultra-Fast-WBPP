@@ -15,6 +15,7 @@ find_package(Threads REQUIRED)
 add_library(openastroflow_native_math STATIC
   src/FusedLnIntegration.cpp
   src/CpuFeatures.cpp
+  src/DebayerKernel.cpp
   src/DrizzleKernel.cpp
   src/ImageTile.cpp
   src/PortableKernels.cpp
