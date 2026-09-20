@@ -485,6 +485,26 @@ typedef struct OafNativeDrizzleRequestV1
    uint8_t* output_touched;
 } OafNativeDrizzleRequestV1;
 
+typedef struct OafNativeDebayerRequestV1
+{
+   uint32_t struct_size;
+   uint32_t width;
+   uint32_t height;
+   uint32_t threads;
+   uint8_t pattern[4];
+   const float* mosaic;
+   size_t mosaic_count;
+   // Three row-major planes R, G, B of width*height Float32 each.
+   float* planes;
+   size_t plane_count;
+} OafNativeDebayerRequestV1;
+
+// Bilinear demosaic of a Bayer mosaic (see PortableKernels.h DebayerBilinear).
+OAF_NATIVE_API int oaf_native_cpu_debayer_bilinear_v1(
+   const OafNativeDebayerRequestV1* request,
+   char* error_message,
+   size_t error_message_capacity );
+
 // Drizzles one frame band onto one output band (see PortableKernels.h
 // DrizzleBand).
 OAF_NATIVE_API int oaf_native_cpu_drizzle_v1(

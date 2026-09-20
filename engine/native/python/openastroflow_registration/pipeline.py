@@ -656,6 +656,7 @@ def analyze_frames(
     detection: DetectionConfig | None = None,
     calibration: CalibrationPlan | None = None,
     workers: int = 4,
+    runner: FrameRunner | None = None,
 ) -> tuple[FrameAnalysis, ...]:
     """Analyze multiple frames in stable order with a shared master cache.
 
@@ -674,8 +675,10 @@ def analyze_frames(
     tasks = [(path, detection, calibration) for path in ordered]
     if workers == 1:
         return tuple(_analyze_frame_task(task) for task in tasks)
-    with FrameRunner(workers, len(ordered)) as runner:
+    if runner is not None:
         return tuple(runner.map(_analyze_frame_task, tasks))
+    with FrameRunner(workers, len(ordered)) as owned:
+        return tuple(owned.map(_analyze_frame_task, tasks))
 
 
 def choose_reference(analyses: Sequence[FrameAnalysis]) -> int:
@@ -1404,6 +1407,62 @@ def _robust_warp_similarity(reference: FloatImage, candidate: FloatImage) -> tup
     return float(np.corrcoef(left, right)[0, 1]), valid_fraction
 
 
+_EMPTY_PREVIEW: FloatImage = np.zeros((1, 1), dtype=np.float32)
+
+
+def _without_preview(analysis: FrameAnalysis) -> FrameAnalysis:
+    """The catalog side of an analysis: what estimation and refinement read.
+
+    The preview image (megabytes per frame) is only needed by the warp
+    validation, which stays in this process, so worker tasks carry catalogs.
+    """
+
+    return replace(analysis, preview=_EMPTY_PREVIEW)
+
+
+def _estimate_member_task(
+    task: tuple[FrameAnalysis, FrameAnalysis | None, FrameTransform | None, FrameAnalysis, RegistrationConfig],
+) -> FrameTransform:
+    """Estimate one same-filter member through its group anchor (or directly
+    against the reference when the anchor is the reference itself)."""
+
+    source, anchor, anchor_result, reference, config = task
+    if anchor is None or anchor_result is None:
+        return _estimate_one(source, reference, config)
+    recovered = _estimate_via_bridge(source, anchor, anchor_result, reference, config)
+    # Direct fallback retains generality for unusual same-filter failures
+    # without penalizing the normal fast path.
+    return recovered or _estimate_one(source, reference, config)
+
+
+# Full-resolution frames decoded by a worker process, keyed by path: the
+# reference image is read once per worker instead of once per member.
+_WORKER_FULL_IMAGES: dict[str, FloatImage] = {}
+_WORKER_FULL_IMAGES_LOCK = threading.Lock()
+
+
+def _worker_full_image(path: str) -> FloatImage:
+    with _WORKER_FULL_IMAGES_LOCK:
+        cached = _WORKER_FULL_IMAGES.get(path)
+    if cached is not None:
+        return cached
+    image = read_full_image(path)
+    with _WORKER_FULL_IMAGES_LOCK:
+        if len(_WORKER_FULL_IMAGES) >= 2:
+            _WORKER_FULL_IMAGES.clear()
+        _WORKER_FULL_IMAGES[path] = image
+    return image
+
+
+def _refine_task(
+    task: tuple[FrameTransform, FrameAnalysis, FrameAnalysis, RegistrationConfig],
+) -> FrameTransform:
+    coarse, source, reference, config = task
+    reference_image = _worker_full_image(reference.path)
+    source_image = read_full_image(source.path)
+    return _refine_full_resolution(coarse, source, reference, source_image, reference_image, config)
+
+
 def register_analyses(
     analyses: Sequence[FrameAnalysis],
     *,
@@ -1411,10 +1470,14 @@ def register_analyses(
     config: RegistrationConfig | None = None,
     validate_warp: bool = True,
     workers: int = 1,
+    runner: FrameRunner | None = None,
 ) -> tuple[int, tuple[FrameTransform, ...]]:
-    """Estimate every transform; ``workers`` bounds concurrent full-resolution
-    refinements, which are independent per frame and give identical results
-    for any worker count."""
+    """Estimate every transform.  The per-frame estimation and the
+    full-resolution refinement are Python-level work that holds the GIL, so
+    with ``workers`` > 1 they run in the spawned worker pool (``runner``, or a
+    pool of this call's own); every frame's result is a pure function of the
+    shared catalogs and its anchor, so the executor never changes a value.
+    The preview warp check stays in this process."""
 
     selected = config or RegistrationConfig()
     if workers < 1:
@@ -1434,109 +1497,84 @@ def register_analyses(
     groups: dict[str | None, list[int]] = {}
     for analysis_index, analysis in enumerate(analyses):
         groups.setdefault(analysis.filter_name, []).append(analysis_index)
-    # Groups are independent (each writes its own indices of ``results``), so
-    # they run concurrently and share the worker budget between them.
-    group_workers = max(1, min(workers, len(groups)))
-    member_budget = max(1, workers // group_workers)
+    catalogs = [_without_preview(analysis) for analysis in analyses]
+    reference_catalog = catalogs[index]
 
-    def process_group(group_indices: list[int]) -> None:
+    # Group anchors: one frame per filter reaches the global reference
+    # directly (the reference's own group is anchored by the reference).
+    # Stable input order is preferable here: a "best" SEP score can be
+    # filter-biased and does not predict cross-filter triangle overlap.
+    anchors: dict[str | None, int] = {}
+    for filter_name, group_indices in groups.items():
         if index in group_indices:
-            anchor_index = index
-        else:
-            anchor_index = -1
-            # Stable input order is preferable here: a "best" SEP score can be
-            # filter-biased and does not predict cross-filter triangle overlap.
-            for candidate_index in group_indices:
-                candidate = _estimate_one(analyses[candidate_index], reference, selected)
-                results[candidate_index] = candidate
-                if candidate.accepted:
-                    anchor_index = candidate_index
-                    break
-            if anchor_index < 0:
-                # Preserve diagnostics for every member if no group anchor can
-                # reach the global reference.
-                for candidate_index in group_indices:
-                    if results[candidate_index] is None:
-                        results[candidate_index] = _estimate_one(
-                            analyses[candidate_index], reference, selected
-                        )
-                return
+            anchors[filter_name] = index
+            continue
+        anchor_index = -1
+        for candidate_index in group_indices:
+            candidate = _estimate_one(analyses[candidate_index], reference, selected)
+            results[candidate_index] = candidate
+            if candidate.accepted:
+                anchor_index = candidate_index
+                break
+        anchors[filter_name] = anchor_index
 
-        anchor_result = results[anchor_index]
-        assert anchor_result is not None
-        pending = [
-            source_index
-            for source_index in group_indices
-            if results[source_index] is None
-        ]
-
-        def estimate_member(source_index: int) -> FrameTransform:
-            if anchor_index == index:
-                return _estimate_one(analyses[source_index], reference, selected)
-            recovered = _estimate_via_bridge(
-                analyses[source_index],
-                analyses[anchor_index],
-                anchor_result,
-                reference,
-                selected,
+    # Members depend only on their anchor and the shared catalogs, so every
+    # group's members form one batch for the worker pool; a group without an
+    # anchor keeps a direct estimate per member for its diagnostics.
+    pending: list[int] = []
+    tasks: list[tuple[FrameAnalysis, FrameAnalysis | None, FrameTransform | None, FrameAnalysis, RegistrationConfig]] = []
+    for filter_name, group_indices in groups.items():
+        anchor_index = anchors[filter_name]
+        anchor_result = results[anchor_index] if anchor_index >= 0 else None
+        bridged = anchor_index >= 0 and anchor_index != index and anchor_result is not None and anchor_result.accepted
+        for source_index in group_indices:
+            if results[source_index] is not None:
+                continue
+            pending.append(source_index)
+            tasks.append(
+                (
+                    catalogs[source_index],
+                    catalogs[anchor_index] if bridged else None,
+                    anchor_result if bridged else None,
+                    reference_catalog,
+                    selected,
+                )
             )
-            # Direct fallback retains generality for unusual same-filter
-            # failures without penalizing the normal fast path.
-            return recovered or _estimate_one(
-                analyses[source_index], reference, selected
-            )
+    owned_runner: FrameRunner | None = None
+    if runner is None and workers > 1 and (len(pending) > 1 or selected.refine_full_centroids):
+        owned_runner = FrameRunner(workers, max(len(pending), len(analyses)))
+    active_runner = runner or owned_runner
+    try:
+        if pending:
+            if active_runner is None:
+                estimates = [_estimate_member_task(task) for task in tasks]
+            else:
+                estimates = active_runner.map(_estimate_member_task, tasks)
+            for source_index, estimate in zip(pending, estimates, strict=True):
+                results[source_index] = estimate
 
-        # Member estimates depend only on the anchor and the shared catalogs,
-        # so they run concurrently; results keep input order.
-        member_workers = max(1, min(member_budget, len(pending)))
-        if member_workers == 1:
-            estimates = [estimate_member(source_index) for source_index in pending]
-        else:
-            with ThreadPoolExecutor(max_workers=member_workers) as executor:
-                estimates = list(executor.map(estimate_member, pending))
-        for source_index, estimate in zip(pending, estimates, strict=True):
-            results[source_index] = estimate
-
-    if group_workers == 1:
-        for group_indices in groups.values():
-            process_group(group_indices)
-    else:
-        with ThreadPoolExecutor(max_workers=group_workers) as executor:
-            list(executor.map(process_group, groups.values()))
-
-    if selected.refine_full_centroids:
-        reference_image = read_full_image(reference.path)
-        refine_indices = [
-            source_index
-            for source_index, optional_result in enumerate(results)
-            if optional_result is not None
-            and source_index != index
-            and optional_result.accepted
-        ]
-
-        def refine(source_index: int) -> FrameTransform:
-            coarse = results[source_index]
-            assert coarse is not None
-            # Each worker decodes its own full-resolution frame; the shared
-            # reference image is read-only.
-            source_image = read_full_image(analyses[source_index].path)
-            return _refine_full_resolution(
-                coarse,
-                analyses[source_index],
-                reference,
-                source_image,
-                reference_image,
-                selected,
-            )
-
-        refine_workers = max(1, min(workers, len(refine_indices)))
-        if refine_workers == 1:
-            refined = [refine(source_index) for source_index in refine_indices]
-        else:
-            with ThreadPoolExecutor(max_workers=refine_workers) as executor:
-                refined = list(executor.map(refine, refine_indices))
-        for source_index, result in zip(refine_indices, refined, strict=True):
-            results[source_index] = result
+        if selected.refine_full_centroids:
+            refine_indices = [
+                source_index
+                for source_index, optional_result in enumerate(results)
+                if optional_result is not None
+                and source_index != index
+                and optional_result.accepted
+            ]
+            refine_tasks = []
+            for source_index in refine_indices:
+                coarse = results[source_index]
+                assert coarse is not None
+                refine_tasks.append((coarse, catalogs[source_index], reference_catalog, selected))
+            if active_runner is None:
+                refined = [_refine_task(task) for task in refine_tasks]
+            else:
+                refined = active_runner.map(_refine_task, refine_tasks)
+            for source_index, result in zip(refine_indices, refined, strict=True):
+                results[source_index] = result
+    finally:
+        if owned_runner is not None:
+            owned_runner.close()
 
     def validate(position: int) -> FrameTransform:
         analysis = analyses[position]
@@ -1590,30 +1628,35 @@ def run_registration(
         raise ValueError("at least two frames are required")
     if workers < 1:
         raise ValueError("workers must be positive")
-    analysis_started = time.perf_counter()
-    analyses = analyze_frames(
-        ordered,
-        detection=detection,
-        calibration=calibration,
-        workers=workers,
-    )
-    analysis_wall_seconds = time.perf_counter() - analysis_started
-    reference_index = None
-    if reference_path is not None:
-        canonical = str(Path(reference_path).expanduser().resolve(strict=True))
-        try:
-            reference_index = ordered.index(canonical)
-        except ValueError as error:
-            raise ValueError("reference_path is not one of the input frames") from error
-    registration_started = time.perf_counter()
-    reference_index, transforms = register_analyses(
-        analyses,
-        reference_index=reference_index,
-        config=registration,
-        validate_warp=validate_warp,
-        workers=workers,
-    )
-    registration_wall_seconds = time.perf_counter() - registration_started
+    # One worker pool serves the frame analysis, the member estimation and
+    # the full-resolution refinement of this stage, then closes.
+    with FrameRunner(workers, len(ordered)) as runner:
+        analysis_started = time.perf_counter()
+        analyses = analyze_frames(
+            ordered,
+            detection=detection,
+            calibration=calibration,
+            workers=workers,
+            runner=runner if workers > 1 else None,
+        )
+        analysis_wall_seconds = time.perf_counter() - analysis_started
+        reference_index = None
+        if reference_path is not None:
+            canonical = str(Path(reference_path).expanduser().resolve(strict=True))
+            try:
+                reference_index = ordered.index(canonical)
+            except ValueError as error:
+                raise ValueError("reference_path is not one of the input frames") from error
+        registration_started = time.perf_counter()
+        reference_index, transforms = register_analyses(
+            analyses,
+            reference_index=reference_index,
+            config=registration,
+            validate_warp=validate_warp,
+            workers=workers,
+            runner=runner if workers > 1 else None,
+        )
+        registration_wall_seconds = time.perf_counter() - registration_started
     accepted = [item for item in transforms if item.accepted and item.full_matrix is not None]
     if len(accepted) != len(transforms):
         failures = [Path(item.path).name for item in transforms if not item.accepted]

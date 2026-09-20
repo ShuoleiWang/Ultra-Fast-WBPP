@@ -1054,38 +1054,38 @@ def _add_offset_grid_rows(
     absolute_rows: Sequence[int] | None = None,
 ) -> None:
     """Add the bilinear offset grid to ``result``; rows are ``range(y0, y1)`` or
-    the explicit ``absolute_rows`` (one per result row), evaluated identically."""
+    the explicit ``absolute_rows`` (one per result row), evaluated identically.
+
+    Every row's value is ``Float32(top*(1-wy) + bottom*wy)`` where ``top`` and
+    ``bottom`` are the Float64 horizontal interpolations of the two enclosing
+    node rows.  All rows of the band are evaluated in one broadcast; the
+    elementwise Float64 arithmetic is the same as a row at a time, so the
+    values are identical, without a Python loop over thousands of rows.
+    """
 
     grid = np.asarray(grid_value, dtype=np.float64)
     y_nodes = np.asarray(y_nodes_value, dtype=np.float64)
     x_lo, x_hi, wx = _offset_grid_x_plan(x_nodes_value, width)
-    horizontal_rows: dict[int, NDArray[np.float64]] = {}
-
-    def horizontal(node_index: int) -> NDArray[np.float64]:
-        cached = horizontal_rows.get(node_index)
-        if cached is None:
-            node_row = grid[node_index]
-            cached = np.asarray(
-                node_row[x_lo] * (1.0 - wx) + node_row[x_hi] * wx,
-                dtype=np.float64,
-            )
-            horizontal_rows[node_index] = cached
-        return cached
-
-    rows = range(y0, y1) if absolute_rows is None else absolute_rows
-    for local_row, absolute_y in enumerate(rows):
-        clipped_y = min(max(float(absolute_y), y_nodes[0]), y_nodes[-1])
-        y_hi = min(
-            max(int(np.searchsorted(y_nodes, clipped_y, side="right")), 1),
-            len(y_nodes) - 1,
-        )
-        y_lo = y_hi - 1
-        wy = (clipped_y - y_nodes[y_lo]) / (y_nodes[y_hi] - y_nodes[y_lo])
-        top = horizontal(y_lo)
-        bottom = horizontal(y_hi)
-        result[local_row] += np.asarray(
-            top * (1.0 - wy) + bottom * wy, dtype=np.float32
-        )
+    rows = (
+        np.arange(y0, y1, dtype=np.float64)
+        if absolute_rows is None
+        else np.asarray(absolute_rows, dtype=np.float64)
+    )
+    if rows.size == 0:
+        return
+    clipped_y = np.clip(rows, y_nodes[0], y_nodes[-1])
+    y_hi = np.clip(np.searchsorted(y_nodes, clipped_y, side="right"), 1, len(y_nodes) - 1)
+    y_lo = y_hi - 1
+    wy = (clipped_y - y_nodes[y_lo]) / (y_nodes[y_hi] - y_nodes[y_lo])
+    # Horizontal interpolation of every node row the band touches.
+    needed = np.unique(np.concatenate([y_lo, y_hi]))
+    horizontal = np.empty((len(y_nodes), width), dtype=np.float64)
+    horizontal[needed] = grid[needed][:, x_lo] * (1.0 - wx) + grid[needed][:, x_hi] * wx
+    top = horizontal[y_lo]
+    bottom = horizontal[y_hi]
+    result += np.asarray(
+        top * (1.0 - wy)[:, None] + bottom * wy[:, None], dtype=np.float32
+    )
 
 
 def evaluate_weight_grid_points(

@@ -102,6 +102,32 @@ def test_bilinear_debayer_keeps_samples_interpolates_smoothly_and_is_band_invari
     assert superpixel_luminance(mosaic, pattern).shape == (24, 30)
 
 
+@requires_native
+def test_native_debayer_is_value_identical_to_the_numpy_reference() -> None:
+    from openastroflow_engine.native_kernels import load_native_kernels
+
+    kernels = load_native_kernels()
+    assert kernels is not None and cfa.debayer_backend() == "accelerated"
+    rng = np.random.default_rng(3)
+    try:
+        for pattern in sorted(cfa.CFA_PATTERNS):
+            for shape in ((7, 9), (64, 80), (65, 81), (1, 1), (2, 3), (130, 97)):
+                mosaic = rng.uniform(0.0, 1000.0, shape).astype(np.float32)
+                if shape[0] > 4:
+                    mosaic[rng.integers(0, shape[0], 20), rng.integers(0, shape[1], 20)] = np.nan
+                    mosaic[0, :] = np.nan
+                native = kernels.debayer_bilinear(mosaic, pattern_layout(pattern))
+                cfa.set_debayer_accelerator(None)
+                reference = bilinear_debayer(mosaic, pattern)
+                cfa.set_debayer_accelerator(lambda m, layout: kernels.debayer_bilinear(m, layout))
+                assert np.array_equal(native, reference, equal_nan=True), (pattern, shape)
+                assert np.array_equal(bilinear_debayer(mosaic, pattern), reference, equal_nan=True)
+    finally:
+        cfa.set_debayer_accelerator(lambda m, layout: kernels.debayer_bilinear(m, layout))
+    with pytest.raises(ValueError):
+        kernels.debayer_bilinear(np.zeros((4, 4), np.float32), (0, 1, 1, 3))
+
+
 def test_debayer_treats_non_finite_samples_as_missing() -> None:
     _truth, mosaic = _planes_and_mosaic("RGGB")
     mosaic[10, 10] = np.nan  # a red sample
