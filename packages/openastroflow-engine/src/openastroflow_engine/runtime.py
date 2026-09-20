@@ -328,7 +328,8 @@ def build_e2e_request(
     drizzle = DrizzleOptions(
         scale=recipe.drizzle.scale,
         pixfrac=recipe.drizzle.drop_shrink,
-        kernel="square",
+        kernel=recipe.drizzle.kernel,
+        cfa_drizzle=recipe.drizzle.cfa_drizzle,
         max_working_set_bytes=tuning.integration_memory_bytes,
     )
     darks = (

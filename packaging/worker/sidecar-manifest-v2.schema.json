@@ -139,7 +139,6 @@
           "additionalProperties": false,
           "required": [
             "astropy",
-            "drizzle",
             "reproject",
             "shapely",
             "light-frame-qc",
@@ -148,7 +147,6 @@
           ],
           "properties": {
             "astropy": { "type": "string", "minLength": 1 },
-            "drizzle": { "type": "string", "minLength": 1 },
             "reproject": { "type": "string", "minLength": 1 },
             "shapely": { "type": "string", "minLength": 1 },
             "light-frame-qc": { "type": "string", "minLength": 1 },
@@ -165,13 +163,12 @@
         { "const": "lightframeqc" },
         { "const": "openastroflow_registration" },
         { "const": "astropy" },
-        { "const": "drizzle" }
-        ,{ "const": "reproject" }
-        ,{ "const": "shapely" }
+        { "const": "reproject" },
+        { "const": "shapely" }
       ],
       "items": false,
-      "minItems": 7,
-      "maxItems": 7
+      "minItems": 6,
+      "maxItems": 6
     }
   }
 }

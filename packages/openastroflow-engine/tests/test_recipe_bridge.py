@@ -155,7 +155,7 @@ def test_every_canonical_result_threshold_is_enforced(
             "DRIZZLE_SCALE_UNSUPPORTED",
         ),
         (
-            lambda recipe: recipe["drizzle"].update({"kernel": "gaussian"}),
+            lambda recipe: recipe["drizzle"].update({"kernel": "lanczos3"}),
             "DRIZZLE_KERNEL_UNSUPPORTED",
         ),
         (

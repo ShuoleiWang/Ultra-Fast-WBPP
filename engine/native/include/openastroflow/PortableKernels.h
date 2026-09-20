@@ -232,6 +232,84 @@ struct RadonPeak
 // order, which is the NumPy nonzero order of the reference.
 void RadonLinePeaks( const RadonPeakRequest& request, std::vector<RadonPeak>& peaks );
 
+enum class DrizzleKernel : std::uint32_t
+{
+   Square = 0,   // the shrunk input pixel, mapped to the output as a quadrilateral
+   Circular = 1, // a disc of the shrunk pixel's area at the mapped centre
+   Gaussian = 2, // a Gaussian whose FWHM is the shrunk pixel's mapped width
+   Point = 3     // the output pixel that holds the mapped centre
+};
+
+struct DrizzleRequest
+{
+   // Rows [sourceRow0, sourceRow0 + sourceRows) of one calibrated frame
+   // (Float32, row-major, sourceWidth wide; non-finite samples carry no
+   // weight).  Pixel (x, y) is the unit square centred on (x, y).
+   std::span<const float> source;
+   std::uint32_t sourceWidth = 0;
+   std::uint32_t sourceRows = 0;
+   std::uint32_t sourceRow0 = 0;
+   // Row-major 3x3 homogeneous map from input pixel-centre coordinates to
+   // output pixel-centre coordinates (registration matrix times the scale).
+   double forward[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+   std::uint32_t scale = 1;      // output pixels per reference pixel
+   double pixfrac = 1.0;         // drop shrink in (0, 1]
+   DrizzleKernel kernel = DrizzleKernel::Square;
+   // Frame normalization in the integration's Float32 arithmetic:
+   //   v' = ((v*normalizationScale) + grid(xr, yr)) + normalizationOffset
+   // where (xr, yr) = output coordinates / scale are reference coordinates
+   // and grid is the bilinear offset grid on gridXNodes x gridYNodes (empty
+   // grid: no additive grid).
+   float normalizationScale = 1.0F;
+   float normalizationOffset = 0.0F;
+   std::span<const double> grid;        // gridYNodes.size() * gridXNodes.size()
+   std::span<const double> gridXNodes;
+   std::span<const double> gridYNodes;
+   // Optional per-pixel weight grid (region weights in [0, 1] on
+   // weightGridXNodes x weightGridYNodes, bilinear and edge-clamped like the
+   // offset grid) multiplying the frame weight at the reference position.
+   std::span<const double> weightGrid;
+   std::span<const double> weightGridXNodes;
+   std::span<const double> weightGridYNodes;
+   // Optional acceptance mask on the reference grid (1 accepted, 0 rejected):
+   // a pixel is dropped only when the mask at its rounded reference
+   // position accepts it.
+   std::span<const std::uint8_t> mask;
+   std::uint32_t maskWidth = 0;
+   std::uint32_t maskHeight = 0;
+   // Optional CFA selection: only pixels whose Bayer channel (from the 2x2
+   // pattern below, indexed by (y & 1, x & 1)) equals `channel` are dropped;
+   // channel 255 drops every pixel.
+   std::uint8_t cfaPattern[4] = { 0, 1, 1, 2 };
+   std::uint8_t channel = 255;
+   float frameWeight = 1.0F;
+   // Output band rows [outputRow0, outputRow0 + outputRows) of an
+   // outputWidth-wide image; the accumulators hold sum(w*a*v') and
+   // sum(w*a) and are added to, not reset.
+   std::uint32_t outputWidth = 0;
+   std::uint32_t outputRows = 0;
+   std::uint32_t outputRow0 = 0;
+   std::span<double> outputSum;
+   std::span<double> outputWeight;
+   // Optional per-pixel touch flags of the band (same size as the
+   // accumulators): set to 1 wherever this frame contributed positive
+   // weight, never cleared, so a caller can count contributing frames
+   // without snapshotting the weight accumulator.
+   std::span<std::uint8_t> outputTouched;
+   std::uint32_t threads = 1;
+
+   void Validate() const;
+};
+
+// Drizzles one frame band onto one output band.  Output rows are split
+// across threads and every thread visits the input pixels whose drops can
+// touch its rows in row-major order, so the accumulators never depend on
+// the thread count.  Drop areas are exact for the square kernel (polygon
+// clipping) and the circular kernel (disc-rectangle area), Gaussian weights
+// are normalized per drop, and the point kernel adds the whole weight to
+// the pixel that holds the mapped centre.
+void DrizzleBand( const DrizzleRequest& request );
+
 // Hardware concurrency clamped to [1, 64]; never zero.
 std::uint32_t DefaultKernelThreads() noexcept;
 

@@ -677,7 +677,7 @@ def test_controller_plan_does_not_emit_schema_valid_but_unexecutable_drizzle(
         controller_plan_envelope(
             _inventory(nina_project),
             mode="drizzle",
-            drizzle_scale=4,
+            drizzle_scale=2.5,  # type: ignore[arg-type]  # schema-valid, not an integer scale
             requested_hardware_profile="m3-pro-tuned",
         )
     assert getattr(error.value, "code", None) == "DRIZZLE_SCALE_UNSUPPORTED"

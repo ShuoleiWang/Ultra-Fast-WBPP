@@ -428,6 +428,70 @@ OAF_NATIVE_API int oaf_native_cpu_radon_peaks_v1(
    char* error_message,
    size_t error_message_capacity );
 
+enum
+{
+   OAF_NATIVE_DRIZZLE_KERNEL_SQUARE = 0,
+   OAF_NATIVE_DRIZZLE_KERNEL_CIRCULAR = 1,
+   OAF_NATIVE_DRIZZLE_KERNEL_GAUSSIAN = 2,
+   OAF_NATIVE_DRIZZLE_KERNEL_POINT = 3
+};
+
+typedef struct OafNativeDrizzleRequestV1
+{
+   uint32_t struct_size;
+   uint32_t source_width;
+   uint32_t source_rows;
+   uint32_t source_row0;
+   uint32_t scale;
+   uint32_t kernel;
+   uint32_t output_width;
+   uint32_t output_rows;
+   uint32_t output_row0;
+   uint32_t mask_width;
+   uint32_t mask_height;
+   uint32_t threads;
+   uint8_t cfa_pattern[4];
+   uint8_t channel;
+   uint8_t reserved[3];
+   float normalization_scale;
+   float normalization_offset;
+   float frame_weight;
+   float reserved_float;
+   double pixfrac;
+   // Row-major 3x3 input-to-output pixel-centre map.
+   double forward[9];
+   const float* source;
+   size_t source_count;
+   const double* grid;
+   size_t grid_count;
+   const double* grid_x_nodes;
+   size_t grid_x_count;
+   const double* grid_y_nodes;
+   size_t grid_y_count;
+   const double* weight_grid;
+   size_t weight_grid_count;
+   const double* weight_grid_x_nodes;
+   size_t weight_grid_x_count;
+   const double* weight_grid_y_nodes;
+   size_t weight_grid_y_count;
+   const uint8_t* mask;
+   size_t mask_count;
+   // Accumulators of the output band, added to in place.
+   double* output_sum;
+   double* output_weight;
+   size_t output_count;
+   // Optional output_count touch flags set to 1 where the frame contributed
+   // positive weight (NULL: not recorded).
+   uint8_t* output_touched;
+} OafNativeDrizzleRequestV1;
+
+// Drizzles one frame band onto one output band (see PortableKernels.h
+// DrizzleBand).
+OAF_NATIVE_API int oaf_native_cpu_drizzle_v1(
+   const OafNativeDrizzleRequestV1* request,
+   char* error_message,
+   size_t error_message_capacity );
+
 // Hardware concurrency clamped to [1, 64].
 OAF_NATIVE_API uint32_t oaf_native_default_kernel_threads_v1(void);
 

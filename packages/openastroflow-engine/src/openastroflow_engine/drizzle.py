@@ -54,7 +54,7 @@ class DeclarativeDrizzleBackend:
 
     def validate_options(self, options: dict[str, Any]) -> tuple[str, ...]:
         errors: list[str] = []
-        unknown = sorted(set(options) - {"scale", "dropShrink", "cfaDrizzle"})
+        unknown = sorted(set(options) - {"scale", "dropShrink", "cfaDrizzle", "kernel"})
         errors.extend(f"unknown drizzle option: {key}" for key in unknown)
         scale = options.get("scale", 2)
         drop_shrink = options.get("dropShrink", 0.9)
@@ -77,6 +77,9 @@ class DeclarativeDrizzleBackend:
             )
         if cfa_drizzle and not self.drizzle_capabilities.supports_cfa_drizzle:
             errors.append("CFA drizzle is unsupported by this backend")
+        kernel = options.get("kernel", "square")
+        if not isinstance(kernel, str) or kernel not in {"square", "circular", "gaussian", "point"}:
+            errors.append("kernel must be square, circular, gaussian or point")
         return tuple(errors)
 
     def drizzle(self, request: DrizzleRequest) -> DrizzleResult:
@@ -87,11 +90,19 @@ class DeclarativeDrizzleBackend:
 
 
 def drizzle_backends() -> tuple[DeclarativeDrizzleBackend, ...]:
+    """The native drizzle backend's declared contract (the execution seam is
+    ``drizzle_native``; availability follows the native kernel library)."""
+
+    from .drizzle_native import SUPPORTED_SCALES
+    from .native_kernels import DRIZZLE_KERNEL_ID, load_native_kernels
+
+    kernels = load_native_kernels()
+    ready = kernels is not None and hasattr(kernels, "drizzle_band")
     capabilities = DrizzleCapabilities(
-        scales=(1, 2, 3),
+        scales=SUPPORTED_SCALES,
         drop_shrink_min=0.1,
         drop_shrink_max=1.0,
-        supports_cfa_drizzle=False,
+        supports_cfa_drizzle=True,
         supports_rejection_maps=True,
     )
     return (
@@ -100,16 +111,17 @@ def drizzle_backends() -> tuple[DeclarativeDrizzleBackend, ...]:
                 backend_id="native-drizzle",
                 stage=StageKind.DRIZZLE,
                 display_name="Ultra-Fast WBPP Native Drizzle",
-                version="protocol-v1",
-                available=False,
-                execution_ready=False,
-                devices=(DeviceKind.CPU, DeviceKind.METAL),
+                version=DRIZZLE_KERNEL_ID,
+                available=ready,
+                execution_ready=ready,
+                devices=(DeviceKind.CPU,),
                 capabilities=(
                     "geometric-drizzle-contract",
                     "drop-shrink-contract",
                     "rejection-map-input-contract",
+                    "cfa-drizzle-contract",
                 ),
-                reason="The drizzle contract is implemented, but the pixel executor is not bundled in this release.",
+                reason=None if ready else "the native kernel library is not loaded",
                 metadata={"drizzle": capabilities.serializable()},
             ),
             drizzle_capabilities=capabilities,

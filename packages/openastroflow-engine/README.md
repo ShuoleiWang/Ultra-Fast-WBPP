@@ -2,7 +2,7 @@
 
 `ultra-fast-wbpp` is the primary headless CLI for the typed control-plane and portable execution package used by the Ultra-Fast WBPP GUI and automation worker. The legacy `openastroflow-engine` command remains a command-name compatibility alias and reports the current Ultra-Fast WBPP product identity. The package inventories NINA FITS/XISF projects, validates recipes and backend capabilities, runs the quality-gated mono E2E path, probes runtime hardware capabilities, and exchanges stable NDJSON messages.
 
-Implemented execution paths remain fail-closed: a drizzle result needs measured sampling, at least three useful subpixel dither phases, independently generated per-frame rejection masks, at least 90% output coverage, a verified receipt, and a newly solved final WCS. An RA/Dec hint or seeded WCS is never reported as an astrometric solution. Unsupported recipe/backend combinations remain blocked during planning.
+Implemented execution paths remain fail-closed: a drizzle result is a second integration of the ordinary integration's own inputs (calibrated frames, registration matrices, normalization, weights and per-sample rejection) on a 1x–4x grid through the native kernel, with science, weight and coverage extensions, a verified receipt, and a newly solved final WCS. An RA/Dec hint or seeded WCS is never reported as an astrometric solution. Unsupported recipe/backend combinations remain blocked during planning.
 
 ## Install for development
 
@@ -60,13 +60,13 @@ inherited header to `SOLVED`.
 
 Astrometry.net and its indexes are user-installed external components, not a built-in solver. The strict final gate requires the app-managed index/config receipt. ASTAP may be probed for diagnostics but cannot currently satisfy the strict managed-catalog publication gate.
 
-Enable drizzle in the recipe contract. Execution additionally requires an installed supported drizzle worker and data that pass the scientific gate:
+Enable drizzle in the recipe contract (scale 1–4, drop shrink, square/circular/gaussian/point kernel). Execution requires the native kernel library:
 
 ```bash
 ultra-fast-wbpp run \
   ~/Astro/NINA/Target-1 ~/Astro/Calibration \
   --output ~/Astro/Results/target-1-drizzle-001 \
-  --mode drizzle --drizzle-scale 2 --drop-shrink 0.9
+  --mode drizzle --drizzle-scale 2 --drop-shrink 0.9 --drizzle-kernel square
 ```
 
 A complete recipe can be supplied with `--recipe recipe.json`. CLI flags override the corresponding recipe fields. The E2E implementation requires a raw Bias group or exactly one compatible MasterBias, and a raw Flat group or compatible MasterFlat for every Light filter. Dark is optional unless the recipe marks it required; when any Dark source is supplied, every Light exposure must have an exact, temperature-compatible raw Dark group or MasterDark. The default astrometric policy is required and cannot be silently downgraded.

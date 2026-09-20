@@ -5,6 +5,8 @@ import type { Translator } from "./i18n";
 import type {
   CalibrationInspection,
   CatalogCompleteEvent,
+  DrizzleKernel,
+  DrizzleScale,
   CatalogDoctorResponse,
   CatalogErrorEvent,
   CatalogInfo,
@@ -205,6 +207,11 @@ export function useWorkflow(t: Translator) {
   const [demoMode, setDemoMode] = useState(false);
   const [inventoryBusy, setInventoryBusy] = useState(false);
   const [drizzleEnabled, setDrizzleEnabled] = useState(false);
+  // Drizzle geometry (scale, drop shrink, kernel) travels with the recipe; the
+  // engine validates the same ranges, so the UI only offers valid values.
+  const [drizzleScale, setDrizzleScale] = useState<DrizzleScale>(2);
+  const [drizzleDropShrink, setDrizzleDropShrink] = useState(0.9);
+  const [drizzleKernel, setDrizzleKernel] = useState<DrizzleKernel>("square");
   // Opt-in per session. The native recipe selects local or global normalization
   // from this flag; it must not infer the choice from a visible progress stage.
   const [localNormalizationEnabled, setLocalNormalizationEnabled] = useState(false);
@@ -586,7 +593,7 @@ export function useWorkflow(t: Translator) {
         sources: sources.filter((source) => source.paths.length).flatMap((source) => source.paths.map((path) => ({ sourceId: safeSourceId(source.role, sourceIndex++), role: source.role, paths: [path], recursive: false }))),
         projectName,
         runLabel: runLabel(matrix, projectName),
-        recipe: { balanced: true, drizzleEnabled, localNormalizationEnabled, solverRequired: true, calibrationWorkflow: "mono-standard-v1" },
+        recipe: { balanced: true, drizzleEnabled, drizzleScale, drizzleDropShrink, drizzleKernel, localNormalizationEnabled, solverRequired: true, calibrationWorkflow: "mono-standard-v1" },
         masterMetadataOverrides: masterOverrideRequests(masterOverrides),
         rawFrameMetadataOverrides: [],
         reviewSelections: validApprovedReviewDigests.map((sourceSha256) => ({ sourceSha256, gatePolicyDigest: qualityInspection!.gatePolicyDigest })),
@@ -681,7 +688,7 @@ export function useWorkflow(t: Translator) {
     qualityInspection, qualityBusy, qualityElapsedSeconds, qualityReady, approvedReviewDigests: validApprovedReviewDigests, toggleReviewApproval, canApproveReview,
     insufficientQualityPanels, insufficientPanels, minimumAdmittedLights,
     calibrationInspection, calibrationBusy, calibrationError, recheckCalibration,
-    drizzleEnabled, setDrizzleEnabled, localNormalizationEnabled, setLocalNormalizationEnabled,
+    drizzleEnabled, setDrizzleEnabled, drizzleScale, setDrizzleScale, drizzleDropShrink, setDrizzleDropShrink, drizzleKernel, setDrizzleKernel, localNormalizationEnabled, setLocalNormalizationEnabled,
     catalogList, catalogDoctor, solverDoctor, recommendedCatalog, solveField, astap, solverSetupReady, catalogTermsAccepted, setCatalogTermsAccepted,
     catalogProgress, catalogStatus, catalogError, startCatalogInstall, cancelCatalogInstall, openCatalogTerms, revealOutput, solverSetupBusy, recheckSolverSetup,
   };

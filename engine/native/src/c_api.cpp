@@ -1001,6 +1001,77 @@ extern "C" int oaf_native_cpu_radon_peaks_v1(
    return OAF_NATIVE_OK;
 }
 
+extern "C" int oaf_native_cpu_drizzle_v1(
+   const OafNativeDrizzleRequestV1* request,
+   char* error_message,
+   size_t error_message_capacity )
+{
+   if ( request == nullptr )
+   {
+      CopyError( error_message, error_message_capacity, "request is required" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   if ( request->struct_size != sizeof( OafNativeDrizzleRequestV1 )
+     || request->source == nullptr || request->output_sum == nullptr
+     || request->output_weight == nullptr
+     || (request->grid == nullptr && request->grid_count != 0)
+     || (request->weight_grid == nullptr && request->weight_grid_count != 0)
+     || (request->mask == nullptr && request->mask_count != 0) )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "drizzle C ABI structure version or input buffer is invalid" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   return GuardedKernelCall(
+      [&]()
+      {
+         using namespace openastroflow::native;
+         DrizzleRequest native;
+         native.source = std::span<const float>( request->source, request->source_count );
+         native.sourceWidth = request->source_width;
+         native.sourceRows = request->source_rows;
+         native.sourceRow0 = request->source_row0;
+         std::copy( request->forward, request->forward + 9, native.forward );
+         native.scale = request->scale;
+         native.pixfrac = request->pixfrac;
+         native.kernel = static_cast<DrizzleKernel>( request->kernel );
+         native.normalizationScale = request->normalization_scale;
+         native.normalizationOffset = request->normalization_offset;
+         if ( request->grid_count != 0 )
+         {
+            native.grid = std::span<const double>( request->grid, request->grid_count );
+            native.gridXNodes = std::span<const double>( request->grid_x_nodes, request->grid_x_count );
+            native.gridYNodes = std::span<const double>( request->grid_y_nodes, request->grid_y_count );
+         }
+         if ( request->weight_grid_count != 0 )
+         {
+            native.weightGrid = std::span<const double>( request->weight_grid, request->weight_grid_count );
+            native.weightGridXNodes = std::span<const double>( request->weight_grid_x_nodes, request->weight_grid_x_count );
+            native.weightGridYNodes = std::span<const double>( request->weight_grid_y_nodes, request->weight_grid_y_count );
+         }
+         if ( request->mask_count != 0 )
+         {
+            native.mask = std::span<const uint8_t>( request->mask, request->mask_count );
+            native.maskWidth = request->mask_width;
+            native.maskHeight = request->mask_height;
+         }
+         std::copy( request->cfa_pattern, request->cfa_pattern + 4, native.cfaPattern );
+         native.channel = request->channel;
+         native.frameWeight = request->frame_weight;
+         native.outputWidth = request->output_width;
+         native.outputRows = request->output_rows;
+         native.outputRow0 = request->output_row0;
+         native.outputSum = std::span<double>( request->output_sum, request->output_count );
+         native.outputWeight = std::span<double>( request->output_weight, request->output_count );
+         if ( request->output_touched != nullptr )
+            native.outputTouched = std::span<uint8_t>( request->output_touched, request->output_count );
+         native.threads = request->threads;
+         DrizzleBand( native );
+      },
+      error_message, error_message_capacity,
+      "unknown native drizzle failure" );
+}
+
 extern "C" uint32_t oaf_native_default_kernel_threads_v1(void)
 {
    return openastroflow::native::DefaultKernelThreads();

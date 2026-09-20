@@ -34,7 +34,6 @@ VERSIONS = {
     "pyinstaller": "6.22.2",
     "packages": {
         "astropy": "8.0.1",
-        "drizzle": "2.2.0",
         "light-frame-qc": "0.3.0",
         "openastroflow-engine": "0.1.0",
         "openastroflow-registration": "0.1.0a1",

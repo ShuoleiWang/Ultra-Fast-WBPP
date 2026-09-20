@@ -296,6 +296,7 @@ progress::-webkit-progress-value { background: var(--accent); }
 .status-note.ok { color: var(--ok); }
 .error-text { color: var(--stop); font-size: 12px; user-select: text; -webkit-user-select: text; }
 .field-row { display: flex; flex-direction: column; gap: 4px; }
+.option-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding: 0 0 4px 22px; }
 .field-row label { font-size: 12px; color: var(--secondary); }
 .field-row .hint { font-size: 11px; color: var(--tertiary); }
 .row-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }

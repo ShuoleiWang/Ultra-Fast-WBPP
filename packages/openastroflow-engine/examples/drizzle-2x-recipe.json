@@ -13,9 +13,10 @@
   },
   "drizzle": {
     "enabled": true,
-    "backend": "stsci-drizzle-cpu",
+    "backend": "auto",
     "scale": 2,
     "dropShrink": 0.9,
+    "kernel": "square",
     "cfaDrizzle": false
   },
   "outputFormat": "FITS",

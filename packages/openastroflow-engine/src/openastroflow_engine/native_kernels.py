@@ -42,6 +42,8 @@ MAD_KERNEL_ID = "native-cpu-mad-rejection-v2"
 MEAN_KERNEL_ID = "native-cpu-masked-mean-v1"
 TILE_OFFSET_KERNEL_ID = "native-cpu-tile-offsets-v1"
 RADON_KERNEL_ID = "native-cpu-radon-peaks-v1"
+DRIZZLE_KERNEL_ID = "native-cpu-drizzle-v1"
+DRIZZLE_KERNELS = {"square": 0, "circular": 1, "gaussian": 2, "point": 3}
 _MAXIMUM_KERNEL_THREADS = 64
 
 
@@ -285,6 +287,52 @@ class _RadonPeakOutputV1(ctypes.Structure):
     ]
 
 
+class _DrizzleRequestV1(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32),
+        ("source_width", ctypes.c_uint32),
+        ("source_rows", ctypes.c_uint32),
+        ("source_row0", ctypes.c_uint32),
+        ("scale", ctypes.c_uint32),
+        ("kernel", ctypes.c_uint32),
+        ("output_width", ctypes.c_uint32),
+        ("output_rows", ctypes.c_uint32),
+        ("output_row0", ctypes.c_uint32),
+        ("mask_width", ctypes.c_uint32),
+        ("mask_height", ctypes.c_uint32),
+        ("threads", ctypes.c_uint32),
+        ("cfa_pattern", ctypes.c_uint8 * 4),
+        ("channel", ctypes.c_uint8),
+        ("reserved", ctypes.c_uint8 * 3),
+        ("normalization_scale", ctypes.c_float),
+        ("normalization_offset", ctypes.c_float),
+        ("frame_weight", ctypes.c_float),
+        ("reserved_float", ctypes.c_float),
+        ("pixfrac", ctypes.c_double),
+        ("forward", ctypes.c_double * 9),
+        ("source", ctypes.POINTER(ctypes.c_float)),
+        ("source_count", ctypes.c_size_t),
+        ("grid", ctypes.POINTER(ctypes.c_double)),
+        ("grid_count", ctypes.c_size_t),
+        ("grid_x_nodes", ctypes.POINTER(ctypes.c_double)),
+        ("grid_x_count", ctypes.c_size_t),
+        ("grid_y_nodes", ctypes.POINTER(ctypes.c_double)),
+        ("grid_y_count", ctypes.c_size_t),
+        ("weight_grid", ctypes.POINTER(ctypes.c_double)),
+        ("weight_grid_count", ctypes.c_size_t),
+        ("weight_grid_x_nodes", ctypes.POINTER(ctypes.c_double)),
+        ("weight_grid_x_count", ctypes.c_size_t),
+        ("weight_grid_y_nodes", ctypes.POINTER(ctypes.c_double)),
+        ("weight_grid_y_count", ctypes.c_size_t),
+        ("mask", ctypes.POINTER(ctypes.c_uint8)),
+        ("mask_count", ctypes.c_size_t),
+        ("output_sum", ctypes.POINTER(ctypes.c_double)),
+        ("output_weight", ctypes.POINTER(ctypes.c_double)),
+        ("output_count", ctypes.c_size_t),
+        ("output_touched", ctypes.POINTER(ctypes.c_uint8)),
+    ]
+
+
 class _CpuFeaturesV1(ctypes.Structure):
     _fields_ = [
         ("struct_size", ctypes.c_uint32),
@@ -307,6 +355,7 @@ _REQUIRED_SYMBOLS = (
     "oaf_native_cpu_masked_mean_v1",
     "oaf_native_cpu_tile_offsets_v1",
     "oaf_native_cpu_radon_peaks_v1",
+    "oaf_native_cpu_drizzle_v1",
     "oaf_native_default_kernel_threads_v1",
 )
 
@@ -404,6 +453,11 @@ class NativeKernels:
             *error_arguments,
         ]
         library.oaf_native_cpu_radon_peaks_v1.restype = ctypes.c_int
+        library.oaf_native_cpu_drizzle_v1.argtypes = [
+            ctypes.POINTER(_DrizzleRequestV1),
+            *error_arguments,
+        ]
+        library.oaf_native_cpu_drizzle_v1.restype = ctypes.c_int
         library.oaf_native_default_kernel_threads_v1.argtypes = []
         library.oaf_native_default_kernel_threads_v1.restype = ctypes.c_uint32
         self.hardware_threads = max(1, int(library.oaf_native_default_kernel_threads_v1()))
@@ -833,6 +887,136 @@ class NativeKernels:
             )
         return levels
 
+    def drizzle_band(
+        self,
+        source: NDArray[np.float32],
+        *,
+        source_row0: int,
+        forward: NDArray[np.float64],
+        scale: int,
+        pixfrac: float,
+        kernel: str,
+        output_sum: NDArray[np.float64],
+        output_weight: NDArray[np.float64],
+        output_row0: int = 0,
+        normalization_scale: float = 1.0,
+        normalization_offset: float = 0.0,
+        grid: NDArray[np.float64] | None = None,
+        grid_x_nodes: NDArray[np.float64] | None = None,
+        grid_y_nodes: NDArray[np.float64] | None = None,
+        weight_grid: NDArray[np.float64] | None = None,
+        weight_grid_x_nodes: NDArray[np.float64] | None = None,
+        weight_grid_y_nodes: NDArray[np.float64] | None = None,
+        mask: NDArray[np.uint8] | None = None,
+        cfa_pattern: Sequence[int] = (0, 1, 1, 2),
+        channel: int = 255,
+        frame_weight: float = 1.0,
+        threads: int | None = None,
+        output_touched: NDArray[np.uint8] | None = None,
+    ) -> None:
+        """Drizzle the source rows onto the output band accumulators in place.
+
+        ``forward`` maps input pixel centres to output pixel centres (the
+        registration matrix times the scale); ``output_sum`` and
+        ``output_weight`` are ``(rows, width)`` Float64 arrays that receive
+        ``sum(w*a*v)`` and ``sum(w*a)``.  ``mask`` is the reference-grid
+        acceptance mask (1 accepted), ``grid``/nodes the additive offset grid
+        of the frame's normalization and ``weight_grid``/nodes an optional
+        per-pixel weight multiplier (region weights).  ``output_touched``, a
+        UInt8 array of the band's shape, is set to 1 wherever the frame
+        contributed positive weight (it is never cleared).
+        """
+
+        samples = np.ascontiguousarray(source, dtype=np.float32)
+        if samples.ndim != 2:
+            raise ValueError("drizzle source must be a 2-D array")
+        if output_sum.ndim != 2 or output_sum.shape != output_weight.shape:
+            raise ValueError("drizzle accumulators must be matching 2-D arrays")
+        if not (output_sum.flags["C_CONTIGUOUS"] and output_weight.flags["C_CONTIGUOUS"]):
+            raise ValueError("drizzle accumulators must be C-contiguous")
+        if output_sum.dtype != np.float64 or output_weight.dtype != np.float64:
+            raise ValueError("drizzle accumulators must be Float64")
+        matrix = np.ascontiguousarray(forward, dtype=np.float64).reshape(9)
+        if kernel not in DRIZZLE_KERNELS:
+            raise ValueError(f"unknown drizzle kernel {kernel!r}")
+        request = _DrizzleRequestV1()
+        request.struct_size = ctypes.sizeof(_DrizzleRequestV1)
+        request.source_width = int(samples.shape[1])
+        request.source_rows = int(samples.shape[0])
+        request.source_row0 = int(source_row0)
+        request.scale = int(scale)
+        request.kernel = DRIZZLE_KERNELS[kernel]
+        request.output_width = int(output_sum.shape[1])
+        request.output_rows = int(output_sum.shape[0])
+        request.output_row0 = int(output_row0)
+        request.threads = _thread_count(threads)
+        pattern = tuple(int(value) for value in cfa_pattern)
+        if len(pattern) != 4:
+            raise ValueError("cfa_pattern needs four channel indices")
+        request.cfa_pattern = (ctypes.c_uint8 * 4)(*pattern)
+        request.channel = int(channel)
+        request.normalization_scale = float(normalization_scale)
+        request.normalization_offset = float(normalization_offset)
+        request.frame_weight = float(frame_weight)
+        request.pixfrac = float(pixfrac)
+        request.forward = (ctypes.c_double * 9)(*matrix.tolist())
+        request.source = samples.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        request.source_count = samples.size
+        keep_alive: list[Any] = [samples]
+        if grid is not None:
+            grid_values = np.ascontiguousarray(grid, dtype=np.float64)
+            x_nodes = np.ascontiguousarray(grid_x_nodes, dtype=np.float64)
+            y_nodes = np.ascontiguousarray(grid_y_nodes, dtype=np.float64)
+            if grid_values.shape != (y_nodes.size, x_nodes.size):
+                raise ValueError("drizzle offset grid shape must be (y nodes, x nodes)")
+            keep_alive += [grid_values, x_nodes, y_nodes]
+            request.grid = grid_values.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+            request.grid_count = grid_values.size
+            request.grid_x_nodes = x_nodes.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+            request.grid_x_count = x_nodes.size
+            request.grid_y_nodes = y_nodes.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+            request.grid_y_count = y_nodes.size
+        if weight_grid is not None:
+            weight_values = np.ascontiguousarray(weight_grid, dtype=np.float64)
+            weight_x = np.ascontiguousarray(weight_grid_x_nodes, dtype=np.float64)
+            weight_y = np.ascontiguousarray(weight_grid_y_nodes, dtype=np.float64)
+            if weight_values.shape != (weight_y.size, weight_x.size):
+                raise ValueError("drizzle weight grid shape must be (y nodes, x nodes)")
+            keep_alive += [weight_values, weight_x, weight_y]
+            request.weight_grid = weight_values.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+            request.weight_grid_count = weight_values.size
+            request.weight_grid_x_nodes = weight_x.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+            request.weight_grid_x_count = weight_x.size
+            request.weight_grid_y_nodes = weight_y.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+            request.weight_grid_y_count = weight_y.size
+        if mask is not None:
+            mask_values = np.ascontiguousarray(mask, dtype=np.uint8)
+            if mask_values.ndim != 2:
+                raise ValueError("drizzle mask must be a 2-D array")
+            keep_alive.append(mask_values)
+            request.mask = mask_values.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
+            request.mask_count = mask_values.size
+            request.mask_width = int(mask_values.shape[1])
+            request.mask_height = int(mask_values.shape[0])
+        request.output_sum = output_sum.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+        request.output_weight = output_weight.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+        request.output_count = output_sum.size
+        if output_touched is not None:
+            if (
+                output_touched.shape != output_sum.shape
+                or output_touched.dtype != np.uint8
+                or not output_touched.flags["C_CONTIGUOUS"]
+            ):
+                raise ValueError("drizzle touch flags must be a C-contiguous UInt8 array of the band's shape")
+            request.output_touched = output_touched.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
+        error = ctypes.create_string_buffer(_ERROR_BYTES)
+        status = int(
+            self._library.oaf_native_cpu_drizzle_v1(ctypes.byref(request), error, ctypes.sizeof(error))
+        )
+        if status != 0:
+            self._raise(error, status, "native drizzle")
+        del keep_alive
+
 
 _LOCK = threading.Lock()
 _CACHE: dict[str, NativeKernels | None] = {}
@@ -922,6 +1106,8 @@ __all__ = [
     "MEAN_KERNEL_ID",
     "NATIVE_ABI_VERSION",
     "NativeKernelError",
+    "DRIZZLE_KERNELS",
+    "DRIZZLE_KERNEL_ID",
     "NativeKernels",
     "RADON_KERNEL_ID",
     "TILE_OFFSET_KERNEL_ID",
