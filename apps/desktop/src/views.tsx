@@ -6,7 +6,7 @@ import type { InventoryTab } from "./Sidebar";
 import { dispositionLabel } from "./Inspector";
 import { BrandMark, CheckIcon, CpuIcon, FileIcon, FolderIcon, PlayIcon, RevealIcon, SparkIcon, XIcon } from "./icons";
 import { DRIZZLE_KERNELS, DRIZZLE_SCALES } from "./types";
-import type { DrizzleKernel, DrizzleScale, GateDisposition, InspectedLightQuality, MasterMetadataOverride, OutputArtifact, OutputArtifactKind, ScreeningSummary } from "./types";
+import type { DrizzleKernel, DrizzleScale, GateDisposition, InspectedLightQuality, MasterMetadataOverride, OutputArtifact, OutputArtifactKind, ScreeningSummary, SolverBackendStatus } from "./types";
 import type { useWorkflow } from "./useWorkflow";
 
 export type Workflow = ReturnType<typeof useWorkflow>;
@@ -94,20 +94,37 @@ export function LaunchSettings({ mode, workflow, outputPathText, setOutputPathTe
         <label className={`toggle ${workflow.localNormalizationEnabled ? "enabled" : ""}`}><input type="checkbox" checked={workflow.localNormalizationEnabled} onChange={(event) => workflow.setLocalNormalizationEnabled(event.target.checked)} /><span><strong>{t("localNormalization")}</strong><small>{t("localNormalizationHint")}</small></span></label>
         <section className="panel" aria-labelledby="solver-title"><div className="panel-heading"><span id="solver-title">{t("solverSetup")}</span><div className="setup-actions"><small>{workflow.solverSetupReady ? t("ready") : t("actionRequired")}</small>{workflow.nativeRuntime && <button type="button" className="btn small" disabled={workflow.solverSetupBusy || workflow.catalogStatus === "DOWNLOADING" || workflow.catalogStatus === "VERIFYING"} onClick={() => void workflow.recheckSolverSetup()}>{workflow.solverSetupBusy ? t("checkingSetup") : t("recheckSetup")}</button>}</div></div>
           <div className="panel-body">
-            <SolverRow name="solve-field" ready={Boolean(workflow.solveField?.executionReady)} version={workflow.solveField?.version} path={workflow.solveField?.metadata?.probe?.path} instruction={t("solveFieldInstall")} t={t} />
-            <SolverRow name="ASTAP" ready={Boolean(workflow.astap?.executionReady)} version={workflow.astap?.version} path={workflow.astap?.metadata?.probe?.path} instruction={t("astapDiagnostic")} t={t} />
+            <SolverRows workflow={workflow} t={t} />
             {!workflow.nativeRuntime ? <p className="mock-notice">{t("browserNoSolver")}</p> : workflow.catalogDoctor?.ok ? <div className="catalog-ready"><CheckIcon /><div><strong>{t("catalogReady")}</strong><p>{workflow.catalogDoctor.catalogRoot}</p></div></div> : workflow.recommendedCatalog ? <div className="catalog-install"><div><strong>{t("catalogInstallTitle")}</strong><p className="hint">{t("catalogInstallBody")}</p></div><div className="terms-box"><p>{workflow.recommendedCatalog.providerTerms.summary}</p><a href={workflow.recommendedCatalog.providerTerms.url} onClick={(event) => { event.preventDefault(); void workflow.openCatalogTerms(workflow.recommendedCatalog!.providerTerms.url); }}>{t("viewTerms")}</a><label><input type="checkbox" checked={workflow.catalogTermsAccepted} disabled={workflow.catalogStatus === "DOWNLOADING" || workflow.catalogStatus === "VERIFYING"} onChange={(event) => workflow.setCatalogTermsAccepted(event.target.checked)} />{t("acceptTerms", { id: workflow.recommendedCatalog.providerTerms.acceptanceId })}</label></div>{workflow.catalogStatus === "DOWNLOADING" && <div className="catalog-progress" role="status"><progress max={1} value={catalogFraction} /><span>{workflow.catalogProgress ? `${workflow.catalogProgress.artifactId} · ${(catalogFraction * 100).toFixed(1)}%` : t("waitProgress")}</span><button type="button" className="btn small" onClick={() => void workflow.cancelCatalogInstall()}>{t("cancelDownload")}</button></div>}{workflow.catalogStatus === "VERIFYING" && <p role="status" className="status-note">{t("verifyingCatalog")}</p>}{workflow.catalogStatus !== "DOWNLOADING" && workflow.catalogStatus !== "VERIFYING" && <div className="row-actions"><button type="button" className="btn primary" disabled={!workflow.catalogTermsAccepted} onClick={() => void workflow.startCatalogInstall()}>{t("downloadCatalog", { size: formatBytes(workflow.recommendedCatalog.totalSizeBytes, t) })}</button></div>}</div> : <p className="error-text" role="alert">{t("noCatalogManifest")}</p>}
             {workflow.catalogError && <p className="error-text" role="alert">{workflow.catalogError}</p>}
           </div>
         </section>
-        <div className="compute" aria-label={t("computeBackend")}><CpuIcon /><strong>{workflow.capabilities?.chip ?? t("detectingHardware")}</strong><span>{workflow.capabilities?.cpuBackend ?? "Portable CPU"} · {workflow.capabilities?.gpuBackend ?? "GPU probe"} · {workflow.capabilities?.platform === "browser" ? t("demoNoCompute") : workflow.capabilities?.platform === "windows" ? t("windowsBoundary") : workflow.capabilities?.optimizationTier === "M3_PRO_TUNED" ? t("m3Optimized") : t("appleGeneric")}</span></div>
+        <div className="compute" aria-label={t("computeBackend")}><CpuIcon /><strong>{workflow.capabilities?.chip ?? t("detectingHardware")}</strong><span>{workflow.capabilities?.cpuBackend ?? "Portable CPU"} · {workflow.capabilities?.gpuBackend ?? "GPU probe"} · {computeLabel(workflow.capabilities, t)}</span></div>
       </div></details>
     </div>
     {!workflow.canStart && !workflow.demoMode && <div className="blockers" role="status"><strong>{t("blockers")}</strong><ul>{!workflow.capabilities?.available && <li>{workflow.capabilities?.unavailableReason ?? t("blockerEngine")}</li>}{!workflow.calibrationReady && <li>{t("blockerCalibration")}</li>}{!workflow.allRequiredConfirmed && <li>{t("blockerTypes")}</li>}{workflow.matrix.length === 0 && <li>{t("blockerLights")}</li>}{workflow.insufficientPanels.map((cell) => <li key={cell.panelId}>{t("insufficientPanelLights", { target: cell.target, filter: cell.filter, count: workflow.qualityReady ? cell.admittedCount : cell.lightCount, required: workflow.minimumAdmittedLights })}</li>)}{!workflow.solverSetupReady && <li>{t("blockerSolver")}</li>}{!workflow.outputParent && <li>{t("blockerOutput")}</li>}{!workflow.masterOverridesReady && <li>{t("blockerMaster")}</li>}{workflow.cfaBlockedAssets.length > 0 && <li>{t("blockerCfaUnknownPattern")}</li>}</ul>{workflow.qualityReady && workflow.insufficientPanels.length > 0 && mode !== "inspect" && <button type="button" className="btn small" onClick={() => workflow.setStep("inspect")}>{t("reviewLightAdmission")}</button>}</div>}
   </div>;
 }
 
-/** Bottom bar: where the result goes and the start button; the import page adds the optional screening review. */
+/** The validated path this build runs on, as the compute line names it. */
+function computeLabel(capabilities: Workflow["capabilities"], t: Translator): string {
+  if (capabilities?.platform === "browser") return t("demoNoCompute");
+  if (capabilities?.platform === "windows") return capabilities.optimizationTier === "WINDOWS_X64" ? t("windowsValidated") : t("windowsUnsupported");
+  return capabilities?.optimizationTier === "M3_PRO_TUNED" ? t("m3Optimized") : t("appleGeneric");
+}
+
+/**
+ * The two solvers, the platform's primary one first with its install
+ * instruction: solve-field on macOS, ASTAP (verified by the engine against the
+ * managed indexes) on Windows, where solve-field has no native build.
+ */
+function SolverRows({ workflow, t }: { workflow: Workflow; t: Translator }) {
+  const windows = workflow.primarySolver === "astap";
+  const solveField = <SolverRow key="solve-field" name="solve-field" backend={workflow.solveField} ready={workflow.solveFieldReady} instruction={t(windows ? "solveFieldOptional" : "solveFieldInstall")} t={t} />;
+  const astap = <SolverRow key="astap" name="ASTAP" backend={workflow.astap} ready={workflow.astapReady} instruction={t(windows ? "astapInstall" : "astapAlternative")} t={t} />;
+  return <>{windows ? [astap, solveField] : [solveField, astap]}</>;
+}
+
 /** What the run will leave out, said before the start button is pressed. */
 function ScreeningNotice({ mode, workflow, t }: { mode: "import" | "inspect"; workflow: Workflow; t: Translator }) {
   if (workflow.demoMode) return null;
@@ -264,9 +281,14 @@ const MASTER_KINDS: OutputArtifactKind[] = ["SOLVED_MONO_FITS", "LINEAR_RGB_FITS
 const PREVIEW_KINDS: OutputArtifactKind[] = ["MONO_PREVIEW_PNG", "RGB_PREVIEW_PNG_16", "PREVIEW"];
 
 function previewFor(artifact: OutputArtifact, artifacts: OutputArtifact[], native: boolean): string | undefined {
-  if (!native) return undefined;
   const match = artifacts.find((candidate) => PREVIEW_KINDS.includes(candidate.kind) && (candidate.filter ?? "") === (artifact.filter ?? "") && (candidate.target ?? "") === (artifact.target ?? ""));
-  try { return match ? convertFileSrc(match.path) : undefined; } catch { return undefined; }
+  if (!match) return undefined;
+  // The controller carries the PNG previews as data URLs, which show from any
+  // drive or share; the asset protocol (home folder and volumes only) is the
+  // fallback for a preview it could not carry.
+  if (match.previewDataUrl) return match.previewDataUrl;
+  if (!native) return undefined;
+  try { return convertFileSrc(match.path); } catch { return undefined; }
 }
 
 export function ResultView({ workflow, t }: { workflow: Workflow; t: Translator }) {
@@ -339,6 +361,8 @@ export function MasterForm({ item, update, confirm, reset, t }: { item: MasterMe
   </article>;
 }
 
-function SolverRow({ name, ready, version, path, instruction, t }: { name: string; ready: boolean; version?: string; path?: string | null; instruction: string; t: Translator }) {
-  return <article className="solver-row"><span className={`runtime-dot ${ready ? "online" : ""}`} /><div><strong>{name} {ready ? t("executable") : t("notReady")}</strong><p>{ready ? `${version ?? "?"} · ${path ?? t("ready")}` : instruction}</p></div></article>;
+/** One solver: ready means the strict final gate accepts its solutions; an installed but unverified one also shows the engine's reason. */
+function SolverRow({ name, backend, ready, instruction, t }: { name: string; backend?: SolverBackendStatus; ready: boolean; instruction: string; t: Translator }) {
+  const reason = !ready && backend?.executionReady && backend.reason?.trim() ? ` ${backend.reason.trim()}` : "";
+  return <article className="solver-row"><span className={`runtime-dot ${ready ? "online" : ""}`} /><div><strong>{name} {ready ? t("executable") : t("notReady")}</strong><p>{ready ? `${backend?.version ?? "?"} · ${backend?.metadata?.probe?.path ?? t("ready")}` : `${instruction}${reason}`}</p></div></article>;
 }

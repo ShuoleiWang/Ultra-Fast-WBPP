@@ -28,9 +28,12 @@ from .base import (
     GpuAdapter,
     MemoryStatus,
     NoReplaceError,
+    PathLimit,
     VolumeCapabilities,
+    environment_view,
     fallback_memory,
     fallback_topology,
+    remove_file,
 )
 
 
@@ -49,7 +52,10 @@ _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 WELL_KNOWN_EXECUTABLES: dict[str, tuple[str, ...]] = {
     # Relative to each of ProgramFiles, ProgramFiles(x86) and LOCALAPPDATA.
-    "astap": (r"ASTAP\astap.exe", r"ASTAP\astap_cli.exe"),
+    # The headless CLI first: the GUI binary also solves from the command
+    # line but opens a window; both spellings of the folder are listed for
+    # case-sensitive volumes and tests (NTFS itself does not care).
+    "astap": (r"astap\astap_cli.exe", r"astap\astap.exe", r"ASTAP\astap_cli.exe", r"ASTAP\astap.exe"),
     "solve-field": (r"Astrometry.net\bin\solve-field.exe", r"astrometry\bin\solve-field.exe"),
     "siril-cli": (r"Siril\bin\siril-cli.exe", r"Siril\siril-cli.exe", r"Programs\Siril\bin\siril-cli.exe"),
 }
@@ -192,6 +198,127 @@ def registry_processor_brand() -> str:
     return str(value).strip()
 
 
+# MAX_PATH is 260 characters including the terminating NUL; the policy that
+# lifts it lives under HKLM and needs an administrator (and, for a running
+# session, a sign-out) to change, which is why the engine reports it rather
+# than setting it.
+_LONG_PATHS_KEY = r"SYSTEM\CurrentControlSet\Control\FileSystem"
+_LONG_PATHS_VALUE = "LongPathsEnabled"
+LONG_PATHS_REGISTRY_KEY = rf"HKLM\{_LONG_PATHS_KEY}\{_LONG_PATHS_VALUE}"
+MAX_PATH_CHARACTERS = 259
+LONG_PATH_CHARACTERS = 32767
+
+
+def _read_machine_registry_value(key_path: str, value_name: str) -> object:
+    """``HKLM\\<key_path>\\<value_name>``; ``OSError`` when it does not exist."""
+
+    import winreg
+
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path) as key:
+        value, _kind = winreg.QueryValueEx(key, value_name)
+    return value
+
+
+def long_paths_enabled(
+    read_value: Callable[[str, str], object] | None = None,
+) -> bool | None:
+    """Whether the ``LongPathsEnabled`` policy is on.
+
+    ``read_value(key_path, value_name)`` returns the raw registry value or
+    raises ``OSError``; the default reads ``winreg``.  A missing value is the
+    Windows default (off).  ``None`` means the registry could not be consulted
+    at all, which happens off Windows and leaves the caller with the
+    conservative short limit.
+    """
+
+    if read_value is None:
+        if sys.platform != "win32":
+            return None
+        read_value = _read_machine_registry_value
+    try:
+        value = read_value(_LONG_PATHS_KEY, _LONG_PATHS_VALUE)
+    except FileNotFoundError:
+        return False
+    except (ImportError, OSError, TypeError, ValueError):
+        return None
+    try:
+        return int(value) == 1  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return False
+
+
+def path_limit(
+    enabled: bool | None = None,
+    *,
+    read_value: Callable[[str, str], object] | None = None,
+    probe: Callable[[], bool] | None = None,
+) -> PathLimit:
+    """32767 characters with long paths enabled, otherwise ``MAX_PATH``.
+
+    ``enabled`` may be injected (tests describe a machine); by default the
+    policy is read from the registry and, when it is on, confirmed by a real
+    attempt (``probe``, ``long_paths_effective`` by default): the policy
+    only takes effect for an executable whose manifest opts in
+    (``longPathAware``), and a frozen worker built without it still gets
+    ``MAX_PATH`` from ``CreateFileW``.  When the registry cannot be read the
+    short limit applies, because a wrong "unlimited" would only be
+    discovered by a failed write deep inside a run.
+    """
+
+    injected = enabled is not None
+    if enabled is None:
+        enabled = long_paths_enabled(read_value)
+    if enabled is None:
+        return PathLimit(MAX_PATH_CHARACTERS, None, f"MAX_PATH ({LONG_PATHS_REGISTRY_KEY} unavailable)")
+    if enabled and not injected and (probe is not None or sys.platform == "win32"):
+        effective = (probe or long_paths_effective)()
+        if not effective:
+            return PathLimit(
+                MAX_PATH_CHARACTERS, True, "MAX_PATH (policy on, process manifest not longPathAware)"
+            )
+    return PathLimit(
+        LONG_PATH_CHARACTERS if enabled else MAX_PATH_CHARACTERS,
+        enabled,
+        LONG_PATHS_REGISTRY_KEY,
+    )
+
+
+LONG_PATH_PROBE_COMPONENT = "oaf-long-path-probe-" + "x" * 90
+
+
+def long_paths_effective(root: str | os.PathLike[str] | None = None) -> bool:
+    """Whether this process can actually create a path longer than MAX_PATH.
+
+    Long paths need both the machine policy and the executable's manifest;
+    only a real attempt answers for both.  A directory well past 260
+    characters is created under ``root`` (the temp directory by default) and
+    removed again; any failure means the short limit applies.
+    """
+
+    import tempfile
+
+    base = Path(root if root is not None else tempfile.gettempdir())
+    # Three components of 110 characters: the probe must exceed MAX_PATH
+    # through its total length, not through one component, because NTFS
+    # caps every component at 255 characters whatever the policy says.
+    top = base / LONG_PATH_PROBE_COMPONENT
+    probe = top / LONG_PATH_PROBE_COMPONENT / LONG_PATH_PROBE_COMPONENT
+    try:
+        probe.mkdir(parents=True, exist_ok=True)
+        marker = probe / "ok"
+        marker.write_bytes(b"1")
+        marker.unlink()
+        return True
+    except OSError:
+        return False
+    finally:
+        for directory in (probe, probe.parent, top):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+
+
 def volume_capabilities_from(
     filesystem: str, flags: int, *, source: str = "GetVolumeInformationW"
 ) -> VolumeCapabilities:
@@ -279,7 +406,9 @@ def publish_file_no_replace_with(
     except OSError:
         rename(temporary, destination)
         return "rename"
-    temporary.unlink()
+    # The destination link exists now; only the temporary name is dropped,
+    # waiting out a scanner that may still hold the freshly written file.
+    remove_file(temporary, missing_ok=False, platform_id="windows")
     return "hardlink"
 
 
@@ -371,11 +500,18 @@ def well_known_executables(
 ) -> tuple[Path, ...]:
     """Install locations under ProgramFiles, ProgramFiles(x86) and LOCALAPPDATA."""
 
+    # A merged copy of ``os.environ`` carries upper-cased keys on Windows;
+    # resolve the roots the way the OS would.
+    view = environment_view(environment, platform_id="windows")
     candidates: list[Path] = []
     for root_key in _EXECUTABLE_ROOT_KEYS:
-        root = environment.get(root_key)
+        root = view.get(root_key)
         if root:
-            candidates.extend(Path(root) / relative for relative in table.get(tool, ()))
+            # Split on the table's own separator so the candidates are real
+            # paths on every host (the tests build them on POSIX).
+            candidates.extend(
+                Path(root).joinpath(*relative.split("\\")) for relative in table.get(tool, ())
+            )
     return tuple(candidates)
 
 
@@ -405,6 +541,9 @@ class WindowsPlatform:
     def volume_capabilities(self, path: Path) -> VolumeCapabilities:
         return volume_information(path)
 
+    def path_limit(self) -> PathLimit:
+        return path_limit()
+
     def rename_directory_no_replace(self, source: Path, destination: Path) -> None:
         rename_directory_no_replace_with(source, destination)
 
@@ -423,7 +562,7 @@ class WindowsPlatform:
         environment: Mapping[str, str] | None = None,
         home: str | os.PathLike[str] | None = None,
     ) -> Path:
-        env = os.environ if environment is None else environment
+        env = environment_view(os.environ if environment is None else environment, platform_id="windows")
         override = env.get("OPENASTROFLOW_DATA_DIR")
         if override:
             return Path(override).expanduser()
@@ -448,12 +587,17 @@ class WindowsPlatform:
 
 
 __all__ = [
+    "LONG_PATHS_REGISTRY_KEY",
+    "LONG_PATH_CHARACTERS",
+    "MAX_PATH_CHARACTERS",
     "WELL_KNOWN_EXECUTABLES",
     "WindowsPlatform",
     "execution_state_keep_awake",
     "flush_directory",
     "global_memory_status",
+    "long_paths_enabled",
     "parse_processor_core_records",
+    "path_limit",
     "publish_file_no_replace_with",
     "registry_processor_brand",
     "rename_directory_no_replace_with",

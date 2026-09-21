@@ -6,17 +6,17 @@
 //! lifetime, progress delivery, and cancellation.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read};
-use std::process::{Child, Stdio};
+use std::io::{BufReader, Read};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime};
 
-use crate::platform;
+use crate::platform::{self, ManagedChild};
 use crate::sidecar::{
-    command_output, discover_engine, sidecar_output, spawn_sidecar, EngineExecutable,
+    command_output, discover_engine, sidecar_output, spawn_sidecar, EngineExecutable, LossyLines,
 };
 
 const PROGRESS_EVENT: &str = "openastroflow://catalog-progress";
@@ -27,7 +27,7 @@ const MAX_DIAGNOSTIC_BYTES: usize = 8 * 1024;
 
 #[derive(Default)]
 pub(crate) struct CatalogRegistry {
-    jobs: Mutex<HashMap<String, Arc<Mutex<Child>>>>,
+    jobs: Mutex<HashMap<String, Arc<Mutex<ManagedChild>>>>,
     shutting_down: AtomicBool,
 }
 
@@ -254,8 +254,8 @@ fn stream_progress<R: Runtime>(
 ) -> std::thread::JoinHandle<String> {
     std::thread::spawn(move || {
         let mut diagnostics = String::new();
-        for line in BufReader::new(stderr).lines() {
-            let Ok(line) = line else { break };
+        // Lenient decoding: a provider's odd byte must not end progress.
+        for line in LossyLines::new(BufReader::new(stderr)) {
             if line.len() <= 256 * 1024 {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
                     if value.get("event").and_then(serde_json::Value::as_str)
@@ -534,14 +534,13 @@ mod tests {
         assert!(checked_identifier("catalog/../../escape", "catalogId").is_err());
     }
 
-    #[cfg(unix)]
     #[test]
     fn application_shutdown_terminates_every_catalog_process_tree() {
         let registry = CatalogRegistry::default();
-        let mut command = std::process::Command::new("/bin/sleep");
-        command.arg("30");
-        platform::configure_child_process(&mut command);
-        let child = Arc::new(Mutex::new(command.spawn().expect("catalog child")));
+        let mut command = platform::test_support::sleeping_command();
+        let child = Arc::new(Mutex::new(
+            ManagedChild::spawn(&mut command).expect("catalog child"),
+        ));
         registry
             .jobs
             .lock()

@@ -34,6 +34,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .calibration import CalibrationError, FitsFrame, _plain_header_value
+from .platform import remove_file
 from .native_kernels import (
     DRIZZLE_KERNEL_ID,
     DRIZZLE_KERNELS,
@@ -461,11 +462,11 @@ def drizzle_group(request: DrizzleGroupRequest) -> DrizzleGroupResult:
         try:
             os.link(staged_receipt, receipt_path)
         except Exception:
-            output_path.unlink(missing_ok=True)
+            remove_file(output_path)
             raise
     finally:
-        staged_output.unlink(missing_ok=True)
-        staged_receipt.unlink(missing_ok=True)
+        remove_file(staged_output)
+        remove_file(staged_receipt)
     return DrizzleGroupResult(
         output_path=str(output_path),
         receipt_path=str(receipt_path),

@@ -383,8 +383,8 @@ def test_measure_paths_process_pool_matches_threads_and_reports_parallelism(
     process_stats: dict[str, object] = {}
     by_processes = measure_paths(frames, tmp_path / "processes", config, workers=2, stats=process_stats)
 
-    assert thread_stats == {"parallelism": "threads", "workers": 2}
-    assert process_stats == {"parallelism": "processes", "workers": 2}
+    assert thread_stats == {"parallelism": "threads", "workers": 2, "fallbackReason": None}
+    assert process_stats == {"parallelism": "processes", "workers": 2, "fallbackReason": None}
     assert [item.status for item in by_processes] == ["MEASURED", "ERROR", "MEASURED", "MEASURED"]
     for left, right in zip(by_threads, by_processes):
         assert left.metadata.path == right.metadata.path
@@ -419,9 +419,18 @@ def test_measure_paths_falls_back_to_threads_when_processes_cannot_start(
 
     monkeypatch.setattr(parallel_module, "ProcessPoolExecutor", RefusingPool)
     stats: dict[str, object] = {}
-    results = measure_paths([frame, frame], tmp_path / "out", config, workers=2, stats=stats)
-    assert stats == {"parallelism": "threads", "workers": 2}
+    with pytest.warns(RuntimeWarning, match="process table exhausted"):
+        results = measure_paths([frame, frame], tmp_path / "out", config, workers=2, stats=stats)
+    # The receipt names why threads ran, so a frozen build that cannot spawn
+    # is diagnosable from its QC manifest.
+    assert stats == {"parallelism": "threads", "workers": 2, "fallbackReason": "OSError: process table exhausted"}
     assert [item.status for item in results] == ["MEASURED", "MEASURED"]
+
+    monkeypatch.setattr(parallel_module.sys, "frozen", True, raising=False)
+    frozen_stats: dict[str, object] = {}
+    with pytest.warns(RuntimeWarning, match="freeze_support"):
+        measure_paths([frame, frame], tmp_path / "frozen", config, workers=2, stats=frozen_stats)
+    assert "freeze_support()" in str(frozen_stats["fallbackReason"])
 
 
 def test_measure_paths_writes_unique_thumbnails_under_output_directory(

@@ -10,13 +10,16 @@ import struct
 
 import pytest
 
+from pe_fixtures import MACHINE_ARM64, build_pe_image
 from scripts.attest_bundled_runtime import (
     BundleAttestationError,
     _attest_runtime_libraries,
     attest_legal_resources,
     attest_macos_deployment,
     attest_runtime,
+    attest_windows_deployment,
     inspect_macos_bundle,
+    inspect_windows_runtime,
     write_create_only,
 )
 from scripts.build_worker_sidecar import (
@@ -29,6 +32,7 @@ from scripts.build_worker_sidecar import (
 
 
 TARGET = detect_host_target_triple()
+WINDOWS_TARGET = "x86_64-pc-windows-msvc"
 VERSIONS = {
     "python": "3.12.3",
     "pyinstaller": "6.22.2",
@@ -162,11 +166,11 @@ def _test_app(root: Path) -> Path:
     return app
 
 
-def _resource_root(root: Path) -> Path:
+def _resource_root(root: Path, target: str = TARGET) -> Path:
     resource = root / "openastroflow-worker"
-    runtime = resource / runtime_directory_name(TARGET)
+    runtime = resource / runtime_directory_name(target)
     runtime.mkdir(parents=True)
-    entry = runtime / sidecar_filename(TARGET)
+    entry = runtime / sidecar_filename(target)
     handshake = json.dumps(WORKER_HANDSHAKE, sort_keys=True, separators=(",", ":"))
     catalogs = json.dumps(
         {
@@ -180,11 +184,25 @@ def _resource_root(root: Path) -> Path:
         sort_keys=True,
         separators=(",", ":"),
     )
+    doctor = json.dumps(
+        {
+            "nativeKernels": {
+                "loaded": True,
+                "libraryPath": "ignored-by-the-attestation/openastroflow_native.dll",
+                "sha256": "sha256:" + "b" * 64,
+                "abiVersion": 1,
+                "cpuArchitecture": "x86_64",
+            }
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     entry.write_text(
         "#!/bin/sh\n"
         'if [ "$1" = "--version" ]; then echo "ultra-fast-wbpp 0.1.0"; exit 0; fi\n'
         f"if [ \"$1\" = \"catalog\" ]; then printf '%s\\n' '{catalogs}'; exit 0; fi\n"
         'if [ "$1" = "run-project" ]; then echo "usage: ultra-fast-wbpp run-project"; exit 0; fi\n'
+        f"if [ \"$1\" = \"doctor\" ]; then printf '%s\\n' '{doctor}'; exit 0; fi\n"
         "read request\n"
         f"printf '%s\\n' '{handshake}'\n",
         encoding="utf-8",
@@ -194,13 +212,49 @@ def _resource_root(root: Path) -> Path:
     internal = runtime / "_internal"
     internal.mkdir()
     (internal / "python.dat").write_bytes(b"python")
+    if target in WINDOWS_TARGET_MACHINES:
+        _populate_windows_tree(runtime)
     manifest = build_manifest(
-        runtime, TARGET, versions=VERSIONS, handshake=WORKER_HANDSHAKE
+        runtime, target, versions=VERSIONS, handshake=WORKER_HANDSHAKE
     )
-    (resource / manifest_filename(TARGET)).write_text(
+    (resource / manifest_filename(target)).write_text(
         json.dumps(manifest), encoding="utf-8"
     )
     return resource
+
+
+WINDOWS_TARGET_MACHINES = {"x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"}
+
+
+def _populate_windows_tree(runtime: Path) -> None:
+    """A frozen-worker-shaped tree whose PE closure is complete."""
+
+    internal = runtime / "_internal"
+    (internal / "python312.dll").write_bytes(
+        build_pe_image(
+            imports=("KERNEL32.dll", "VCRUNTIME140.dll", "api-ms-win-crt-runtime-l1-1-0.dll", "ws2_32.dll")
+        )
+    )
+    (internal / "VCRUNTIME140.dll").write_bytes(
+        build_pe_image(imports=("KERNEL32.dll", "api-ms-win-crt-heap-l1-1-0.dll"))
+    )
+    numpy = internal / "numpy" / "_core"
+    numpy.mkdir(parents=True)
+    (numpy / "_multiarray_umath.cp312-win_amd64.pyd").write_bytes(
+        build_pe_image(
+            imports=("python312.dll", "VCRUNTIME140.dll", "msvcp140-9f3d2c1b.dll", "KERNEL32.dll"),
+            delay_imports=("ADVAPI32.dll",),
+        )
+    )
+    libs = internal / "numpy.libs"
+    libs.mkdir()
+    (libs / "msvcp140-9f3d2c1b.dll").write_bytes(
+        build_pe_image(imports=("KERNEL32.dll", "VCRUNTIME140.dll", "api-ms-win-crt-string-l1-1-0.dll"))
+    )
+    native = internal / "openastroflow_engine" / "native"
+    native.mkdir(parents=True)
+    (native / "openastroflow_native.dll").write_bytes(build_pe_image(imports=("KERNEL32.dll",)))
+    (native / "README.md").write_text("kernels", encoding="utf-8")
 
 
 @pytest.mark.skipif(
@@ -503,3 +557,209 @@ def test_runtime_library_attestation_rejects_tampered_package_provenance(
     with pytest.raises(BundleAttestationError, match="differs from pinned policy"):
         _attest_runtime_libraries(runtime, entry_point, 5.0)
     assert len(smoke_calls) == 1  # Reject altered provenance before launching.
+
+
+def _windows_runtime(root: Path) -> Path:
+    resource = _resource_root(root, WINDOWS_TARGET)
+    runtime = resource / runtime_directory_name(WINDOWS_TARGET)
+    # The closure audit inspects bytes, so the entry point is a real PE image
+    # here rather than the POSIX shell stand-in used for launch tests.
+    (runtime / sidecar_filename(WINDOWS_TARGET)).write_bytes(
+        build_pe_image(imports=("KERNEL32.dll", "USER32.dll"), dll=False)
+    )
+    return runtime
+
+
+def test_windows_import_closure_resolves_every_pe_image_to_system_or_bundled(tmp_path: Path) -> None:
+    runtime = _windows_runtime(tmp_path)
+
+    audit = attest_windows_deployment(runtime, WINDOWS_TARGET)
+
+    assert audit["verified"] is True
+    assert audit["policy"]["machine"] == "x86_64"
+    assert audit["policy"]["nativeKernelCrt"] == "static"
+    assert audit["policy"]["authenticode"] == "release-gate-not-verified"
+    assert audit["peFileCount"] == 6
+    assert audit["importClosure"]["unresolvedEdgeCount"] == 0
+    assert audit["importClosure"]["bundledEdgeCount"] == 5
+    assert audit["importClosure"]["systemEdgeCount"] > 0
+    by_path = {item["path"]: item for item in audit["files"]}
+    extension = by_path["_internal/numpy/_core/_multiarray_umath.cp312-win_amd64.pyd"]
+    assert extension["crtLinkage"] == "dynamic"
+    assert extension["delayImports"] == ["ADVAPI32.dll"]
+    resolutions = {item["dll"]: item for item in extension["imports"]}
+    assert resolutions["python312.dll"]["resolution"] == "bundled"
+    assert resolutions["python312.dll"]["bundleTargets"] == ["_internal/python312.dll"]
+    assert resolutions["msvcp140-9f3d2c1b.dll"]["bundleTargets"] == ["_internal/numpy.libs/msvcp140-9f3d2c1b.dll"]
+    assert resolutions["KERNEL32.dll"]["resolution"] == "system"
+    assert resolutions["ADVAPI32.dll"]["resolution"] == "system"
+    kernels = by_path["_internal/openastroflow_engine/native/openastroflow_native.dll"]
+    assert kernels["crtLinkage"] == "static"
+    assert kernels["machine"] == "x86_64"
+    launcher = by_path["openastroflow-worker-x86_64-pc-windows-msvc.exe"]
+    assert launcher["isDll"] is False
+    assert launcher["crtLinkage"] == "static"
+    # The record is relative to the runtime root: no local path leaks.
+    assert all(not path.startswith(str(tmp_path)) for path in by_path)
+    assert str(tmp_path) not in json.dumps(audit)
+
+
+def test_windows_import_closure_rejects_dlls_absent_from_a_clean_machine(tmp_path: Path) -> None:
+    runtime = _windows_runtime(tmp_path)
+    offender = runtime / "_internal" / "shapely" / "_geos.cp312-win_amd64.pyd"
+    offender.parent.mkdir()
+    offender.write_bytes(build_pe_image(imports=("python312.dll", "MSVCP140.dll", "geos_c.dll")))
+
+    audit = inspect_windows_runtime(runtime, WINDOWS_TARGET)
+
+    assert audit["importClosure"]["unresolvedEdgeCount"] == 2
+    assert audit["violations"] == [
+        {"code": "UNRESOLVED_DLL_IMPORT", "path": "_internal/shapely/_geos.cp312-win_amd64.pyd", "dll": "geos_c.dll"},
+        {"code": "UNRESOLVED_DLL_IMPORT", "path": "_internal/shapely/_geos.cp312-win_amd64.pyd", "dll": "MSVCP140.dll"},
+    ]
+    with pytest.raises(BundleAttestationError, match="UNRESOLVED_DLL_IMPORT.*MSVCP140.dll"):
+        attest_windows_deployment(runtime, WINDOWS_TARGET)
+
+    # Shipping the DLLs in the tree, in any directory and any case, resolves them.
+    (runtime / "_internal" / "shapely.libs").mkdir()
+    (runtime / "_internal" / "shapely.libs" / "GEOS_C.DLL").write_bytes(build_pe_image(imports=("KERNEL32.dll",)))
+    (runtime / "_internal" / "msvcp140.dll").write_bytes(build_pe_image(imports=("KERNEL32.dll", "VCRUNTIME140.dll")))
+    assert attest_windows_deployment(runtime, WINDOWS_TARGET)["verified"] is True
+
+
+def test_windows_import_closure_requires_a_static_crt_native_kernel_dll(tmp_path: Path) -> None:
+    runtime = _windows_runtime(tmp_path)
+    kernels = runtime / "_internal" / "openastroflow_engine" / "native" / "openastroflow_native.dll"
+    kernels.write_bytes(build_pe_image(imports=("KERNEL32.dll", "VCRUNTIME140.dll", "MSVCP140.dll")))
+    (runtime / "_internal" / "MSVCP140.dll").write_bytes(build_pe_image(imports=("KERNEL32.dll",)))
+
+    audit = inspect_windows_runtime(runtime, WINDOWS_TARGET)
+
+    assert audit["violations"] == [
+        {
+            "code": "NATIVE_KERNEL_DYNAMIC_CRT",
+            "path": "_internal/openastroflow_engine/native/openastroflow_native.dll",
+            "dynamicCrtImports": ["MSVCP140.dll", "VCRUNTIME140.dll"],
+        }
+    ]
+    with pytest.raises(BundleAttestationError, match="NATIVE_KERNEL_DYNAMIC_CRT"):
+        attest_windows_deployment(runtime, WINDOWS_TARGET)
+
+    kernels.unlink()
+    audit = inspect_windows_runtime(runtime, WINDOWS_TARGET)
+    assert audit["violations"] == [{"code": "NATIVE_KERNEL_MISSING", "dll": "openastroflow_native.dll"}]
+
+
+def test_windows_import_closure_rejects_wrong_machine_and_corrupt_images(tmp_path: Path) -> None:
+    runtime = _windows_runtime(tmp_path)
+    arm = runtime / "_internal" / "arm.pyd"
+    arm.write_bytes(build_pe_image(imports=("KERNEL32.dll",), machine=MACHINE_ARM64))
+    corrupt = runtime / "_internal" / "corrupt.dll"
+    corrupt.write_bytes(b"MZ" + b"\0" * 200)
+
+    audit = inspect_windows_runtime(runtime, WINDOWS_TARGET)
+
+    codes = sorted((item["code"], item["path"]) for item in audit["violations"])
+    assert codes == [
+        ("INVALID_PE_IMAGE", "_internal/corrupt.dll"),
+        ("WRONG_MACHINE", "_internal/arm.pyd"),
+    ]
+    with pytest.raises(BundleAttestationError, match="Windows import-closure audit found 2"):
+        attest_windows_deployment(runtime, WINDOWS_TARGET)
+    with pytest.raises(BundleAttestationError, match="pc-windows-msvc"):
+        inspect_windows_runtime(runtime, "aarch64-apple-darwin")
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="uses a POSIX shell launcher standing in for the frozen worker",
+)
+def test_windows_attestation_runs_closure_launch_budget_and_native_doctor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resource = _resource_root(tmp_path, WINDOWS_TARGET)
+    # The launch probes need an executable stand-in, which on this host is a
+    # shell script named like the frozen worker; keep the closure audit from
+    # treating that script as a broken PE image.
+    monkeypatch.setattr("scripts.attest_bundled_runtime._PE_SUFFIXES", {".dll", ".pyd"})
+    main_executable = tmp_path / "Ultra-Fast WBPP.exe"
+    main_executable.write_bytes(
+        build_pe_image(imports=("KERNEL32.dll", "VCRUNTIME140.dll"), dll=False, subsystem=2)
+    )
+
+    payload = attest_runtime(
+        resource,
+        WINDOWS_TARGET,
+        max_start_seconds=5.0,
+        bundle_name="installed-runtime",
+        signature={"verified": False, "mode": "unsigned-prerelease", "hardenedRuntime": False},
+        require_windows_import_closure=True,
+        windows_main_executable=main_executable,
+    )
+
+    assert payload["windowsDeployment"]["verified"] is True
+    assert payload["windowsDeployment"]["peFileCount"] == 5
+    assert payload["windowsDeployment"]["importClosure"]["unresolvedEdgeCount"] == 0
+    assert payload["windowsDeployment"]["mainExecutable"]["dynamicCrtImports"] == ["VCRUNTIME140.dll"]
+    assert payload["nativeKernels"] == {
+        "loaded": True,
+        "libraryFileName": "openastroflow_native.dll",
+        "sha256": "sha256:" + "b" * 64,
+        "abiVersion": 1,
+        "cpuArchitecture": "x86_64",
+        "doctorSeconds": payload["nativeKernels"]["doctorSeconds"],
+    }
+    assert payload["launch"]["version"] == "ultra-fast-wbpp 0.1.0"
+    assert "ignored-by-the-attestation" not in json.dumps(payload)
+
+    with pytest.raises(BundleAttestationError, match="non-Windows target"):
+        attest_runtime(
+            _resource_root(tmp_path / "mac", TARGET),
+            TARGET,
+            max_start_seconds=5.0,
+            bundle_name="x",
+            signature={"verified": False, "mode": "unsigned-prerelease", "hardenedRuntime": False},
+            require_windows_import_closure=True,
+        )
+    with pytest.raises(BundleAttestationError, match="only be recorded with the Windows"):
+        attest_runtime(
+            _resource_root(tmp_path / "mac2", TARGET),
+            TARGET,
+            max_start_seconds=5.0,
+            bundle_name="x",
+            signature={"verified": False, "mode": "unsigned-prerelease", "hardenedRuntime": False},
+            windows_main_executable=main_executable,
+        )
+
+
+def test_windows_main_executable_facts_are_recorded_not_gated(tmp_path: Path) -> None:
+    from scripts.attest_bundled_runtime import inspect_windows_main_executable
+
+    exe = tmp_path / "Ultra-Fast WBPP.exe"
+    exe.write_bytes(
+        build_pe_image(
+            imports=("KERNEL32.dll", "VCRUNTIME140.dll", "api-ms-win-crt-runtime-l1-1-0.dll", "WebView2Loader.dll"),
+            dll=False,
+            subsystem=2,
+        )
+    )
+
+    facts = inspect_windows_main_executable(exe, WINDOWS_TARGET)
+
+    assert facts["fileName"] == "Ultra-Fast WBPP.exe"
+    assert facts["subsystem"] == "windows-gui"
+    assert facts["crtLinkage"] == "dynamic"
+    assert facts["dynamicCrtImports"] == ["VCRUNTIME140.dll"]
+    assert facts["nonSystemImports"] == ["VCRUNTIME140.dll", "WebView2Loader.dll"]
+    assert str(tmp_path) not in json.dumps(facts)
+
+    console = tmp_path / "console.exe"
+    console.write_bytes(build_pe_image(imports=("KERNEL32.dll",), dll=False, subsystem=3))
+    with pytest.raises(BundleAttestationError, match="GUI executable"):
+        inspect_windows_main_executable(console, WINDOWS_TARGET)
+    arm = tmp_path / "arm.exe"
+    arm.write_bytes(build_pe_image(imports=("KERNEL32.dll",), dll=False, subsystem=2, machine=MACHINE_ARM64))
+    with pytest.raises(BundleAttestationError, match="built for aarch64"):
+        inspect_windows_main_executable(arm, WINDOWS_TARGET)
+    with pytest.raises(BundleAttestationError, match="missing"):
+        inspect_windows_main_executable(tmp_path / "absent.exe", WINDOWS_TARGET)

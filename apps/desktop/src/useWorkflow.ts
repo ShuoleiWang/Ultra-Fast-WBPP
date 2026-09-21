@@ -28,6 +28,7 @@ import type {
   RuntimeCapabilities,
   QualityInspection,
   ScreeningSummary,
+  SolverBackendStatus,
   SolverDoctorResponse,
   SourceSet,
   StageProgress,
@@ -160,6 +161,21 @@ function panelMatrix(assets: InspectedAsset[], admittedPaths: ReadonlySet<string
   return [...groups.values()].sort((a, b) => a.target.localeCompare(b.target)
     || filterRank(a.filter) - filterRank(b.filter)
     || a.filter.localeCompare(b.filter));
+}
+
+export type SolverBackendId = "astrometry-net" | "astap";
+
+/**
+ * Whether the strict final gate would accept this backend's solutions: it must
+ * run, and it must produce the managed-catalog correspondence evidence.  An
+ * engine that predates the `scienceReady` field only ever produced that
+ * evidence with solve-field, so its absence counts as ready for solve-field
+ * and as not ready for ASTAP.
+ */
+export function solverScienceReady(backend: SolverBackendStatus | undefined): boolean {
+  if (!backend?.executionReady) return false;
+  if (backend.scienceReady === undefined) return backend.backendId === "astrometry-net";
+  return backend.scienceReady === true;
 }
 
 // Approval works for any project: the engine binds each selection to the
@@ -686,7 +702,14 @@ export function useWorkflow(t: Translator) {
   const cfaPattern = cfaAssets[0]?.cfaPattern.trim().toUpperCase();
   const solveField = solverDoctor?.backends.find((backend) => backend.backendId === "astrometry-net");
   const astap = solverDoctor?.backends.find((backend) => backend.backendId === "astap");
-  const solverSetupReady = Boolean(catalogDoctor?.ok && solveField?.executionReady);
+  const solveFieldReady = solverScienceReady(solveField);
+  const astapReady = solverScienceReady(astap);
+  // solve-field has no native Windows build; there ASTAP, verified by the
+  // engine against the managed indexes, is the solver users install first.
+  const primarySolver: SolverBackendId = capabilities?.platform === "windows" ? "astap" : "astrometry-net";
+  // Any science-ready backend satisfies the recipe's `auto` solver choice;
+  // the verified offline catalog is required by both.
+  const solverSetupReady = Boolean(catalogDoctor?.ok && solverDoctor?.backends.some(solverScienceReady));
   const qualityReady = Boolean(qualityInspection && qualityInspection.frames.length === (sources.find((source) => source.role === "LIGHT")?.fileCount ?? 0));
   const canApproveReview = (frame: InspectedLightQuality) => reviewCanBeApproved(frame, qualityInspection);
   const validApprovedReviewDigests = useMemo(() => approvedReviewDigests.filter((digest) => qualityInspection?.frames.some((frame) => frame.sourceSha256 === digest && reviewCanBeApproved(frame, qualityInspection))), [approvedReviewDigests, qualityInspection]);
@@ -719,7 +742,7 @@ export function useWorkflow(t: Translator) {
     insufficientQualityPanels, insufficientPanels, minimumAdmittedLights,
     calibrationInspection, calibrationBusy, calibrationError, recheckCalibration,
     drizzleEnabled, setDrizzleEnabled, drizzleScale, setDrizzleScale, drizzleDropShrink, setDrizzleDropShrink, drizzleKernel, setDrizzleKernel, localNormalizationEnabled, setLocalNormalizationEnabled,
-    catalogList, catalogDoctor, solverDoctor, recommendedCatalog, solveField, astap, solverSetupReady, catalogTermsAccepted, setCatalogTermsAccepted,
+    catalogList, catalogDoctor, solverDoctor, recommendedCatalog, solveField, astap, solveFieldReady, astapReady, primarySolver, solverSetupReady, catalogTermsAccepted, setCatalogTermsAccepted,
     catalogProgress, catalogStatus, catalogError, startCatalogInstall, cancelCatalogInstall, openCatalogTerms, revealOutput, solverSetupBusy, recheckSolverSetup,
   };
 }

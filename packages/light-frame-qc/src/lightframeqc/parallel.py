@@ -14,7 +14,9 @@ from concurrent.futures.process import BrokenProcessPool
 import multiprocessing
 import os
 import pickle
+import sys
 from typing import Any, Callable, Iterable, TypeVar
+import warnings
 
 # Below this many items a process pool's start-up outweighs its gain.
 PROCESS_POOL_MINIMUM_ITEMS = 12
@@ -53,10 +55,18 @@ class FrameRunner:
         self.parallelism = choose_parallelism(workers, item_count)
         self.workers = 1 if self.parallelism == "sequential" else min(workers, max(item_count, 1))
         self._executor: Executor | None = None
+        self.fallback_reason: str | None = None
 
     @property
     def stats(self) -> dict[str, Any]:
-        return {"parallelism": self.parallelism, "workers": self.workers}
+        # ``fallbackReason`` is set when a process pool was replaced by
+        # threads; receipts keep it so a slow frozen build (no spawned
+        # workers) can be told apart from a machine that is merely small.
+        return {
+            "parallelism": self.parallelism,
+            "workers": self.workers,
+            "fallbackReason": self.fallback_reason,
+        }
 
     def __enter__(self) -> "FrameRunner":
         return self
@@ -88,10 +98,34 @@ class FrameRunner:
         if self.parallelism == "processes":
             try:
                 return list(self._open().map(function, items))
-            except _PROCESS_POOL_FAILURES:
-                self.close()
-                self.parallelism = "threads"
+            except _PROCESS_POOL_FAILURES as error:
+                self._fall_back_to_threads(error)
         return list(self._open().map(function, items))
+
+    def _fall_back_to_threads(self, error: BaseException) -> None:
+        """Replace a broken or unstartable process pool by a thread pool.
+
+        The reason is kept for the receipt and raised as a warning because
+        the fallback is silent otherwise and costs several times the wall
+        time on eight cores.  A frozen executable is the expected cause: its
+        spawned children must re-enter ``multiprocessing.freeze_support()``
+        before any argument dispatch, or they run the command line instead.
+        """
+
+        self.close()
+        self.parallelism = "threads"
+        reason = f"{type(error).__name__}: {error}".strip().rstrip(":")
+        if getattr(sys, "frozen", False):
+            reason += (
+                " (frozen executable: the launcher must call multiprocessing.freeze_support() "
+                "before dispatching its arguments)"
+            )
+        self.fallback_reason = reason
+        warnings.warn(
+            f"frame worker process pool unavailable, computing in threads instead: {reason}",
+            RuntimeWarning,
+            stacklevel=3,
+        )
 
 
 __all__ = ["FrameRunner", "PARALLELISM_ENVIRONMENT", "PROCESS_POOL_MINIMUM_ITEMS", "choose_parallelism"]

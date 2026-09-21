@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
 import math
 import threading
@@ -1639,7 +1640,15 @@ def run_registration(
     reference_candidates: Iterable[str] | None = None,
     validate_warp: bool = True,
     workers: int = 4,
+    runner: FrameRunner | None = None,
 ) -> RegistrationRun:
+    """Analyze, register and validate ``paths`` onto one reference frame.
+
+    ``runner`` lets the caller share one spawned worker pool with the stages
+    before this one (the E2E run reuses its quality-gate pool, saving the
+    pool's start-up); without it the stage opens and closes its own.
+    """
+
     started = time.perf_counter()
     ordered = [str(Path(path).expanduser().resolve(strict=True)) for path in paths]
     candidate_indices: list[int] | None = None
@@ -1656,8 +1665,10 @@ def run_registration(
     if workers < 1:
         raise ValueError("workers must be positive")
     # One worker pool serves the frame analysis, the member estimation and
-    # the full-resolution refinement of this stage, then closes.
-    with FrameRunner(workers, len(ordered)) as runner:
+    # the full-resolution refinement of this stage; an owned pool closes
+    # with the stage, a shared one stays with its owner.
+    owned = FrameRunner(workers, len(ordered)) if runner is None else None
+    with owned if owned is not None else nullcontext(runner) as runner:
         analysis_started = time.perf_counter()
         analyses = analyze_frames(
             ordered,

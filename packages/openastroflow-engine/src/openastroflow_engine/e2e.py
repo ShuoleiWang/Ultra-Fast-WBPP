@@ -17,7 +17,7 @@ from __future__ import annotations
 from lightframeqc.content_hash import file_sha256
 from lightframeqc.cfa import is_cfa_pattern
 from . import platform as platform_services
-from .platform import NoReplaceError
+from .platform import NoReplaceError, remove_file, remove_tree, rename_with_retry
 from .calibration_policy import apply_mono_workflow, bias_from_header, MONO_STANDARD, can_omit_bias, conflicting_profile_fields, workflow_receipt
 
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
@@ -39,6 +39,7 @@ import tempfile
 import threading
 from time import perf_counter
 from typing import Any, Callable, Iterable, Mapping, Sequence
+import warnings
 
 from .quality_cache import quality_cache_directory
 from .review_preview import (
@@ -56,6 +57,8 @@ import numpy as np
 from lightframeqc.analysis import analyze_measurements
 from lightframeqc.config import DEFAULT_CONFIG, QcConfig
 from lightframeqc.measure import measure_paths
+from lightframeqc.parallel import FrameRunner
+from lightframeqc.source_extraction import NONDETERMINISTIC_WARNING, cached_extraction_self_test
 from lightframeqc.models import FrameResult, GateDisposition
 from lightframeqc.quality_gate import GatePolicy, evaluate_quality_gate
 from lightframeqc.readers import probe_frame_metadata
@@ -107,6 +110,13 @@ from .selection import (
 from .selection.policy import selection_receipt
 from .selection.region import RegionWeightMap, region_weight_maps
 from .xisf_pixels import convert_xisf_to_fits, preflight_xisf_header
+from .path_budget import (
+    PIXEL_PIPELINE_DIRECTORY,
+    PIXEL_PIPELINE_STAGING_STEM,
+    STAGING_SUFFIX,
+    WORK_DIRECTORY,
+    name_token,
+)
 from .preview import render_auto_stretch_preview
 from .solver import (
     SolveRequest,
@@ -627,7 +637,7 @@ def _stage_e2e_xisf_inputs(
                     receipt.source_sha256 != expected.sha256
                     or receipt.source_size_bytes != expected.size_bytes
                 ):
-                    staged.unlink(missing_ok=True)
+                    remove_file(staged)
                     raise E2EError(
                         "SOURCE_CHANGED",
                         "XISF conversion does not match the captured source identity",
@@ -809,7 +819,7 @@ def _sanitize_shareable_tree(
             stream.write(encoded)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        rename_with_retry(temporary, path, replace=True)
 
 
 def _share_safe_receipt_core(
@@ -1234,7 +1244,7 @@ def _verify_sources(identities: Sequence[_SourceIdentity], *, workers: int = 4) 
 
 
 def _safe_token(value: str) -> str:
-    token = re.sub(r"[^A-Z0-9]+", "_", value.upper()).strip("_")
+    token = name_token(value)
     if not token:
         raise E2EError("FILTER_INVALID", "filter name cannot be encoded safely")
     return token
@@ -2368,6 +2378,7 @@ def _register_lights(
     source_aliases: Mapping[str, Path] | None = None,
     source_sha256_by_path: Mapping[str, str] | None = None,
     reference_candidates: Sequence[Path] | None = None,
+    runner: FrameRunner | None = None,
 ) -> _RegistrationProducts:
     try:
         from openastroflow_registration import RegistrationConfig, run_registration
@@ -2397,6 +2408,7 @@ def _register_lights(
             ),
             validate_warp=True,
             workers=workers,
+            runner=runner,
         )
     except Exception as error:
         raise E2EError("REGISTRATION_FAILED", str(error)) from error
@@ -2703,10 +2715,13 @@ def _ordinary_candidates(
                 / coverage_data.size
             )
         with fits.open(path, mode="readonly", memmap=True, checksum=True) as hdul:
-            master_data = np.asarray(hdul[0].data)
-            null_fraction = float(
-                1.0 - np.count_nonzero(np.isfinite(master_data)) / master_data.size
-            )
+            # Keep only the finite mask: an array of the memory map itself
+            # would outlive the ``with`` block and, on Windows, keep the
+            # master locked while the run later moves it.
+            finite_master = np.isfinite(hdul[0].data)
+        null_fraction = float(
+            1.0 - np.count_nonzero(finite_master) / finite_master.size
+        )
         if (
             supported_fraction < minimum_coverage_fraction
             or null_fraction > maximum_null_fraction
@@ -3404,7 +3419,7 @@ def _discard_owned_solver_output(path: Path) -> bool:
     if stat.S_ISDIR(mode):
         return False
     try:
-        path.unlink()
+        remove_file(path, missing_ok=False)
         return True
     except OSError:
         return False
@@ -3736,9 +3751,8 @@ def _failure_result(
     callback: ProgressCallback | None,
     screening: Mapping[str, Any] | None = None,
 ) -> E2EResult:
-    private_work = staging / "work"
-    if private_work.exists():
-        shutil.rmtree(private_work)
+    private_work = staging / WORK_DIRECTORY
+    remove_tree(private_work)
     _sanitize_shareable_tree(staging, sources)
     evidence_artifacts = _artifact_records(
         staging,
@@ -3920,10 +3934,18 @@ def run_e2e(
                 )
     _emit(progress, ProgressStage.INVENTORY, "completed", f"validated {len(identities)} source files")
 
-    staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", suffix=".staging", dir=output.parent))
+    staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", suffix=STAGING_SUFFIX, dir=output.parent))
     published = False
+    # One spawned worker pool serves quality-gate measurement, star-field
+    # analysis and registration: each spawned worker imports NumPy, astropy,
+    # SEP and the engine (about 1.7 s per worker on the Windows laptop), so
+    # three pools per run cost several seconds of wall time for nothing.
+    # Every frame runs the same function whichever pool executes it, so the
+    # values never depend on the sharing.  Closed as soon as registration is
+    # done so its processes do not sit on memory during integration.
+    frame_runner = FrameRunner(request.workers, len(lights))
     try:
-        work = staging / "work"
+        work = staging / WORK_DIRECTORY
         receipts_dir = staging / "receipts"
         products_dir = staging / "products"
         previews_dir = staging / "previews"
@@ -3932,6 +3954,18 @@ def run_e2e(
             directory.mkdir()
 
         _emit(progress, ProgressStage.QUALITY_CONTROL, "started", "measuring and gating Light frames")
+        # Star counts, quality weights and therefore the masters depend on
+        # SEP's extraction being reproducible; the verdict of its self-test
+        # is part of the receipt and a failing build is called out here.
+        source_extraction = cached_extraction_self_test()
+        if not source_extraction["deterministic"]:
+            notice = (
+                f"{NONDETERMINISTIC_WARNING}: the installed sep {source_extraction['sepVersion']} "
+                "returns different objects for identical input; run-to-run identical products "
+                "cannot be claimed on this machine"
+            )
+            warnings.warn(notice, RuntimeWarning, stacklevel=2)
+            _emit(progress, ProgressStage.QUALITY_CONTROL, "running", notice)
         qc_dir = staging / "qc"
         qc_dir.mkdir()
         qc_timings: dict[str, float] = {}
@@ -3944,6 +3978,7 @@ def run_e2e(
             request.qc_config,
             workers=request.workers,
             stats=qc_measurement_stats,
+            runner=frame_runner,
         )
         qc_timings["measurementSeconds"] = perf_counter() - qc_started
         _emit(progress, ProgressStage.QUALITY_CONTROL, "running", f"measured {len(measurements)} Light frames; analyzing star fields")
@@ -3952,7 +3987,7 @@ def run_e2e(
         groups, frame_results = analyze_measurements(
             measurements, request.qc_config,
             cache_directory=quality_cache_directory(), cache_stats=qc_cache_stats,
-            workers=request.workers, stats=qc_analysis_stats,
+            workers=request.workers, stats=qc_analysis_stats, runner=frame_runner,
         )
         qc_timings["analysisSeconds"] = perf_counter() - qc_started
         qc_started = perf_counter()
@@ -4191,7 +4226,9 @@ def run_e2e(
                 )
                 for path in staged_inputs["LIGHT"]
             },
+            runner=frame_runner,
         )
+        frame_runner.close()
         if selection_confidence:
             # Reduced-confidence frames keep their registration quality weight
             # scaled by the selection confidence; excluded frames never reach here.
@@ -4211,7 +4248,7 @@ def run_e2e(
         )
 
         _emit(progress, ProgressStage.INTEGRATION, "started", "calibrating, registering, and integrating PASS frames")
-        pipeline_root = work / "pixel-pipeline"
+        pipeline_root = work / PIXEL_PIPELINE_DIRECTORY
         # Drizzle mode runs the same registered integration: its per-frame
         # normalization, weights and rejection masks are what the drizzle
         # applies to the calibrated Lights on the finer grid.
@@ -4430,13 +4467,15 @@ def run_e2e(
         pass_index = 0
         while True:
             pass_index += 1
-            pass_root = pipeline_root if pass_index == 1 else work / f"pixel-pipeline-pass{pass_index}"
+            pass_root = pipeline_root if pass_index == 1 else work / f"{PIXEL_PIPELINE_DIRECTORY}-pass{pass_index}"
             staged_pipeline_transforms, staged_quality_weights, staged_stellar_scale_hints = (
                 _staged_pixel_maps(light_subset)
             )
             selection_observers.clear()
             try:
                 pipeline_result = _run_portable_pipeline_fits(
+                    # The deepest level of the run's layout; see path_budget.
+                    _staging_stem=PIXEL_PIPELINE_STAGING_STEM,
                     bias_files=staged_inputs["BIAS"],
                     dark_files=staged_inputs["DARK"],
                     flat_files=staged_inputs["FLAT"],
@@ -4609,7 +4648,7 @@ def run_e2e(
                 f"{len(removable)} frame(s) measured harmful by the counterfactual; "
                 "integrating again without them",
             )
-            shutil.rmtree(pass_root, ignore_errors=True)
+            remove_tree(pass_root, ignore_errors=True)
         pipeline_root = pass_root
         if request.selection.unattended:
             selection_block = selection_receipt(
@@ -4833,7 +4872,7 @@ def run_e2e(
 
         _emit(progress, ProgressStage.VERIFY, "started", "verifying sources and final artifact identities")
         _verify_sources(identities)
-        shutil.rmtree(work)
+        remove_tree(work)
         _sanitize_shareable_tree(staging, identities)
         artifacts = _artifact_records(
             staging,
@@ -4849,6 +4888,7 @@ def run_e2e(
             "calibrationPolicy": workflow_receipt(request.pipeline_parameters.calibration_workflow),
             "integrationMode": request.integration_mode.value,
             "sources": [item.serializable() for item in identities],
+            "execution": {"sourceExtraction": dict(source_extraction)},
             "qualityControl": {
                 "manifest": "qc/manifest.json",
                 "passedLights": len(passed),
@@ -4910,13 +4950,17 @@ def run_e2e(
             excluded_light_paths=tuple(str(path) for path in excluded),
         )
     except Exception:
-        if not published and staging.exists():
-            shutil.rmtree(staging)
+        if not published:
+            remove_tree(staging)
         try:
             _emit(progress, ProgressStage.FAILED, "failed", "E2E execution aborted without publishing success")
         except Exception:
             pass
         raise
+    finally:
+        # Idempotent: the success path closed the pool after registration;
+        # a gate failure returned early with the pool still open.
+        frame_runner.close()
 
 
 __all__ = [

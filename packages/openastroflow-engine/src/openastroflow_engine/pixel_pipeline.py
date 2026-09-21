@@ -20,7 +20,6 @@ import math
 import os
 from pathlib import Path
 import re
-import shutil
 import sys
 import tempfile
 import time
@@ -70,7 +69,8 @@ from .metal_integration import (
     integrate_registered_group,
 )
 from . import platform as platform_services
-from .platform import NoReplaceError
+from .platform import NoReplaceError, remove_file, remove_tree
+from .path_budget import STAGING_SUFFIX, check_output_path_budget, light_stem, name_token
 from .native_kernels import describe_native_kernels
 from .performance_profile import select_execution_tuning
 from .local_normalization import (
@@ -927,7 +927,7 @@ def _require_filter(info: FrameInfo) -> str:
 
 
 def _safe_token(value: str) -> str:
-    token = re.sub(r"[^A-Z0-9]+", "_", value.upper()).strip("_")
+    token = name_token(value)
     if not token:
         raise CalibrationError("FILENAME_TOKEN_EMPTY", f"cannot encode group name {value!r}")
     return token
@@ -2256,10 +2256,9 @@ def _register_frame(
                     "refusing to overwrite registered frame",
                     path=str(destination),
                 ) from error
-            temporary.unlink()
+            remove_file(temporary, missing_ok=False)
         finally:
-            if temporary.exists():
-                temporary.unlink()
+            remove_file(temporary)
     if execution is not None:
         execution.update(
             {
@@ -2491,8 +2490,7 @@ def _write_float_fits(
         _atomic_publish_file(temporary, destination)
         return writer.sha256
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        remove_file(temporary)
 
 
 def _process_light_job(
@@ -3061,10 +3059,9 @@ def _crop_fits(
                 raise CalibrationError(
                     "OUTPUT_EXISTS", "refusing to overwrite master", path=str(destination)
                 ) from error
-            temporary.unlink()
+            remove_file(temporary, missing_ok=False)
         finally:
-            if temporary.exists():
-                temporary.unlink()
+            remove_file(temporary)
     return PixelStatistics(
         finite_pixels=finite_total,
         invalid_pixels=invalid_total,
@@ -3139,8 +3136,13 @@ def _run_portable_pipeline_fits(
     _source_identity_seed: Mapping[str, tuple[str, Mapping[str, int]]] | None = None,
     _integration_tile_observers: Callable[[str, Sequence[str]], Any] | None = None,
     region_weight_maps: Mapping[str, Any] | None = None,
+    _staging_stem: str | None = None,
 ) -> PipelineResult:
     """Run raw or pre-integrated calibration through unsolved linear masters.
+
+    ``_staging_stem`` names the transient staging directory beside the output
+    (``.<stem>.<8>.stage``); the E2E run passes a short stem because that
+    directory is the deepest level of its layout (see ``path_budget``).
 
     ``_integration_tile_observers(filter_name, ordered_light_paths)`` may
     return a tile observer for that group's ordinary integration (selection
@@ -3550,7 +3552,9 @@ def _run_portable_pipeline_fits(
         source_identity_cache,
     )
     staging = Path(
-        tempfile.mkdtemp(prefix=f".{output.name}.", suffix=".staging", dir=output.parent)
+        tempfile.mkdtemp(
+            prefix=f".{_staging_stem or output.name}.", suffix=STAGING_SUFFIX, dir=output.parent
+        )
     )
     published = False
     metal_executor: NativeMetalExecutor | None = None
@@ -4048,7 +4052,7 @@ def _run_portable_pipeline_fits(
                 target_label="filter integration domain",
                 additive_label="raw Light",
             )
-            stem = re.sub(r"[^A-Za-z0-9._-]+", "_", path.stem).strip("_") or "light"
+            stem = light_stem(path)
             calibrated_path = (
                 calibrated_dir / f"{index:05d}_{stem}.fits"
                 if parameters.materialize_calibrated_lights
@@ -4834,7 +4838,7 @@ def _run_portable_pipeline_fits(
 
         if prefetch_pool is not None:
             prefetch_pool.shutdown(wait=True)
-        shutil.rmtree(work_dir)
+        remove_tree(work_dir)
         _verify_source_identities(source_identities)
         if _trusted_generated_calibration is not None:
             # Recheck source stat identities and rehash the generated masters
@@ -4982,8 +4986,8 @@ def _run_portable_pipeline_fits(
             prefetch_pool.shutdown(wait=True, cancel_futures=True)
         if metal_executor is not None:
             metal_executor.close()
-        if not published and staging.exists():
-            shutil.rmtree(staging)
+        if not published:
+            remove_tree(staging)
 
 
 def _rekey_for_staged_lights(
@@ -5059,6 +5063,19 @@ def run_portable_pipeline(
     output = Path(output_directory).expanduser().resolve(strict=False)
     if output.exists() or os.path.lexists(output):
         raise CalibrationError("OUTPUT_EXISTS", "output directory must be new", path=str(output))
+    light_paths = tuple(light_files)
+    # The runtime checks the same budget for its own layouts before a run
+    # starts; a direct caller of the pipeline gets the check here, in this
+    # module's error contract.  The runtime module imports this one, so its
+    # error class is resolved at call time.
+    from .runtime import RuntimeConfigurationError
+
+    try:
+        check_output_path_budget(
+            output, light_count=len(light_paths), light_paths=light_paths, layout="pixels"
+        )
+    except RuntimeConfigurationError as error:
+        raise CalibrationError(error.code, str(error), path=str(output)) from error
     output.parent.mkdir(parents=True, exist_ok=True)
     originals = {
         "BIAS": _canonical_inputs(bias_files, "Bias", required=False),
@@ -5071,7 +5088,7 @@ def run_portable_pipeline(
         ),
         "MASTER_DARK": _canonical_inputs(master_dark_files, "MasterDark", required=False),
         "MASTER_FLAT": _canonical_inputs(master_flat_files, "MasterFlat", required=False),
-        "LIGHT": _canonical_inputs(light_files, "Light", required=True),
+        "LIGHT": _canonical_inputs(light_paths, "Light", required=True),
     }
     all_originals = [path for paths in originals.values() for path in paths]
     if len({os.path.normcase(str(path)) for path in all_originals}) != len(all_originals):

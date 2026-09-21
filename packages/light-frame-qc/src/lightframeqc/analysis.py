@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 import math
 from pathlib import Path
@@ -1257,11 +1258,13 @@ def analyze_measurements(
     cache_stats: dict[str, int] | None = None,
     workers: int = 1,
     stats: dict[str, Any] | None = None,
+    runner: FrameRunner | None = None,
 ) -> tuple[list[dict[str, Any]], list[FrameResult]]:
     """Group the measurements and analyze every group against its reference.
 
     ``workers`` bounds the per-frame registration/feature work (see
-    :mod:`lightframeqc.parallel`); ``stats`` receives what ran.
+    :mod:`lightframeqc.parallel`); ``stats`` receives what ran.  ``runner``
+    shares a caller-owned worker pool; otherwise the call opens its own.
     """
 
     config.validate()
@@ -1271,7 +1274,8 @@ def analyze_measurements(
     cache = GroupAnalysisCache(cache_directory, config, cache_stats) if cache_directory is not None else None
 
     measured_paths: set[str] = set()
-    with FrameRunner(workers, len(frames)) as runner:
+    owned = FrameRunner(workers, len(frames)) if runner is None else None
+    with owned if owned is not None else nullcontext(runner) as runner:
         for base_id, base_frames in build_groups(frames, config):
             cache_key = cache.key(base_id, base_frames) if cache is not None else None
             cached = cache.load(cache_key, base_frames) if cache is not None else None

@@ -6,6 +6,7 @@ from pathlib import Path
 from astropy.io import fits
 import numpy as np
 import pytest
+from lightframeqc.fits_bands import fits_reader_mode
 from lightframeqc.xisf import XISF
 
 from lightframeqc.readers import (
@@ -56,7 +57,11 @@ def test_reads_unsigned_fits_by_bounded_block_mean_without_mutating_input(
     assert preview.source_width == 8
     assert preview.source_height == 6
     assert preview.source_channels == 1
-    assert preview.reader_backend == "astropy-fits-memmap"
+    # The transport is the platform's (a memory map on POSIX, buffered band
+    # reads on Windows); the receipt names whichever ran.
+    assert preview.reader_backend == (
+        "astropy-fits-buffered" if fits_reader_mode() == "buffered" else "astropy-fits-memmap"
+    )
     assert preview.metadata.filter_name == "R"
     assert preview.metadata.exposure_seconds == pytest.approx(300.0)
     assert _sha256(source) == before_hash

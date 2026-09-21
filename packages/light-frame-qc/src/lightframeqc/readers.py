@@ -26,6 +26,7 @@ from numpy.typing import NDArray
 from .xisf import XISF
 
 from .cfa import even_block_size, is_cfa_pattern
+from .fits_bands import close_image_data, open_fits_image_data, reader_backend
 from .metadata import _header_lookup, normalize_metadata
 from .models import FrameMetadata
 
@@ -441,7 +442,9 @@ def _read_fits_preview(
                         f"limit is {max_full_decode_bytes}",
                     )
 
-            data = hdu.data
+            # A memory map on POSIX; on Windows a band reader over the same
+            # bytes (``fits_bands``), which the 64-row preview reads suit.
+            data = open_fits_image_data(hdu, path)
             if data is None:
                 raise FrameReadError("NO_IMAGE", path, "selected FITS HDU has no data")
             width, height, channels, layout = _fits_layout(tuple(data.shape), path)
@@ -473,12 +476,15 @@ def _read_fits_preview(
                     values = values * bscale + bzero
                 return values
 
-            preview = _block_mean_preview(
-                read_rows,
-                width=width,
-                height=height,
-                block_size=factor,
-            )
+            try:
+                preview = _block_mean_preview(
+                    read_rows,
+                    width=width,
+                    height=height,
+                    block_size=factor,
+                )
+            finally:
+                close_image_data(data)
             metadata = normalize_metadata(
                 FrameMetadata(
                     path=str(path),
@@ -489,7 +495,7 @@ def _read_fits_preview(
                     header=header,
                 )
             )
-            backend = "astropy-fits-compressed" if isinstance(hdu, fits.CompImageHDU) else "astropy-fits-memmap"
+            backend = "astropy-fits-compressed" if isinstance(hdu, fits.CompImageHDU) else reader_backend(data)
     except FrameReadError:
         raise
     except Exception as error:

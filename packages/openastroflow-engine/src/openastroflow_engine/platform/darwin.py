@@ -15,6 +15,7 @@ from .base import (
     CpuTopology,
     GpuAdapter,
     MemoryStatus,
+    PathLimit,
     VolumeCapabilities,
     fallback_topology,
 )
@@ -24,6 +25,7 @@ from .posix import (
     fsync_directory,
     kill_process_tree,
     libc_no_replace_rename,
+    path_limit,
     publish_file_no_replace,
     rename_directory_no_replace_with,
     sysconf_memory,
@@ -207,6 +209,9 @@ class DarwinPlatform:
 
     def volume_capabilities(self, path: Path) -> VolumeCapabilities:
         return volume_from_mount_table(path, parse_mount_output(_mount_output()), source="mount")
+
+    def path_limit(self) -> PathLimit:
+        return path_limit()
 
     def rename_directory_no_replace(self, source: Path, destination: Path) -> None:
         rename_directory_no_replace_with(source, destination, libc_no_replace_rename("darwin"))

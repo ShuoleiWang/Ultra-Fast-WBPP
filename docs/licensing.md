@@ -33,7 +33,11 @@ runtime imports no GPL-licensed code.
 
 SEP carries LGPL-3.0-or-later requirements, which the frozen worker satisfies as
 a separately replaceable shared library with its notices preserved; the LGPLv3
-refers to the GPLv3 text, which the repository keeps for that reason. Separately
+refers to the GPLv3 text, which the repository keeps for that reason. Windows
+bundles ship a modified SEP (`1.4.1+oaf.1`): the modification is the patch in
+[`packaging/patches`](../packaging/patches) applied to the unmodified 1.4.1
+source distribution by `scripts/build_sep_wheel.py`, which is how the
+corresponding source of that build is provided. Separately
 installed solvers and catalog data retain their own terms. See
 [third-party notices](../THIRD_PARTY_NOTICES.md). The repository includes the
 [GPLv3 text](../LICENSES/GPL-3.0.txt) and the

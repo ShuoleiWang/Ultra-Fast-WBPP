@@ -7,7 +7,7 @@ Original Ultra-Fast WBPP code is licensed under MIT. The Python runtime no longe
 - NumPy — BSD-3-Clause and bundled component notices.
 - SciPy — BSD-3-Clause and bundled component notices.
 - Astropy — BSD-3-Clause.
-- SEP — LGPL-3.0-or-later. The LGPLv3 incorporates the GPLv3 by reference; the repository therefore keeps [LICENSES/GPL-3.0.txt](LICENSES/GPL-3.0.txt) for that notice.
+- SEP — LGPL-3.0-or-later. The LGPLv3 incorporates the GPLv3 by reference; the repository therefore keeps [LICENSES/GPL-3.0.txt](LICENSES/GPL-3.0.txt) for that notice. Windows bundles carry a modified build (`1.4.1+oaf.1`); the modification is the patch under [packaging/patches](packaging/patches), applied to the unmodified 1.4.1 source distribution by `scripts/build_sep_wheel.py`.
 - scikit-image — BSD family and MIT component notices.
 - Astroalign — MIT. The adapted triangle bootstrap retains its upstream copyright and permission notice; a complete copy is in [LICENSES/astroalign-MIT.txt](LICENSES/astroalign-MIT.txt).
 - Pillow — MIT-CMU.

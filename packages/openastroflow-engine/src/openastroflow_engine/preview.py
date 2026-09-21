@@ -14,6 +14,7 @@ from numpy.typing import NDArray
 from PIL import Image
 
 from .calibration import CalibrationError, FitsFrame
+from .platform import remove_file
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,7 +164,7 @@ def render_auto_stretch_preview(
             raise CalibrationError(
                 "OUTPUT_EXISTS", "refusing to overwrite preview", path=str(destination)
             ) from error
-        temporary.unlink()
+        remove_file(temporary, missing_ok=False)
         black, white, median, mad = stretch
         return PreviewResult(
             output_path=str(destination),
@@ -177,8 +178,7 @@ def render_auto_stretch_preview(
             flipped_vertically=flip_vertical,
         )
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        remove_file(temporary)
 
 
 __all__ = ["PreviewResult", "render_auto_stretch_preview"]

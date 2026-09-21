@@ -563,6 +563,7 @@ def measure_paths(
     workers: int = 1,
     *,
     stats: dict[str, Any] | None = None,
+    runner: FrameRunner | None = None,
 ) -> list[FrameMeasurement]:
     """Measure paths in stable order, optionally with bounded parallelism.
 
@@ -571,7 +572,9 @@ def measure_paths(
     memory ceiling by approximately the same factor.  Per-frame failures are
     returned with ``status='ERROR'`` so a long acquisition is fully audited.
     ``stats`` receives the parallelism that ran (``parallelism``, ``workers``);
-    see :mod:`lightframeqc.parallel` for how it is chosen.
+    see :mod:`lightframeqc.parallel` for how it is chosen.  ``runner`` shares
+    a caller-owned worker pool (its start-up is paid once for several
+    stages); otherwise the call opens and closes its own.
     """
 
     config.validate()
@@ -600,10 +603,11 @@ def measure_paths(
         for index, frame_path in enumerate(ordered_paths)
     ]
 
-    with FrameRunner(workers, len(tasks)) as runner:
-        results = runner.map(_measure_task, tasks)
+    owned = FrameRunner(workers, len(tasks)) if runner is None else None
+    with owned if owned is not None else nullcontext(runner) as active:
+        results = active.map(_measure_task, tasks)
         if stats is not None:
-            stats.update(runner.stats)
+            stats.update(active.stats)
     return results
 
 

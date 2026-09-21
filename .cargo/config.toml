@@ -1,0 +1,6 @@
+# The desktop executable must start on a Windows machine without the Visual
+# C++ redistributable: link the C runtime statically on the MSVC target, as
+# the native kernel DLL already does.  Nothing here changes what the Python
+# side ships (its interpreter carries its own vcruntime).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

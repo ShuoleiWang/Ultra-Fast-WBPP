@@ -1,6 +1,6 @@
 # Release process
 
-This is a release checklist, not a stable-release claim. The current distribution is an unsigned/ad-hoc-signed macOS development build. Hosted CI must pass on the actual public commit; local tests and earlier retained receipts do not establish that result. Windows has no accepted installed bundle or real-data E2E, and no Developer ID/notarized or Authenticode-signed artifact is available.
+This is a release checklist, not a stable-release claim. The current distribution is an unsigned/ad-hoc-signed macOS development build. Hosted CI must pass on the actual public commit; local tests and earlier retained receipts do not establish that result. Windows x64 has an installed-bundle attestation and a retained real-data E2E (see [windows.md](windows.md)); no Developer ID/notarized or Authenticode-signed artifact is available, so both platforms ship as unsigned prereleases.
 
 ## Before opening the repository
 
@@ -24,7 +24,7 @@ The current repository does not yet contain trustworthy `macOS arm64` or `Window
 
 ## Signing and publication
 
-macOS release builds require Developer ID signing, hardened runtime, notarization and stapling. Windows installers require Authenticode signing. Signing credentials live only in protected release secrets and are never accepted through project files or command-line arguments written to logs.
+macOS release builds require Developer ID signing, hardened runtime, notarization and stapling. Windows installers require Authenticode signing; until then SmartScreen shows "Windows protected your PC → More info → Run anyway" for the NSIS installer and the MSI shows the unknown-publisher prompt, which the prerelease notes say. The Windows job of the release workflow builds the frozen worker with the patched SEP wheel (`scripts/build_sep_wheel.py`), the native DLL with the static C runtime (`--require-static-crt`), installs the MSI silently on the runner, attests the installed layout (`scripts/windows/attest-installed-msi.ps1`: every DLL import resolved by the OS or the tree, handshake and catalog listing within budget) and uninstalls it before the artefacts are collected; the installers embed the WebView2 Evergreen bootstrapper, which downloads the runtime from Microsoft at install time on a machine that lacks it. Signing credentials live only in protected release secrets and are never accepted through project files or command-line arguments written to logs.
 
 Tag-triggered pre-1.0 validation builds use the checked-in `tauri.prerelease.conf.json` to apply an ad-hoc hardened-runtime signature on macOS. This seals the app and bundled worker for integrity testing but does not establish a developer identity or bypass Gatekeeper; the GitHub release is therefore labeled `unsigned prerelease`. Stable automation must replace that identity with protected platform signing material and reject an ad-hoc signature. The macOS artifact must then pass Apple's notarization service and have its ticket stapled before publication.
 

@@ -38,13 +38,23 @@ jobs:
           -e "./packages/light-frame-qc[test]"
           -e "./engine/native/python[test]"
           -e "./packages/openastroflow-engine[test,all]"
+      - name: Replace the PyPI SEP wheel with the deterministic patched build (Windows)
+        if: runner.os == 'Windows'
+        # sep 1.4.1 from PyPI is non-deterministic on MSVC builds (rand_r shim,
+        # uninitialised deblending buffers) and quadratic in the object count.
+        # The pinned sdist plus packaging/patches/*.patch is compiled here so
+        # the tests run against the bytes the Windows sidecar will ship.
+        run: >-
+          python scripts/build_sep_wheel.py --install
+          --report build/sep-wheel/sep-wheel-report.json
       - name: Check installed dependency consistency
         run: python -m pip check
-      - name: Build, test and install the native kernels (MSVC /fp:strict on Windows)
+      - name: Build, test and install the native kernels (MSVC /fp:strict, static CRT on Windows)
         run: >-
           python scripts/build_native_runtime.py
           --build-dir build/native-release
           --report build/native-release/native-build-report.json
+          ${{ runner.os == 'Windows' && '--require-static-crt' || '' }}
       - name: Require the native kernels to load on this runner
         shell: bash
         run: >-

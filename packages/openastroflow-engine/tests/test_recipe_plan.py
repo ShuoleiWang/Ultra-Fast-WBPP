@@ -310,6 +310,11 @@ def test_solver_required_by_default() -> None:
 def test_published_recipe_examples_parse() -> None:
     package_root = Path(__file__).parents[1]
     for path in sorted((package_root / "examples").glob("*.json")):
+        # ``._name.json`` is an AppleDouble resource fork that macOS leaves
+        # beside a file copied to a non-Apple volume (or through ``tar``
+        # without ``COPYFILE_DISABLE=1``); it is not a recipe.
+        if path.name.startswith("._"):
+            continue
         recipe = Recipe.from_dict(json.loads(path.read_text(encoding="utf-8")))
         assert recipe.schema_version == 1
 

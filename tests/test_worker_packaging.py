@@ -425,3 +425,46 @@ def test_source_launcher_exposes_runtime_library_abi_smoke() -> None:
     assert payload["openssl"].startswith("OpenSSL ")
     assert payload["libmpdec"]
     assert payload["python"]
+
+
+def test_frozen_launcher_keeps_spawned_worker_pools_possible() -> None:
+    """The QC/registration pools spawn children from the frozen executable.
+
+    A child re-enters ``main`` with ``--multiprocessing-fork``; without
+    ``freeze_support()`` before any argument dispatch it would run the command
+    line instead of its task loop, and ``FrameRunner`` would fall back to
+    threads (recording ``fallbackReason``).  The spec keeps a console
+    subsystem so the children inherit the parent's standard streams.
+    """
+
+    import ast
+
+    launcher_path = ROOT / "packaging" / "worker" / "launcher.py"
+    tree = ast.parse(launcher_path.read_text(encoding="utf-8"))
+    main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main")
+    statements = main.body
+
+    def calls(node: ast.AST, qualified: str) -> bool:
+        return (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Call)
+            and ast.unparse(node.value.func) == qualified
+        )
+
+    freeze_index = next(
+        index for index, node in enumerate(statements) if calls(node, "multiprocessing.freeze_support")
+    )
+    first_argv_use = next(
+        index for index, node in enumerate(statements) if "sys.argv" in ast.unparse(node)
+    )
+    assert freeze_index < first_argv_use, "freeze_support() must run before any argument dispatch"
+
+    spec_text = (ROOT / "packaging" / "worker" / "openastroflow_worker.spec").read_text(encoding="utf-8")
+    assert "console=True" in spec_text and "console=False" not in spec_text
+
+    from lightframeqc import parallel
+
+    source = (Path(parallel.__file__)).read_text(encoding="utf-8")
+    assert "fallbackReason" in source and "freeze_support()" in source
+    runner = parallel.FrameRunner(2, 20)
+    assert runner.stats["fallbackReason"] is None

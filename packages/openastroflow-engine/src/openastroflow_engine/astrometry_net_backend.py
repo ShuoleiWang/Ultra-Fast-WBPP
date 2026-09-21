@@ -211,7 +211,10 @@ def discover_astrometry_net(
         return _candidate_path(executable)
     import shutil
 
-    env = os.environ if environment is None else environment
+    env = platform_services.environment_view(
+        os.environ if environment is None else environment,
+        platform_id=platform_services.current().platform_id,
+    )
     for key in ("OPENASTROFLOW_SOLVE_FIELD", "ASTROMETRY_NET_SOLVE_FIELD"):
         candidate = _candidate_path(env.get(key))
         if candidate:
@@ -237,7 +240,10 @@ def discover_astrometry_config(
 
     if config_path is not None:
         return str(Path(config_path).expanduser().absolute())
-    env = os.environ if environment is None else environment
+    env = platform_services.environment_view(
+        os.environ if environment is None else environment,
+        platform_id=platform_services.current().platform_id,
+    )
     candidates: list[Path] = []
     for key in ("OPENASTROFLOW_ASTROMETRY_CONFIG", "ASTROMETRY_NET_CONFIG"):
         value = env.get(key)
@@ -356,7 +362,9 @@ def probe_astrometry_net(
     environment: Mapping[str, str] | None = None,
     timeout_seconds: float = 5.0,
 ) -> ExecutableProbe:
-    discovery_environment = {**os.environ, **dict(environment or {})}
+    discovery_environment = platform_services.merged_environment(
+        os.environ, environment, platform_id=platform_services.current().platform_id
+    )
     path = discover_astrometry_net(executable, environment=discovery_environment)
     if path is None:
         return ExecutableProbe(None, False, False, "unavailable", error_code="EXECUTABLE_UNAVAILABLE", message="solve-field was not found")
@@ -860,10 +868,10 @@ class AstrometryNetSolverBackend:
         self.catalog_manifest_dir = catalog_manifest_dir
         discovered_config = discover_astrometry_config(
             config_path,
-            environment={**os.environ, **self.environment},
+            environment=platform_services.merged_environment(os.environ, self.environment, platform_id=platform_services.current().platform_id),
         )
         self.config_path = Path(discovered_config) if discovered_config is not None else None
-        path = discover_astrometry_net(executable, environment={**os.environ, **self.environment})
+        path = discover_astrometry_net(executable, environment=platform_services.merged_environment(os.environ, self.environment, platform_id=platform_services.current().platform_id))
         self.runtime: SolverProcessRuntime | None = None
         if path is None:
             self.probe = ExecutableProbe(None, False, False, "unavailable", error_code="EXECUTABLE_UNAVAILABLE", message="solve-field was not found")
@@ -947,7 +955,7 @@ class AstrometryNetSolverBackend:
                     catalog_snapshot = installed_set_snapshot_for_solver_config(
                         self.config_path,
                         manifest_dir=self.catalog_manifest_dir,
-                        environment={**os.environ, **self.environment},
+                        environment=platform_services.merged_environment(os.environ, self.environment, platform_id=platform_services.current().platform_id),
                     )
                     catalog_preflight = {
                         "managed": True,
@@ -1270,7 +1278,7 @@ class AstrometryNetSolverBackend:
                                 index_identities,
                                 catalog_root=Path(catalog_snapshot["catalogRoot"]),
                                 manifest_dir=self.catalog_manifest_dir,
-                                environment={**os.environ, **self.environment},
+                                environment=platform_services.merged_environment(os.environ, self.environment, platform_id=platform_services.current().platform_id),
                             )
                             pre_receipts = {
                                 item["installedSetIdentity"]: item
@@ -1298,7 +1306,7 @@ class AstrometryNetSolverBackend:
                             verify_installed_set_snapshot(
                                 catalog_snapshot,
                                 manifest_dir=self.catalog_manifest_dir,
-                                environment={**os.environ, **self.environment},
+                                environment=platform_services.merged_environment(os.environ, self.environment, platform_id=platform_services.current().platform_id),
                             )
                             index_artifacts = tuple(
                                 SolverIndexArtifact(

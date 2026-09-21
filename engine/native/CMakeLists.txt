@@ -6,6 +6,18 @@ endif()
 
 project(OpenAstroFlowNative VERSION 0.1.0 LANGUAGES CXX)
 
+if(MSVC)
+  # Link the Visual C++ runtime statically (/MT, /MTd for Debug). The kernel
+  # DLL ships inside the frozen worker and must load on a clean Windows
+  # machine without the VC++ redistributable; MSVCP140/VCRUNTIME140 imports
+  # are therefore a release-gate failure (scripts/build_native_runtime.py
+  # --require-static-crt). Set project-wide (CMP0091 NEW, CMake >= 3.15) so
+  # the ctest executables that link the same objects do not mix runtimes.
+  # The C ABI only exchanges caller-owned buffers, so no CRT allocation
+  # crosses the DLL boundary.
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 option(OAF_BUILD_TESTS "Build native scientific contract tests" ON)
 option(OAF_ENABLE_METAL "Build the Apple Metal backend when available" ON)
 option(OAF_BUILD_BENCHMARKS "Build opt-in native performance benchmarks" OFF)

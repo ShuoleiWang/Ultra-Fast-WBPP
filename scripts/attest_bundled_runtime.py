@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-"""Attest and time the actual runtime tree embedded in a release bundle."""
+"""Attest and time the actual runtime tree embedded in a release bundle.
+
+macOS (``--app``): codesign verification, the Mach-O deployment-target and
+dylib-closure audit, the pinned runtime-library provenance, and the launch
+budget of the frozen worker inside the read-only disk image.
+
+Windows (``--resource-root`` with a ``*-pc-windows-msvc`` target): the PE
+import-closure audit of the installed worker tree (every ``.dll``/``.pyd``/
+``.exe`` may only import Windows system DLLs or files shipped in the tree, and
+the native kernel DLL must link the C runtime statically), the same launch
+budget, and a ``doctor`` run proving the kernels load from the installed
+layout.  The MSI is installed by ``scripts/windows/attest-installed-msi.ps1``,
+which points this script at ``<InstallLocation>\\resources\\openastroflow-worker``.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +20,7 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import platform
 import plistlib
 import struct
@@ -19,6 +32,7 @@ from typing import Any, Mapping, Sequence
 
 try:
     from scripts.build_worker_sidecar import (
+        WINDOWS_TARGETS,
         ResourceBoundaryError,
         SidecarBuildError,
         build_runtime_record,
@@ -26,13 +40,23 @@ try:
         load_macos14_runtime_policy,
         manifest_filename,
         normalize_target_triple,
+        run_native_kernel_smoke,
         run_runtime_library_smoke,
         run_worker_handshake,
         runtime_directory_name,
         validate_manifest,
     )
+    from scripts.pe_imports import (
+        PEFormatError,
+        crt_linkage,
+        dynamic_crt_imports,
+        is_pe_image,
+        is_windows_system_dll,
+        read_pe_imports,
+    )
 except ModuleNotFoundError:  # direct ``python scripts/...`` execution
     from build_worker_sidecar import (
+        WINDOWS_TARGETS,
         ResourceBoundaryError,
         SidecarBuildError,
         build_runtime_record,
@@ -40,10 +64,19 @@ except ModuleNotFoundError:  # direct ``python scripts/...`` execution
         load_macos14_runtime_policy,
         manifest_filename,
         normalize_target_triple,
+        run_native_kernel_smoke,
         run_runtime_library_smoke,
         run_worker_handshake,
         runtime_directory_name,
         validate_manifest,
+    )
+    from pe_imports import (
+        PEFormatError,
+        crt_linkage,
+        dynamic_crt_imports,
+        is_pe_image,
+        is_windows_system_dll,
+        read_pe_imports,
     )
 
 
@@ -57,6 +90,12 @@ LEGAL_RESOURCE_NAMES = (
     "LICENSES/GPL-3.0.txt", "LICENSES/astroalign-MIT.txt",
 )
 MACOS_MAXIMUM_DEPLOYMENT_TARGET = (14, 0, 0)
+WINDOWS_TARGET_MACHINES = {
+    "x86_64-pc-windows-msvc": "x86_64",
+    "aarch64-pc-windows-msvc": "aarch64",
+}
+NATIVE_KERNEL_DLL_NAME = "openastroflow_native.dll"
+_PE_SUFFIXES = {".dll", ".pyd", ".exe"}
 
 _THIN_MACHO_MAGICS = {
     b"\xce\xfa\xed\xfe": ("<", False),
@@ -631,6 +670,207 @@ def attest_macos_deployment(app: Path) -> dict[str, Any]:
     return audit
 
 
+def _windows_tree_files(root: Path) -> tuple[Path, ...]:
+    files: list[Path] = []
+    for directory, directory_names, file_names in os.walk(root, followlinks=False):
+        directory_path = Path(directory)
+        directory_names[:] = sorted(
+            name for name in directory_names if not (directory_path / name).is_symlink()
+        )
+        for name in sorted(file_names):
+            path = directory_path / name
+            try:
+                if path.is_symlink() or not path.is_file():
+                    continue
+            except OSError as error:
+                raise BundleAttestationError(
+                    f"cannot inspect installed runtime member: {error}"
+                ) from error
+            files.append(path)
+    return tuple(files)
+
+
+def inspect_windows_runtime(runtime_root: Path, target: str) -> dict[str, Any]:
+    """Parse every PE image in an installed worker tree and resolve its imports.
+
+    The loader on a clean Windows machine can satisfy an import in two ways
+    only: from the operating system (``pe_imports.is_windows_system_dll``) or
+    from a DLL that the tree itself ships.  Anything else, including a Visual
+    C++ runtime DLL that merely happened to exist on the build machine, is a
+    violation.  The native kernel DLL must additionally be a static-CRT build,
+    and every image must match the target architecture.  Paths in the record
+    are relative to the runtime root; no install location is serialized.
+    """
+
+    try:
+        expected_machine = WINDOWS_TARGET_MACHINES[target]
+    except KeyError as error:
+        raise BundleAttestationError(
+            "Windows import-closure audit requires a *-pc-windows-msvc target"
+        ) from error
+    if runtime_root.is_symlink() or not runtime_root.is_dir():
+        raise BundleAttestationError("installed runtime root must be a real directory")
+    files = _windows_tree_files(runtime_root)
+    by_name: dict[str, list[str]] = {}
+    for path in files:
+        by_name.setdefault(path.name.casefold(), []).append(
+            path.relative_to(runtime_root).as_posix()
+        )
+    candidates = [
+        path
+        for path in files
+        if path.suffix.casefold() in _PE_SUFFIXES or is_pe_image(path)
+    ]
+    if not candidates:
+        raise BundleAttestationError("installed runtime contains no PE images")
+
+    records: list[dict[str, Any]] = []
+    violations: list[dict[str, Any]] = []
+    system_edges = bundled_edges = unresolved_edges = 0
+    native_kernel_seen = False
+    for path in candidates:
+        relative = path.relative_to(runtime_root).as_posix()
+        try:
+            facts = read_pe_imports(path)
+        except PEFormatError as error:
+            violations.append({"code": "INVALID_PE_IMAGE", "path": relative, "detail": str(error)})
+            continue
+        if facts.machineName != expected_machine:
+            violations.append(
+                {
+                    "code": "WRONG_MACHINE",
+                    "path": relative,
+                    "machine": facts.machineName,
+                    "expectedMachine": expected_machine,
+                }
+            )
+        resolved: list[dict[str, Any]] = []
+        for name in facts.all_imports:
+            basename = PureWindowsPath(name).name
+            if is_windows_system_dll(basename):
+                resolution = "system"
+                system_edges += 1
+                resolved.append({"dll": name, "resolution": resolution})
+            elif basename.casefold() in by_name:
+                resolution = "bundled"
+                bundled_edges += 1
+                resolved.append(
+                    {
+                        "dll": name,
+                        "resolution": resolution,
+                        "bundleTargets": sorted(by_name[basename.casefold()]),
+                    }
+                )
+            else:
+                unresolved_edges += 1
+                resolved.append({"dll": name, "resolution": "unresolved"})
+                violations.append(
+                    {"code": "UNRESOLVED_DLL_IMPORT", "path": relative, "dll": name}
+                )
+        linkage = crt_linkage(facts.all_imports)
+        if path.name.casefold() == NATIVE_KERNEL_DLL_NAME:
+            native_kernel_seen = True
+            if linkage != "static":
+                violations.append(
+                    {
+                        "code": "NATIVE_KERNEL_DYNAMIC_CRT",
+                        "path": relative,
+                        "dynamicCrtImports": list(dynamic_crt_imports(facts.all_imports)),
+                    }
+                )
+        records.append(
+            {
+                "path": relative,
+                "sha256": _sha256(path),
+                "format": facts.format,
+                "machine": facts.machineName,
+                "isDll": facts.isDll,
+                "subsystem": facts.subsystemName,
+                "crtLinkage": linkage,
+                "imports": resolved,
+                "delayImports": list(facts.delayImports),
+            }
+        )
+    if not native_kernel_seen:
+        violations.append({"code": "NATIVE_KERNEL_MISSING", "dll": NATIVE_KERNEL_DLL_NAME})
+    return {
+        "policy": {
+            "platform": "Windows",
+            "targetTriple": target,
+            "machine": expected_machine,
+            "importResolution": "windows-system-dll-or-bundled-file",
+            "nativeKernelCrt": "static",
+            # Authenticode signing is a release gate that this prerelease
+            # pipeline does not perform; the installer stays unsigned.
+            "authenticode": "release-gate-not-verified",
+        },
+        "peFileCount": len(records),
+        "importClosure": {
+            "systemEdgeCount": system_edges,
+            "bundledEdgeCount": bundled_edges,
+            "unresolvedEdgeCount": unresolved_edges,
+        },
+        "files": records,
+        "violations": violations,
+    }
+
+
+def inspect_windows_main_executable(executable: Path, target: str) -> dict[str, Any]:
+    """Import facts for the desktop executable itself (informational).
+
+    The Rust binary is not part of the worker tree, so its closure is recorded
+    rather than gated here: a ``VCRUNTIME140.dll`` import means the MSVC CRT is
+    linked dynamically and the app depends on the VC++ redistributable being
+    present on the user's machine.  ``dynamicCrtImports`` makes that visible
+    in the attestation so the release checklist can act on it.
+    """
+
+    if executable.is_symlink() or not executable.is_file():
+        raise BundleAttestationError("desktop executable is missing or unsafe")
+    try:
+        facts = read_pe_imports(executable)
+    except PEFormatError as error:
+        raise BundleAttestationError(f"desktop executable is not a valid PE image: {error}") from error
+    expected_machine = WINDOWS_TARGET_MACHINES.get(target)
+    if facts.machineName != expected_machine:
+        raise BundleAttestationError(
+            f"desktop executable is built for {facts.machineName}, expected {expected_machine}"
+        )
+    if facts.isDll or facts.subsystemName != "windows-gui":
+        raise BundleAttestationError("desktop executable is not a Windows GUI executable")
+    unresolved = [name for name in facts.all_imports if not is_windows_system_dll(PureWindowsPath(name).name)]
+    return {
+        "fileName": executable.name,
+        "sha256": _sha256(executable),
+        "machine": facts.machineName,
+        "subsystem": facts.subsystemName,
+        "imports": list(facts.all_imports),
+        "crtLinkage": crt_linkage(facts.all_imports),
+        "dynamicCrtImports": list(dynamic_crt_imports(facts.all_imports)),
+        # Imports that neither Windows nor the executable's own directory can
+        # be assumed to provide; the VC++ runtime DLLs are the expected entry.
+        "nonSystemImports": unresolved,
+    }
+
+
+def attest_windows_deployment(runtime_root: Path, target: str) -> dict[str, Any]:
+    """Fail closed unless every installed PE image resolves on a clean machine."""
+
+    audit = inspect_windows_runtime(runtime_root, target)
+    violations = audit.pop("violations")
+    if violations:
+        examples = "; ".join(
+            f"{item['code']}:{item.get('path', item.get('dll', ''))}"
+            + (f"->{item['dll']}" if item["code"] == "UNRESOLVED_DLL_IMPORT" else "")
+            for item in violations[:8]
+        )
+        raise BundleAttestationError(
+            f"Windows import-closure audit found {len(violations)} violation(s): {examples}"
+        )
+    audit["verified"] = True
+    return audit
+
+
 def attest_legal_resources(
     application_resources: Path, canonical_root: Path = REPOSITORY
 ) -> dict[str, Any]:
@@ -785,6 +1025,15 @@ def _run_project_help(entry_point: Path, timeout_seconds: float) -> float:
     return elapsed
 
 
+def _run_native_kernel_smoke(entry_point: Path, timeout_seconds: float) -> tuple[dict[str, Any], float]:
+    started = time.perf_counter()
+    try:
+        facts = run_native_kernel_smoke([str(entry_point)], timeout_seconds=timeout_seconds)
+    except SidecarBuildError as error:
+        raise BundleAttestationError(f"installed native kernel smoke failed: {error}") from error
+    return facts, time.perf_counter() - started
+
+
 def _attest_runtime_libraries(
     runtime_path: Path, entry_point: Path, timeout_seconds: float
 ) -> tuple[dict[str, Any], dict[str, Any], float]:
@@ -930,6 +1179,8 @@ def attest_runtime(
     bundle_name: str,
     signature: Mapping[str, Any],
     require_macos_runtime_provenance: bool = False,
+    require_windows_import_closure: bool = False,
+    windows_main_executable: Path | None = None,
 ) -> dict[str, Any]:
     target = normalize_target_triple(target_triple)
     if max_start_seconds <= 0:
@@ -939,6 +1190,25 @@ def attest_runtime(
     post_sign_runtime = build_runtime_record(runtime_path, target)
     _require_same_logical_layout(pre_sign["runtime"], post_sign_runtime)
     entry_point = runtime_path / post_sign_runtime["entryPoint"]
+
+    windows_deployment = None
+    if require_windows_import_closure:
+        if target not in WINDOWS_TARGETS:
+            raise BundleAttestationError(
+                "Windows import-closure attestation was requested for a non-Windows target"
+            )
+        # Static analysis first: a tree that cannot load on a clean machine is
+        # rejected before any launch that the build runner's own DLLs could
+        # make look healthy.
+        windows_deployment = attest_windows_deployment(runtime_path, target)
+        if windows_main_executable is not None:
+            windows_deployment["mainExecutable"] = inspect_windows_main_executable(
+                windows_main_executable, target
+            )
+    elif windows_main_executable is not None:
+        raise BundleAttestationError(
+            "the desktop executable can only be recorded with the Windows import-closure attestation"
+        )
 
     version, version_seconds = _run_version(entry_point, max_start_seconds)
     handshake, handshake_seconds = _run_handshake(entry_point, max_start_seconds)
@@ -995,6 +1265,23 @@ def attest_runtime(
             "smoke": runtime_library_smoke,
             "smokeSeconds": round(runtime_library_smoke_seconds, 6),
         }
+    if windows_deployment is not None:
+        # ``doctor`` is not a start-up latency probe (it enumerates hardware),
+        # so it gets its own generous timeout and is recorded, not budgeted.
+        native_kernels, native_seconds = _run_native_kernel_smoke(
+            entry_point, max(60.0, 4 * max_start_seconds)
+        )
+        payload["windowsDeployment"] = windows_deployment
+        library_path = native_kernels.get("libraryPath")
+        payload["nativeKernels"] = {
+            "loaded": native_kernels["loaded"],
+            # Only the file name: the install location is not part of the identity.
+            "libraryFileName": PureWindowsPath(str(library_path)).name if library_path else None,
+            "sha256": native_kernels.get("sha256"),
+            "abiVersion": native_kernels.get("abiVersion"),
+            "cpuArchitecture": native_kernels.get("cpuArchitecture"),
+            "doctorSeconds": round(native_seconds, 6),
+        }
     return payload
 
 
@@ -1018,11 +1305,25 @@ def _parser() -> argparse.ArgumentParser:
     location = parser.add_mutually_exclusive_group(required=True)
     location.add_argument("--app", type=Path, help="signed macOS .app bundle")
     location.add_argument(
-        "--resource-root", type=Path, help="installed openastroflow-worker resource root"
+        "--resource-root",
+        type=Path,
+        help=(
+            "installed openastroflow-worker resource root; for a *-pc-windows-msvc "
+            "target this also runs the PE import-closure audit and the native kernel doctor"
+        ),
     )
     parser.add_argument("--target", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--max-start-seconds", type=float, default=5.0)
+    parser.add_argument(
+        "--main-executable",
+        type=Path,
+        default=None,
+        help=(
+            "installed desktop executable whose PE import facts are recorded "
+            "(Windows targets only; informational, not a gate)"
+        ),
+    )
     return parser
 
 
@@ -1059,6 +1360,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             bundle_name=bundle_name,
             signature=signature,
             require_macos_runtime_provenance=arguments.app is not None,
+            require_windows_import_closure=(
+                arguments.app is None
+                and normalize_target_triple(arguments.target) in WINDOWS_TARGETS
+            ),
+            windows_main_executable=arguments.main_executable,
         )
         if legal_resources is not None:
             payload["legalResources"] = legal_resources
@@ -1085,10 +1391,15 @@ if __name__ == "__main__":
 __all__ = [
     "BundleAttestationError",
     "MACOS_MAXIMUM_DEPLOYMENT_TARGET",
+    "NATIVE_KERNEL_DLL_NAME",
+    "WINDOWS_TARGET_MACHINES",
     "attest_legal_resources",
     "attest_macos_deployment",
     "attest_runtime",
+    "attest_windows_deployment",
     "inspect_macos_bundle",
+    "inspect_windows_main_executable",
+    "inspect_windows_runtime",
     "main",
     "write_create_only",
 ]

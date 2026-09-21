@@ -14,6 +14,7 @@ from .platform import (
     CpuTopology,
     GpuAdapter,
     MemoryStatus,
+    PathLimit,
     PlatformId,
     fallback_topology,
     platform_id_for,
@@ -53,6 +54,12 @@ class HardwareProfile:
     memory_source: str = "unavailable"
     topology_source: str = "unavailable"
     gpus: tuple[GpuAdapter, ...] = field(default_factory=tuple)
+    # Memory the OS reported as free at detection time (``None`` where the
+    # platform does not say, e.g. macOS); pool sizing bounds itself by it.
+    available_memory_bytes: int | None = None
+    # ``None`` for an injected host: the fact belongs to the running machine
+    # and the path budget then asks the platform layer itself.
+    path_limit: PathLimit | None = None
 
     @property
     def apple_silicon(self) -> bool:
@@ -84,8 +91,10 @@ class HardwareProfile:
             "isaFeatures": list(self.isa_features),
             "memoryBytes": self.memory_bytes,
             "memorySource": self.memory_source,
+            "availableMemoryBytes": self.available_memory_bytes,
             "topologySource": self.topology_source,
             "gpus": [adapter.serializable() for adapter in self.gpus],
+            "pathLimit": self.path_limit.serializable() if self.path_limit is not None else None,
         }
 
 
@@ -123,6 +132,7 @@ def detect_hardware(
     cpu_brand_probe: Callable[[], str] | None = None,
     topology: CpuTopology | None = None,
     memory: MemoryStatus | None = None,
+    path_limit: PathLimit | None = None,
     isa_probe: Callable[[], tuple[str, ...]] = _native_isa_features,
 ) -> HardwareProfile:
     """Detect compatibility, keeping execution readiness a separate concern.
@@ -156,6 +166,9 @@ def detect_hardware(
             else MemoryStatus(0, None, "unavailable")
         )
 
+    if path_limit is None and services is not None:
+        path_limit = services.path_limit()
+
     brand = cpu_brand
     if brand is None and cpu_brand_probe is not None:
         brand = cpu_brand_probe()
@@ -179,7 +192,11 @@ def detect_hardware(
         "isa_features": tuple(isa_features),
         "memory_bytes": int(memory.total_bytes),
         "memory_source": memory.source,
+        "available_memory_bytes": (
+            int(memory.available_bytes) if memory.available_bytes is not None else None
+        ),
         "topology_source": topology.source,
+        "path_limit": path_limit,
     }
 
     if platform_id == "darwin" and architecture in _ARM64_MACHINES:

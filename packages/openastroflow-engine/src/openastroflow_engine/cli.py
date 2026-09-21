@@ -82,6 +82,15 @@ def doctor_payload() -> dict[str, Any]:
     tuning = select_execution_tuning(hardware)
     registry = default_registry()
     descriptors = registry.serializable()
+    # A solver's probe says whether its process runs; ``scienceReady`` says
+    # whether its solutions can pass the E2E catalog-correspondence gate.  The
+    # GUI needs both to tell "install the solver" from "solver is diagnostic
+    # only" without re-deriving the planner's rule.
+    for backend in descriptors:
+        if backend["stage"] == StageKind.SOLVER.value:
+            solver = registry.get(backend["backendId"])
+            backend["scienceReady"] = solver is not None and solver_backend_science_ready(solver)
+
     def ready(stage: StageKind) -> bool:
         return any(
             backend["stage"] == stage.value
@@ -111,12 +120,22 @@ def doctor_payload() -> dict[str, Any]:
     # arbitrary future field.  That evidence is established and recorded only
     # by each solve attempt.
     catalog_coverage_verified = False
+    # The installed SEP build decides whether two runs of the same project
+    # agree bit for bit (Windows builds without the patched extractor do
+    # not); the doctor states it so the receipts' warning has a home.
+    from lightframeqc.source_extraction import cached_extraction_self_test
+
+    try:
+        source_extraction: dict[str, Any] = cached_extraction_self_test()
+    except Exception as error:  # a broken extractor is reported, not hidden
+        source_extraction = {"version": None, "deterministic": None, "error": str(error)[:200]}
     return {
         "schemaVersion": 1,
         "engineVersion": __version__,
         "hardware": hardware.serializable(),
         "tuning": tuning.serializable(),
         "nativeKernels": describe_native_kernels(),
+        "sourceExtraction": source_extraction,
         "backends": descriptors,
         "status": {
             "inventoryReady": True,
@@ -533,6 +552,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # Receipts, progress and the worker protocol are UTF-8 on every platform;
+    # a Windows console code page must not decide how they are encoded.
+    platform_services.reconfigure_utf8_stdio()
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:

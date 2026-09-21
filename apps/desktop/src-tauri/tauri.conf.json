@@ -61,8 +61,21 @@
     "shortDescription": "End-to-end astrophotography workflow",
     "longDescription": "Import NINA sessions, quality-gate frames, calibrate, register, integrate, drizzle, and plate-solve in one guided workflow.",
     "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "silent": true
+      },
+      "allowDowngrades": false,
       "wix": {
         "upgradeCode": "c9df5382-651e-5356-937a-98ee5d0f3e43"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "English",
+          "SimpChinese"
+        ],
+        "displayLanguageSelector": true
       }
     }
   }

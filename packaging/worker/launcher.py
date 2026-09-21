@@ -6,7 +6,24 @@ import platform
 import sys
 
 
+def _utf8_stdio() -> None:
+    # The protocol with the desktop shell is UTF-8 in both directions; a
+    # Windows console (code page 936 on a Chinese system) would otherwise
+    # encode a degree sign or a CJK path as mojibake or fail outright.  The
+    # engine's ``platform`` layer does the same for the source CLI; this copy
+    # runs before any engine import so the runtime smoke stays import-free.
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (LookupError, OSError, ValueError):
+            pass
+
+
 def main() -> int:
+    _utf8_stdio()
     # Quality-gate measurement spawns worker processes from this same frozen
     # executable; a child carries ``--multiprocessing-fork`` and must run its
     # task loop here instead of the command line.

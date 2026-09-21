@@ -26,9 +26,11 @@ from typing import Any, Iterable, Mapping, Sequence, Callable
 from astropy.io import fits
 import numpy as np
 from lightframeqc.cfa import CFA_PATTERNS, normalize_pattern as normalize_cfa_pattern
+from lightframeqc.fits_bands import FitsBandReader, close_image_data, open_fits_image_data
 from numpy.typing import NDArray
 
 from .lanczos_table import TAP_OFFSETS, tap_weights
+from .platform import remove_file
 from .native_kernels import (
     MAD_KERNEL_ID,
     MEAN_KERNEL_ID,
@@ -276,7 +278,14 @@ def cfa_metadata(info: Any) -> dict[str, str]:
 
 
 class FitsFrame:
-    """Read-only, manually scaled view of one uncompressed 2-D FITS image."""
+    """Read-only, manually scaled view of one uncompressed 2-D FITS image.
+
+    The stored samples are reached through astropy's memory map on POSIX and
+    through ``lightframeqc.fits_bands.FitsBandReader`` (``seek`` +
+    ``readinto`` bands) on Windows, where page faults make a map several
+    times slower; both deliver the same bytes with the same dtype, so the
+    decoding below never sees a difference.
+    """
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self.path = Path(path).expanduser().resolve(strict=True)
@@ -337,8 +346,13 @@ class FitsFrame:
                 raise CalibrationError(
                     "FITS_GEOMETRY_INVALID", "invalid image dimensions", path=str(self.path)
                 )
-            self._data = image_hdu.data
-            if self._data is None or self._data.shape != (height, width):
+            try:
+                self._data = open_fits_image_data(image_hdu, self.path)
+            except ValueError as error:
+                raise CalibrationError(
+                    "FITS_DATA_INVALID", str(error), path=str(self.path)
+                ) from error
+            if self._data is None or tuple(self._data.shape) != (height, width):
                 raise CalibrationError(
                     "FITS_DATA_INVALID",
                     "image data does not match its header",
@@ -350,6 +364,11 @@ class FitsFrame:
             self._bzero = float(image_hdu.header.get("BZERO", 0.0))
             blank = image_hdu.header.get("BLANK")
             self._blank = int(blank) if blank is not None else None
+            if isinstance(self._data, FitsBandReader):
+                # The reader has its own handle; astropy's is not needed and,
+                # on Windows, would be one more open handle per frame.
+                self._hdul.close()
+                self._hdul = None
             return self
         except CalibrationError:
             self.close()
@@ -361,6 +380,7 @@ class FitsFrame:
             ) from error
 
     def close(self) -> None:
+        close_image_data(self._data)
         self._data = None
         if self._hdul is not None:
             self._hdul.close()
@@ -891,7 +911,9 @@ def _atomic_publish_file(temporary: Path, destination: Path) -> None:
         raise CalibrationError(
             "OUTPUT_EXISTS", "refusing to overwrite output", path=str(destination)
         ) from error
-    temporary.unlink()
+    # The destination link exists; dropping the temporary name waits out a
+    # scanner that may still hold the freshly written file (Windows).
+    remove_file(temporary, missing_ok=False)
 
 
 def _temporary_output(destination: Path) -> Path:
@@ -900,7 +922,7 @@ def _temporary_output(destination: Path) -> Path:
         prefix=f".{destination.name}.", suffix=".partial", dir=destination.parent
     )
     os.close(descriptor)
-    Path(name).unlink()
+    remove_file(name, missing_ok=False)
     return Path(name)
 
 
@@ -2765,11 +2787,9 @@ def integrate_expressions(
             },
         )
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        remove_file(temporary)
         for map_temporary in map_temporaries.values():
-            if map_temporary.exists():
-                map_temporary.unlink()
+            remove_file(map_temporary)
 
 
 def write_expression(
@@ -2823,8 +2843,7 @@ def write_expression(
         _atomic_publish_file(temporary, destination)
         return final_statistics
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        remove_file(temporary)
 
 
 __all__ = [

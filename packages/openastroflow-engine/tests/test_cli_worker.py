@@ -688,3 +688,40 @@ def test_worker_will_not_promote_a_synthetic_stage_placeholder(tmp_path: Path) -
     placeholder.write_text('{"status":"succeeded"}', encoding="utf-8")
     with pytest.raises(Exception, match="connected executor receipt"):
         _validate_stage_evidence("integration", placeholder)
+
+
+@pytest.mark.parametrize("console_encoding", ["cp936", "ascii"])
+def test_cli_streams_are_utf8_regardless_of_the_console_code_page(
+    tmp_path: Path, console_encoding: str
+) -> None:
+    """A CJK path and a degree sign survive a Windows OEM console code page.
+
+    ``PYTHONIOENCODING`` stands in for the console: Python would otherwise
+    encode stdout with it, turning the JSON into cp936 bytes (mojibake for
+    the UTF-8 reader on the other end) or failing with ``UnicodeEncodeError``
+    under a code page that lacks the character.
+    """
+
+    import os
+    import subprocess
+    import sys
+
+    from conftest import write_frame
+
+    project = tmp_path / "目录 (12°)"
+    write_frame(project / "LIGHT" / "M16_120s_R_001.fits", "Light")
+    environment = {**os.environ, "PYTHONIOENCODING": console_encoding}
+    environment.pop("PYTHONUTF8", None)
+    completed = subprocess.run(
+        [sys.executable, "-m", "openastroflow_engine", "inventory", str(project), "--compact"],
+        capture_output=True,
+        env=environment,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", "replace")
+    payload = json.loads(completed.stdout.decode("utf-8"))
+    rendered = json.dumps(payload, ensure_ascii=False)
+    assert "目录 (12°)" in rendered
+    # The bytes on the pipe are UTF-8, not the console code page's encoding.
+    assert "目录 (12°)".encode("utf-8") in completed.stdout
