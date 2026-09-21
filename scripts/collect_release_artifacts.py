@@ -254,12 +254,17 @@ def collect(
             )
             + "\n",
             encoding="utf-8",
+            newline="\n",
         )
         copied.append(metadata)
         sums = output / f"SHA256SUMS-{target}"
+        # LF regardless of the build host: write_text would emit CRLF on
+        # Windows and `sha256sum -c` / `shasum -c` on macOS and Linux would
+        # then look for "<name>\r" and report every file as unreadable.
         sums.write_text(
             "".join(f"{_sha256(path)}  {path.name}\n" for path in sorted(copied)),
             encoding="ascii",
+            newline="\n",
         )
         copied.append(sums)
     except Exception:
