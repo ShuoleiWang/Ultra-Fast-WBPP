@@ -58,7 +58,7 @@ missing index/catalog coverage fails the individual solve and publishes only a
 separate `.unsolved` evidence directory. It never promotes a pointing hint or
 inherited header to `SOLVED`.
 
-Astrometry.net and its indexes are user-installed external components, not a built-in solver. The strict final gate requires the app-managed index/config receipt. ASTAP may be probed for diagnostics but cannot currently satisfy the strict managed-catalog publication gate.
+Astrometry.net and its indexes are user-installed external components, not a built-in solver. The strict final gate requires the app-managed index/config receipt. ASTAP (`astap_cli` with its own star database) satisfies the same gate when the engine verifies its solution against the managed index stars, which is the Windows route (`backend: auto` prefers `solve-field` where both are installed); without the managed index set ASTAP is diagnostic-only.
 
 Enable drizzle in the recipe contract (scale 1–4, drop shrink, square/circular/gaussian/point kernel). Execution requires the native kernel library:
 
@@ -71,7 +71,7 @@ ultra-fast-wbpp run \
 
 A complete recipe can be supplied with `--recipe recipe.json`. CLI flags override the corresponding recipe fields. The E2E implementation requires a raw Bias group or exactly one compatible MasterBias, and a raw Flat group or compatible MasterFlat for every Light filter. Dark is optional unless the recipe marks it required; when any Dark source is supplied, every Light exposure must have an exact, temperature-compatible raw Dark group or MasterDark. The default astrometric policy is required and cannot be silently downgraded.
 
-Copy [`examples/default-recipe.json`](examples/default-recipe.json) for a conservative starting point. Supplied masters are content-hashed, role-checked, and reused read-only without another integration or bias subtraction. A raw group and supplied master may coexist only for disjoint filter/exposure profiles; ambiguous matches block planning. [`examples/drizzle-2x-recipe.json`](examples/drizzle-2x-recipe.json) selects the probed STScI CPU backend and additionally requires measured sampling, dither, rejection, and coverage evidence.
+Copy [`examples/default-recipe.json`](examples/default-recipe.json) for a conservative starting point. Supplied masters are content-hashed, role-checked, and reused read-only without another integration or bias subtraction. A raw group and supplied master may coexist only for disjoint filter/exposure profiles; ambiguous matches block planning. [`examples/drizzle-2x-recipe.json`](examples/drizzle-2x-recipe.json) enables a 2× drizzle through the native kernel (`backend: auto`, drop shrink 0.9, square kernel); sampling, dither and coverage evidence is recorded as advisory.
 
 Ordinary integration combines the registration quality weight with the independently measured noise weight for each admitted Light. The accepted-sample count, accepted/total coverage fraction, and robust-rejection count are written as real per-pixel FITS maps and promoted beside `coverage.json`; receipts bind their paths, statistics, and checksums.
 
@@ -111,7 +111,7 @@ The complete message contract is documented in [`docs/worker-protocol.md`](docs/
 - Every Apple-silicon Mac (`arm64`/`aarch64`) targets the generic CPU profile; Metal is advertised only after a real native executor/device/ABI probe succeeds.
 - Apple M3 Pro receives the separate `apple-m3-pro-tuned-v1` optimization profile.
 - Other M1/M2/M3/M4 and future M-series variants remain on the safe generic profile unless a measured tuning profile is added; they are `compatible-generic`, not performance-validated by the current evidence.
-- Windows exposes an unvalidated generic CPU interface today. Its descriptor is intentionally structured so future GPU backends can be added without changing recipes; hosted CI, E2E, installer and signing evidence are still pending.
+- Windows x64 runs the `windows-cpu` profile (validated on one Ryzen 7 5800H laptop and in hosted CI; see `docs/windows.md`). Its descriptor is intentionally structured so future GPU backends can be added without changing recipes; there is no GPU compute on Windows and the installer is not yet signed.
 
 Hardware capability is not the same as an installed pixel executor. `doctor`
 reports callable/process probes separately. `endToEndExecutableReady` means the

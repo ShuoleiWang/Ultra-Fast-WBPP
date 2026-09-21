@@ -219,8 +219,11 @@ from an atomic counter so hybrid or throttled cores never change results, only
 timing. Keep remaining platform-specific code behind these services and the
 existing filesystem/process adapters.
 
-A separately installed Astrometry.net `solve-field` and checked local indexes
-satisfy the current final solve contract. ASTAP and Siril adapters are optional
-and must not be described as equivalent final-validation backends. No online
+A separately installed Astrometry.net `solve-field` with checked local indexes
+satisfies the final solve contract, and so does ASTAP (`astap_cli` with its own
+star database) when the engine verifies its solution against the managed index
+stars, which is the Windows route ([windows.md](windows.md)); `backend: auto`
+prefers `solve-field` where both are installed. Without the managed index set
+ASTAP stays diagnostic-only, and the Siril adapter is diagnostic-only. No online
 image-upload solver fallback is implemented. Executable licenses and catalog
 redistribution permissions are separate; see [licensing](licensing.md).

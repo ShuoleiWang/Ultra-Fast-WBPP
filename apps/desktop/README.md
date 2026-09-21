@@ -33,7 +33,7 @@ For interface-only work, run `make demo`. The browser preview is explicitly mark
 | `src-tauri/src/sidecar.rs` | Worker discovery, integrity, and launch |
 | `src-tauri/src/platform/` | Process-tree control (`ManagedChild`: process groups on POSIX, Job Objects on Windows) and hardware profiles |
 
-The standard workflow is monochrome. Missing optional master metadata remains unknown; known conflicts still block calibration, and explicitly tagged Bayer data is unsupported. Advanced overrides are bound to source content. See [calibration conventions](../../docs/recipes/calibration.md).
+The standard workflow is monochrome. Missing optional master metadata remains unknown; known conflicts still block calibration, and Bayer (one-shot-colour) Lights are processed as R/G/B colour channel groups ([recipe](../../docs/recipes/osc-cfa.md)). Advanced overrides are bound to source content. See [calibration conventions](../../docs/recipes/calibration.md).
 
 Every worker process is started through `platform::ManagedChild` with UTF-8 stdio. On macOS and Linux the worker leads its own process group; on Windows it runs inside a Job Object with kill-on-close, so cancelling a run or quitting the application also stops the worker pools and solver processes it started. The worker's progress stream is decoded leniently: a stray console byte never ends progress reporting.
 

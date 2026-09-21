@@ -1,5 +1,7 @@
 # Release readiness review — 2026-09-09
 
+> Dated record. Since this review the GPL XISF dependency was removed from the worker (the runtime imports no GPL library, see [licensing.md](licensing.md)), Windows x64 became a validated platform ([windows.md](windows.md)) and hosted CI runs on every pull request; the open rows of the gap table below are tracked in [validation-matrix.md](validation-matrix.md).
+
 This is a local source review, not a stable-release certification. The repository
 can be presented as an alpha project after the candidate's checks pass. Existing
 local desktop acceptance is useful evidence, but is not a current multi-platform

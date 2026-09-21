@@ -1,0 +1,124 @@
+# Why Ultra-Fast WBPP
+
+What this project does better than PixInsight's Weighted Batch Preprocessing (WBPP), what it does not do, and the evidence behind every claim. Numbers come from the pages linked next to them; the reference data set is the maintainer's private 61-Light NGC 7331 project (four nights, L 26 / R 11 / G 11 / B 13, 300 s, 6252 × 4176 mono, one meridian flip), processed on a 36 GB, 12-core M3 Pro unless stated otherwise. Ultra-Fast WBPP is an independent implementation; it contains no PixInsight code and does not claim algorithmic equivalence.
+
+## The short version
+
+| | Ultra-Fast WBPP | PixInsight WBPP 3.0.1 (PixInsight 1.9.4) |
+|---|---|---|
+| **The same 61 Lights on the same Mac** | **76 s** from raw Lights to solved, verified L/R/G/B masters | **24 min 11 s** with WBPP's default route for this data (calibration with the supplied masters, weighting, registration with drizzle data, LocalNormalization, integration, astrometric solution), 12 worker threads |
+| **Which frames go in** | Every Light is measured (transparency, extinction, native-resolution PSF, trails, occlusion, field agreement) and admitted, held for review or excluded with stated reasons. The unattended policy (a recipe option) re-checks every frame with a leave-one-out counterfactual measured *inside* the integration and keeps the clean area of partly clouded or partly blocked frames through per-frame region weight maps | Whole frames are weighted and accepted or rejected from descriptor thresholds; a frame is in or out as a whole |
+| **What you can trust** | Sources are read-only, results go into a new directory, every product carries a receipt with content hashes, algorithm and kernel identifiers and the platform facts that produced it; the desktop shows "done" only after re-verifying the receipt, the hashes and the final sky coordinates. Runs are bit-identical on the same machine | A console log |
+| **Master quality** | Judged with a [quantitative standard](master-evaluation-standard.md) against WBPP's own masters of the same data: the luminance master is EQUIVALENT, the binned noise gain G₈ is 1.01–1.03 on all four filters, PSF, ellipticity, background and photometry within tolerance | The reference |
+| **Drizzle** | Native 1×–4× drizzle of exactly what the ordinary integration used; the drizzled master is the ordinary master's photometric twin; Bayer drizzle for one-shot colour | DrizzleIntegration |
+| **Platforms and license** | macOS 14+ on Apple Silicon and Windows 10/11 x64; MIT, no GPL runtime dependency, no PixInsight required | Commercial PixInsight license; macOS, Windows, Linux |
+| **After preprocessing** | Linear masters, previews, receipts. No post-processing | A complete processing platform |
+
+The rest of this page gives the detail and the evidence.
+
+## 1. Speed: 76 seconds for 61 × 26 MP Lights
+
+| Run | Wall clock | Source |
+|---|---|---|
+| Ultra-Fast WBPP, current `main`, M3 Pro | **76.2 s** | [CHANGELOG](../CHANGELOG.md) (kernel v3 entry), [windows.md](windows.md) |
+| The same project, four releases earlier | 170 s → 97 s → 82 s → 76 s | [CHANGELOG](../CHANGELOG.md) |
+| Ultra-Fast WBPP on a Ryzen 7 5800H laptop (Windows 11, 16 GB) | 267–289 s, solver and verification included | [windows.md](windows.md) |
+| Ultra-Fast WBPP with 2× drizzle of all four filters (measured at the 97 s stage) | 178 s including the 1 GB of drizzle products | [drizzle recipe](recipes/drizzle.md) |
+| PixInsight WBPP 3.0.1 on the same Mac, same 61 Lights | 24 min 11 s (1451 s) | WBPP's own log of the reference run, 2026-09-16 |
+
+The WBPP figure is one measurement of WBPP's default route on identical inputs, with LocalNormalization enabled and drizzle data generated (Ultra-Fast WBPP leaves LocalNormalization off by default and drizzle is a separate stage); it is a wall-clock comparison of what each tool does out of the box, not a benchmark of one algorithm.
+
+Where the time goes and how it was removed:
+
+- **Native kernels for the three hot loops.** The Lanczos-3 registration warp, the full-stack median/MAD rejection decision and the weighted reduction run in multithreaded C++ ([`engine/native`](../engine/native/README.md)) that reproduces the NumPy reference operation for operation, so both paths publish identical pixels. One 26 MP warp: 7.54 s in NumPy, 0.43 s native (17.6×); a 12-frame integration 4.5× faster; the whole portable pipeline 5.4× faster, pixels identical ([benchmarks](../benchmarks/README.md)).
+- **Nothing is decoded twice.** Calibration and registration are fused: a Light is decoded once, calibrated in memory against once-decoded masters, warped directly, and only the registered frame is written with a streaming SHA-256 ([architecture](architecture.md#performance)).
+- **A deterministic Lanczos-3 weight table** (kernel v3) replaced six transcendental evaluations and 48 divisions per output pixel: a rotated 26 MP warp 2.02 s → 1.35 s on one core, the project 82 s → 76 s, interpolation error below 1e-12 and the same table on every platform ([CHANGELOG](../CHANGELOG.md)).
+- **Measured, not guessed.** [`benchmarks/trace_run.py`](../benchmarks/README.md) traces a real run (stages, kernels, I/O, spawned workers, CPU and memory samples) into a Perfetto trace; it found the per-row Python loop that cost 150 s of thread-wall for 4 s of arithmetic, the GIL-bound registration threads and the 1.3 s NumPy debayer, each of which is now a vectorised pass, a worker-pool task or a 29 ms native kernel.
+- **Every core, bounded memory.** Statistics passes read all sampled rows of a frame at once; the next filter group's normalization is fitted on a helper thread while the current group integrates; memory budgets decide how many Lights are in flight and the kernels split each warp and tile across the remaining cores ([hardware](hardware.md)).
+
+## 2. Deterministic and verifiable
+
+- **Bit-identical runs.** Two runs of the same project produce the same bytes on the same machine, verified on macOS and on Windows through the installed application's frozen worker ([validation matrix](validation-matrix.md)). Windows and macOS masters differ only by math-library rounding and are compared with [`benchmarks/master_tolerance_gate.py`](../benchmarks/README.md), never by hash.
+- **One arithmetic, two implementations.** Every native kernel is held value-identical to its NumPy reference by differential tests on every CI runner (Ubuntu, macOS, Windows with MSVC `/fp:strict`), and thread-count invariance tests guarantee that hybrid or throttled cores change timing only ([architecture](architecture.md#platform-and-solver-support)).
+- **Deterministic source extraction.** The PyPI SEP build is non-deterministic on Windows; the bundled patched build is self-tested in every run and an unpatched environment is marked `SEP_NONDETERMINISTIC` in the receipt ([windows.md](windows.md)).
+- **Receipts.** Each product records input identities, algorithm and kernel identifiers, selection decisions, normalization coefficients, rejection counts, platform facts with their sources, and content hashes; the run's `qc/selection.json` records every frame's reasons and counterfactual numbers ([architecture](architecture.md#data-and-correctness-boundaries)).
+- **Fail closed.** Sources are read-only; publication is create-only; a `SOLVED` WCS exists only after the engine verified the solution against catalog stars (a header hint stays a `SEED`); on Windows the ASTAP solution is verified against the managed Astrometry.net index stars with the same evidence shape (26–43 matched Tycho-2 stars at 0.62–0.84″ RMS on the reference masters). The desktop re-opens the products and checks receipt, hashes and final sky coordinates before it reports success ([astrometry recipe](recipes/astrometry.md), [windows.md](windows.md)).
+- **Pixel changes are gated.** When a numerical change may legitimately move pixels, the tolerance gate states what it may do (≥ 99.99 % of pixels within 16 Float32 ulps or 0.002 σ, at most 1e-6 outliers each within 2 σ, identical accepted-sample counts, identical evaluator statuses) and checks it ([benchmarks](../benchmarks/README.md)).
+
+## 3. Frame selection a machine can defend
+
+- **Measured evidence, one implementation.** The quality gate measures every Light (star detection on previews and native-resolution star stamps, transparency and per-cell dimming against a clear-sky envelope, a bounded Theil–Sen extinction fit per night, trailing, occlusion, field agreement, background structure) and the desktop's optional review runs the very same code as the run, so verdicts never differ ([screening recipe](recipes/automatic-screening.md)).
+- **Unattended selection.** With `selection.policy: unattended-v1` hard guards exclude unusable frames, "not enough evidence" codes keep a frame at reduced weight instead of excluding it, defect codes enter a gray zone whose PSF cut-offs follow the chosen priority (depth, balanced, resolution), and a frame's confidence times a PSF factor scales its integration weight ([architecture](architecture.md#unattended-light-selection), [design](frame-selection-plan.md), [implementation record](frame-selection-implementation.md)). The default `legacy-gate` reproduces the historical PASS-only admission exactly, and the desktop builds its recipe without a selection block today, so the unattended policy is a command-line/recipe option until more data sets have been run.
+- **Native-resolution PSF.** Star stamps are read from the full-resolution frame (half-flux radius, FWHM, wing fraction); on the reference set the real FWHM is 3.6–4.7 px where the preview measurement said 8.4, and defective frames separate cleanly (defocus 8.2 px, trailing 8.1 px, dew 6.6 px).
+- **The counterfactual oracle.** Under an unattended policy, during the ordinary integration a tile observer accumulates, for every frame, what the master would look like without it (block-noise depth, second-order background residual, FWHM proxy, tile bootstrap intervals). A frame the counterfactual confirms harmful is removed and the group is integrated again, at most three passes, with the evidence in the receipt; a frame stays only if the master is better with it.
+- **Region weight maps.** A frame with a blocked or dimmed region becomes a per-frame weight map that the weighted mean applies sample by sample (native masked-mean kernel and NumPy reference agree bit for bit), so the clean part of a partly clouded frame is used and the rest contributes nothing; the coverage map reports the effective weight.
+- **Evidence.** The defect-injection harness ([`benchmarks/selection_defect_injection.py`](../benchmarks/selection_defect_injection.py)) injects thin and patchy cloud, dew, defocus, occlusion and trailing into real frames: every defect is handled, with zero false positives on clean frames and on benign controls (a darker night, a legitimately brighter sky); a patchy-cloud frame is kept at full weight with a beneficial counterfactual (Δdepth −0.062 mag), and an occluded frame is kept at confidence 0.6 with Δdepth −0.113 mag while its blocked quadrant shows up in the coverage map at the right place on both flipped nights ([implementation record, §8](frame-selection-implementation.md)). On a second, six-night L/R/G/B campaign the bounded extinction fit raised the automatic admission from 26 to 52 of 97 frames, the remaining reviews being genuine cloud and low source retention ([CHANGELOG](../CHANGELOG.md), *Fixed*).
+
+## 4. Integration science
+
+- **Registration.** Every filter of a target registers onto one reference with a projective model fitted to core-weighted centroids, so frames of other nights or hour angles do not leave filter-dependent offsets; exact identity and integer half-turns copy pixels, everything else is one Lanczos-3 warp with a domain-union support clamp. Meridian flips are ordinary rotations ([architecture](architecture.md#scientific-work)).
+- **Rejection scale model v2.** The noise part of each pixel's rejection scale is the pooled MAD of its row window and every frame is judged against its own noise, so small stacks no longer clip good samples where the per-pixel MAD is low by chance; the previous model is reproduced bit for bit when the new terms are off.
+- **Transient trails found from their whole length.** Each frame's residual against the temporal median is integrated along every line of every dyadic length with a fast Radon transform, so a faint satellite that fades along its track is still detected, and only that frame's samples inside the corridor are dropped ([architecture](architecture.md#scientific-work)).
+- **Normalization that respects the sensor.** Frames are matched to the frame with the flattest large-scale background; when the sky level varies across the group, the sky-proportional part of each frame's background (residual flat-field structure) is separated from the object by regression in the sensor frame, through each frame's registration transform, so a meridian flip does not move it; the master's background tilt is moved to the flattest non-negative mix of the frames' own tilts, so gradients of different nights cancel where they disagree.
+- **Weights that ignore resampling phase.** Frame weights are the inverse variance of 4 × 4 block means, insensitive to the sub-pixel phase of the Lanczos-3 resampling, times the selection confidence and PSF factor.
+- **One grid for every channel.** The filter masters of a run are cropped to one common rectangle; every master is solved independently and the independent solutions verify each other at solver precision before the lowest-RMS one is written to all of them, so RGB/LRGB products are combined without any resampling ([project recipe](recipes/project-mosaic-rgb.md)).
+
+## 5. Master quality against PixInsight WBPP
+
+[`benchmarks/evaluate_masters.py`](../benchmarks/README.md#master-evaluation-against-pixinsight-wbpp) implements the [master evaluation standard](master-evaluation-standard.md): one matched clean-star list on both native grids, a photometric model `P = a·O + b`, and PASS / WARN / FAIL per metric with bootstrap confidence intervals across seven families (PSF, noise and depth, background flatness in units of PixInsight's own noise, artefacts, photometric fidelity, geometry, cross-channel alignment); the verdict rules are BETTER / EQUIVALENT / WORSE / INCONCLUSIVE with hard thresholds.
+
+On the reference data set against the WBPP masters of the same frames (September 2026):
+
+- The luminance master is **EQUIVALENT** (G₈ 1.01–1.02 depending on the selection policy, with an interval of about ±0.01; its FWHM went from slightly worse to slightly better than WBPP's over the September rounds); half-light and moment FWHM, ellipticity, core concentration, hot/cold pixel residuals, trail residuals, background structure and photometry are within tolerance on every filter.
+- The binned noise gain G₈ (SNR at about two FWHM, higher is more SNR than the PixInsight master) is 1.01 (L), 1.02 (R), 1.03 (G) and 1.03 (B) in the evaluator runs of 2026-09-18 that followed the rejection scale model v2 and the block-noise weights; the later selection and kernel-v3 changes left all 124 per-metric statuses identical and moved the headline numbers by at most 1e-4. The standard is strict by design: R and B stay INCONCLUSIVE because the gain sits at the ±0.02 equivalence threshold with its confidence interval, and G is flagged by one artefact count (171 flat-topped star cores against an allowance of 169, a known sensitivity of that metric to the detection count) while its noise gain is the largest of the four. No filter evaluates WORSE on any PSF, background or photometric metric, and the project does not claim BETTER.
+- Bright satellite trails are removed to the noise floor (PixInsight's Winsorized sigma clipping leaves wings of a few tenths of a binned sigma); the remaining difference is a single faint trail that both tools partly leak.
+
+The bar the maintainer holds the project to: visual quality, especially background evenness, must never be worse than WBPP's, and SNR is the thing to beat. Every pipeline change is re-evaluated against these masters before it lands.
+
+## 6. Drizzle that is the master's twin
+
+The drizzle of a filter group is a second integration of exactly what the ordinary integration used, on a 1×–4× finer grid, in the native kernel: the calibrated unregistered Lights and their full-resolution registration matrices, the global-normalization scale, offset and offset grid applied in the same Float32 arithmetic at the registered position, the integration weights (noise, selection and region maps) and the per-sample rejection decisions of the ordinary integration. Nothing is re-estimated, so the drizzled master is the ordinary master's exact photometric twin with finer sampling ([drizzle recipe](recipes/drizzle.md)).
+
+On the reference set at 2×: half-light radius 2.5–4.4 % smaller than the Lanczos-3 master, effective noise over 4 × 4 native pixels 6–7 % lower, star flux ratio 0.993–0.994, coverage 99.95–100 %, 0.68 s per 26 MP frame. Square, circular, Gaussian and point kernels, drop shrink 0.1–1.0, science / weight / coverage products in one FITS, receipts with every input's provenance.
+
+## 7. One-shot colour
+
+A Light with a Bayer pattern (`RGGB`, `BGGR`, `GRBG`, `GBRG`) is processed without a recipe switch: screening and registration measure a luminance, calibration stays in the mosaic domain with separate flat-scaling factors per colour channel, the calibrated mosaic is debayered (29 ms per 26 MP frame in the native kernel) into R, G and B channel groups that the rest of the pipeline treats as filters, and drizzle drops the mosaic's own samples of each colour (Bayer drizzle) so that dithered data reaches the sensor's resolution. Validated on a synthetic RGGB set built from the real mono Lights: channel photometry exact, 1× debayer widens stars 5–10 %, 2× Bayer drizzle recovers full resolution with exact photometry; 79 s (1×) and 127 s (2×) on the M3 Pro. A real one-shot-colour data set has not been processed yet ([OSC recipe](recipes/osc-cfa.md)).
+
+## 8. A desktop that stays out of the way
+
+- **One window, one document.** Toolbar with import actions and the run's activity, source-list sidebar (project states, sources by target and filter, results), content area (frame table, screening table with decision filters and the target × filter matrix, processing stages, result masters), inspector with the selected frame's evidence, bottom launch bar. Light and dark follow the system; English and Simplified Chinese ([design record](gui-redesign-plan.md), [desktop guide](../apps/desktop/README.md)).
+- **Import to result in one step.** Drop every night at once; types, targets, filters and acquisition profiles come from the headers and conflicts are shown, never guessed; the output folder is remembered; screening is part of the run and the launch bar says beforehand what the run will leave out, with approve-all for REVIEW frames and a link to the optional review page. The result page lists what was stacked and what was excluded, with previews.
+- **Honest failure states.** A run that fails closed shows the stage it stopped in, the failure code and message and the preserved evidence directory instead of a spinning stage.
+- **A brand you can show.** The application icon and mark are rendered by one reproducible script; the README screenshots are rendered from the labelled browser demo by another ([branding](../assets/branding/README.md)).
+
+## 9. Platforms
+
+- **macOS 14+ on Apple Silicon.** Validated on a 36 GB M3 Pro (twelve CPU workers and kernel threads, eight QC readers, Metal available and measured; the `auto` integration prefers the native CPU kernels because the rejection statistics dominate). Other M-series machines run the generic profile and are reported as `compatible-generic`, not `performance-validated`, until measured ([hardware](hardware.md)).
+- **Windows 10 22H2 / 11 x64.** ASTAP as the verified final-gate solver, static-CRT kernels and desktop executable, Job Objects that stop the whole worker tree on cancel, an up-front path-length budget (`OUTPUT_PATH_TOO_LONG`), memory-bounded worker counts, antivirus-tolerant file lifecycle, deterministic source extraction; the installed MSI is attested (260 PE images, 0 unresolved imports) and the frozen worker reproduced the development runs bit for bit ([windows.md](windows.md), [validation matrix](validation-matrix.md)).
+- **One platform layer.** Operating-system differences live in `openastroflow_engine.platform`; every probe is a pure function of its raw input and is tested on every host, and no platform fact changes a pixel.
+
+## 10. Tools contributors actually get
+
+| Tool | What it answers |
+|---|---|
+| [`benchmarks/evaluate_masters.py`](../benchmarks/evaluate_masters.py) | Is this master as good as the PixInsight master of the same data? Per-metric PASS/WARN/FAIL with confidence intervals |
+| [`benchmarks/master_tolerance_gate.py`](../benchmarks/master_tolerance_gate.py) | Did a numerical change move pixels more than it is allowed to? |
+| [`benchmarks/trace_run.py`](../benchmarks/trace_run.py) | Where does a real run spend its time (stages, kernels, I/O, workers, GIL contention), as a Perfetto trace |
+| [`benchmarks/selection_defect_injection.py`](../benchmarks/selection_defect_injection.py), [`selection_oracle_report.py`](../benchmarks/selection_oracle_report.py) | Does the selection policy catch injected defects without penalising clean frames? |
+| [`benchmarks/native_kernels_pipeline.py`](../benchmarks/native_kernels_pipeline.py), [`e2e_stage_timings.py`](../benchmarks/e2e_stage_timings.py) | Native versus NumPy, per stage, with pixel identity checked |
+| [`scripts/build_native_runtime.py`](../scripts/build_native_runtime.py), [`attest_bundled_runtime.py`](../scripts/attest_bundled_runtime.py) | One Release build → test → install chain on every OS; proof that a bundle ships what it claims |
+| [`scripts/check_public_tree.py`](../scripts/check_public_tree.py), [`check_local_links.py`](../scripts/check_local_links.py) | Nothing private in the tree, no dead links |
+| [`apps/desktop/scripts/brand_icon.py`](../apps/desktop/scripts/brand_icon.py), [`screenshots.py`](../apps/desktop/scripts/screenshots.py) | Reproducible icon and documentation screenshots |
+
+CI runs the Python suite on Ubuntu, macOS and Windows (3.11 and 3.12) with the kernels built and installed first, Rust fmt/clippy/tests on three OSes, the native C++ tests, the Apple Silicon Metal differential, the React shell tests and build, CodeQL and the public-tree check; `main` is protected by the `CI gate`.
+
+## 11. What it does not do
+
+- It is preprocessing only: linear masters out, no stretching, gradient removal, deconvolution or colour calibration. It is not a PixInsight replacement.
+- Monochrome is validated on real data; one-shot colour, four-panel mosaics and LocalNormalization are validated on synthetic data only, and LocalNormalization does not promise gradient-free output.
+- Two machines have retained real-data evidence (one M3 Pro, one Ryzen 7 5800H laptop); other Macs and Windows classes run generic profiles. There are no signed or notarized installers yet.
+- The plate solver is external (Astrometry.net `solve-field` with local indexes on macOS, ASTAP plus the managed index set on Windows); nothing is uploaded anywhere.
+- The Metal path is audited and available but not faster than the native CPU kernels for the current workload; there is no GPU compute on Windows.
+
+The full register of validated and unvalidated claims is [validation-matrix.md](validation-matrix.md); the release blockers are in [release-readiness.md](release-readiness.md).

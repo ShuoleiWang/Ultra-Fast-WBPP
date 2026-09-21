@@ -23,4 +23,4 @@ A recipe is a versioned scientific contract, not a loose collection of GUI toggl
 
 The GUI recommends a recipe from metadata but never silently changes one after planning. Any change produces a new canonical recipe digest and invalidates only affected downstream artifacts.
 
-For the complete product sequence, return to the [main README](../../README.md); a [Simplified Chinese quick start](../README.zh-CN.md) is also available.
+For the complete product sequence, return to the [main README](../../README.md); a [Simplified Chinese quick start](../README.zh-CN.md) is also available, and the [documentation index](../README.md) maps every page.
