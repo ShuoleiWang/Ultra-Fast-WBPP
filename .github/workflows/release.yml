@@ -27,6 +27,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        if: runner.os == 'Windows'
         with:
           python-version: "3.12"
           cache: pip
@@ -35,6 +36,29 @@ jobs:
             engine/native/python/pyproject.toml
             packages/openastroflow-engine/pyproject.toml
             packaging/worker/requirements-build.txt
+
+      - name: Select the Homebrew Python 3.12 (macOS)
+        if: runner.os == 'macOS'
+        # The macOS 14 runtime overlay (packaging/worker/macos14-runtime-libraries-v1.json)
+        # replaces the Homebrew openssl@3 and mpdecimal dylibs that a
+        # Homebrew-built interpreter links against with digest-pinned Sonoma
+        # bottles. setup-python installs python.org's framework build, which
+        # bundles its own OpenSSL and links libmpdec statically, so the overlay
+        # would find nothing to replace and the pinned ABI smoke could not hold.
+        # The venv keeps pip out of Homebrew's externally managed site-packages
+        # and is what the local macOS build uses as well.
+        shell: bash
+        run: |
+          brew install python@3.12
+          python_bin="$(brew --prefix python@3.12)/bin/python3.12"
+          "${python_bin}" -m venv "${RUNNER_TEMP}/oaf-venv"
+          echo "${RUNNER_TEMP}/oaf-venv/bin" >> "${GITHUB_PATH}"
+          "${RUNNER_TEMP}/oaf-venv/bin/python" -m pip install --upgrade pip
+          "${RUNNER_TEMP}/oaf-venv/bin/python" - <<'PY'
+          import decimal, ssl, sys, _decimal
+          print(sys.version, _decimal.__file__)
+          print("libmpdec", decimal.__libmpdec_version__, "|", ssl.OPENSSL_VERSION)
+          PY
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:

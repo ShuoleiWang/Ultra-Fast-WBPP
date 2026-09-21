@@ -113,6 +113,24 @@ def test_tag_workflow_only_prepares_a_draft_release() -> None:
     assert "--verify-tag" in release_command
 
 
+def test_release_macos_job_freezes_a_homebrew_python_for_the_runtime_overlay() -> None:
+    workflow = (REPOSITORY / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+    # The macOS 14 overlay swaps the Homebrew openssl@3/mpdecimal dylibs a
+    # Homebrew interpreter links against; python.org's framework build (what
+    # setup-python provides) bundles OpenSSL and links libmpdec statically, so
+    # the macOS job must freeze from a Homebrew Python or the overlay has
+    # nothing to replace.
+    setup_python = workflow.split("actions/setup-python", 1)[1].split("- name:", 1)[0]
+    assert "if: runner.os == 'Windows'" in setup_python
+    homebrew = workflow.split("Select the Homebrew Python 3.12 (macOS)", 1)[1].split("- uses:", 1)[0]
+    assert "if: runner.os == 'macOS'" in homebrew
+    assert "brew install python@3.12" in homebrew
+    assert "-m venv" in homebrew and "GITHUB_PATH" in homebrew
+    assert "--macos14-bottle-root build/macos14-runtime-libraries" in workflow
+
+
 def test_windows_installers_embed_webview2_and_install_per_user_without_downgrades() -> None:
     config = json.loads((TAURI_ROOT / "tauri.conf.json").read_text(encoding="utf-8"))
     windows = config["bundle"]["windows"]
