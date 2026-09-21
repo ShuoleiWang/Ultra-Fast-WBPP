@@ -132,9 +132,14 @@ def test_collects_one_windows_msi_and_one_nsis_without_guessing_names(
     # hyphenated so the checksum file matches what GitHub serves.
     assert msi.name.replace(" ", "-") in names
     assert nsis.name.replace(" ", "-") in names
-    sums = (tmp_path / "windows-release" / "SHA256SUMS-x86_64-pc-windows-msvc").read_text(encoding="ascii")
+    sums_path = tmp_path / "windows-release" / "SHA256SUMS-x86_64-pc-windows-msvc"
+    sums = sums_path.read_text(encoding="ascii")
     assert "Ultra-Fast-WBPP_0.1.0_x64_en-US.msi" in sums and "Ultra-Fast-WBPP_0.1.0_x64-setup.exe" in sums
     assert " Ultra-Fast WBPP" not in sums
+    # sha256sum -c on macOS/Linux needs LF lines even when the file was
+    # written on the Windows runner.
+    assert b"\r" not in sums_path.read_bytes()
+    assert b"\r" not in (tmp_path / "windows-release" / "release-metadata-x86_64-pc-windows-msvc.json").read_bytes()
 
 
 def test_rejects_ambiguous_or_old_windows_installers(tmp_path: Path) -> None:
