@@ -16,6 +16,7 @@ from openastroflow_engine.global_normalization import (
     GlobalNormalizationParameters,
     StellarScaleHint,
 )
+from openastroflow_engine.path_budget import STAGING_SUFFIX
 from openastroflow_engine.pixel_pipeline import (
     AffineTransform,
     MasterMetadataOverride,
@@ -340,7 +341,8 @@ def test_raw_to_unsolved_master_is_numerically_correct_and_audited(
     assert receipt["astrometry"]["status"] == "UNSOLVED"
     assert receipt["astrometry"]["wcsValidated"] is False
     assert receipt["drizzle"]["status"] == "NOT_RUN"
-    assert all(".staging" not in str(value) for value in receipt["statistics"].values())
+    # No staging path (``.<name>.<random>.stage``) may leak into the receipt.
+    assert all(STAGING_SUFFIX not in str(value) for value in receipt["statistics"].values())
     for artifact in receipt["outputs"]:
         artifact_path = output / artifact["path"]
         assert artifact_path.is_file()

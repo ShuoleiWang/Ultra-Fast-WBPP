@@ -18,6 +18,28 @@ from .platform import current
 
 GIB = 1024**3
 
+# The QC measurement, analysis and registration pools each hold a decoded
+# Light plus SEP's working set per spawned worker: about 1.25 GiB committed
+# per worker at 26 MP (the eight-worker pools committed 13.4 GB on a 16 GB
+# laptop), on top of roughly 2 GiB that the main process, the desktop shell
+# and the OS keep for themselves.  Where the platform reports free memory
+# the pool is bounded by it so an 8 GB machine does not page.
+QC_WORKER_COMMIT_BYTES = 1.25 * GIB
+QC_WORKER_RESERVED_BYTES = 2 * GIB
+
+
+def memory_bound_qc_workers(qc_workers: int, available_memory_bytes: int | None) -> int:
+    """``qc_workers`` capped by what the reported free memory can hold.
+
+    Platforms that do not report free memory (macOS) keep their table value
+    unchanged; at least one worker always runs.
+    """
+
+    if available_memory_bytes is None:
+        return qc_workers
+    fit = int((int(available_memory_bytes) - QC_WORKER_RESERVED_BYTES) // QC_WORKER_COMMIT_BYTES)
+    return max(1, min(qc_workers, fit))
+
 
 @dataclass(frozen=True, slots=True)
 class ExecutionTuning:
@@ -38,6 +60,9 @@ class ExecutionTuning:
     # its in-flight Lights; integration tiles use all of it).  Distinct from
     # ``cpu_workers``, which is the memory-bound number of Lights in flight.
     kernel_threads: int = 1
+    # Free memory the platform reported when the row was chosen (``None``
+    # where it does not say); ``qc_workers`` is bounded by it when known.
+    available_memory_bytes: int | None = None
 
     def serializable(self) -> dict[str, object]:
         return {
@@ -55,6 +80,7 @@ class ExecutionTuning:
             "memorySource": self.memory_source,
             "logicalCores": self.logical_cores,
             "kernelThreads": self.kernel_threads,
+            "availableMemoryBytes": self.available_memory_bytes,
         }
 
 
@@ -105,11 +131,18 @@ def _physical_memory_bytes() -> int:
     return int(current().memory_status().total_bytes)
 
 
+def _available_memory_bytes() -> int | None:
+    """Free memory from the platform service layer (``None`` where unreported)."""
+
+    return current().memory_status().available_bytes
+
+
 def select_execution_tuning(
     hardware: HardwareProfile,
     *,
     logical_cores: int | None = None,
     physical_memory_bytes: int | None = None,
+    available_memory_bytes: int | None = None,
 ) -> ExecutionTuning:
     """Choose bounded resource values without changing numerical parameters.
 
@@ -125,10 +158,16 @@ def select_execution_tuning(
     cores = max(1, int(logical_cores or os.cpu_count() or 1))
     if physical_memory_bytes is None:
         physical_memory_bytes = hardware.memory_bytes or None
+        if available_memory_bytes is None:
+            available_memory_bytes = hardware.available_memory_bytes
     memory_source = hardware.memory_source if physical_memory_bytes else "platform"
     memory = max(2 * GIB, int(physical_memory_bytes or _physical_memory_bytes()))
     if physical_memory_bytes is None:
+        # An injected profile without a measurement asks the running platform
+        # for the free memory as well.
         memory_source = current().memory_status().source
+        if available_memory_bytes is None:
+            available_memory_bytes = _available_memory_bytes()
     usable = max(1 * GIB, int(memory * 0.62))
     # Fused calibrate+register keeps whole decoded Lights in memory (about
     # 12 bytes per pixel each); the registration budget therefore sets how
@@ -141,6 +180,9 @@ def select_execution_tuning(
         "memory_bytes": memory,
         "memory_source": memory_source,
         "logical_cores": cores,
+        "available_memory_bytes": (
+            int(available_memory_bytes) if available_memory_bytes is not None else None
+        ),
     }
 
     if hardware.m3_pro_tuned and memory >= 24 * GIB:
@@ -181,10 +223,13 @@ def select_execution_tuning(
         # SMT siblings and efficiency cores (dynamic chunking balances them).
         band = _band(_X86_64_BANDS, memory)
         workers = max(1, min(band.workers, cores))
+        # The three frame pools commit about 1.25 GiB per spawned worker;
+        # Windows and Linux report free memory, so the pool never outgrows it.
+        qc_workers = max(1, min(8, cores)) if memory >= 12 * GIB else workers
         return ExecutionTuning(
             profile_id=f"{hardware.platform_id}-x86-64-cpu-v1",
             cpu_workers=workers,
-            qc_workers=max(1, min(8, cores)) if memory >= 12 * GIB else workers,
+            qc_workers=memory_bound_qc_workers(qc_workers, available_memory_bytes),
             integration_tile_rows=band.tile_rows,
             gpu_inflight_buffers=0,
             local_normalization_sample_stride=band.sample_stride,
@@ -197,7 +242,7 @@ def select_execution_tuning(
     return ExecutionTuning(
         profile_id="portable-cpu-generic-v1",
         cpu_workers=workers,
-        qc_workers=min(2, workers),
+        qc_workers=memory_bound_qc_workers(min(2, workers), available_memory_bytes),
         integration_tile_rows=band.tile_rows,
         gpu_inflight_buffers=0,
         local_normalization_sample_stride=band.sample_stride,
@@ -206,4 +251,11 @@ def select_execution_tuning(
     )
 
 
-__all__ = ["ExecutionTuning", "GIB", "select_execution_tuning"]
+__all__ = [
+    "ExecutionTuning",
+    "GIB",
+    "QC_WORKER_COMMIT_BYTES",
+    "QC_WORKER_RESERVED_BYTES",
+    "memory_bound_qc_workers",
+    "select_execution_tuning",
+]

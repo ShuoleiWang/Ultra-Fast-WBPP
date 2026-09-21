@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command, Stdio};
+use std::process::{ChildStderr, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-use crate::platform;
+use crate::platform::{self, ManagedChild};
 
 const PROGRESS_EVENT: &str = "openastroflow://pipeline-progress";
 const ARTIFACT_EVENT: &str = "openastroflow://pipeline-artifact";
@@ -40,6 +40,13 @@ impl EngineExecutable {
     pub(crate) fn command(&self, subcommand: &str) -> Command {
         let mut command = Command::new(&self.path);
         command.arg(subcommand);
+        // The worker's stdio carries JSON with user paths and captions.  A
+        // Windows console code page (936 on a Chinese system) would replace
+        // or garble every non-ANSI character; Python's UTF-8 mode makes the
+        // pipes, the file-system encoding and the console UTF-8 everywhere.
+        command
+            .env("PYTHONUTF8", "1")
+            .env("PYTHONIOENCODING", "utf-8");
         platform::configure_child_process(&mut command);
         command
     }
@@ -48,8 +55,9 @@ impl EngineExecutable {
 const TEXT_BUSY_RETRIES: u32 = 20;
 const TEXT_BUSY_RETRY_DELAY: Duration = Duration::from_millis(50);
 
-/// Launches a sidecar command, retrying for about a second while its
-/// executable is momentarily "text busy".
+/// Launches a sidecar command under the platform's process-tree control,
+/// retrying for about a second while its executable is momentarily "text
+/// busy".
 ///
 /// On Unix, a fork elsewhere in this process (another sidecar launch, a
 /// test thread) inherits every open descriptor until its own exec; if one of
@@ -57,10 +65,10 @@ const TEXT_BUSY_RETRY_DELAY: Duration = Duration::from_millis(50);
 /// file meanwhile fails with `ETXTBSY` even though the writer already closed
 /// it.  rustc, cargo and git retry the same way; any other launch error is
 /// returned at once.
-pub(crate) fn spawn_sidecar(command: &mut Command) -> std::io::Result<Child> {
+pub(crate) fn spawn_sidecar(command: &mut Command) -> std::io::Result<ManagedChild> {
     let mut attempt = 0;
     loop {
-        match command.spawn() {
+        match ManagedChild::spawn(command) {
             Err(error) if is_text_busy(&error) && attempt < TEXT_BUSY_RETRIES => {
                 attempt += 1;
                 std::thread::sleep(TEXT_BUSY_RETRY_DELAY);
@@ -70,16 +78,58 @@ pub(crate) fn spawn_sidecar(command: &mut Command) -> std::io::Result<Child> {
     }
 }
 
-/// `Command::output` with the same text-busy retry as [`spawn_sidecar`].
+/// `Command::output` with the same text-busy retry and process-tree control
+/// as [`spawn_sidecar`].
 pub(crate) fn sidecar_output(command: &mut Command) -> std::io::Result<std::process::Output> {
     let mut attempt = 0;
     loop {
-        match command.output() {
+        match ManagedChild::output(command) {
             Err(error) if is_text_busy(&error) && attempt < TEXT_BUSY_RETRIES => {
                 attempt += 1;
                 std::thread::sleep(TEXT_BUSY_RETRY_DELAY);
             }
             result => return result,
+        }
+    }
+}
+
+/// Lines of a worker's diagnostic stream, decoded leniently.
+///
+/// `BufRead::lines` stops at the first line that is not valid UTF-8, so one
+/// stray byte from a solver's console output would end progress reporting
+/// for the rest of the run.  Here an invalid sequence only becomes U+FFFD in
+/// that line; reading stops at end of stream or on an I/O error.
+pub(crate) struct LossyLines<R: BufRead> {
+    reader: R,
+    buffer: Vec<u8>,
+}
+
+impl<R: BufRead> LossyLines<R> {
+    pub(crate) fn new(reader: R) -> Self {
+        Self {
+            reader,
+            buffer: Vec::new(),
+        }
+    }
+}
+
+impl<R: BufRead> Iterator for LossyLines<R> {
+    type Item = String;
+
+    fn next(&mut self) -> Option<String> {
+        self.buffer.clear();
+        match self.reader.read_until(b'\n', &mut self.buffer) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => {
+                let mut line = self.buffer.as_slice();
+                if let Some(rest) = line.strip_suffix(b"\n") {
+                    line = rest;
+                }
+                if let Some(rest) = line.strip_suffix(b"\r") {
+                    line = rest;
+                }
+                Some(String::from_utf8_lossy(line).into_owned())
+            }
         }
     }
 }
@@ -96,7 +146,7 @@ fn is_text_busy(_error: &std::io::Error) -> bool {
 
 #[derive(Default)]
 pub(crate) struct PipelineRegistry {
-    jobs: Mutex<HashMap<String, Arc<Mutex<Child>>>>,
+    jobs: Mutex<HashMap<String, Arc<Mutex<ManagedChild>>>>,
     shutting_down: AtomicBool,
 }
 
@@ -887,8 +937,18 @@ fn select_profile_for_host(
     Err("the sidecar did not advertise a hardware profile compatible with this host".to_owned())
 }
 
+/// Windows is release-validated on x86-64 only: the CPU kernels, the worker
+/// runtime and the retained E2E evidence all target that architecture.  Any
+/// other Windows architecture keeps the shell in its interface-only state.
 fn platform_scientific_release_validated(host: &platform::PlatformProfile) -> bool {
-    host.platform != "windows"
+    host.platform != "windows" || host.architecture == "x86_64"
+}
+
+fn platform_unavailable_reason(host: &platform::PlatformProfile) -> String {
+    format!(
+        "Windows on {} is not supported by this release; the validated Windows build is x86-64 only (ARM64 has no worker runtime or E2E acceptance)",
+        host.architecture
+    )
 }
 
 fn probe_runtime<R: Runtime>(app: &AppHandle<R>) -> Result<RuntimeProbe, String> {
@@ -962,11 +1022,18 @@ pub(crate) fn get_capabilities<R: Runtime>(app: &AppHandle<R>) -> RuntimeCapabil
                     .capabilities
                     .stages
                     .contains(&StageKind::AstrometricSolve);
-            // Windows currently has compile/interface evidence only.  Do not
-            // promote that seam to a product-ready scientific runtime until
-            // the Windows release matrix has retained E2E evidence.
+            // Only architectures with retained scientific E2E evidence may
+            // present themselves as a product-ready runtime.
             let release_validated = platform_scientific_release_validated(&platform_profile);
             let available = stages_ready && solver_available && release_validated;
+            let unavailable_reason = (!available).then(|| {
+                if release_validated {
+                    "sidecar handshake passed, but one or more required E2E stages are unavailable"
+                        .to_owned()
+                } else {
+                    platform_unavailable_reason(&platform_profile)
+                }
+            });
             RuntimeCapabilities {
                 platform: platform_profile.platform,
                 chip: platform_profile.chip,
@@ -985,6 +1052,8 @@ pub(crate) fn get_capabilities<R: Runtime>(app: &AppHandle<R>) -> RuntimeCapabil
                     .contains(&BackendFeature::MetalExecution)
                 {
                     "Metal execution".to_owned()
+                } else if platform_profile.platform == "windows" {
+                    platform_profile.gpu_backend.to_owned()
                 } else {
                     "Portable CPU only".to_owned()
                 },
@@ -996,6 +1065,7 @@ pub(crate) fn get_capabilities<R: Runtime>(app: &AppHandle<R>) -> RuntimeCapabil
                         "APPLE_SILICON"
                     }
                     HardwareProfile::GenericArm64Cpu => "PORTABLE",
+                    HardwareProfile::WindowsCpu if release_validated => "WINDOWS_X64",
                     HardwareProfile::WindowsCpu => "PORTABLE",
                 },
                 available,
@@ -1006,15 +1076,7 @@ pub(crate) fn get_capabilities<R: Runtime>(app: &AppHandle<R>) -> RuntimeCapabil
                         .contains(&BackendFeature::Drizzle),
                 solver_available,
                 runtime_version: Some(probe.implementation_version),
-                unavailable_reason: (!available).then(|| {
-                    if !release_validated {
-                        "Windows adapter contracts compile and run in CI, but this release has no retained Windows scientific E2E acceptance"
-                            .to_owned()
-                    } else {
-                        "sidecar handshake passed, but one or more required E2E stages are unavailable"
-                            .to_owned()
-                    }
-                }),
+                unavailable_reason,
             }
         }
         Err(error) => RuntimeCapabilities {
@@ -1692,7 +1754,7 @@ fn stream_stderr<R: Runtime>(app: AppHandle<R>, job_id: String, stderr: ChildStd
 fn stream_worker<R: Runtime>(
     app: AppHandle<R>,
     registry: Arc<PipelineRegistry>,
-    child: Arc<Mutex<Child>>,
+    child: Arc<Mutex<ManagedChild>>,
     mut stdout: BufReader<std::process::ChildStdout>,
     mut cursor: ProtocolCursor,
     job_id: String,
@@ -2075,14 +2137,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[cfg(unix)]
     #[test]
     fn application_shutdown_terminates_every_pipeline_process_tree() {
         let registry = PipelineRegistry::default();
-        let mut command = Command::new("/bin/sleep");
-        command.arg("30");
-        platform::configure_child_process(&mut command);
-        let child = Arc::new(Mutex::new(command.spawn().expect("pipeline child")));
+        let mut command = platform::test_support::sleeping_command();
+        let child = Arc::new(Mutex::new(
+            ManagedChild::spawn(&mut command).expect("pipeline child"),
+        ));
         registry
             .jobs
             .lock()
@@ -2244,15 +2305,59 @@ mod tests {
     }
 
     #[test]
-    fn windows_interface_evidence_is_not_scientific_release_acceptance() {
-        assert!(!platform_scientific_release_validated(&simulated_host(
-            "windows", "x86_64", "x86_64"
+    fn windows_release_validation_is_x86_64_only() {
+        assert!(platform_scientific_release_validated(&simulated_host(
+            "windows",
+            "x86_64",
+            "AMD Ryzen 7 5800H"
         )));
         assert!(platform_scientific_release_validated(&simulated_host(
             "macos",
             "aarch64",
             "Apple M3 Pro"
         )));
+        let arm = simulated_host("windows", "aarch64", "Snapdragon X Elite");
+        assert!(!platform_scientific_release_validated(&arm));
+        let reason = platform_unavailable_reason(&arm);
+        assert!(reason.contains("aarch64"));
+        assert!(reason.contains("x86-64 only"));
+    }
+
+    #[test]
+    fn worker_environment_forces_utf8_stdio() {
+        let command = EngineExecutable {
+            path: PathBuf::from("openastroflow-worker"),
+        }
+        .command("worker");
+        let environment = command
+            .get_envs()
+            .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(environment.get("PYTHONUTF8"), Some(&"1"));
+        assert_eq!(environment.get("PYTHONIOENCODING"), Some(&"utf-8"));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("worker")]
+        );
+    }
+
+    #[test]
+    fn lossy_lines_survive_invalid_utf8_and_keep_later_lines() {
+        let stream: Vec<u8> =
+            b"first\r\nbad \xff byte\n{\"type\":\"progress\"}\nno newline".to_vec();
+        let lines = LossyLines::new(std::io::Cursor::new(stream)).collect::<Vec<_>>();
+        assert_eq!(
+            lines,
+            vec![
+                "first".to_owned(),
+                "bad \u{fffd} byte".to_owned(),
+                "{\"type\":\"progress\"}".to_owned(),
+                "no newline".to_owned(),
+            ]
+        );
+        assert!(LossyLines::new(std::io::Cursor::new(Vec::new()))
+            .next()
+            .is_none());
     }
 
     #[cfg(unix)]
@@ -2748,13 +2853,10 @@ print((pathlib.Path(__file__).parent / 'inventory.json').read_text())
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn cancellation_terminates_the_worker_process_group() {
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "sleep 30"]);
-        platform::configure_child_process(&mut command);
-        let child = command.spawn().expect("spawn cancellable process");
+    fn cancellation_terminates_the_worker_process_tree() {
+        let mut command = platform::test_support::sleeping_command();
+        let child = ManagedChild::spawn(&mut command).expect("spawn cancellable process");
         let id = "cancel-test".to_owned();
         let registry = PipelineRegistry::default();
         registry

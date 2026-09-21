@@ -26,9 +26,10 @@ from .e2e import (
     IntegrationMode,
     ReviewApproval,
 )
-from .hardware import HardwareProfile, detect_hardware
+from .hardware import CpuFamily, HardwareProfile, detect_hardware
 from .inventory import inventory_manifest_sha256
 from .models import AssetRole, AssetStatus, IssueSeverity, ProjectInventory
+from .path_budget import Layout, check_output_path_budget
 from .performance_profile import select_execution_tuning
 from .pixel_pipeline import (
     MasterMetadataOverride,
@@ -446,6 +447,53 @@ def select_solver_chain(
     return tuple(selected)
 
 
+def refuse_unsupported_platform(hardware: HardwareProfile) -> None:
+    """Windows is supported on x86-64 only.
+
+    The portable CPU path would run on Windows/ARM64, but nothing about it is
+    validated there (no native kernels, no retained execution evidence), so
+    the run is refused with a stable code instead of producing unattested
+    products.  macOS and Linux keep their own readiness gates in the plan.
+    """
+
+    if hardware.platform_id == "windows" and hardware.cpu_family is not CpuFamily.X86_64:
+        raise RuntimeConfigurationError(
+            "PLATFORM_UNSUPPORTED",
+            f"Windows on {hardware.architecture} is outside the supported boundary; "
+            "this release runs on Windows 10/11 x86-64 only",
+        )
+
+
+def check_run_path_budget(
+    inventory: ProjectInventory,
+    output_directory: str | Path,
+    hardware: HardwareProfile,
+    *,
+    layout: Layout,
+) -> None:
+    """Fail before any work when the run's deepest path would not fit.
+
+    The limit comes from the hardware profile when it carries one (the
+    running host's ``detect_hardware`` does; tests inject it) and from the
+    platform layer otherwise, so an injected foreign profile never silences
+    the check on a real Windows host.
+    """
+
+    lights = [
+        asset for asset in inventory.assets
+        if asset.role is AssetRole.LIGHT and asset.status is AssetStatus.READY
+    ]
+    check_output_path_budget(
+        output_directory,
+        targets=[asset.target for asset in lights],
+        filters=[asset.filter_name for asset in lights],
+        light_count=len(lights),
+        light_paths=[asset.path for asset in lights],
+        layout=layout,
+        limit=hardware.path_limit,
+    )
+
+
 def prepare_execution(
     inventory: ProjectInventory,
     recipe: Recipe,
@@ -460,11 +508,19 @@ def prepare_execution(
     field_of_view_degrees: float | None = None,
     search_radius_degrees: float | None = None,
     requested_hardware_profile: str | None = None,
+    layout: Layout = "run",
 ) -> tuple[ExecutionPlan, E2ERequest, tuple[SolverBackend, ...]]:
-    """Validate a plan and return every object needed by ``run_e2e``."""
+    """Validate a plan and return every object needed by ``run_e2e``.
+
+    ``layout`` is the output layout whose path budget is checked: a single
+    ``run`` here, the deeper ``project`` layout when called on behalf of
+    ``prepare_project_execution``.
+    """
 
     registry = registry or default_registry()
     hardware = hardware or detect_hardware()
+    refuse_unsupported_platform(hardware)
+    check_run_path_budget(inventory, output_directory, hardware, layout=layout)
     plan = build_plan(inventory, recipe, hardware=hardware, registry=registry)
     if not plan.contract_valid:
         reasons = "; ".join(
@@ -527,6 +583,7 @@ def prepare_project_execution(
         field_of_view_degrees=field_of_view_degrees,
         search_radius_degrees=search_radius_degrees,
         requested_hardware_profile=requested_hardware_profile,
+        layout="project",
     )
     return (
         plan,
@@ -538,10 +595,12 @@ def prepare_project_execution(
 __all__ = [
     "RuntimeConfigurationError",
     "build_e2e_request",
+    "check_run_path_budget",
     "inventory_manifest_sha256",
     "pixel_backend_for_hardware_profile",
     "prepare_execution",
     "prepare_project_execution",
+    "refuse_unsupported_platform",
     "select_solver_chain",
     "validate_e2e_inventory",
 ]

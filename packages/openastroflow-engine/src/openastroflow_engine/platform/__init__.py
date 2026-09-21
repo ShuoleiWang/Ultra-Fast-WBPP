@@ -3,28 +3,28 @@
 from __future__ import annotations
 
 from functools import lru_cache
-import sys
 
 from .base import (
     ChildProcessOptions,
     CpuTopology,
+    EnvironmentView,
     GpuAdapter,
     MemoryStatus,
     NoReplaceError,
+    PathLimit,
     PlatformId,
     PlatformServices,
     VolumeCapabilities,
+    environment_view,
     fallback_memory,
     fallback_topology,
+    merged_environment,
+    platform_id_for,
+    reconfigure_utf8_stdio,
+    remove_file,
+    remove_tree,
+    rename_with_retry,
 )
-
-
-def platform_id_for(sys_platform: str = sys.platform) -> PlatformId:
-    if sys_platform == "darwin":
-        return "darwin"
-    if sys_platform in {"win32", "cygwin", "msys"}:
-        return "windows"
-    return "linux"
 
 
 def services_for(identifier: PlatformId) -> PlatformServices:
@@ -53,15 +53,23 @@ def current() -> PlatformServices:
 __all__ = [
     "ChildProcessOptions",
     "CpuTopology",
+    "EnvironmentView",
     "GpuAdapter",
     "MemoryStatus",
     "NoReplaceError",
+    "PathLimit",
     "PlatformId",
     "PlatformServices",
     "VolumeCapabilities",
     "current",
+    "environment_view",
     "fallback_memory",
     "fallback_topology",
+    "merged_environment",
     "platform_id_for",
+    "reconfigure_utf8_stdio",
+    "remove_file",
+    "remove_tree",
+    "rename_with_retry",
     "services_for",
 ]

@@ -94,7 +94,7 @@ make desktop-dev
 
 ## 状态与要求
 
-- **积极开发中的 alpha。** 目标平台 Apple Silicon、macOS 14+。真实素材流程在 M3 Pro 上验证；其他 Mac 仍待验收。本地构建为 ad-hoc 签名，未公证。Windows 有构建与测试目标，暂无受支持的安装包。
+- **积极开发中的 alpha。** 目标平台 Apple Silicon、macOS 14+。真实素材流程在 M3 Pro 上验证；其他 Mac 仍待验收。本地构建为 ad-hoc 签名，未公证。Windows x64（Windows 10 22H2 / 11）已支持，板解算用 ASTAP 并由引擎对管理星表验证；已验证范围与未签名安装包的注意事项见 [windows.md](windows.md)。
 - **单色已在真实数据上验证；彩色相机仅在合成数据上验证。** Bayer（RGGB/BGGR/GRBG/GBRG）亮场按马赛克校准、去马赛克为 R/G/B 通道 master 并合成 RGB（[配方](recipes/osc-cfa.md)），但尚未处理过真实的 OSC 数据集。Drizzle、LocalNormalization、RGB/LRGB 与马赛克需要更广泛的真实数据验证；LocalNormalization 不保证无梯度输出。
 - **天文解算**需要另行安装 Astrometry.net 的 `solve-field` 与本地索引：按[求解器设置](recipes/offline-solver-catalogs.md)配置，然后在应用中**重新检测配置**。
 - 需要保存全分辨率中间帧的磁盘空间。

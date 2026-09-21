@@ -63,8 +63,10 @@ args = sys.argv[1:]
 if backend == "astap" and args == ["-help"]:
     if mode == "missing-capability":
         print("ASTAP version 2026.07.30 -f")
-    else:
+    elif mode == "no-sip":
         print("ASTAP version 2026.07.30 -f -o -wcs -ra -spd -fov -r")
+    else:
+        print("ASTAP version 2026.07.30 -f -o -wcs -ra -spd -fov -r -sip")
     raise SystemExit(0)
 if backend == "astrometry" and args == ["--version"]:
     if mode == "version-unsupported":
@@ -156,7 +158,13 @@ if backend == "astap":
     elif mode == "corrupt-output":
         wcs_path.write_bytes(b"not a fits header")
     else:
-        solution_header().tofile(wcs_path, overwrite=True)
+        header = solution_header()
+        header_file = os.environ.get("FAKE_WCS_HEADER")
+        if header_file:
+            # Catalog-verification tests supply the WCS their synthetic
+            # master was rendered with.
+            header = fits.Header.fromtextfile(header_file)
+        header.tofile(wcs_path, overwrite=True)
     solved = "F" if mode == "seed-only" else "T"
     ini_path.write_text(f"PLTSOLVD={solved}\n", encoding="ascii")
     raise SystemExit(0)
@@ -300,6 +308,15 @@ def managed_catalog(tmp_path: Path) -> tuple[Path, Path, dict[str, object]]:
     return root / "astrometry.cfg", manifests, verified
 
 
+def fake_star_database(tmp_path: Path) -> Path:
+    """ASTAP database files beside nothing in particular; the probe needs them."""
+
+    directory = tmp_path / "astap-database"
+    directory.mkdir(exist_ok=True)
+    (directory / "d50_0101.1476").write_bytes(b"fake star database area")
+    return directory
+
+
 def backend_for(kind: str, script: Path, tmp_path: Path, mode: str = "success"):
     environment = {"FAKE_BACKEND": kind, "FAKE_MODE": mode}
     common = dict(
@@ -310,8 +327,12 @@ def backend_for(kind: str, script: Path, tmp_path: Path, mode: str = "success"):
         timeout_seconds=2.0,
         probe_timeout_seconds=2.0,
     )
+    # These tests exercise the process contract; the managed-catalog gate has
+    # its own tests (test_catalog_correspondence.py), so it is relaxed here.
     if kind == "astap":
-        return AstapSolverBackend(**common)
+        return AstapSolverBackend(
+            **common, require_managed_catalog=False, star_database_dir=fake_star_database(tmp_path)
+        )
     return AstrometryNetSolverBackend(**common, require_managed_catalog=False)
 
 
@@ -321,12 +342,31 @@ def test_probe_finds_version_and_required_capabilities(tmp_path: Path, kind: str
     environment = {"FAKE_BACKEND": kind, "FAKE_MODE": "success"}
     if kind == "astap":
         assert discover_astap(sys.executable) == str(Path(sys.executable).absolute())
-        probe = probe_astap(
+        without_database = probe_astap(
             sys.executable,
             executable_args=(str(script),),
             environment=environment,
         )
+        assert without_database.available is True
+        assert without_database.execution_ready is False
+        assert without_database.error_code == "STAR_DATABASE_MISSING"
+        assert without_database.evidence["starDatabase"]["found"] is False
+        probe = probe_astap(
+            sys.executable,
+            executable_args=(str(script),),
+            environment=environment,
+            star_database_dir=fake_star_database(tmp_path),
+        )
         assert probe.version == "2026.07.30"
+        assert probe.evidence["starDatabase"] == {
+            "found": True,
+            "source": "configured",
+            "path": str(fake_star_database(tmp_path).absolute()),
+            "families": ["d50"],
+            "fileCount": 1,
+        }
+        assert "path" not in probe.serializable()["evidence"]["starDatabase"]
+        assert "catalog-correspondence-quality-v1" in probe.capabilities
     else:
         assert discover_astrometry_net(sys.executable) == str(Path(sys.executable).absolute())
         probe = probe_astrometry_net(
@@ -598,6 +638,8 @@ def test_optional_local_solver_logs_are_separate_and_path_redacted(tmp_path: Pat
         diagnostic_log_root=log_root,
         timeout_seconds=2.0,
         probe_timeout_seconds=2.0,
+        require_managed_catalog=False,
+        star_database_dir=fake_star_database(tmp_path),
     )
     result = backend.solve(SolveRequest(str(source), str(tmp_path / "solved.fits")))
 
@@ -636,6 +678,8 @@ def test_posix_process_group_cannot_leave_a_mutating_child(tmp_path: Path) -> No
         },
         staging_root=tmp_path,
         timeout_seconds=2.0,
+        require_managed_catalog=False,
+        star_database_dir=fake_star_database(tmp_path),
     )
 
     result = backend.solve(SolveRequest(str(source), str(tmp_path / "solved.fits")))
@@ -666,7 +710,9 @@ def test_success_isolated_input_and_verifiable_receipt(tmp_path: Path, kind: str
         probe_timeout_seconds=2.0,
     )
     backend = (
-        AstapSolverBackend(**common)
+        AstapSolverBackend(
+            **common, require_managed_catalog=False, star_database_dir=fake_star_database(tmp_path)
+        )
         if kind == "astap"
         else AstrometryNetSolverBackend(**common, require_managed_catalog=False)
     )
@@ -691,6 +737,12 @@ def test_success_isolated_input_and_verifiable_receipt(tmp_path: Path, kind: str
     argv = json.loads(argv_log.read_text(encoding="utf-8"))
     assert str(source) not in argv
     assert "-update" not in argv
+    if kind == "astap":
+        # ASTAP's -fov is the field height: the width hint (2.0 deg) scaled by
+        # the 30x40 input's aspect ratio (29/39), RA in hours, Dec as SPD.
+        assert argv[argv.index("-fov") + 1] == f"{2.0 * 29 / 39:.12g}"
+        assert argv[argv.index("-ra") + 1] == f"{270.0 / 15.0:.12g}"
+        assert argv[argv.index("-spd") + 1] == f"{75.0:.12g}"
     assert result.evidence["process"]["shell"] is False
     assert result.evidence["source"]["sha256"] == f"sha256:{original}"
     assert result.evidence["outputs"]["published"]["sha256"].startswith("sha256:")
@@ -726,8 +778,15 @@ def test_success_isolated_input_and_verifiable_receipt(tmp_path: Path, kind: str
             replace(result, astrometric_quality=drifted_quality)
         ) is False
     else:
+        # Without a managed index set the ASTAP adapter cannot recompute
+        # correspondences, so its solution stays diagnostic only.
+        assert result.evidence["adapterVersion"] == "astap-process-v4"
         assert result.astrometric_quality is None
         assert result.evidence["astrometricQuality"]["status"] == "UNAVAILABLE"
+        assert result.evidence["catalogPreflight"] == {"managed": False, "reason": "NO_MANAGED_CONFIG"}
+        assert "-d" in argv and argv[argv.index("-d") + 1] == str(fake_star_database(tmp_path))
+        assert "-sip" in argv
+        assert result.evidence["solveOptions"] == {"sipRequested": True, "starDatabaseDirectoryConfigured": True}
         assert validate_solver_result(
             result,
             require_scientific_evidence=True,
@@ -843,6 +902,50 @@ def test_staged_input_or_executable_drift_fails_closed(tmp_path: Path, kind: str
         assert not (tmp_path / f"{mode}.fits").exists()
 
 
+def test_astap_sip_is_requested_only_when_the_cli_advertises_it(tmp_path: Path) -> None:
+    script = write_fake_solver(tmp_path / "fake_solver.py")
+    source = write_input(tmp_path / "light.fits")
+    argv_log = tmp_path / "argv.json"
+    older_cli = AstapSolverBackend(
+        executable=sys.executable,
+        executable_args=(str(script),),
+        environment={"FAKE_BACKEND": "astap", "FAKE_MODE": "no-sip", "FAKE_ARGV_LOG": str(argv_log)},
+        staging_root=tmp_path,
+        timeout_seconds=2.0,
+        probe_timeout_seconds=2.0,
+        require_managed_catalog=False,
+        star_database_dir=fake_star_database(tmp_path),
+    )
+    assert older_cli.descriptor.execution_ready is True
+    assert older_cli.sip_requested is False
+    assert older_cli.descriptor.metadata["solveOptions"] == {
+        "sipPolynomial": True,
+        "sipRequested": False,
+        "starDatabaseDirectoryConfigured": True,
+    }
+    result = older_cli.solve(SolveRequest(str(source), str(tmp_path / "no-sip.fits")))
+    assert result.status is SolverStatus.SOLVED
+    assert "-sip" not in json.loads(argv_log.read_text(encoding="utf-8"))
+    assert result.evidence["solveOptions"]["sipRequested"] is False
+
+    disabled = AstapSolverBackend(
+        executable=sys.executable,
+        executable_args=(str(script),),
+        environment={"FAKE_BACKEND": "astap", "FAKE_MODE": "success", "FAKE_ARGV_LOG": str(argv_log)},
+        staging_root=tmp_path,
+        timeout_seconds=2.0,
+        probe_timeout_seconds=2.0,
+        require_managed_catalog=False,
+        star_database_dir=fake_star_database(tmp_path),
+        sip_polynomial=False,
+    )
+    assert "-sip" in disabled.probe.evidence["supportedOptionalOptions"]
+    assert disabled.sip_requested is False
+    result = disabled.solve(SolveRequest(str(source), str(tmp_path / "sip-disabled.fits")))
+    assert result.status is SolverStatus.SOLVED
+    assert "-sip" not in json.loads(argv_log.read_text(encoding="utf-8"))
+
+
 def test_astap_rejects_symlinked_solver_artifact(tmp_path: Path) -> None:
     if os.name == "nt":
         pytest.skip("ordinary Windows users may not have symlink privileges")
@@ -858,6 +961,8 @@ def test_astap_rejects_symlinked_solver_artifact(tmp_path: Path) -> None:
             "FAKE_EXTERNAL_WCS": str(external),
         },
         staging_root=tmp_path,
+        require_managed_catalog=False,
+        star_database_dir=fake_star_database(tmp_path),
     )
 
     result = backend.solve(SolveRequest(str(source), str(tmp_path / "solved.fits")))

@@ -187,6 +187,7 @@ def test_services_expose_the_protocol_surface(identifier: str) -> None:
 # ---------------------------------------------------------------------------
 
 import os
+import shutil
 import subprocess
 import sys
 
@@ -397,7 +398,7 @@ def test_child_process_options_and_executable_tables() -> None:
     assert services_for("linux").well_known_executables("siril-cli") == (Path("/usr/bin/siril-cli"), Path("/usr/local/bin/siril-cli"))
     environment = {"ProgramFiles": r"C:\Program Files", "LOCALAPPDATA": r"C:\Users\example\AppData\Local"}
     candidates = services_for("windows").well_known_executables("solve-field", environment=environment)
-    assert candidates[0] == Path(r"C:\Program Files") / r"Astrometry.net\bin\solve-field.exe"
+    assert candidates[0] == Path(r"C:\Program Files").joinpath("Astrometry.net", "bin", "solve-field.exe")
     assert len(candidates) == 4
     assert services_for("windows").well_known_executables("unknown-tool", environment=environment) == ()
     assert services_for("darwin").well_known_executables("unknown-tool") == ()
@@ -432,3 +433,311 @@ def test_kill_process_tree_terminates_a_live_child() -> None:
         if process.poll() is None:
             process.kill()
     services.kill_process_tree(process)
+
+
+def test_environment_view_resolves_windows_names_regardless_of_case() -> None:
+    from openastroflow_engine.platform import EnvironmentView, environment_view, merged_environment
+
+    # A merged copy of ``os.environ`` on Windows carries upper-cased keys.
+    upper = {"PROGRAMFILES": r"C:\Program Files", "PATH": r"C:\Windows", "ProgramFiles(x86)": r"C:\Program Files (x86)"}
+    view = environment_view(upper, platform_id="windows")
+    assert isinstance(view, EnvironmentView) and view.case_insensitive
+    assert view.get("ProgramFiles") == r"C:\Program Files"
+    assert view["programfiles(X86)"] == r"C:\Program Files (x86)"
+    assert "path" in view and "Missing" not in view and view.get("Missing") is None
+    assert list(view) == list(upper) and len(view) == 3
+    with pytest.raises(KeyError):
+        view["nothing"]
+    # POSIX resolves names exactly; the view is transparent.
+    posix = environment_view(upper, platform_id="darwin")
+    assert posix.get("ProgramFiles") is None and posix.get("PROGRAMFILES") == r"C:\Program Files"
+    # Overrides replace the existing spelling on Windows instead of adding a second key.
+    merged = merged_environment(upper, {"Path": r"D:\tools", "TEMP": r"C:\t"}, platform_id="windows")
+    assert merged == {"PROGRAMFILES": r"C:\Program Files", "ProgramFiles(x86)": r"C:\Program Files (x86)", "Path": r"D:\tools", "TEMP": r"C:\t"}
+    assert merged_environment(upper, {"Path": "x"}, platform_id="linux") == {**upper, "Path": "x"}
+    assert merged_environment(upper, None, platform_id="windows") == upper
+
+
+def test_windows_well_known_executables_prefer_astap_cli_and_ignore_key_case(tmp_path: Path) -> None:
+    program_files = tmp_path / "Program Files"
+    (program_files / "astap").mkdir(parents=True)
+    cli = program_files / "astap" / "astap_cli.exe"
+    gui = program_files / "astap" / "astap.exe"
+    cli.write_bytes(b"MZ"); gui.write_bytes(b"MZ")
+    services = platform_services.services_for("windows")
+    candidates = services.well_known_executables("astap", environment={"PROGRAMFILES": str(program_files), "LOCALAPPDATA": str(tmp_path / "Local")})
+    assert candidates[0] == cli and candidates[1] == gui
+    # Both spellings of the folder are listed for case-sensitive volumes; the
+    # per-user root follows the machine-wide ones.
+    assert [candidate.relative_to(program_files).as_posix().lower() for candidate in candidates[:4]] == [
+        "astap/astap_cli.exe", "astap/astap.exe", "astap/astap_cli.exe", "astap/astap.exe",
+    ]
+    assert candidates[4].is_relative_to(tmp_path / "Local")
+    assert services.data_root(environment={"LOCALAPPDATA": str(tmp_path / "Local")}) == tmp_path / "Local" / "OpenAstroFlow"
+    assert services.data_root(environment={"localappdata": str(tmp_path / "Local")}) == tmp_path / "Local" / "OpenAstroFlow"
+
+
+# ---------------------------------------------------------------------------
+# Path limits and file lifecycle helpers
+# ---------------------------------------------------------------------------
+
+import threading
+import time
+
+from openastroflow_engine.platform import PathLimit, remove_file, remove_tree, rename_with_retry
+from openastroflow_engine.platform.base import (
+    RETRIED_WINERRORS,
+    RETRY_BUDGET_SECONDS,
+    RETRY_INITIAL_SECONDS,
+    RETRY_MAXIMUM_SECONDS,
+    retry_file_operation,
+)
+
+
+class _SharingViolation(OSError):
+    """``ERROR_SHARING_VIOLATION`` as CPython raises it on Windows."""
+
+    winerror = 32
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.sleeps: list[float] = []
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_path_limit_shape_on_every_platform() -> None:
+    for identifier in ("darwin", "linux"):
+        limit = services_for(identifier).path_limit()
+        assert limit == PathLimit(None, None, "unlimited")
+        assert limit.serializable() == {"maxCharacters": None, "longPathsEnabled": None, "source": "unlimited"}
+    windows = services_for("windows").path_limit()
+    assert windows.max_characters in {259, 32767}
+    if sys.platform == "win32":
+        assert isinstance(windows.long_paths_enabled, bool)
+        if windows.source == windows_platform.LONG_PATHS_REGISTRY_KEY:
+            assert windows.max_characters == (32767 if windows.long_paths_enabled else 259)
+        else:
+            # The policy is on but this interpreter's manifest is not
+            # longPathAware: the probe decided, and the source says so.
+            assert windows.long_paths_enabled is True
+            assert windows.max_characters == 259
+            assert "longPathAware" in windows.source
+    else:
+        # Off Windows the registry cannot be read: the short limit applies.
+        assert windows.max_characters == 259 and windows.long_paths_enabled is None
+        assert "unavailable" in windows.source
+    host = current().path_limit()
+    assert isinstance(host, PathLimit)
+    assert (host.max_characters is None) == (sys.platform != "win32")
+
+
+def test_long_paths_policy_is_read_from_the_registry_value(tmp_path: Path) -> None:
+    def missing(key: str, value: str) -> object:
+        raise FileNotFoundError(2, "The system cannot find the file specified", key + "\\" + value)
+
+    def denied(key: str, value: str) -> object:
+        raise PermissionError(13, "Access is denied")
+
+    read = {"key": None}
+
+    def enabled(key: str, value: str) -> object:
+        read["key"] = (key, value)
+        return 1
+
+    assert windows_platform.long_paths_enabled(enabled) is True
+    assert read["key"] == (r"SYSTEM\CurrentControlSet\Control\FileSystem", "LongPathsEnabled")
+    assert windows_platform.long_paths_enabled(lambda key, value: 0) is False
+    assert windows_platform.long_paths_enabled(lambda key, value: "1") is True
+    assert windows_platform.long_paths_enabled(lambda key, value: "junk") is False
+    assert windows_platform.long_paths_enabled(missing) is False
+    assert windows_platform.long_paths_enabled(denied) is None
+    assert windows_platform.path_limit(True) == PathLimit(32767, True, windows_platform.LONG_PATHS_REGISTRY_KEY)
+    assert windows_platform.path_limit(False) == PathLimit(259, False, windows_platform.LONG_PATHS_REGISTRY_KEY)
+    # The policy alone does not make long paths usable: the executable's
+    # manifest must opt in, which only a real attempt can confirm.
+    on = lambda key, value: 1  # noqa: E731
+    assert windows_platform.path_limit(read_value=on, probe=lambda: True) == PathLimit(32767, True, windows_platform.LONG_PATHS_REGISTRY_KEY)
+    assert windows_platform.path_limit(read_value=on, probe=lambda: False) == PathLimit(259, True, "MAX_PATH (policy on, process manifest not longPathAware)")
+    assert windows_platform.path_limit(read_value=lambda key, value: 0, probe=lambda: True) == PathLimit(259, False, windows_platform.LONG_PATHS_REGISTRY_KEY)
+    unknown = windows_platform.path_limit(read_value=denied)
+    assert unknown.max_characters == 259 and unknown.long_paths_enabled is None
+
+
+def test_long_path_probe_exceeds_max_path_through_nested_components(tmp_path: Path) -> None:
+    # NTFS caps a single component at 255 characters whatever the policy
+    # says, so the probe reaches past MAX_PATH by nesting, never by one name.
+    component = windows_platform.LONG_PATH_PROBE_COMPONENT
+    assert len(component) < 255
+    assert 3 * (len(component) + 1) > windows_platform.MAX_PATH_CHARACTERS
+    result = windows_platform.long_paths_effective(tmp_path)
+    assert result in (True, False)
+    # Probe directories never survive, whichever way the attempt went.
+    assert not (tmp_path / component).exists()
+    if sys.platform != "win32":
+        assert result is True
+    elif windows_platform.long_paths_enabled() is True:
+        # Policy on: the probe is what decides the effective limit.
+        assert result == (windows_platform.path_limit().max_characters == windows_platform.LONG_PATH_CHARACTERS)
+    else:
+        # Policy off (or unreadable): nothing can create a path past MAX_PATH.
+        assert result is False
+
+
+def test_retry_waits_out_windows_sharing_violations_with_bounded_backoff() -> None:
+    clock = _FakeClock()
+    attempts = {"count": 0}
+
+    def flaky() -> str:
+        attempts["count"] += 1
+        if attempts["count"] <= 3:
+            raise _SharingViolation(13, "sharing violation")
+        return "done"
+
+    assert retry_file_operation(flaky, platform_id="windows", sleep=clock.sleep, clock=clock) == "done"
+    assert attempts["count"] == 4
+    assert clock.sleeps == [RETRY_INITIAL_SECONDS, RETRY_INITIAL_SECONDS * 2, RETRY_INITIAL_SECONDS * 4]
+
+    # PermissionError counts as transient too; ERROR_DIR_NOT_EMPTY as well.
+    assert 145 in RETRIED_WINERRORS and 5 in RETRIED_WINERRORS
+    attempts["count"] = 0
+
+    def denied_once() -> None:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise PermissionError(13, "denied")
+
+    retry_file_operation(denied_once, platform_id="windows", sleep=clock.sleep, clock=clock)
+    assert attempts["count"] == 2
+
+    # Errors that waiting cannot fix are raised at once, without sleeping.
+    before = list(clock.sleeps)
+
+    def missing() -> None:
+        raise FileNotFoundError(2, "missing")
+
+    with pytest.raises(FileNotFoundError):
+        retry_file_operation(missing, platform_id="windows", sleep=clock.sleep, clock=clock)
+    assert clock.sleeps == before
+
+    # The budget is bounded: the delay saturates and the error propagates.
+    clock = _FakeClock()
+
+    def stuck() -> None:
+        raise _SharingViolation(13, "still open")
+
+    with pytest.raises(_SharingViolation):
+        retry_file_operation(stuck, platform_id="windows", sleep=clock.sleep, clock=clock)
+    assert max(clock.sleeps) == RETRY_MAXIMUM_SECONDS
+    assert RETRY_BUDGET_SECONDS <= sum(clock.sleeps) <= RETRY_BUDGET_SECONDS + RETRY_MAXIMUM_SECONDS
+
+    # POSIX never retries: the operation runs once and its error propagates.
+    clock = _FakeClock()
+    attempts["count"] = 0
+    with pytest.raises(_SharingViolation):
+        retry_file_operation(stuck, platform_id="darwin", sleep=clock.sleep, clock=clock)
+    assert clock.sleeps == []
+
+
+def test_remove_helpers_are_idempotent_and_report_what_they_removed(tmp_path, monkeypatch) -> None:
+    target = tmp_path / "a.partial"
+    assert remove_file(target) is False
+    with pytest.raises(FileNotFoundError):
+        remove_file(target, missing_ok=False)
+    target.write_bytes(b"x")
+    assert remove_file(target) is True and not target.exists()
+
+    tree = tmp_path / "staging"
+    assert remove_tree(tree) is False
+    with pytest.raises(FileNotFoundError):
+        remove_tree(tree, missing_ok=False)
+    (tree / "nested").mkdir(parents=True)
+    (tree / "nested" / "file").write_bytes(b"y")
+    assert remove_tree(tree) is True and not tree.exists()
+
+    # A tree another process still holds is retried as a whole on Windows and
+    # given up quietly only when the caller asked for best effort.
+    clock = _FakeClock()
+    calls = {"count": 0}
+    real_rmtree = shutil.rmtree
+
+    def rmtree_locked(path, *args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] < 3:
+            raise _SharingViolation(13, "directory in use")
+        real_rmtree(path, *args, **kwargs)
+
+    tree.mkdir()
+    monkeypatch.setattr(shutil, "rmtree", rmtree_locked)
+    assert remove_tree(tree, platform_id="windows", sleep=clock.sleep, clock=clock) is True
+    assert calls["count"] == 3 and len(clock.sleeps) == 2 and not tree.exists()
+
+    def rmtree_stuck(path, *args, **kwargs):
+        raise _SharingViolation(13, "directory in use")
+
+    tree.mkdir()
+    monkeypatch.setattr(shutil, "rmtree", rmtree_stuck)
+    clock = _FakeClock()
+    assert remove_tree(tree, ignore_errors=True, platform_id="windows", sleep=clock.sleep, clock=clock) is False
+    with pytest.raises(_SharingViolation):
+        remove_tree(tree, platform_id="windows", sleep=clock.sleep, clock=clock)
+    monkeypatch.setattr(shutil, "rmtree", real_rmtree)
+
+    source = tmp_path / "receipt.json.tmp"
+    destination = tmp_path / "receipt.json"
+    destination.write_text("old", encoding="utf-8")
+    source.write_text("new", encoding="utf-8")
+    rename_with_retry(source, destination, replace=True)
+    assert destination.read_text(encoding="utf-8") == "new" and not source.exists()
+    source.write_text("moved", encoding="utf-8")
+    rename_with_retry(source, tmp_path / "fresh.json")
+    assert (tmp_path / "fresh.json").read_text(encoding="utf-8") == "moved"
+
+
+def test_remove_file_outlives_a_handle_another_thread_holds(tmp_path) -> None:
+    """A file that is open elsewhere is removed as soon as the handle closes.
+
+    POSIX unlinks the name immediately; Windows refuses while the handle is
+    open (sharing violation), so the helper must wait.  Both hosts end with
+    the file gone; only Windows is expected to have slept.
+    """
+
+    target = tmp_path / "held.partial"
+    target.write_bytes(b"held")
+    opened = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with target.open("rb"):
+            opened.set()
+            release.wait(5.0)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert opened.wait(5.0)
+    sleeps: list[float] = []
+
+    def sleeping(seconds: float) -> None:
+        sleeps.append(seconds)
+        # Release the handle after the first wait so the retry can succeed.
+        release.set()
+        time.sleep(seconds)
+
+    try:
+        removed = remove_file(target, sleep=sleeping)
+    finally:
+        release.set()
+        holder.join(5.0)
+    assert removed is True
+    assert not target.exists()
+    if sys.platform == "win32":
+        assert sleeps, "Windows must have waited for the holder to close the file"
+    else:
+        assert sleeps == []

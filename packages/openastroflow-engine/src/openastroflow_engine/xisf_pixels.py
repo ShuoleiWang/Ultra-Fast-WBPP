@@ -29,6 +29,7 @@ from lightframeqc.xisf import XISF
 
 from lightframeqc.content_hash import file_sha256
 from .calibration import CalibrationError, FitsFloatWriter
+from .platform import remove_file
 
 
 XISF_PIXEL_BRIDGE_VERSION = "xisf-private-fits-v2"
@@ -669,14 +670,12 @@ def convert_xisf_to_fits(
             os.link(temporary, destination)
         except FileExistsError as error:
             raise CalibrationError("OUTPUT_EXISTS", "refusing to overwrite staging FITS", path=str(destination)) from error
-        temporary.unlink()
+        remove_file(temporary, missing_ok=False)
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        remove_file(temporary)
     after = _stat_identity(source)
     if before != after or _sha256(source) != source_sha256:
-        if destination.exists():
-            destination.unlink()
+        remove_file(destination)
         raise CalibrationError("SOURCE_CHANGED", "XISF source changed during decode", path=str(source))
     (
         numeric_domain,

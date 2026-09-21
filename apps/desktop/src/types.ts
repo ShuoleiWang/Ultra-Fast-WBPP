@@ -26,7 +26,7 @@ export interface RuntimeCapabilities {
   chip: string;
   cpuBackend: string;
   gpuBackend: string;
-  optimizationTier: "M3_PRO_TUNED" | "APPLE_SILICON" | "PORTABLE" | "MOCK";
+  optimizationTier: "M3_PRO_TUNED" | "APPLE_SILICON" | "WINDOWS_X64" | "PORTABLE" | "MOCK";
   available: boolean;
   drizzleAvailable: boolean;
   solverAvailable: boolean;
@@ -189,7 +189,8 @@ export interface AstrometryReceipt {
 }
 export interface ArtifactReceipt { artifactId: string; relativePath: string; sha256: string; sizeBytes: number; astrometry?: AstrometryReceipt; }
 export type OutputArtifactKind = "SOLVED_MONO_FITS" | "LINEAR_RGB_FITS" | "RGB_PREVIEW_TIFF_16" | "RGB_PREVIEW_PNG_16" | "MONO_PREVIEW_PNG" | "RECEIPT" | "REPORT" | "DRIZZLE_DATA" | "MASTER" | "PREVIEW";
-export interface OutputArtifact { kind: OutputArtifactKind; name: string; path: string; detail: string; filter?: string; target?: string; receipt?: ArtifactReceipt; }
+/** `previewDataUrl`: the PNG previews travel as data URLs so the result page shows them from any drive or share. */
+export interface OutputArtifact { kind: OutputArtifactKind; name: string; path: string; detail: string; filter?: string; target?: string; previewDataUrl?: string; receipt?: ArtifactReceipt; }
 
 export interface StageProgress { name: string; stageId: string; status: "WAITING" | "RUNNING" | "DONE" | "FAILED"; percent: number; }
 export interface PipelineProgressEvent { jobId: string; stageId?: string; state: ProgressState; fraction: number; completedUnits?: number | null; totalUnits?: number | null; message: string; overallFraction?: number; scope?: "panel" | "project"; panelId?: string; panelTarget?: string; panelFilter?: string; panelIndex?: number; panelCount?: number; }
@@ -227,7 +228,8 @@ export interface CatalogInfo {
 }
 export interface CatalogListResponse { schemaVersion: 1; catalogRoot: string; catalogs: CatalogInfo[]; }
 export interface CatalogDoctorResponse { schemaVersion: 1; ok: boolean; catalogRoot: string; config: { path?: string; present: boolean; valid: boolean }; installedSetBindingReady: boolean; message: string; }
-export interface SolverBackendStatus { backendId: string; displayName: string; version: string; available: boolean; executionReady: boolean; reason?: string | null; metadata?: { probe?: { path?: string | null; version?: string; executionReady?: boolean } }; }
+/** `scienceReady`: the backend produces the managed-catalog evidence the strict final gate requires (ASTAP only once the engine verifies its solutions against the managed indexes). */
+export interface SolverBackendStatus { backendId: string; displayName: string; version: string; available: boolean; executionReady: boolean; scienceReady?: boolean; reason?: string | null; metadata?: { probe?: { path?: string | null; version?: string; executionReady?: boolean } }; }
 export interface SolverDoctorResponse { schemaVersion: 1; engineVersion: string; backends: SolverBackendStatus[]; }
 
 export interface CatalogInstallRequest { catalogId: string; acceptedTermsId: string; fieldOfViewDegrees?: number; }

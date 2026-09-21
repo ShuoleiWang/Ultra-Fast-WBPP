@@ -30,6 +30,7 @@ from numpy.typing import NDArray
 
 from lightframeqc.content_hash import file_sha256
 from .calibration import CalibrationError, FitsFloatWriter, FitsFrame, PixelStatistics
+from .platform import remove_tree
 
 
 LOCAL_NORMALIZATION_VERSION = "paired-background-grid-v1"
@@ -626,10 +627,8 @@ def normalize_registered_group(
         completed = True
         return LocalNormalizationResult(tuple(outputs), str(receipt_path), receipt)
     finally:
-        if not completed and destination.exists():
-            import shutil
-
-            shutil.rmtree(destination)
+        if not completed:
+            remove_tree(destination)
 
 
 __all__ = [

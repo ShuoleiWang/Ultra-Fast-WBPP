@@ -11,4 +11,11 @@
       />
     </dependentAssembly>
   </dependency>
+  <!-- Long paths need the machine policy (LongPathsEnabled) and this opt-in;
+       the frozen worker's PyInstaller bootloader already declares it. -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <ws2:longPathAware xmlns:ws2="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</ws2:longPathAware>
+    </windowsSettings>
+  </application>
 </assembly>

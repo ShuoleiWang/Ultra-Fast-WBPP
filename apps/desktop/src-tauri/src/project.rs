@@ -7,9 +7,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Runtime};
 
-use crate::platform;
-use crate::sidecar::{discover_engine, new_public_identifier};
+use crate::platform::{self, ManagedChild};
+use crate::sidecar::{discover_engine, new_public_identifier, LossyLines};
 
 const PROGRESS_EVENT: &str = "openastroflow://pipeline-progress";
 const COMPLETE_EVENT: &str = "openastroflow://pipeline-complete";
@@ -121,7 +121,7 @@ pub(crate) struct ProjectRegistry {
 
 #[derive(Clone)]
 struct ProjectJob {
-    child: Arc<Mutex<Child>>,
+    child: Arc<Mutex<ManagedChild>>,
     request_path: PathBuf,
 }
 
@@ -317,6 +317,11 @@ struct UiArtifact {
     filter: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     target: Option<String>,
+    /// The PNG previews as data URLs, so the result page shows them from any
+    /// output location (another drive, a UNC share) without the webview's
+    /// asset protocol having to reach that path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview_data_url: Option<String>,
     receipt: UiArtifactReceipt,
 }
 
@@ -384,6 +389,14 @@ const MAX_SCREENING_FRAMES: usize = 512;
 const MAX_SCREENING_PREVIEWS: usize = 128;
 const MAX_SCREENING_PREVIEW_BYTES: u64 = 512 * 1024;
 const MAX_SCREENING_PREVIEW_TOTAL_BYTES: usize = 24 * 1024 * 1024;
+/// A mono preview is an 8-bit PNG with at most a 2048-pixel long edge (1.0 to
+/// 1.5 MB for a 26 MP channel).  The RGB preview is the 16-bit PNG of the same
+/// size, whose noisy low bits barely compress: 8.4 MB at 1541 pixels, up to
+/// about 14 MB at 2048.  Both kinds are carried, mono first; a file over its
+/// bound or over the total budget is left to the copy on disk.
+const MAX_MONO_PREVIEW_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_RGB_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_ARTIFACT_PREVIEW_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
 
 /// Standard base64 with padding; the previews are small, so no crate.
@@ -406,17 +419,18 @@ fn base64_encode(bytes: &[u8]) -> String {
     encoded
 }
 
-/// Load one review preview the worker published under `root` as a data URL.
-fn screening_preview(root: &Path, relative: &str, budget: &mut usize) -> Option<String> {
-    let (_, resolved) = relative_artifact(root, relative).ok()?;
+/// Loads one PNG the worker published at `resolved` (already checked to lie
+/// under the output root) as a data URL, or `None` when it is not a PNG, is
+/// larger than `max_bytes`, or would exceed the remaining transport `budget`.
+fn png_data_url(resolved: &Path, max_bytes: u64, budget: &mut usize) -> Option<String> {
     let size = resolved.metadata().ok()?.len();
-    if size == 0 || size > MAX_SCREENING_PREVIEW_BYTES {
+    if size == 0 || size > max_bytes {
         return None;
     }
     let mut bytes = Vec::with_capacity(size as usize);
-    File::open(&resolved)
+    File::open(resolved)
         .ok()?
-        .take(MAX_SCREENING_PREVIEW_BYTES + 1)
+        .take(max_bytes + 1)
         .read_to_end(&mut bytes)
         .ok()?;
     if bytes.len() as u64 != size || !bytes.starts_with(&PNG_SIGNATURE) {
@@ -428,6 +442,28 @@ fn screening_preview(root: &Path, relative: &str, budget: &mut usize) -> Option<
     }
     *budget -= encoded.len();
     Some(encoded)
+}
+
+/// Load one review preview the worker published under `root` as a data URL.
+fn screening_preview(root: &Path, relative: &str, budget: &mut usize) -> Option<String> {
+    let (_, resolved) = relative_artifact(root, relative).ok()?;
+    png_data_url(&resolved, MAX_SCREENING_PREVIEW_BYTES, budget)
+}
+
+/// Attaches the product previews to the verified artifacts: the mono previews
+/// first (one per channel card), then the RGB preview, so the per-channel
+/// cards keep theirs when the budget runs short.
+fn attach_artifact_previews(artifacts: &mut [UiArtifact]) {
+    let mut budget = MAX_ARTIFACT_PREVIEW_TOTAL_BYTES;
+    for (kind, max_bytes) in [
+        ("MONO_PREVIEW_PNG", MAX_MONO_PREVIEW_BYTES),
+        ("RGB_PREVIEW_PNG_16", MAX_RGB_PREVIEW_BYTES),
+    ] {
+        for artifact in artifacts.iter_mut().filter(|item| item.kind == kind) {
+            artifact.preview_data_url =
+                png_data_url(Path::new(&artifact.path), max_bytes, &mut budget);
+        }
+    }
 }
 
 /// The receipt's `execution.screening`, with previews loaded; `None` when a
@@ -755,7 +791,10 @@ fn project_request_json(
                 "allowMasters": true,
                 "masterMetadataOverrides": request.master_metadata_overrides,
             },
-            "solver": { "policy": "REQUIRED", "backend": "astrometry-net", "searchRadiusDegrees": 15.0 },
+            // `auto` lets the engine take whichever installed backend is
+            // science-ready on this platform (solve-field, or ASTAP verified
+            // against the managed indexes); the gates below stay unchanged.
+            "solver": { "policy": "REQUIRED", "backend": "auto", "searchRadiusDegrees": 15.0 },
             "drizzle": {
                 "enabled": request.recipe.drizzle_enabled, "backend": "auto",
                 "scale": request.recipe.drizzle_scale, "dropShrink": request.recipe.drizzle_drop_shrink,
@@ -997,6 +1036,7 @@ fn validate_completion(output: &Path, result: &serde_json::Value) -> Result<Comp
                 .get("target")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned),
+            preview_data_url: None,
             receipt: UiArtifactReceipt {
                 artifact_id: format!("project-artifact-{}", index + 1),
                 relative_path: relative,
@@ -1009,6 +1049,7 @@ fn validate_completion(output: &Path, result: &serde_json::Value) -> Result<Comp
     if solved_count == 0 {
         return Err("project receipt has no solved mono product".to_owned());
     }
+    attach_artifact_previews(&mut artifacts);
     let receipt_relative = receipt_path
         .strip_prefix(&root)
         .map_err(|_| "receipt path escaped output")?
@@ -1026,6 +1067,7 @@ fn validate_completion(output: &Path, result: &serde_json::Value) -> Result<Comp
         detail: "outer project receipt · content verified".to_owned(),
         filter: None,
         target: None,
+        preview_data_url: None,
         receipt: UiArtifactReceipt {
             artifact_id: "project-receipt".to_owned(),
             relative_path: receipt_relative,
@@ -1127,15 +1169,17 @@ fn normalize_progress(job_id: &str, event: &serde_json::Value) -> ProgressEvent 
     }
 }
 
-fn stream_progress<R: Runtime>(
+/// Forwards the worker's `--progress-json` records from its diagnostic stream
+/// and keeps the rest as the failure diagnostics.  Lines are decoded leniently
+/// so a solver's stray console byte cannot end progress for the rest of the run.
+fn stream_progress<R: Runtime, S: Read + Send + 'static>(
     app: AppHandle<R>,
     job_id: String,
-    stderr: std::process::ChildStderr,
+    stderr: S,
 ) -> std::thread::JoinHandle<String> {
     std::thread::spawn(move || {
         let mut diagnostics = String::new();
-        for line in BufReader::new(stderr).lines() {
-            let Ok(line) = line else { break };
+        for line in LossyLines::new(BufReader::new(stderr)) {
             let value = (line.len() <= 256 * 1024)
                 .then(|| serde_json::from_str::<serde_json::Value>(&line).ok())
                 .flatten();
@@ -1670,6 +1714,135 @@ mod tests {
     }
 
     #[test]
+    fn progress_stream_survives_an_invalid_byte_and_keeps_later_events() {
+        use std::sync::mpsc;
+        use tauri::Listener;
+
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let (sender, receiver) = mpsc::channel();
+        handle.listen(PROGRESS_EVENT, move |event| {
+            let _ = sender.send(event.payload().to_owned());
+        });
+        let mut stream = Vec::new();
+        stream.extend_from_slice(br#"{"type":"progress","event":{"stage":"quality-control","status":"RUNNING","current":1,"total":4}}"#);
+        stream.extend_from_slice(b"\nASTAP console \xff\xfe garbage\r\n");
+        stream.extend_from_slice(br#"{"type":"progress","event":{"stage":"registration","status":"RUNNING","current":2,"total":4}}"#);
+        stream.extend_from_slice(b"\nTraceback tail \xc3\xa9\n");
+        let diagnostics = stream_progress(handle, "job".to_owned(), std::io::Cursor::new(stream))
+            .join()
+            .expect("progress thread");
+        let first: serde_json::Value = serde_json::from_str(
+            &receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("first progress event"),
+        )
+        .unwrap();
+        assert_eq!(first["stageId"], "quality-control");
+        let second: serde_json::Value = serde_json::from_str(
+            &receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("progress after the invalid byte"),
+        )
+        .unwrap();
+        assert_eq!(second["stageId"], "register");
+        assert_eq!(second["fraction"], 0.5);
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(
+            diagnostics,
+            "ASTAP console \u{fffd}\u{fffd} garbage\nTraceback tail \u{e9}\n"
+        );
+    }
+
+    #[test]
+    fn artifact_previews_are_carried_as_bounded_data_urls() {
+        let root =
+            std::env::temp_dir().join(new_public_identifier("artifact-preview-test").unwrap());
+        std::fs::create_dir_all(root.join("previews")).unwrap();
+        std::fs::create_dir_all(root.join("products/color")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let product = root.join("products/product_L.fits");
+        std::fs::write(&product, b"synthetic solved product").unwrap();
+        let small_png: Vec<u8> = PNG_SIGNATURE.iter().copied().chain([7_u8; 64]).collect();
+        let large_png: Vec<u8> = PNG_SIGNATURE
+            .iter()
+            .copied()
+            .chain(std::iter::repeat_n(9_u8, MAX_MONO_PREVIEW_BYTES as usize))
+            .collect();
+        let mono_preview = root.join("previews/product_L.png");
+        let oversized_preview = root.join("previews/product_R.png");
+        let rgb_preview = root.join("products/color/preview-16bit.png");
+        std::fs::write(&mono_preview, &small_png).unwrap();
+        std::fs::write(&oversized_preview, &large_png).unwrap();
+        std::fs::write(&rgb_preview, &small_png).unwrap();
+        let record = |kind: &str, path: &Path, extra: serde_json::Value| {
+            let mut value = serde_json::json!({
+                "kind": kind,
+                "path": path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/"),
+                "sha256": sha256_file(path).unwrap(),
+                "sizeBytes": path.metadata().unwrap().len(),
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            value
+        };
+        let astrometry = serde_json::json!({
+            "referenceFrame":"ICRS","projection":"TAN","centerRaDegrees":281.0,"centerDecDegrees":-6.0,
+            "pixelScaleArcsec":1.4,"rotationDegrees":0.0,"rmsPixels":0.3,"rmsArcsec":0.42,"matchedStars":73,
+            "parity":"POSITIVE","catalogIdentity":"2".repeat(64),"indexIdentities":["astrometry.net:index:4108:healpix:123:hpnside:4"],
+            "correspondenceSha256":"3".repeat(64),"catalogManaged":true,"installedSetIdentity":"5".repeat(64),"catalogManifestSha256":"6".repeat(64),
+            "indexArtifacts":[{"indexId":"4108","relativeName":"index-4108.fits","sizeBytes":94550400,"sha256":"7".repeat(64),"manifestSha256":"6".repeat(64),"installedSetIdentity":"5".repeat(64)}],
+            "wcsSha256":"4".repeat(64)
+        });
+        let receipt = serde_json::json!({"success":true,"state":"SOLVED","finalProducts":{
+            "resultGate":{"status":"PASS","allMonoProductsSolved":true,"managedCatalogEvidenceRequired":true,"sourceIdentityVerifiedAtCommit":true,"mosaicCoverageOverlapSeamPassed":true},
+            "guiArtifacts":[
+                record("SOLVED_MONO_FITS", &product, serde_json::json!({"filter":"L","finalGate":{"status":"PASS"},"astrometry":astrometry})),
+                record("MONO_PREVIEW_PNG", &mono_preview, serde_json::json!({"filter":"L"})),
+                record("MONO_PREVIEW_PNG", &oversized_preview, serde_json::json!({"filter":"R"})),
+                record("RGB_PREVIEW_PNG_16", &rgb_preview, serde_json::json!({})),
+            ]
+        }});
+        let receipt_path = root.join("receipt.json");
+        std::fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        let result = serde_json::json!({"success":true,"state":"SOLVED","outputDirectory":root,"receiptPath":receipt_path});
+        let artifacts = validate_completion(&root, &result).unwrap().artifacts;
+        let by_kind = |kind: &str, filter: Option<&str>| {
+            artifacts
+                .iter()
+                .find(|item| item.kind == kind && item.filter.as_deref() == filter)
+                .unwrap()
+        };
+        let expected = format!("data:image/png;base64,{}", base64_encode(&small_png));
+        assert_eq!(
+            by_kind("MONO_PREVIEW_PNG", Some("L"))
+                .preview_data_url
+                .as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            by_kind("RGB_PREVIEW_PNG_16", None)
+                .preview_data_url
+                .as_deref(),
+            Some(expected.as_str())
+        );
+        // Over the per-file bound: the file stays on disk only.
+        assert!(by_kind("MONO_PREVIEW_PNG", Some("R"))
+            .preview_data_url
+            .is_none());
+        assert!(by_kind("SOLVED_MONO_FITS", Some("L"))
+            .preview_data_url
+            .is_none());
+        assert!(by_kind("RECEIPT", None).preview_data_url.is_none());
+        let serialized = serde_json::to_value(&artifacts).unwrap();
+        assert!(serialized[0].get("previewDataUrl").is_none());
+        assert_eq!(serialized[1]["previewDataUrl"], expected);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn project_progress_preserves_panel_context_and_reserves_completion() {
         let value = serde_json::json!({"stage":"complete", "status":"completed", "current":9, "total":2,
             "overallFraction":1.2, "scope":"panel", "panelId":"cartwheel__b", "panelTarget":"Cartwheel",
@@ -1946,6 +2119,8 @@ sys.exit(1)
             "mono-standard-v1"
         );
         assert_eq!(value["recipe"]["calibration"]["bias"], "OPTIONAL");
+        assert_eq!(value["recipe"]["solver"]["backend"], "auto");
+        assert_eq!(value["recipe"]["solver"]["policy"], "REQUIRED");
         assert_eq!(
             value["recipe"]["calibration"]["masterMetadataOverrides"],
             serde_json::json!([])
@@ -2082,14 +2257,13 @@ sys.exit(1)
         .is_err());
     }
 
-    #[cfg(unix)]
     #[test]
     fn application_shutdown_terminates_every_project_process_tree() {
         let registry = ProjectRegistry::default();
-        let mut command = std::process::Command::new("/bin/sleep");
-        command.arg("30");
-        platform::configure_child_process(&mut command);
-        let child = Arc::new(Mutex::new(command.spawn().expect("project child")));
+        let mut command = platform::test_support::sleeping_command();
+        let child = Arc::new(Mutex::new(
+            ManagedChild::spawn(&mut command).expect("project child"),
+        ));
         registry.jobs.lock().unwrap().insert(
             "project-shutdown-test".to_owned(),
             ProjectJob {

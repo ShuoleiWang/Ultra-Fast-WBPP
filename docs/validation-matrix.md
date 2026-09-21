@@ -56,7 +56,16 @@ The application may run a generic arm64/Metal path on an unbenchmarked M-series 
 
 ## Windows release matrix
 
-The hosted Windows matrix is configured for Python 3.11/3.12, Rust app-core/Tauri commands, explicit `taskkill /T` process-tree tests, and native C++ CPU C ABI tests; the current uncommitted candidate has not produced a hosted run. These remain interface, compilation, and synthetic-test targets only: no packaged Windows scientific E2E, real raw E2E, reparse-point/handle-identity acceptance, installed-runtime attestation, installer smoke, signing, or representative Windows hardware evidence exists. Windows GPU support cannot be inferred from the interface or CI configuration.
+| Area | Evidence (2026-09-21, AMD Ryzen 7 5800H 8C/16T, 16 GB, NVMe, Windows 11 Pro 25H2; hosted `windows-latest` CI) | Status |
+|---|---|---|
+| Native kernels | MSVC 14.44 `/W4 /WX /fp:strict`, static C runtime; the installed DLL imports `KERNEL32.dll` only; ctest and `test_native_kernels.py` value-identical to NumPy on the laptop and on CI | Passing |
+| Source extraction | Patched SEP `1.4.1+oaf.1` built from the pinned sdist; the determinism self-test and the run-to-run comparison of two real projects agree bit for bit; the PyPI build is refused by the same tests | Passing |
+| Python suite | Full engine, quality-gate, registration and repository test suites on the laptop and on Windows CI (Python 3.11/3.12), including the Windows-only file-lock, path-limit, environment-view and job-object tests | Passing |
+| Real project (CLI) | 61-frame NGC 7331 L/R/G/B project with supplied masters, ASTAP `2026.09.01` + D20 verified against the managed indexes 4107–4112: four solved masters and the LRGB product, run-to-run bit-identical (see the laptop numbers in [windows.md](windows.md)) | Passing |
+| Installed application | `scripts/windows/attest-installed-msi.ps1` on the laptop: silent MSI install (8 s), 260 PE images of the installed tree audited with 0 unresolved import edges, kernel DLL and desktop executable static-CRT, GUI-subsystem executable, 3.0 s worker handshake, doctor loading the kernels from the installed tree, clean uninstall (no files, no registry entry). The installed frozen worker then ran the 61-frame project under a minimal environment (no development tools on `PATH`): 285 s, every product bit-identical to the development runs | Passing |
+| GUI session | Import, screening review, run, previews, cancel and quit-during-run driven through the Windows GUI on real hardware | Pending (the process-tree termination and progress-stream tests run on Windows CI; a hands-on GUI pass on the laptop is still to be recorded) |
+| Installer attestation | Release workflow installs the MSI on the runner, attests every DLL/PYD/EXE import of the installed worker tree and the launch budget, then uninstalls (the same script that passed on the laptop) | Configured |
+| Not validated | Windows 10 on real hardware, Intel hybrid cores, 8 GB and HDD machines (simulated in unit tests only), Authenticode signing, GPU acceleration (not used) | Open |
 
 ## Scientific 1.0 gate
 
@@ -68,6 +77,6 @@ Define the supported scope before applying this gate. Unsupported or explicitly 
 - Ordinary and Drizzle integration with science, weight, coverage/context, rejection and null-pixel evidence.
 - Final WCS after the last geometry-changing stage, including SIP or a documented bounded linear-model residual.
 - Crash/cancel/recovery, warm-cache invalidation, source drift, low disk, permission failure, and existing-destination tests.
-- M3 Pro performance profile plus at least one non-M3 Apple Silicon compatibility run. Windows x64 CPU E2E is required before a Windows release, not before a macOS-only release.
+- M3 Pro performance profile plus at least one non-M3 Apple Silicon compatibility run; the Windows x64 CPU E2E is retained (above) and a second Windows hardware class is still required before a stable Windows release.
 
 No unchecked row is converted into a marketing claim.

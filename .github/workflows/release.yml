@@ -58,15 +58,25 @@ jobs:
           -e "./packages/openastroflow-engine[test,all]"
           -r packaging/worker/requirements-build.txt
 
+      - name: Replace the PyPI SEP wheel with the deterministic patched build (Windows)
+        if: runner.os == 'Windows'
+        # The frozen worker ships whatever sep is installed here: the pinned
+        # sdist plus packaging/patches/*.patch makes MSVC builds deterministic
+        # and linear in the object count (see scripts/build_sep_wheel.py).
+        run: >-
+          python scripts/build_sep_wheel.py --install
+          --report build/sep-wheel/sep-wheel-report.json
+
       - name: Check installed dependency consistency
         run: python -m pip check
 
-      - name: Build, test and install the native CPU/Metal runtime
+      - name: Build, test and install the native CPU/Metal runtime (static CRT on Windows)
         shell: bash
         run: >-
           python scripts/build_native_runtime.py
           --build-dir build/native-release
           --report build/native-release/native-build-report.json
+          ${{ runner.os == 'Windows' && '--require-static-crt' || '' }}
 
       - name: Test source tree and release gates
         shell: bash
@@ -158,6 +168,27 @@ jobs:
           rmdir "${oaf_mount}"
           trap - EXIT
 
+      - name: Install the MSI silently, attest the installed runtime, uninstall (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        # msiexec /i ... /qn -> PE import-closure audit + launch budget + doctor
+        # against the tree WiX installed (not the build directory) -> /x /qn.
+        # The launch budget is wider than the 5 s macOS one because a first
+        # launch of the frozen tree on a hosted runner pays for on-access
+        # scanning of thousands of files. The NSIS installer shares the same
+        # frozen worker bytes and is collected below; Authenticode signing
+        # remains a documented release gate that this unsigned prerelease
+        # pipeline does not perform.
+        run: |
+          $msi = @(Get-ChildItem -Path target/release/bundle/msi -Filter *.msi -File)
+          if ($msi.Count -ne 1) { throw "expected exactly one MSI, found $($msi.Count)" }
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/attest-installed-msi.ps1 `
+            -Msi $msi[0].FullName `
+            -Target $env:OAF_TARGET `
+            -MaxStartSeconds 20 `
+            -Output "build/bundle-attestations/openastroflow-worker-$($env:OAF_TARGET).bundled.manifest.json"
+          if ($LASTEXITCODE -ne 0) { throw "installed-MSI attestation failed with $LASTEXITCODE" }
+
       - name: Collect bundles, manifests, and checksums
         shell: bash
         run: |
@@ -189,11 +220,37 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          # Windows remains a validation-only artifact until installed-runtime
-          # attestation, installer smoke, and Authenticode gates exist.
-          pattern: ultra-fast-wbpp-macos-14-*
+          # Both platforms: the Windows MSI/NSIS pass the installed-runtime
+          # attestation (PE import closure, static-CRT kernels, launch budget)
+          # in the bundle job before they can reach this step.
+          pattern: ultra-fast-wbpp-*
           path: release-assets
           merge-multiple: true
+      - name: Write the prerelease notes
+        run: |
+          cat > release-notes.md <<'EOF'
+          Unsigned validation build for maintainer review; not a stable release. Verify the
+          included `SHA256SUMS-<target>` files before installing anything.
+
+          **macOS (Apple Silicon, DMG):** ad-hoc signed, not notarized. Gatekeeper will
+          refuse the first launch; open it once via right-click, "Open" or System Settings,
+          Privacy & Security, "Open Anyway".
+
+          **Windows 10/11 x64 (MSI and NSIS installers):** not Authenticode-signed.
+          - The NSIS installer (`*-setup.exe`, per-user, installs under `%LOCALAPPDATA%`)
+            triggers Microsoft Defender SmartScreen: choose "More info", then "Run anyway".
+          - The MSI installs per machine (Program Files) and shows a User Account Control
+            prompt from an unknown publisher; accept it only for a build whose SHA-256 you
+            have verified. The MSI embeds the WebView2 bootstrapper and installs the
+            runtime silently when it is missing.
+          - Authenticode signing is a release gate: stable releases will carry a signature
+            and these warnings will not appear.
+
+          Every installer was produced and attested in this workflow run: the frozen worker's
+          DLL/PYD import closure resolves against Windows system DLLs or shipped files, the
+          native kernel DLL links the C runtime statically, and the installed runtime passed
+          the launch budget before the artifacts were collected.
+          EOF
       - name: Create draft GitHub prerelease for maintainer review
         env:
           GH_TOKEN: ${{ github.token }}
@@ -204,5 +261,5 @@ jobs:
           --verify-tag
           --draft
           --prerelease
-          --title "Ultra-Fast WBPP ${GITHUB_REF_NAME} (macOS arm64 unsigned prerelease)"
-          --notes "Unsigned macOS arm64 validation build. Verify the included SHA256SUMS files. It is ad-hoc signed, not notarized, and not a stable release. Windows artifacts remain CI-only until installed-runtime attestation, installer smoke, and Authenticode gates pass."
+          --title "Ultra-Fast WBPP ${GITHUB_REF_NAME} (macOS arm64 + Windows x64 unsigned prerelease)"
+          --notes-file release-notes.md

@@ -25,7 +25,6 @@ import math
 import os
 from pathlib import Path
 import re
-import shutil
 import stat
 import struct
 import sys
@@ -42,7 +41,7 @@ from numpy.typing import NDArray
 
 from lightframeqc.content_hash import file_sha256
 from . import platform as platform_services
-from .platform import NoReplaceError
+from .platform import NoReplaceError, remove_tree
 from .solver import validate_wcs_header
 
 
@@ -728,8 +727,7 @@ def build_color_product(
             raise ColorProductError("ATOMIC_PUBLICATION_FAILED", str(error), path=str(output)) from error
         _best_effort_fsync_directory(output.parent)
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+        remove_tree(staging)
 
     return ColorProductResult(
         output_directory=str(output),

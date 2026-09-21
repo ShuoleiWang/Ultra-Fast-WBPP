@@ -183,14 +183,18 @@ threads measured slower.) See the scoped, reproducible measurements in
 
 ## Platform and solver support
 
-Apple Silicon/macOS is the current desktop target. Windows (x86-64, Windows
-10/11) is being brought up in phases (see [windows.md](windows.md)): the native
-CPU kernels build with MSVC (`/W4 /WX /fp:strict`), the Python CI job builds and
-installs them on Ubuntu, macOS and Windows before the tests so the
+Apple Silicon/macOS and Windows x64 (Windows 10 22H2 / 11) are the desktop
+targets (see [windows.md](windows.md)). The native CPU kernels build with MSVC
+(`/W4 /WX /fp:strict`, static C runtime) and the Python CI job builds and
+installs them on Ubuntu, macOS and Windows before the tests, so the
 value-identical differential tests run against the real library on every
-runner, and the sidecar builder refuses a frozen worker that cannot load them.
-Windows still needs independent packaged scientific acceptance before it is a
-support claim.
+runner; the sidecar builder refuses a frozen worker that cannot load them and
+the Windows bundle attestation refuses a DLL import the installed tree does not
+provide. Operating-system differences live in `openastroflow_engine.platform`
+(memory, topology, path limits, environment-name resolution, file-lifecycle
+retries, process trees); on Windows the final solve is ASTAP verified by the
+engine against the managed Astrometry.net index stars, with the same evidence
+and gates as `solve-field`.
 
 Operating-system differences live in the platform service layer
 `openastroflow_engine.platform` (`current()` selects the `darwin`, `windows` or

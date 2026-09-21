@@ -1,0 +1,344 @@
+sep 1.4.1 -> 1.4.1+oaf.1: deterministic and linear-time source extraction
+on Windows (MSVC builds), behaviour-neutral elsewhere.
+
+Applied by scripts/build_sep_wheel.py to the hash-pinned sep==1.4.1 sdist
+(sha256 a0c8324ab66ee716080472cb212e4303e6c3e33b0d43763075b20d4cab793b25).
+
+Modified 2026-09-21 for Ultra-Fast WBPP; this file is the complete set of
+changes against upstream sep 1.4.1 (LGPL-3.0-or-later, see licenses/), kept
+in the repository so the modified library remains rebuildable from source:
+
+1. src/sepcore.h, src/deblend.c: MSVC has no rand_r(); upstream maps it to
+   rand(), whose per-thread state the `randseed = 1` reset in sep_extract()
+   never touches.  Every extraction in a thread therefore continued the
+   previous random sequence and gatherup() assigned faint deblended pixels
+   differently from call to call (object counts and fluxes varied on
+   identical input).  sep_rand_r() advances the caller's seed like POSIX
+   rand_r(), returning 0..32767 to match this platform's RAND_MAX.
+
+2. src/lutz.c, src/deblend.c: the Lutz scan buffers (info, store, marker,
+   psstack, start, end) and the deblending tables (son, ok, objlist) are
+   allocated zero-initialised, and the son table's tail is cleared after it
+   grows, so heap contents can never reach a deblending decision.  This
+   matches what upstream already does for the main-scan buffers in
+   extract.c.
+
+3. src/extract.h, src/extract.c, src/lutz.c, src/deblend.c: addobjdeep()
+   grows the object and pixel arrays geometrically instead of by one object
+   per call.  The exact-size realloc copied the whole list for every
+   detection, which is quadratic on allocators that cannot extend a block in
+   place (the Windows heap) and made extraction cost per object grow with
+   the object count.  Logical sizes and outputs are unchanged.
+
+4. PKG-INFO: the sdist version becomes 1.4.1+oaf.1 so that
+   sep.__version__ and importlib.metadata identify the patched build.
+
+Outputs (all catalog columns and the segmentation map) are bit-identical to
+the upstream wheel on macOS for crowded synthetic fields with deblending.
+
+diff --git a/PKG-INFO b/PKG-INFO
+--- a/PKG-INFO
++++ b/PKG-INFO
+@@ -1,6 +1,6 @@
+ Metadata-Version: 2.1
+ Name: sep
+-Version: 1.4.1
++Version: 1.4.1+oaf.1
+ Summary: Astronomical source extraction and photometry library
+ Author: Emmanuel Bertin, Kyle Barbary, Kyle Boone, Thomas Robitaille, Matt Craig, Curtis McCully, Evert Rol, Joe Lyman, Michael Wuertenberger, Ingvar Stepanyan, Gabe Brammer, Peter Watson
+ Maintainer-email: Peter Watson <peter.watson+sep@inaf.it>
+diff --git a/src/sepcore.h b/src/sepcore.h
+--- a/src/sepcore.h
++++ b/src/sepcore.h
+@@ -99,6 +99,11 @@
+ #if defined(_MSC_VER)
+ #define _Thread_local __declspec(thread)
+ #define _Atomic  // this isn't great, but we only use atomic for global settings
+-#define rand_r(SEED) \
+-  rand()  // MSVC doesn't provide rand_r, but makes rand safe for re-entrancy
++/* MSVC has no rand_r(). Mapping it to rand() made `randseed = 1` in
++   sep_extract() a no-op: rand() keeps per-thread state that the reset never
++   touched, so every extraction in a thread continued the previous sequence
++   and gatherup() assigned faint deblended pixels differently call to call.
++   sep_rand_r() (deblend.c) advances the caller's seed like POSIX rand_r(). */
++int sep_rand_r(unsigned int * seed);
++#define rand_r(SEED) sep_rand_r(SEED)
+ #endif
+diff --git a/src/extract.h b/src/extract.h
+--- a/src/extract.h
++++ b/src/extract.h
+@@ -132,6 +132,13 @@
+   int64_t npix; /* number of pixels in pixel-list */
+   pliststruct * plist; /* pointer to the pixel-list */
+   PIXTYPE thresh; /* detection threshold */
++  /* Allocated capacity of `obj` (objects) and `plist` (pixels) as seen by
++     addobjdeep(), which grows both geometrically instead of by one object at
++     a time. 0 means "unknown": the next append reallocates from the current
++     counts, so a list whose arrays were (re)allocated elsewhere is safe as
++     long as that code resets the capacity to 0 or to the exact size. */
++  int64_t nobjalloc;
++  int64_t npixalloc;
+ } objliststruct;
+ 
+ 
+diff --git a/src/extract.c b/src/extract.c
+--- a/src/extract.c
++++ b/src/extract.c
+@@ -411,6 +411,7 @@
+   }
+ 
+   co = pstop = 0;
++  objlist.nobjalloc = objlist.npixalloc = 0;
+   if (image->segmap) {
+     objlist.nobj = numids;
+     QMALLOC(objlist.obj, objstruct, numids, status);
+@@ -424,6 +425,7 @@
+   finalobjlist->obj = NULL;
+   finalobjlist->plist = NULL;
+   finalobjlist->nobj = finalobjlist->npix = 0;
++  finalobjlist->nobjalloc = finalobjlist->npixalloc = 0;
+ 
+ 
+   /* Allocate memory for the pixel list */
+@@ -933,6 +935,7 @@
+   objlistout.obj = NULL;
+   objlistout.plist = NULL;
+   objlistout.nobj = objlistout.npix = 0;
++  objlistout.nobjalloc = objlistout.npixalloc = 0;
+ 
+   /*----- Allocate memory to store object data */
+   objlist->obj = &obj;
+@@ -996,36 +999,60 @@
+ int addobjdeep(int objnb, objliststruct * objl1, objliststruct * objl2) {
+   objstruct * objl2obj;
+   pliststruct *plist1 = objl1->plist, *plist2 = objl2->plist;
+-  int64_t fp, i, j, npx, objnb2;
++  int64_t fp, i, j, npx, objnb2, nobjalloc, npixalloc;
+ 
+   fp = objl2->npix; /* 2nd list's plist size in pixels */
+   j = fp * plistsize; /* 2nd list's plist size in bytes */
+   objnb2 = objl2->nobj; /* # of objects currently in 2nd list*/
+ 
+-  /* Allocate space in `objl2` for the new object */
+-  if (objnb2) {
+-    objl2obj = realloc(objl2->obj, (++objl2->nobj) * sizeof(objstruct));
+-  } else {
+-    objl2obj = malloc((++objl2->nobj) * sizeof(objstruct));
+-  }
+-
+-  if (!objl2obj) {
+-    goto earlyexit;
++  /* Allocate space in `objl2` for the new object. The arrays grow
++     geometrically (at least +50%) instead of by one object per call: with
++     tens of thousands of detections the exact-size realloc copied the whole
++     list for every object, which is quadratic on allocators that cannot
++     extend a block in place (the Windows heap). Both arrays are only ever
++     resized when they are too small; the logical sizes stay nobj/npix. */
++  if (objl2->obj == NULL || objl2->nobj + 1 > objl2->nobjalloc) {
++    nobjalloc = objl2->nobjalloc + objl2->nobjalloc / 2;
++    if (nobjalloc < objl2->nobj + 1) {
++      nobjalloc = objl2->nobj + 1;
++    }
++    if (nobjalloc < 16) {
++      nobjalloc = 16;
++    }
++    if (objl2->obj == NULL) {
++      objl2obj = malloc(nobjalloc * sizeof(objstruct));
++    } else {
++      objl2obj = realloc(objl2->obj, nobjalloc * sizeof(objstruct));
++    }
++    if (!objl2obj) {
++      goto earlyexit;
++    }
++    objl2->obj = objl2obj;
++    objl2->nobjalloc = nobjalloc;
+   }
+-  objl2->obj = objl2obj;
+ 
+   /* Allocate space for the new object's pixels in 2nd list's plist */
+   npx = objl1->obj[objnb].fdnpix;
+-  if (fp) {
+-    plist2 = realloc(plist2, (objl2->npix += npx) * plistsize);
+-  } else {
+-    plist2 = malloc((objl2->npix = npx) * plistsize);
++  if (plist2 == NULL || fp + npx > objl2->npixalloc) {
++    npixalloc = objl2->npixalloc + objl2->npixalloc / 2;
++    if (npixalloc < fp + npx) {
++      npixalloc = fp + npx;
++    }
++    if (plist2 == NULL) {
++      plist2 = malloc(npixalloc * plistsize);
++    } else {
++      plist2 = realloc(plist2, npixalloc * plistsize);
++    }
++    if (!plist2) {
++      goto earlyexit;
++    }
++    objl2->plist = plist2;
++    objl2->npixalloc = npixalloc;
+   }
+ 
+-  if (!plist2) {
+-    goto earlyexit;
+-  }
+-  objl2->plist = plist2;
++  /* Both arrays can hold the object: commit the new logical sizes. */
++  objl2->nobj++;
++  objl2->npix = fp + npx;
+ 
+   /* copy the plist */
+   plist2 += j;
+@@ -1043,10 +1070,9 @@
+ 
+   return RETURN_OK;
+ 
+-  /* if early exit, reset 2nd list */
++  /* if early exit, the 2nd list is unchanged: a failed realloc keeps the old
++     block, and nobj/npix are only advanced after both allocations succeed */
+ earlyexit:
+-  objl2->nobj--;
+-  objl2->npix = fp;
+   return MEMORY_ALLOC_ERROR;
+ }
+ 
+diff --git a/src/lutz.c b/src/lutz.c
+--- a/src/lutz.c
++++ b/src/lutz.c
+@@ -50,12 +50,16 @@
+   buffers->xmin = buffers->ymin = 0;
+   buffers->xmax = width - 1;
+   buffers->ymax = height - 1;
+-  QMALLOC(buffers->info, infostruct, stacksize, status);
+-  QMALLOC(buffers->store, infostruct, stacksize, status);
+-  QMALLOC(buffers->marker, char, stacksize, status);
+-  QMALLOC(buffers->psstack, pixstatus, stacksize, status);
+-  QMALLOC(buffers->start, int64_t, stacksize, status);
+-  QMALLOC(buffers->end, int64_t, stacksize, status);
++  /* Zero-initialised like the main-scan buffers in extract.c: lutz() keeps
++     these across every deblending call of one extraction and inspects
++     start[]/store[] entries before it has written them on some paths, so
++     the heap contents must not leak into the deblending decisions. */
++  QCALLOC(buffers->info, infostruct, stacksize, status);
++  QCALLOC(buffers->store, infostruct, stacksize, status);
++  QCALLOC(buffers->marker, char, stacksize, status);
++  QCALLOC(buffers->psstack, pixstatus, stacksize, status);
++  QCALLOC(buffers->start, int64_t, stacksize, status);
++  QCALLOC(buffers->end, int64_t, stacksize, status);
+   QMALLOC(buffers->discan, int64_t, stacksize, status);
+   discant = buffers->discan;
+   for (i = stacksize; i--;) {
+@@ -291,9 +295,16 @@
+ 
+ exit_lutz:
+ 
++  /* The lists are trimmed to their exact size, so record that capacity for
++     addobjdeep(); a failed trim leaves the larger block, whose capacity is
++     unknown (0) and therefore never trusted. */
++  objlist->nobjalloc = 0;
++  objlist->npixalloc = 0;
+   if (objlist->nobj && out == RETURN_OK) {
+     if (!(objlist->obj = realloc(obj, objlist->nobj * sizeof(objstruct)))) {
+       out = MEMORY_ALLOC_ERROR;
++    } else {
++      objlist->nobjalloc = objlist->nobj;
+     }
+   } else {
+     free(obj);
+@@ -303,6 +314,8 @@
+   if (cn && out == RETURN_OK) {
+     if (!(objlist->plist = realloc(plist, cn))) {
+       out = MEMORY_ALLOC_ERROR;
++    } else {
++      objlist->npixalloc = cn / plistsize;
+     }
+   } else {
+     free(objlist->plist);
+diff --git a/src/deblend.c b/src/deblend.c
+--- a/src/deblend.c
++++ b/src/deblend.c
+@@ -52,6 +52,16 @@
+ createsubmap(objliststruct *, int64_t, int64_t *, int64_t *, int64_t *, int64_t *);
+ int gatherup(objliststruct *, objliststruct *);
+ 
++#if defined(_MSC_VER)
++/* Reentrant replacement for the missing MSVC rand_r() (see sepcore.h). The
++   POSIX.1-2001 example generator is used so that the returned range
++   0..32767 matches this platform's RAND_MAX, which gatherup() divides by. */
++int sep_rand_r(unsigned int * seed) {
++  *seed = *seed * 1103515245u + 12345u;
++  return (int)((*seed / 65536u) % 32768u);
++}
++#endif
++
+ /******************************** deblend ************************************/
+ /*
+ Divide a list of isophotal detections in several parts (deblending).
+@@ -89,6 +99,8 @@
+   debobjlist.plist = debobjlist2.plist = NULL;
+   debobjlist.nobj = debobjlist2.nobj = 0;
+   debobjlist.npix = debobjlist2.npix = 0;
++  debobjlist.nobjalloc = debobjlist2.nobjalloc = 0;
++  debobjlist.npixalloc = debobjlist2.npixalloc = 0;
+ 
+   /* Create the submap for the object.
+    * The submap is used in lutz(). We create it here because we may call
+@@ -155,12 +167,21 @@
+               goto exit;
+             }
+             if (h >= nbm - 1) {
+-              if (!(ctx->son = (short *)
+-                        realloc(ctx->son, xn * nsonmax * (nbm += 16) * sizeof(short))))
+-              {
++              /* Grow the son table and clear the new tail so that the
++                 branch walks below never read heap garbage. */
++              int64_t oldsonsize = xn * nsonmax * nbm;
++              int64_t newsonsize;
++              short * grownson;
++              nbm += 16;
++              newsonsize = xn * nsonmax * nbm;
++              if (!(grownson = (short *)realloc(ctx->son, newsonsize * sizeof(short)))) {
+                 status = MEMORY_ALLOC_ERROR;
+                 goto exit;
+               }
++              ctx->son = grownson;
++              memset(
++                  ctx->son + oldsonsize, 0, (size_t)(newsonsize - oldsonsize) * sizeof(short)
++              );
+             }
+             ctx->son[k - 1 + xn * (i + nsonmax * (h++))] = (short)m;
+             ctx->ok[k + xn * m] = (short)1;
+@@ -238,9 +259,11 @@
+ int allocdeblend(int deblend_nthresh, int64_t w, int64_t h, deblendctx * ctx) {
+   int status = RETURN_OK;
+   memset(ctx, 0, sizeof(deblendctx));
+-  QMALLOC(ctx->son, short, deblend_nthresh * nsonmax * NBRANCH, status);
+-  QMALLOC(ctx->ok, short, deblend_nthresh * nsonmax, status);
+-  QMALLOC(ctx->objlist, objliststruct, deblend_nthresh, status);
++  /* Zero-initialised: these persist across every deblend() call of one
++     extraction, and the branch tables must not start from heap garbage. */
++  QCALLOC(ctx->son, short, deblend_nthresh * nsonmax * NBRANCH, status);
++  QCALLOC(ctx->ok, short, deblend_nthresh * nsonmax, status);
++  QCALLOC(ctx->objlist, objliststruct, deblend_nthresh, status);
+   status = lutzalloc(w, h, &ctx->lutz);
+   if (status != RETURN_OK) {
+     goto exit;
+@@ -339,6 +362,7 @@
+   }
+ 
+   objlistout->plist = pixelout;
++  objlistout->npixalloc = objlistout->npix + npix;
+   k = objlistout->npix;
+   iclst = 0; /* To avoid gcc -Wall warnings */
+   for (pixt = pixelin + objin->firstpix; pixt >= pixelin;
+@@ -377,8 +401,11 @@
+   }
+ 
+   objlistout->npix = k;
++  objlistout->npixalloc = 0;
+   if (!(objlistout->plist = realloc(pixelout, objlistout->npix * plistsize))) {
+     status = MEMORY_ALLOC_ERROR;
++  } else {
++    objlistout->npixalloc = objlistout->npix;
+   }
+ 
+ exit:

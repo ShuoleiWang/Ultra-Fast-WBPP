@@ -19,6 +19,9 @@ const native = vi.hoisted(() => ({
   catalogInspectionError: undefined as Error | undefined,
   solverReady: true,
   solverError: undefined as Error | undefined,
+  platform: "macos" as "macos" | "windows",
+  astapReady: false,
+  astapScienceReady: false,
   startRun: vi.fn(),
   cancelRun: vi.fn(),
   startCatalogInstall: vi.fn(),
@@ -75,7 +78,11 @@ const catalogListing = {
 vi.mock("./bridge", () => ({
   hasTauriRuntime: () => true,
   desktopBridge: {
-    getCapabilities: vi.fn(async () => { native.capabilityCalls += 1; return { platform: "macos", chip: "Apple M3 Pro", cpuBackend: "Native CPU execution", gpuBackend: "Metal execution", optimizationTier: "M3_PRO_TUNED", available: true, drizzleAvailable: true, solverAvailable: true, runtimeVersion: "0.1.0" }; }),
+    getCapabilities: vi.fn(async () => {
+      native.capabilityCalls += 1;
+      if (native.platform === "windows") return { platform: "windows", chip: "AMD Ryzen 7 5800H with Radeon Graphics", cpuBackend: "Native CPU execution", gpuBackend: "GPU acceleration not used", optimizationTier: "WINDOWS_X64", available: true, drizzleAvailable: true, solverAvailable: true, runtimeVersion: "0.1.0" };
+      return { platform: "macos", chip: "Apple M3 Pro", cpuBackend: "Native CPU execution", gpuBackend: "Metal execution", optimizationTier: "M3_PRO_TUNED", available: true, drizzleAvailable: true, solverAvailable: true, runtimeVersion: "0.1.0" };
+    }),
     inspectPaths: (...args: unknown[]) => native.inspectPaths(...args),
     inspectCalibration: (...args: unknown[]) => native.inspectCalibration(...args),
     inspectQuality: (...args: unknown[]) => native.inspectQuality(...args),
@@ -86,7 +93,9 @@ vi.mock("./bridge", () => ({
     catalogDoctor: vi.fn(async () => { native.solverSetupCalls += 1; if (native.catalogInspectionError) throw native.catalogInspectionError; return { schemaVersion: 1, ok: native.catalogReady, catalogRoot: catalogListing.catalogRoot, config: { present: native.catalogReady, valid: native.catalogReady }, installedSetBindingReady: native.catalogReady, message: native.catalogReady ? "ready" : "missing" }; }),
     solverDoctor: vi.fn(async () => { native.solverSetupCalls += 1; if (native.solverError) throw native.solverError; return { schemaVersion: 1, engineVersion: "0.1.0", backends: [
       { backendId: "astrometry-net", displayName: "solve-field", version: "0.97", available: native.solverReady, executionReady: native.solverReady, metadata: { probe: { path: "/opt/homebrew/bin/solve-field", version: "0.97", executionReady: native.solverReady } } },
-      { backendId: "astap", displayName: "ASTAP", version: "unavailable", available: false, executionReady: false, reason: "not installed" },
+      native.astapReady
+        ? { backendId: "astap", displayName: "ASTAP", version: "2026.09.01", available: true, executionReady: true, scienceReady: native.astapScienceReady, reason: native.astapScienceReady ? null : "STAR_DATABASE_MISSING: no D20 or larger star database beside astap_cli.exe", metadata: { probe: { path: "C:\\Program Files\\astap\\astap_cli.exe", version: "2026.09.01", executionReady: true } } }
+        : { backendId: "astap", displayName: "ASTAP", version: "unavailable", available: false, executionReady: false, reason: "not installed" },
     ] }; }),
     startCatalogInstall: (...args: unknown[]) => native.startCatalogInstall(...args), cancelCatalogInstall: (...args: unknown[]) => native.cancelCatalogInstall(...args), verifyCatalog: (...args: unknown[]) => native.verifyCatalog(...args),
     openProviderTerms: (...args: unknown[]) => native.openProviderTerms(...args),
@@ -139,6 +148,7 @@ beforeEach(() => {
   native.handlers = undefined; native.catalogHandlers = undefined; native.inspectError = undefined; native.qualityDisposition = "PASS"; native.reviewFirst = false; native.cfa = false; native.unknownCfa = false; native.useMasterDark = false; native.catalogReady = true; native.catalogInspectionError = undefined;
   native.capabilityCalls = 0; native.solverSetupCalls = 0; native.dropListenerCalls = 0; native.pipelineListenerCalls = 0; native.catalogListenerCalls = 0; native.lightCount = 1;
   native.solverReady = true; native.solverError = undefined; native.dropHandler = undefined;
+  native.platform = "macos"; native.astapReady = false; native.astapScienceReady = false;
   native.inspectPaths.mockReset().mockImplementation(async () => { if (native.inspectError) throw native.inspectError; return inventory(); });
   native.inspectCalibration.mockReset().mockImplementation(async ({ paths }: { paths: string[] }) => {
     const ready = paths.some((path) => path.includes("平场")) && paths.some((path) => path.includes("偏置"));
@@ -677,6 +687,112 @@ describe("native product workflow", () => {
     expect(screen.getByText("盾牌座 Panel 1 × R：当前可用 1 张 Light，至少需要 2 张。")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "人工复核后批准纳入" })).not.toBeInTheDocument();
     expect(native.startRun).not.toHaveBeenCalled();
+  });
+});
+
+describe("Windows x64 solver route", () => {
+  it("starts with a science-ready ASTAP when solve-field is absent and names the validated CPU path", async () => {
+    native.platform = "windows"; native.solverReady = false; native.astapReady = true; native.astapScienceReady = true;
+    render(<App />);
+    await reachRecipe();
+    await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled());
+    expect(screen.queryByText("安装解算器（solve-field 或 ASTAP）和已校验离线星表。")).not.toBeInTheDocument();
+    const rows = document.querySelectorAll(".solver-row");
+    expect(rows[0]).toHaveTextContent(/ASTAP 可执行/);
+    expect(rows[0]).toHaveTextContent("C:\\Program Files\\astap\\astap_cli.exe");
+    expect(rows[1]).toHaveTextContent(/solve-field 未就绪/);
+    expect(rows[1]).toHaveTextContent("Windows 上不需要");
+    expect(screen.getByLabelText("计算后端")).toHaveTextContent("AMD Ryzen 7 5800H with Radeon Graphics");
+    expect(screen.getByLabelText("计算后端")).toHaveTextContent("Native CPU execution · GPU acceleration not used · Windows x64 · 已验证的 CPU 路径");
+    expect(screen.getByText("离线星表已校验并配置")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /开始处理/ }));
+    expect(native.startRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the solver blocker while ASTAP runs but is not science-ready", async () => {
+    native.platform = "windows"; native.solverReady = false; native.astapReady = true; native.astapScienceReady = false;
+    render(<App />);
+    await reachRecipe();
+    await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
+    expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
+    expect(screen.getByText("安装解算器（solve-field 或 ASTAP）和已校验离线星表。")).toBeInTheDocument();
+    const astap = document.querySelectorAll(".solver-row")[0];
+    expect(astap).toHaveTextContent(/ASTAP 未就绪/);
+    expect(astap).toHaveTextContent("请从 hnsky.org 安装 ASTAP（astap_cli.exe）和星表数据库（D20 或更大）");
+    expect(astap).toHaveTextContent("STAR_DATABASE_MISSING");
+    expect(native.startRun).not.toHaveBeenCalled();
+    // The engine reports the star database installed: the same setup recheck unblocks the start.
+    native.astapScienceReady = true;
+    await userEvent.click(screen.getByRole("button", { name: "重新检测配置" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled());
+  });
+
+  it("never lets ASTAP satisfy the gate on an engine that does not report scienceReady", async () => {
+    native.platform = "windows"; native.solverReady = false; native.astapReady = true;
+    const doctor = await import("./bridge").then((module) => module.desktopBridge.solverDoctor as unknown as ReturnType<typeof vi.fn>);
+    const original = doctor.getMockImplementation()!;
+    doctor.mockImplementation(async () => {
+      const report = await original();
+      report.backends = report.backends.map((backend: { backendId: string; scienceReady?: boolean }) => { const { scienceReady: _ignored, ...rest } = backend; return rest; });
+      return report;
+    });
+    render(<App />);
+    await reachRecipe();
+    await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
+    expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
+    expect(document.querySelectorAll(".solver-row")[0]).toHaveTextContent(/ASTAP 未就绪/);
+    doctor.mockImplementation(original);
+  });
+
+  it("keeps macOS on solve-field first and treats a missing scienceReady as ready for it only", async () => {
+    native.astapReady = true; native.astapScienceReady = false;
+    render(<App />);
+    await reachRecipe();
+    const rows = document.querySelectorAll(".solver-row");
+    expect(rows[0]).toHaveTextContent(/solve-field 可执行/);
+    expect(rows[1]).toHaveTextContent(/ASTAP 未就绪/);
+    expect(rows[1]).toHaveTextContent("可选替代：ASTAP");
+    expect(screen.getByLabelText("计算后端")).toHaveTextContent("M3 PRO 深度优化");
+    await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled());
+  });
+});
+
+describe("result previews", () => {
+  it("prefers the controller's preview data URLs over asset-protocol paths", async () => {
+    render(<App />); await reachRun();
+    const monoPreview = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAIAAAUAAen63NgAAAAASUVORK5CYII=";
+    const rgbPreview = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGP4DwQACfsD/Wm0a9YAAAAASUVORK5CYII=";
+    await act(async () => native.handlers?.onComplete({
+      jobId: "run-native-1", outputDirectory: "D:\\astro\\out\\NGC7331_2026-09-21_2210",
+      artifacts: [
+        solvedArtifact,
+        { kind: "LINEAR_RGB_FITS", name: "rgb.fits", path: "D:\\astro\\out\\NGC7331_2026-09-21_2210\\rgb.fits", detail: "linear RGB" },
+        { kind: "MONO_PREVIEW_PNG", name: "盾牌座_R_mosaic.png", path: "D:\\astro\\out\\NGC7331_2026-09-21_2210\\previews\\盾牌座_R_mosaic.png", detail: "auto-stretched mono preview", filter: "R", target: "盾牌座", previewDataUrl: monoPreview },
+        { kind: "RGB_PREVIEW_PNG_16", name: "rgb.png", path: "D:\\astro\\out\\NGC7331_2026-09-21_2210\\rgb.png", detail: "16-bit display preview", previewDataUrl: rgbPreview },
+      ],
+      gate: { decision: "ready", checks: readyChecks },
+    }));
+    expect(await screen.findByText(/最终门禁 · WCS 已解算/)).toBeInTheDocument();
+    expect(document.querySelector(".result-hero-image")).toHaveAttribute("src", monoPreview);
+    const cards = [...document.querySelectorAll(".card")];
+    expect(cards).toHaveLength(2);
+    expect(cards[0].querySelector(".shot img")).toHaveAttribute("src", monoPreview);
+    expect(cards[1].querySelector(".shot img")).toHaveAttribute("src", rgbPreview);
+    expect(screen.getByRole("button", { name: "显示输出：NGC7331_2026-09-21_2210" })).toBeEnabled();
+  });
+
+  it("falls back to no preview when the controller carried none and the asset protocol is unavailable", async () => {
+    render(<App />); await reachRun();
+    await act(async () => native.handlers?.onComplete({
+      jobId: "run-native-1", outputDirectory: "/结果/final",
+      artifacts: [solvedArtifact, { kind: "MONO_PREVIEW_PNG", name: "盾牌座_R_mosaic.png", path: "/结果/final/previews/盾牌座_R_mosaic.png", detail: "auto-stretched mono preview", filter: "R", target: "盾牌座" }],
+      gate: { decision: "ready", checks: readyChecks },
+    }));
+    expect(await screen.findByText(/最终门禁 · WCS 已解算/)).toBeInTheDocument();
+    expect(document.querySelector(".result-hero-image")).toBeNull();
+    expect(document.querySelector(".card .shot img")).toBeNull();
   });
 });
 

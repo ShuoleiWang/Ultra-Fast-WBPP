@@ -179,3 +179,49 @@ def test_collects_post_sign_runtime_attestation_into_release_metadata(tmp_path: 
     assert metadata["signed"] is False
     assert metadata["bundledRuntimeAttestation"]["treeSha256"] == "a" * 64
     assert metadata["bundledRuntimeAttestation"]["signature"]["mode"] == "ad-hoc"
+
+
+def test_collects_windows_installed_runtime_attestation_as_unsigned_prerelease(tmp_path: Path) -> None:
+    _source_tree(tmp_path)
+    bundle = tmp_path / "target" / "release" / "bundle"
+    (bundle / "dmg" / "Ultra-Fast-WBPP_0.1.0_aarch64.dmg").unlink()
+    (bundle / "msi").mkdir()
+    (bundle / "nsis").mkdir()
+    (bundle / "msi" / "Ultra-Fast WBPP_0.1.0_x64_en-US.msi").write_bytes(b"msi")
+    (bundle / "nsis" / "Ultra-Fast WBPP_0.1.0_x64-setup.exe").write_bytes(b"nsis")
+    target = "x86_64-pc-windows-msvc"
+    sidecars = tmp_path / "build" / "sidecars"
+    runtime = sidecars / f"openastroflow-worker-{target}"
+    runtime.mkdir()
+    (sidecars / f"{runtime.name}.manifest.json").write_text(
+        json.dumps({"runtime": {"directoryName": runtime.name}}), encoding="utf-8"
+    )
+    attestations = tmp_path / "build" / "bundle-attestations"
+    attestations.mkdir()
+    # The name scripts/windows/attest-installed-msi.ps1 writes for the MSI gate.
+    attestation = attestations / f"openastroflow-worker-{target}.bundled.manifest.json"
+    attestation.write_text(
+        json.dumps(
+            {
+                "runtime": {"treeSha256": "c" * 64},
+                "signature": {"verified": False, "mode": "unsigned-prerelease", "hardenedRuntime": False},
+                "launch": {"versionSeconds": 2.0, "handshakeSeconds": 2.5, "catalogListSeconds": 2.1},
+                "windowsDeployment": {"verified": True, "importClosure": {"unresolvedEdgeCount": 0}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    output = tmp_path / "windows-release"
+    files = collect(tmp_path, output, target, source_commit="b" * 40)
+
+    names = {path.name for path in files}
+    assert attestation.name in names
+    assert "Ultra-Fast WBPP_0.1.0_x64_en-US.msi" in names
+    assert "Ultra-Fast WBPP_0.1.0_x64-setup.exe" in names
+    metadata = json.loads((output / f"release-metadata-{target}.json").read_text())
+    assert metadata["signed"] is False
+    assert metadata["bundledRuntimeAttestation"]["signature"]["mode"] == "unsigned-prerelease"
+    assert metadata["bundledRuntimeAttestation"]["treeSha256"] == "c" * 64
+    sums = (output / f"SHA256SUMS-{target}").read_text(encoding="ascii")
+    assert attestation.name in sums and ".msi" in sums and "-setup.exe" in sums

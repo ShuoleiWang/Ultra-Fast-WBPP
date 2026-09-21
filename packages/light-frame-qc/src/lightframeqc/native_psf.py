@@ -23,6 +23,7 @@ from numpy.typing import NDArray
 from .models import Star
 from .xisf import XISF
 from .cfa import is_cfa_pattern, luminance, normalize_pattern, shifted_pattern
+from .fits_bands import close_image_data, open_fits_image_data
 
 
 @dataclass(frozen=True)
@@ -204,20 +205,26 @@ def open_native_image(path: str) -> Iterator[NativeImage | None]:
         for hdu in hdul:
             if not isinstance(hdu, (fits.PrimaryHDU, fits.ImageHDU, fits.CompImageHDU)):
                 continue
-            data = hdu.data
+            # The memory map, or on Windows a band reader over the same bytes
+            # (``fits_bands``); stamps are small row bands either way.
+            data = open_fits_image_data(hdu, path)
             if data is None:
                 continue
             layout = _fits_layout(tuple(data.shape))
             if layout is None:
+                close_image_data(data)
                 continue
-            yield NativeImage(
-                data,
-                layout,
-                bscale=float(hdu.header.get("BSCALE", 1.0) or 1.0),
-                bzero=float(hdu.header.get("BZERO", 0.0) or 0.0),
-                blank=hdu.header.get("BLANK"),
-                cfa_pattern=_fits_cfa_pattern(hdu.header),
-            )
+            try:
+                yield NativeImage(
+                    data,
+                    layout,
+                    bscale=float(hdu.header.get("BSCALE", 1.0) or 1.0),
+                    bzero=float(hdu.header.get("BZERO", 0.0) or 0.0),
+                    blank=hdu.header.get("BLANK"),
+                    cfa_pattern=_fits_cfa_pattern(hdu.header),
+                )
+            finally:
+                close_image_data(data)
             return
         yield None
 

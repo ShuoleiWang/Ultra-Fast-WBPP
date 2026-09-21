@@ -37,9 +37,12 @@ datas = filter_entries(
 binaries = []
 if sys.platform == "win32":
     # The native kernel DLL is a real binary on Windows: collecting it as a
-    # binary lets PyInstaller walk its imports and bundle the MSVC runtime
-    # (msvcp140.dll, vcruntime140*.dll) it links dynamically, so the frozen
-    # worker loads the kernels on a machine without a VC++ redistributable.
+    # binary lets PyInstaller walk its import table like every other DLL in
+    # the tree instead of copying it blindly as data. The DLL links the C
+    # runtime statically (engine/native/CMakeLists.txt, enforced by
+    # scripts/build_native_runtime.py --require-static-crt), so that walk finds
+    # only Windows system DLLs; the release attestation re-checks the whole
+    # frozen tree's PE import closure against a clean machine's DLL set.
     native_dlls = [
         entry for entry in datas if entry[0].lower().endswith(".dll") and entry[1].replace("\\", "/").startswith("openastroflow_engine/native")
     ]

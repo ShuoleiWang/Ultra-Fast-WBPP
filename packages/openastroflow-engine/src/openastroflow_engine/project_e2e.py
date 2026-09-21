@@ -82,6 +82,9 @@ from .e2e import (
     run_e2e,
 )
 from .models import AssetRole, AssetStatus, FrameAsset, ProjectInventory
+from lightframeqc.source_extraction import cached_extraction_self_test
+from .path_budget import DETAILS_DIRECTORY, PROJECT_STAGING_SUFFIX, RUNS_DIRECTORY, target_key
+from .platform import remove_file, rename_with_retry
 from .mosaic import (
     MosaicError,
     MosaicRequest,
@@ -95,8 +98,8 @@ from .solver import SolverBackend, canonical_wcs_sha256, validate_wcs_header
 
 
 PROJECT_E2E_VERSION = "openastroflow-project-e2e-v1"
-# Everything that is not a final channel, a preview or the receipt lives here.
-DETAILS_DIRECTORY = "details"
+# Everything that is not a final channel, a preview or the receipt lives under
+# ``DETAILS_DIRECTORY`` (named in ``path_budget`` with the other layout parts).
 
 
 class ProjectE2EError(RuntimeError):
@@ -380,7 +383,7 @@ _FILTER_ALIASES = {
 
 
 def _normalized_token(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+    return target_key(value)
 
 
 def _science_target(asset: FrameAsset) -> tuple[str, str]:
@@ -1392,9 +1395,12 @@ def _crop_final_channels(
                 # Stream the FITS-backed slice; this does not allocate a full
                 # additional science frame or alter any retained pixel value.
                 fits.writeto(temporary, plane.data[top:bottom, left:right], header, overwrite=False, checksum=True)
-            os.replace(temporary, path)
+            # Leaving the ``with`` block releases the memory map of ``path``
+            # (no array of it is retained), which the replace below needs on
+            # Windows.
+            rename_with_retry(temporary, path, replace=True)
         finally:
-            temporary.unlink(missing_ok=True)
+            remove_file(temporary)
     return evidence
 
 
@@ -1510,13 +1516,21 @@ def run_project_e2e(
             "REVIEW_APPROVAL_SOURCE_AMBIGUOUS",
             "review selections must identify exactly one current Light: " + ", ".join(unmatched),
         )
-    staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", suffix=".project-staging", dir=output.parent))
+    staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", suffix=PROJECT_STAGING_SUFFIX, dir=output.parent))
     # The published directory holds only the final channels, ``previews`` and
     # ``receipt.json`` at its top level; every intermediate stage lives under
     # ``details`` so the result reads at a glance.
     details = staging / DETAILS_DIRECTORY
     details.mkdir()
-    records: dict[str, Any] = {"subruns": [], "mosaics": {}, "finalSolves": {}, "alignment": {}}
+    records: dict[str, Any] = {
+        "subruns": [],
+        "mosaics": {},
+        "finalSolves": {},
+        "alignment": {},
+        # The panel runs record the same verdict; here it is visible at the
+        # project level without opening a run receipt.
+        "sourceExtraction": dict(cached_extraction_self_test()),
+    }
     passed: list[str] = []
     excluded: list[str] = []
     project_progress = _ProjectProgress(layout, request.e2e_request, progress)
@@ -1559,7 +1573,7 @@ def run_project_e2e(
 
         panels_by_filter: dict[str, list[tuple[SciencePanel, Path]]] = {}
         panel_quality_by_path: dict[str, dict[str, Any]] = {}
-        runs_root = details / "runs"
+        runs_root = details / RUNS_DIRECTORY
         runs_root.mkdir()
         # One run per target carries every filter of that target: the run
         # registers all Lights onto one reference frame and crops the filter

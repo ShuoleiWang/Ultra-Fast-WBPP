@@ -426,7 +426,10 @@ def manifest_search_paths(
 ) -> tuple[Path, ...]:
     if manifest_dir is not None:
         return (Path(manifest_dir).expanduser().absolute(),)
-    env = os.environ if environment is None else environment
+    env = platform_services.environment_view(
+        os.environ if environment is None else environment,
+        platform_id=platform_services.current().platform_id,
+    )
     paths: list[Path] = []
     configured = env.get("OPENASTROFLOW_CATALOG_MANIFEST_DIR")
     if configured:

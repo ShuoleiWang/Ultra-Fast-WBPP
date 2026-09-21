@@ -170,7 +170,10 @@ def discover_siril_cli(
 
     if executable is not None:
         return _candidate_path(executable)
-    env = os.environ if environment is None else environment
+    env = platform_services.environment_view(
+        os.environ if environment is None else environment,
+        platform_id=platform_services.current().platform_id,
+    )
     for key in ("OPENASTROFLOW_SIRIL_CLI", "SIRIL_CLI_PATH"):
         candidate = _candidate_path(env.get(key))
         if candidate:
@@ -310,7 +313,9 @@ def probe_siril_cli(
     environment: Mapping[str, str] | None = None,
     timeout_seconds: float = 5.0,
 ) -> ExecutableProbe:
-    discovery_environment = {**os.environ, **dict(environment or {})}
+    discovery_environment = platform_services.merged_environment(
+        os.environ, environment, platform_id=platform_services.current().platform_id
+    )
     path = discover_siril_cli(executable, environment=discovery_environment)
     if path is None:
         return ExecutableProbe(
@@ -778,7 +783,9 @@ class SirilBackend:
         self.timeout_seconds = float(timeout_seconds)
         self.staging_root = Path(staging_root).expanduser() if staging_root is not None else None
         self.environment = dict(environment or {})
-        discovery_environment = {**os.environ, **self.environment}
+        discovery_environment = platform_services.merged_environment(
+            os.environ, self.environment, platform_id=platform_services.current().platform_id
+        )
         path = discover_siril_cli(executable, environment=discovery_environment)
         self.runtime: SolverProcessRuntime | None = None
         if path is None:

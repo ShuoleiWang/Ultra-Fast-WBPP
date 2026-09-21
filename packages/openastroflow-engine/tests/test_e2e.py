@@ -989,6 +989,10 @@ def test_qc_review_is_manifested_and_never_enters_pixel_pipeline(
     assert 0 < preview.stat().st_size <= 512 * 1024
     assert all(item.get("reviewPreviewPath") is None for item in manifest["frames"] if item["qualityGate"]["disposition"] == "PASS")
     receipt = json.loads((output / "receipt.json").read_text(encoding="utf-8"))
+    # The SEP determinism self-test is part of every run's evidence.
+    source_extraction = receipt["execution"]["sourceExtraction"]
+    assert source_extraction["version"] == "sep-extraction-self-test-v1"
+    assert source_extraction["deterministic"] is True and source_extraction["warnings"] == []
     screening = receipt["qualityControl"]["screening"]
     assert screening["counts"] == {"PASS": 8, "REVIEW": 1, "HARD_FAIL": 0}
     assert (screening["admitted"], screening["excluded"]) == (8, 1)

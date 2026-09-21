@@ -607,7 +607,11 @@ def solver_backends() -> tuple[SolverBackend, ...]:
     from .astrometry_net_backend import AstrometryNetSolverBackend
 
     common = ("seed-hints", "celestial-wcs", "fail-closed-wcs-validation")
+    # Registry order is the planner's ``auto`` preference; keep it aligned with
+    # the runtime chain (astrometry-net, astap, native) so the plan names the
+    # solver that will actually run first when both are science-ready.
     return (
+        AstrometryNetSolverBackend(),
         AstapSolverBackend(),
         DeclarativeSolverBackend(
             BackendDescriptor(
@@ -622,7 +626,6 @@ def solver_backends() -> tuple[SolverBackend, ...]:
                 reason="The native solver protocol exists, but no native solver implementation is bundled yet.",
             )
         ),
-        AstrometryNetSolverBackend(),
     )
 
 

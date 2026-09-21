@@ -19,7 +19,6 @@ import inspect
 import math
 import os
 from pathlib import Path
-import shutil
 import stat
 import tempfile
 from typing import Any, Callable, Mapping, Sequence
@@ -29,6 +28,7 @@ from astropy.wcs import WCS
 import numpy as np
 from numpy.typing import NDArray
 
+from .platform import remove_tree
 from .color_product import (
     ColorProductError,
     DirectoryPublisher,
@@ -1114,8 +1114,7 @@ def build_solved_panel_mosaic(
             raise MosaicError("ATOMIC_PUBLICATION_FAILED", str(error), path=str(output)) from error
         _best_effort_fsync_directory(output.parent)
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+        remove_tree(staging)
 
     return MosaicResult(
         output_directory=str(output),

@@ -481,6 +481,7 @@ def test_four_panel_rgb_project_runs_mosaics_fresh_solves_and_color(tmp_path: Pa
         assert hdul[0].data.shape == (3, 14, 14)
         assert hdul[0].header["OAFSTATE"] == "SOLVED"
     receipt = json.loads(Path(result.receipt_path).read_text(encoding="utf-8"))
+    assert receipt["execution"]["sourceExtraction"]["deterministic"] is True
     assert receipt["execution"]["sharedCalibration"]["rawIntegrationCount"] == 0
     assert all(
         item["workingState"] == "NEEDS_FINAL_SOLVE"

@@ -16,6 +16,8 @@ from .base import (
     ChildProcessOptions,
     MemoryStatus,
     NoReplaceError,
+    PathLimit,
+    UNLIMITED_PATH_LIMIT,
     VolumeCapabilities,
     fallback_memory,
 )
@@ -84,6 +86,13 @@ def volume_from_mount_table(
         return VolumeCapabilities("unknown", None, None, True, source)
     fstype = best[1]
     return VolumeCapabilities(fstype, hardlink_support(fstype), None, True, source)
+
+
+def path_limit() -> PathLimit:
+    """POSIX ``PATH_MAX`` (1024 on macOS, 4096 on Linux) is far beyond any
+    path the engine composes, so no budget check applies."""
+
+    return UNLIMITED_PATH_LIMIT
 
 
 def fsync_directory(path: Path) -> bool:
@@ -211,6 +220,7 @@ __all__ = [
     "kill_process_tree",
     "libc_no_replace_rename",
     "no_keep_awake",
+    "path_limit",
     "publish_file_no_replace",
     "rename_directory_no_replace_with",
     "sysconf_memory",
