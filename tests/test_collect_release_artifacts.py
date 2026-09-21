@@ -128,8 +128,13 @@ def test_collects_one_windows_msi_and_one_nsis_without_guessing_names(
 
     files = collect(tmp_path, tmp_path / "windows-release", "x86_64-pc-windows-msvc")
     names = {path.name for path in files}
-    assert msi.name in names
-    assert nsis.name in names
+    # The Tauri names carry the product name's space; the collected copies are
+    # hyphenated so the checksum file matches what GitHub serves.
+    assert msi.name.replace(" ", "-") in names
+    assert nsis.name.replace(" ", "-") in names
+    sums = (tmp_path / "windows-release" / "SHA256SUMS-x86_64-pc-windows-msvc").read_text(encoding="ascii")
+    assert "Ultra-Fast-WBPP_0.1.0_x64_en-US.msi" in sums and "Ultra-Fast-WBPP_0.1.0_x64-setup.exe" in sums
+    assert " Ultra-Fast WBPP" not in sums
 
 
 def test_rejects_ambiguous_or_old_windows_installers(tmp_path: Path) -> None:
@@ -217,8 +222,11 @@ def test_collects_windows_installed_runtime_attestation_as_unsigned_prerelease(t
 
     names = {path.name for path in files}
     assert attestation.name in names
-    assert "Ultra-Fast WBPP_0.1.0_x64_en-US.msi" in names
-    assert "Ultra-Fast WBPP_0.1.0_x64-setup.exe" in names
+    # Published under space-free names: GitHub would serve the Tauri names as
+    # "Ultra-Fast.WBPP_…", and the checksum file must name the files as served.
+    assert "Ultra-Fast-WBPP_0.1.0_x64_en-US.msi" in names
+    assert "Ultra-Fast-WBPP_0.1.0_x64-setup.exe" in names
+    assert not any(" " in name for name in names)
     metadata = json.loads((output / f"release-metadata-{target}.json").read_text())
     assert metadata["signed"] is False
     assert metadata["bundledRuntimeAttestation"]["signature"]["mode"] == "unsigned-prerelease"

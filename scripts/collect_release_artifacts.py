@@ -146,6 +146,19 @@ def _bundle_files(repository: Path, target: str) -> list[Path]:
     return selected
 
 
+def release_asset_name(name: str) -> str:
+    """The basename an artifact is published under.
+
+    GitHub rewrites spaces in release asset names (``Ultra-Fast WBPP_…`` is
+    served as ``Ultra-Fast.WBPP_…``), which would leave ``SHA256SUMS`` and the
+    release metadata naming files that do not exist on the release page.
+    Tauri names the Windows installers after the product name, so they are
+    collected under the hyphenated form the macOS DMG already uses.
+    """
+
+    return name.replace(" ", "-")
+
+
 def collect(
     repository: Path,
     output: Path,
@@ -188,9 +201,9 @@ def collect(
         if attestation_source.is_file():
             sources.append(attestation_source)
         for source in sources:
-            destination = output / source.name
+            destination = output / release_asset_name(source.name)
             if destination.exists():
-                raise ReleaseCollectionError(f"duplicate release basename: {source.name}")
+                raise ReleaseCollectionError(f"duplicate release basename: {destination.name}")
             shutil.copy2(source, destination)
             copied.append(destination)
         metadata = output / f"release-metadata-{target}.json"
