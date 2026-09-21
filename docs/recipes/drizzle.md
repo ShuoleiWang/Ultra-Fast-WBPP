@@ -36,7 +36,7 @@ The drizzled masters of one run share their grid by construction (`scale` times 
 
 ## Performance and quality (NGC 7331, 61 × 26 MP Lights, L 26 / R 11 / G 11 / B 13, M3 Pro)
 
-- Drizzle stage 2× square, drop shrink 0.9: 0.68 s per 26 MP frame (the next frame is read while the current one is dropped), 50 s for the four filters including the 1 GB products; the whole project run takes 178 s against 97 s without drizzle (the rest is the solve, alignment and colour products of four times as many pixels).
+- Drizzle stage 2× square, drop shrink 0.9: 0.68 s per 26 MP frame (the next frame is read while the current one is dropped), 50 s for the four filters including the 1 GB products; the whole project run took 178 s against 97 s without drizzle when this was measured (the ordinary run is 76 s after the later kernel work) (the rest is the solve, alignment and colour products of four times as many pixels).
 - Against the ordinary Lanczos-3 master in native-pixel units: half-light radius 2.5–4.4 % smaller (L 1.96 vs 2.01 px, R 1.90 vs 1.97, G 2.11 vs 2.21, B 2.07 vs 2.15), effective noise over 4 × 4 native pixels 6–7 % lower, star flux ratio 0.993–0.994, coverage 99.95–100 %. Block-averaged back to the reference grid the stars have the same ellipticity as the ordinary master.
 - A comparison with PixInsight's DrizzleIntegration output on the same data is still to be recorded; PixInsight's WBPP is run manually for that.
 

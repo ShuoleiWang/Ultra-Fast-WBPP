@@ -9,8 +9,8 @@ binary is checked into source control.
 For a source build:
 
 ```bash
-cmake -S engine/native -B build/native -DOAF_ENABLE_METAL=ON
-cmake --build build/native --parallel
-cmake --install build/native \
-  --prefix packages/openastroflow-engine/src
+python scripts/build_native_runtime.py --build-dir build/native-release
+# = Release configure, build, ctest and install into this directory
+#   (the Makefile's `native-release-install` runs the same chain).
+# Never install the unoptimized `build/native` test configuration.
 ```

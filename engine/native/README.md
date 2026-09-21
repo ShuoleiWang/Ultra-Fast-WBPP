@@ -15,9 +15,10 @@ one cross-platform Release chain (configure, build, `ctest`, install into
 `packages/openastroflow-engine/src/openastroflow_engine/native`) that CI, the
 release workflow and Windows machines use; it writes a JSON report with the
 compiler and the installed library's SHA-256. On Windows the supported compiler
-is MSVC 2022 (`/W4 /WX /fp:strict`, `/MD`; the Visual Studio generator needs no
+is MSVC 2022 (`/W4 /WX /fp:strict`, static C runtime `/MT`; the Visual Studio generator needs no
 environment setup, Ninja needs a developer prompt), and the frozen worker
-collects the DLL as a PyInstaller binary so the MSVC runtime ships with it.
+collects the DLL as a PyInstaller binary; the bundle attestation refuses any
+import that neither the installed tree nor the operating system provides.
 
 Strict builds disable fast-math and floating-point contraction. An accelerator result must match finite masks and rejection counts and remain within the committed numerical gate before it can satisfy a product recipe.
 
@@ -37,8 +38,11 @@ exact zero may differ). They are exposed through the C ABI as
 `oaf_native_cpu_mad_rejection_v2` (v1 keeps the per-pixel MAD layout; v2 adds
 the row-pooled MAD and per-frame noise factors of the rejection scale model,
 and reproduces v1 exactly when neither is requested),
-`oaf_native_cpu_masked_mean_v1` and
-`oaf_native_cpu_tile_offsets_v1`, are compiled with `-fno-fast-math
+`oaf_native_cpu_masked_mean_v1`/`_v2` (v2 applies per-sample region weight
+maps), `oaf_native_cpu_tile_offsets_v1`, `oaf_native_cpu_radon_peaks_v1`
+(the transient-trail line search), `oaf_native_cpu_drizzle_v1`,
+`oaf_native_cpu_debayer_bilinear_v1` and `oaf_native_lanczos3_table_v1` (the
+deterministic weight table behind registration kernel v3), are compiled with `-fno-fast-math
 -ffp-contract=off`, and are covered by `tests/PortableKernelTests.cpp`.
 Each kernel splits its range with `ParallelRange`: worker threads (and the
 calling thread) claim fixed-size chunks from an atomic counter (8 warp rows,

@@ -2,6 +2,8 @@
 
 Bug reports, reproducible scientific comparisons, documentation and focused fixes are welcome.
 
+[`AGENTS.md`](AGENTS.md) is the full working guide for this repository (repository map, every command, the rules that are not negotiable, the gotchas); coding agents such as OpenAI Codex read it automatically and Claude Code reads the shorter [`CLAUDE.md`](CLAUDE.md). The documentation map is [`docs/README.md`](docs/README.md) and the feature and evidence overview is [`docs/features.md`](docs/features.md).
+
 ## Development setup
 
 Use Python 3.11 or 3.12, Node.js 22, Rust 1.88 or newer, and CMake 3.28 or newer. Desktop development also needs the platform's [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/). On macOS, install Xcode Command Line Tools; Metal builds require the Metal tools provided by Xcode.
@@ -43,6 +45,6 @@ ctest --test-dir build/native --output-on-failure
 make source-check
 ```
 
-Run focused tests while developing; `make check` runs the full local gate before review. Hardware-dependent skips are not hardware acceptance. For numerical changes, report fixture size, backend, tolerance, and wall time; keep benchmarks separate from correctness tests. Do not attach private receipts with acquisition paths or source identities to a public pull request.
+Run focused tests while developing; `make check` runs the full local gate before review. The `build/native` configuration above is the unoptimized test build; for real runs install the Release kernels with `make native-release-install` and never install `build/native`. Hardware-dependent skips are not hardware acceptance. For numerical changes, report fixture size, backend, tolerance, and wall time; keep benchmarks separate from correctness tests. Do not attach private receipts with acquisition paths or source identities to a public pull request.
 
 Use Conventional Commit-style subjects when practical. By contributing, you agree that your contribution is licensed under MIT.
