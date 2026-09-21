@@ -681,11 +681,23 @@ def analyze_frames(
         return tuple(owned.map(_analyze_frame_task, tasks))
 
 
-def choose_reference(analyses: Sequence[FrameAnalysis]) -> int:
+def choose_reference(
+    analyses: Sequence[FrameAnalysis], candidates: Sequence[int] | None = None
+) -> int:
+    """The best-scoring frame, or the best among ``candidates`` when given.
+
+    The score rewards many sharp detections, which a cloud-covered frame can
+    fake with noise blobs of sub-pixel width; a caller that knows which frames
+    passed an independent quality gate restricts the choice to those.
+    """
+
     if not analyses:
         raise ValueError("cannot select a reference from no frames")
+    pool = range(len(analyses)) if not candidates else sorted(set(candidates))
+    if any(index < 0 or index >= len(analyses) for index in pool):
+        raise IndexError("reference candidate is out of range")
     return max(
-        range(len(analyses)),
+        pool,
         key=lambda index: (analyses[index].quality_score, -index),
     )
 
@@ -1467,6 +1479,7 @@ def register_analyses(
     analyses: Sequence[FrameAnalysis],
     *,
     reference_index: int | None = None,
+    reference_candidates: Sequence[int] | None = None,
     config: RegistrationConfig | None = None,
     validate_warp: bool = True,
     workers: int = 1,
@@ -1482,7 +1495,11 @@ def register_analyses(
     selected = config or RegistrationConfig()
     if workers < 1:
         raise ValueError("workers must be positive")
-    index = choose_reference(analyses) if reference_index is None else reference_index
+    index = (
+        choose_reference(analyses, reference_candidates)
+        if reference_index is None
+        else reference_index
+    )
     if index < 0 or index >= len(analyses):
         raise IndexError("reference_index is out of range")
     reference = analyses[index]
@@ -1619,11 +1636,21 @@ def run_registration(
     registration: RegistrationConfig | None = None,
     calibration: CalibrationPlan | None = None,
     reference_path: str | None = None,
+    reference_candidates: Iterable[str] | None = None,
     validate_warp: bool = True,
     workers: int = 4,
 ) -> RegistrationRun:
     started = time.perf_counter()
     ordered = [str(Path(path).expanduser().resolve(strict=True)) for path in paths]
+    candidate_indices: list[int] | None = None
+    if reference_candidates is not None:
+        candidate_indices = []
+        for candidate in reference_candidates:
+            canonical = str(Path(candidate).expanduser().resolve(strict=True))
+            try:
+                candidate_indices.append(ordered.index(canonical))
+            except ValueError as error:
+                raise ValueError("reference_candidates must be input frames") from error
     if len(ordered) < 2:
         raise ValueError("at least two frames are required")
     if workers < 1:
@@ -1651,6 +1678,7 @@ def run_registration(
         reference_index, transforms = register_analyses(
             analyses,
             reference_index=reference_index,
+            reference_candidates=candidate_indices,
             config=registration,
             validate_warp=validate_warp,
             workers=workers,

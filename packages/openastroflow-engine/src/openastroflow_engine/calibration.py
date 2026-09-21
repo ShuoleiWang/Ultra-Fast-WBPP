@@ -28,6 +28,7 @@ import numpy as np
 from lightframeqc.cfa import CFA_PATTERNS, normalize_pattern as normalize_cfa_pattern
 from numpy.typing import NDArray
 
+from .lanczos_table import TAP_OFFSETS, tap_weights
 from .native_kernels import (
     MAD_KERNEL_ID,
     MEAN_KERNEL_ID,
@@ -79,11 +80,7 @@ NOISE_WEIGHT_MINIMUM_DIFFERENCES = 64
 # trigonometric identities: sin(pi(f-k)) = (-1)^k sin(pi f) and
 # sin(pi(f-k)/3) = sin(pi f/3) cos(k pi/3) - cos(pi f/3) sin(k pi/3).
 # The same literals appear in the native kernel; both paths must agree.
-LANCZOS3_TAP_OFFSETS = (-2, -1, 0, 1, 2, 3)
-_SQRT3_HALF = 0.8660254037844386
-LANCZOS3_TAP_SIGNS = (1.0, -1.0, 1.0, -1.0, 1.0, -1.0)
-LANCZOS3_TAP_COSINES = (-0.5, 0.5, 1.0, 0.5, -0.5, -1.0)
-LANCZOS3_TAP_SINES = (-_SQRT3_HALF, -_SQRT3_HALF, 0.0, _SQRT3_HALF, _SQRT3_HALF, 0.0)
+LANCZOS3_TAP_OFFSETS = TAP_OFFSETS
 
 
 class CalibrationError(RuntimeError):
@@ -635,8 +632,9 @@ def _sample_lanczos3_clamped_from(
 ) -> NDArray[np.float32]:
     """Sample with a normalized, bounded six-tap Lanczos-3 kernel.
 
-    The separable kernel is evaluated from first principles and normalized
-    independently on both axes so a constant field remains constant.  A
+    The separable kernel's six tap weights come from the deterministic
+    Lanczos-3 table (``lanczos_table.py``), normalized independently on both
+    axes so a constant field remains constant.  A
     sample is valid only when the complete nonzero support is available;
     any nonfinite pixel carrying nonzero weight invalidates the result.
 
@@ -691,46 +689,9 @@ def _sample_lanczos3_clamped_from(
     offsets = LANCZOS3_TAP_OFFSETS
 
     def weights(fraction: NDArray[np.float64]) -> tuple[NDArray[np.float32], ...]:
-        values: list[NDArray[np.float32]] = []
-        total = np.zeros(fraction.shape, dtype=np.float64)
-        # Three transcendental evaluations serve all six taps exactly.
-        primary_sine = np.sin(np.pi * fraction)
-        reduced = np.pi * fraction / 3.0
-        reduced_sine = np.sin(reduced)
-        reduced_cosine = np.cos(reduced)
-        for offset, sign, tap_cosine, tap_sine in zip(
-            offsets, LANCZOS3_TAP_SIGNS, LANCZOS3_TAP_COSINES, LANCZOS3_TAP_SINES,
-            strict=True,
-        ):
-            distance = fraction - float(offset)
-            absolute = np.abs(distance)
-            weight = np.zeros(distance.shape, dtype=np.float64)
-            at_origin = absolute <= 1.0e-14
-            inside = (absolute < 3.0) & ~at_origin
-            weight[at_origin] = 1.0
-            if np.any(inside):
-                phase = np.pi * distance[inside]
-                primary = (sign * primary_sine[inside]) / phase
-                secondary = (
-                    reduced_sine[inside] * tap_cosine
-                    - reduced_cosine[inside] * tap_sine
-                ) / (phase / 3.0)
-                weight[inside] = primary * secondary
-            # Exact integer offsets other than zero are mathematical
-            # zeros.  Making them exact prevents a distant NaN from
-            # invalidating an integer-coordinate sample through roundoff.
-            integer_zero = (
-                (absolute > 1.0e-14)
-                & (np.abs(distance - np.rint(distance)) <= 1.0e-14)
-            )
-            weight[integer_zero] = 0.0
-            total += weight
-            values.append(np.asarray(weight, dtype=np.float32))
-        if not np.all(np.isfinite(total)) or np.any(np.abs(total) < 1.0e-12):
-            raise RuntimeError("Lanczos-3 weight normalization is singular")
-        for weight in values:
-            np.divide(weight, total, out=weight, casting="unsafe")
-        return tuple(values)
+        # Six normalized taps from the deterministic Lanczos-3 table; the
+        # native kernel reads the same table with the same arithmetic.
+        return tap_weights(fraction)
 
     x_weights = weights(x_fraction)
     y_weights = weights(y_fraction)

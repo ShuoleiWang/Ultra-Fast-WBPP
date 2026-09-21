@@ -580,6 +580,63 @@ def test_single_panel_review_approval_preserves_exact_raw_request(tmp_path: Path
     )
 
 
+def test_review_selections_are_bound_per_target_run_in_a_multi_panel_project(tmp_path: Path) -> None:
+    """A GUI reviewer admits frames of several targets and filters; each
+    target run receives the approvals of its own Lights, bound to that run's
+    request (its Lights, the shared masters it uses, the gate policy)."""
+
+    inventory, base, lights = _project(tmp_path, filters=("R", "G", "B"))
+    digest = lambda path: "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()  # noqa: E731
+    policy = base.gate_policy.canonical_digest()
+    chosen = [path for path in lights if path.parent.parent.name == "dunpai2" and path.parent.name == "R"][:2]
+    chosen.append(next(path for path in lights if path.parent.parent.name == "dunpai3" and path.parent.name == "B"))
+    selections = tuple({"sourceSha256": digest(path), "gatePolicyDigest": policy} for path in chosen)
+    observed: list[E2ERequest] = []
+    runner = FakePanelRunner()
+
+    def capture(request: E2ERequest, **kwargs: Any) -> E2EResult:
+        observed.append(request)
+        return runner(request, **kwargs)
+
+    result = run_project_e2e(
+        ProjectE2ERequest(inventory, base, base.output_directory, review_selections=selections),
+        solver_backends=(ManagedCopySolver(),),
+        panel_runner=capture,
+        mosaic_provider=FakeReproject().provider(),
+    )
+
+    assert result.success is True
+    by_target = {Path(request.light_files[0]).parent.parent.name: request for request in observed}
+    assert sorted(by_target) == ["dunpai1", "dunpai2", "dunpai3", "dunpai4"]
+    assert by_target["dunpai1"].review_approvals == ()
+    assert by_target["dunpai4"].review_approvals == ()
+    assert sorted(item.source_sha256 for item in by_target["dunpai2"].review_approvals) == sorted(digest(path) for path in chosen[:2])
+    assert [item.source_sha256 for item in by_target["dunpai3"].review_approvals] == [digest(chosen[2])]
+    for request in (by_target["dunpai2"], by_target["dunpai3"]):
+        assert {item.gate_policy_digest for item in request.review_approvals} == {policy}
+        assert all(item.request_digest.startswith("sha256:") for item in request.review_approvals)
+    # The two runs' approvals are bound to different requests.
+    assert by_target["dunpai2"].review_approvals[0].request_digest != by_target["dunpai3"].review_approvals[0].request_digest
+
+    stale_base = replace(base, output_directory=str(tmp_path / "product-stale"))
+    stale = ProjectE2ERequest(
+        inventory, stale_base, stale_base.output_directory,
+        review_selections=(*selections, {"sourceSha256": "sha256:" + "f" * 64, "gatePolicyDigest": policy}),
+    )
+    with pytest.raises(ProjectE2EError) as excinfo:
+        run_project_e2e(stale, solver_backends=(ManagedCopySolver(),), panel_runner=FakePanelRunner(), mosaic_provider=FakeReproject().provider())
+    assert excinfo.value.code == "REVIEW_APPROVAL_SOURCE_AMBIGUOUS"
+
+    malformed_base = replace(base, output_directory=str(tmp_path / "product-malformed"))
+    malformed = ProjectE2ERequest(
+        inventory, malformed_base, malformed_base.output_directory,
+        review_selections=({"sourceSha256": digest(chosen[0]), "gatePolicyDigest": policy, "extra": "x"},),
+    )
+    with pytest.raises(ProjectE2EError) as excinfo:
+        run_project_e2e(malformed, solver_backends=(ManagedCopySolver(),), panel_runner=FakePanelRunner(), mosaic_provider=FakeReproject().provider())
+    assert excinfo.value.code == "REVIEW_SELECTION_INVALID"
+
+
 def test_published_layout_is_channels_previews_receipt_and_details(tmp_path: Path) -> None:
     inventory, base, _ = _project(tmp_path, filters=("R", "G", "B", "L"))
     result = run_project_e2e(

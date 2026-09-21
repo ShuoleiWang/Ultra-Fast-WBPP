@@ -951,3 +951,30 @@ def test_real_astrometry_fixture_passes_public_adapter_quality_gate(tmp_path: Pa
         min_matches=12,
         max_rms_arcsec=2.0,
     ).valid
+
+
+def test_solver_process_path_starts_with_the_solver_directories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A GUI launched from the Finder inherits launchd's minimal ``PATH``;
+    ``solve-field`` still has to find its helpers (``pnmfile``, ``image2pnm``,
+    ``astrometry-engine``) next to itself, through a symlink or not."""
+
+    real_dir = tmp_path / "Cellar" / "astrometry-net" / "bin"
+    real_dir.mkdir(parents=True)
+    real = real_dir / "solve-field"
+    real.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    real.chmod(0o755)
+    link_dir = tmp_path / "bin"
+    link_dir.mkdir()
+    link = link_dir / "solve-field"
+    link.symlink_to(real)
+    monkeypatch.setenv("PATH", f"/usr/bin{os.pathsep}/bin{os.pathsep}{link_dir}")
+
+    runtime = astap_backend_module.SolverProcessRuntime(str(link), environment={"FAKE": "1"})
+    entries = runtime.environment["PATH"].split(os.pathsep)
+    assert entries[:2] == [str(link_dir.absolute()), str(real_dir.resolve())]
+    # The inherited entries follow, once each; the solver's own directory is not repeated.
+    assert entries[2:] == ["/usr/bin", "/bin"]
+    assert runtime.environment["FAKE"] == "1" and runtime.environment["LC_ALL"] == "C"
+
+    direct = astap_backend_module.SolverProcessRuntime(str(real), environment=None)
+    assert direct.environment["PATH"].split(os.pathsep)[:3] == [str(real_dir.resolve()), "/usr/bin", "/bin"]

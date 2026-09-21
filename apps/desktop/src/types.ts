@@ -66,6 +66,8 @@ export interface InspectedLightQuality {
   confidence: string;
   starCount: number;
   summary: string;
+  /** false: the quality pass found no transform, so the run's registration would fail on it. */
+  registrable?: boolean | null;
   previewDataUrl?: string | null;
   previewSha256?: string | null;
   evidence: QualityEvidence[];

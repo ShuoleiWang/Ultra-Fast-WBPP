@@ -162,9 +162,12 @@ function panelMatrix(assets: InspectedAsset[], admittedPaths: ReadonlySet<string
     || a.filter.localeCompare(b.filter));
 }
 
-function reviewCanBeApproved(frame: InspectedLightQuality, inspection: QualityInspection | undefined, panelCount: number): boolean {
+// Approval works for any project: the engine binds each selection to the
+// target run that owns the Light, so multi-target and multi-filter projects
+// admit reviewed frames too.
+function reviewCanBeApproved(frame: InspectedLightQuality, inspection: QualityInspection | undefined): boolean {
   const digest = /^sha256:[0-9a-f]{64}$/;
-  return Boolean(inspection && panelCount === 1 && frame.disposition === "REVIEW"
+  return Boolean(inspection && frame.disposition === "REVIEW" && frame.registrable !== false
     && frame.sourceSha256 && digest.test(frame.sourceSha256)
     && digest.test(inspection.gatePolicyDigest) && frame.previewDataUrl
     && inspection.frames.includes(frame)
@@ -206,6 +209,8 @@ export function useWorkflow(t: Translator) {
   const setOutputParent = (value: string | undefined) => { setOutputParentState(value); if (nativeRuntime) rememberOutputParent(value); };
   const [outputDirectory, setOutputDirectory] = useState<string>();
   const [errorMessage, setErrorMessage] = useState<string>();
+  // The engine/desktop failure code of the current run (e.g. ASTROMETRY_REQUIRED), for the run view's failure card.
+  const [runFailureCode, setRunFailureCode] = useState<string>();
   const [demoMode, setDemoMode] = useState(false);
   const [inventoryBusy, setInventoryBusy] = useState(false);
   const [drizzleEnabled, setDrizzleEnabled] = useState(false);
@@ -403,6 +408,10 @@ export function useWorkflow(t: Translator) {
     setOverallProgress((current) => Math.max(current, Math.min(99, Math.max(0, Math.floor(overall * 100)))));
   }, []);
 
+  // A failed run stops its clock and its spinner: the stage that was running is
+  // marked FAILED, the others keep their state, so the list shows where it stopped.
+  const failStages = (current: StageProgress[]) => current.map((stage) => stage.status === "RUNNING" ? { ...stage, status: "FAILED" as const } : stage);
+
   const handleComplete = useCallback((event: PipelineCompleteEvent, receivedAt = performance.now()) => {
     if (!jobIdRef.current) { if (runLaunchInFlightRef.current) pendingTerminalRef.current ??= { kind: "complete", event, receivedAt }; return; }
     if (event.jobId !== jobIdRef.current || event.jobId === terminalJobIdRef.current) return;
@@ -414,7 +423,9 @@ export function useWorkflow(t: Translator) {
     const gateReady = event.gate.decision === "ready" && required.length > 0 && required.every((check) => check.passed);
     const solvedReady = solvedProducts.length > 0 && solvedProducts.every((artifact) => Boolean(artifact.receipt?.astrometry));
     if (!gateReady || !solvedReady) {
+      setStages(failStages);
       setRunStatus("FAILED");
+      setRunFailureCode("PROJECT_RESULT_GATE_BLOCKED");
       setErrorMessage(translatorRef.current("finalGateFailed"));
       return;
     }
@@ -433,7 +444,9 @@ export function useWorkflow(t: Translator) {
     if (cancellingRef.current) { pendingTerminalRef.current ??= { kind: "error", event, receivedAt }; return; }
     terminalJobIdRef.current = event.jobId;
     stopRunClock(receivedAt);
+    setStages(failStages);
     setRunStatus("FAILED");
+    setRunFailureCode(event.code);
     setErrorMessage(`${event.code}: ${event.message}`);
   }, [stopRunClock]);
 
@@ -564,6 +577,13 @@ export function useWorkflow(t: Translator) {
       ? current.filter((digest) => digest !== frame.sourceSha256)
       : [...current, frame.sourceSha256!]);
   };
+  // One click for a whole campaign: every REVIEW frame that can be approved
+  // (or none of them).  The engine still re-measures each one in the run.
+  const setAllReviewApprovals = (approve: boolean) => {
+    setApprovedReviewDigests(approve
+      ? (qualityInspection?.frames ?? []).filter((frame) => canApproveReview(frame)).map((frame) => frame.sourceSha256!)
+      : []);
+  };
 
   const startDemo = () => {
     startRunClock(); terminalJobIdRef.current = undefined; cancellingRef.current = false;
@@ -586,7 +606,7 @@ export function useWorkflow(t: Translator) {
     runLaunchInFlightRef.current = true; setRunLaunchBusy(true);
     jobIdRef.current = undefined; pendingProgressRef.current = []; pendingTerminalRef.current = undefined;
     terminalJobIdRef.current = undefined; progressContextRef.current = undefined; cancellingRef.current = false;
-    setJobId(undefined); setRunProgress(undefined); setExecutionMode("native"); setArtifacts([]); setScreening(undefined); setOutputDirectory(undefined); setRunStatus("RUNNING"); setOverallProgress(0); setStages(initialStages()); setStep("run");
+    setJobId(undefined); setRunProgress(undefined); setExecutionMode("native"); setArtifacts([]); setScreening(undefined); setOutputDirectory(undefined); setRunStatus("RUNNING"); setRunFailureCode(undefined); setOverallProgress(0); setStages(initialStages()); setStep("run");
     // Include launch-command work, but exclude the earlier review and screening.
     startRunClock();
     try {
@@ -668,9 +688,13 @@ export function useWorkflow(t: Translator) {
   const astap = solverDoctor?.backends.find((backend) => backend.backendId === "astap");
   const solverSetupReady = Boolean(catalogDoctor?.ok && solveField?.executionReady);
   const qualityReady = Boolean(qualityInspection && qualityInspection.frames.length === (sources.find((source) => source.role === "LIGHT")?.fileCount ?? 0));
-  const panelCount = useMemo(() => panelMatrix(assets).length, [assets]);
-  const canApproveReview = (frame: InspectedLightQuality) => reviewCanBeApproved(frame, qualityInspection, panelCount);
-  const validApprovedReviewDigests = useMemo(() => approvedReviewDigests.filter((digest) => qualityInspection?.frames.some((frame) => frame.sourceSha256 === digest && reviewCanBeApproved(frame, qualityInspection, panelCount))), [approvedReviewDigests, qualityInspection, panelCount]);
+  const canApproveReview = (frame: InspectedLightQuality) => reviewCanBeApproved(frame, qualityInspection);
+  const validApprovedReviewDigests = useMemo(() => approvedReviewDigests.filter((digest) => qualityInspection?.frames.some((frame) => frame.sourceSha256 === digest && reviewCanBeApproved(frame, qualityInspection))), [approvedReviewDigests, qualityInspection]);
+  // REVIEW frames that will stay out of the stack unless approved, for the launch notice.
+  const pendingReviewCount = useMemo(() => qualityReady ? (qualityInspection?.frames ?? []).filter((frame) => frame.disposition === "REVIEW" && !(frame.sourceSha256 && validApprovedReviewDigests.includes(frame.sourceSha256))).length : 0, [qualityInspection, qualityReady, validApprovedReviewDigests]);
+  const approvableReviewCount = useMemo(() => qualityReady ? (qualityInspection?.frames ?? []).filter((frame) => reviewCanBeApproved(frame, qualityInspection)).length : 0, [qualityInspection, qualityReady]);
+  // Approvable frames the reviewer has not approved yet (frames without a transform are never approvable).
+  const unapprovedApprovableCount = Math.max(0, approvableReviewCount - validApprovedReviewDigests.length);
   const admittedPaths = useMemo(() => new Set(qualityInspection?.frames.filter((frame) => frame.disposition === "PASS" || (frame.disposition === "REVIEW" && frame.sourceSha256 && validApprovedReviewDigests.includes(frame.sourceSha256))).map((frame) => frame.path) ?? []), [qualityInspection, validApprovedReviewDigests]);
   const matrix = useMemo(() => panelMatrix(assets, admittedPaths), [assets, admittedPaths]);
   const minimumAdmittedLights = 2;
@@ -688,10 +712,10 @@ export function useWorkflow(t: Translator) {
   return {
     step, setStep, sources, assets, selectedRole, setSelectedRole, isDragging, setDragging, gate, capabilities, runStatus, runLaunchBusy, runElapsedSeconds, stages, overallProgress, runProgress, executionMode, artifacts, screening,
     importPaths, confirmRole, loadDemo, clearSources, runInspection, startRun, cancelRun, canInspect, allRequiredConfirmed, importedTotal, nativeRuntime,
-    browserDemoAvailable: !nativeRuntime, pickFiles, pickDirectories, chooseOutputParent, useOutputParentPath, outputParent, outputDirectory, canStart, inventoryBusy, inputBusy, errorMessage, calibrationReady,
+    browserDemoAvailable: !nativeRuntime, pickFiles, pickDirectories, chooseOutputParent, useOutputParentPath, outputParent, outputDirectory, canStart, inventoryBusy, inputBusy, errorMessage, runFailureCode, calibrationReady,
     firstSolved, demoMode, projectName, matrix, masterOverrides, updateMasterOverride, resetMasterOverride, confirmMasterOverride, masterOverridesReady, runNavigationLocked,
     cfaBlockedAssets, cfaAssets, cfaPattern,
-    qualityInspection, qualityBusy, qualityElapsedSeconds, qualityReady, approvedReviewDigests: validApprovedReviewDigests, toggleReviewApproval, canApproveReview,
+    qualityInspection, qualityBusy, qualityElapsedSeconds, qualityReady, approvedReviewDigests: validApprovedReviewDigests, toggleReviewApproval, canApproveReview, setAllReviewApprovals, pendingReviewCount, approvableReviewCount, unapprovedApprovableCount,
     insufficientQualityPanels, insufficientPanels, minimumAdmittedLights,
     calibrationInspection, calibrationBusy, calibrationError, recheckCalibration,
     drizzleEnabled, setDrizzleEnabled, drizzleScale, setDrizzleScale, drizzleDropShrink, setDrizzleDropShrink, drizzleKernel, setDrizzleKernel, localNormalizationEnabled, setLocalNormalizationEnabled,

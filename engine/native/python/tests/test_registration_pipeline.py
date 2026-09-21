@@ -341,6 +341,49 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class ReferenceChoiceTests(unittest.TestCase):
+    @staticmethod
+    def _analysis(path: str, count: int, fwhm: float) -> FrameAnalysis:
+        points = np.column_stack([np.linspace(10.0, 100.0, count), np.linspace(10.0, 100.0, count)])
+        return FrameAnalysis(
+            path=path,
+            filter_name="L",
+            preview=np.zeros((128, 128), dtype=np.float32),
+            source_width=128,
+            source_height=128,
+            scale_x=1.0,
+            scale_y=1.0,
+            catalog=StarCatalog(
+                points=points,
+                flux=np.full(count, 500.0),
+                peak=np.full(count, 50.0),
+                fwhm=np.full(count, fwhm),
+                background=0.0,
+                noise=1.0,
+                detected_count=count,
+            ),
+            read_seconds=0.0,
+            calibration_seconds=0.0,
+            detection_seconds=0.0,
+            exposure_seconds=300.0,
+        )
+
+    def test_candidates_keep_a_noise_blob_frame_from_anchoring_the_registration(self) -> None:
+        # A cloud-covered frame: 500 sub-pixel noise detections score 500 / 0.25,
+        # far above real frames with 300 stars of 2.6 px FWHM.
+        analyses = (
+            self._analysis("/clear-a.fits", 300, 2.6),
+            self._analysis("/clear-b.fits", 320, 2.5),
+            self._analysis("/cloud.fits", 500, 0.5),
+        )
+        self.assertEqual(registration_pipeline.choose_reference(analyses), 2)
+        self.assertEqual(registration_pipeline.choose_reference(analyses, [0, 1]), 1)
+        # An empty candidate list means "no restriction", never "no frames".
+        self.assertEqual(registration_pipeline.choose_reference(analyses, []), 2)
+        with self.assertRaises(IndexError):
+            registration_pipeline.choose_reference(analyses, [3])
+
+
 class LocalCentroidReferenceTests(unittest.TestCase):
     """The gathered centroid refinement equals the one-star-at-a-time loop."""
 

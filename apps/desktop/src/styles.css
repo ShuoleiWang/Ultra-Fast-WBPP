@@ -352,6 +352,13 @@ progress::-webkit-progress-value { background: var(--accent); }
 .launchbar .output strong { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; -webkit-user-select: text; }
 .launchbar .output small { color: var(--secondary); white-space: nowrap; }
 .launchbar .actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
+/* The launch bar's screening notice: what the run will leave out, before it starts. */
+.screening-notice { flex: 1 1 100%; display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-radius: var(--radius-card); background: var(--warn-bg); border: 1px solid var(--warn); font-size: 12px; margin-bottom: 8px; }
+.screening-notice .symbol { width: 22px; height: 22px; border-radius: 50%; background: var(--warn); color: #fff; font-weight: 800; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 22px; }
+.screening-notice > div { flex: 1; min-width: 0; }
+.screening-notice strong { display: block; font-size: 13px; }
+.screening-notice span:not(.symbol) { display: block; color: var(--label); margin-top: 2px; }
+.hero-metrics .metric-warn dd strong { color: var(--warn); }
 .blockers { padding: 10px 14px; border-radius: var(--radius-card); background: var(--warn-bg); font-size: 12px; }
 .blockers strong { display: block; margin-bottom: 4px; }
 .blockers ul { list-style: disc; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; }
@@ -405,7 +412,20 @@ progress::-webkit-progress-value { background: var(--accent); }
 .stage-list li:last-child { border-bottom: 0; }
 .stage-list li.waiting { color: var(--tertiary); }
 .stage-list li.running { font-weight: 600; }
-.stage-list li.failed { color: var(--stop); }
+.stage-list li.failed { color: var(--stop); font-weight: 600; }
+.stage-list li.failed .stage-index { color: var(--stop); }
+.stage-list li.failed .mini-track span { background: var(--stop); }
+.stage-list li.failed em { color: var(--stop); }
+/* The failure card of a run that failed closed: unmistakable, selectable, with the evidence path. */
+.run-failure { margin: 4px 24px 12px; padding: 14px 16px; border-radius: var(--radius-card); background: var(--stop-bg); border: 1px solid var(--stop); user-select: text; -webkit-user-select: text; }
+.run-failure-head { display: flex; gap: 12px; align-items: flex-start; }
+.run-failure-head .symbol { width: 28px; height: 28px; border-radius: 50%; background: var(--stop); color: #fff; font-weight: 800; font-size: 18px; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 28px; }
+.run-failure-head strong { display: block; font-size: 16px; color: var(--stop); }
+.run-failure-head span { display: block; font-size: 12px; color: var(--label); margin-top: 2px; }
+.run-failure-code { display: inline-block; margin-right: 2px; padding: 2px 8px; border-radius: 6px; background: var(--stop); color: #fff; font-size: 12px; font-weight: 700; letter-spacing: 0.02em; }
+.run-failure-detail { margin: 10px 0 0; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+.run-failure-hint { margin: 8px 0 0; font-size: 12px; color: var(--label); }
+.run-failure-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; color: var(--text); }
 .stage-list li .stage-index { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; }
 .stage-list li.done .stage-index { color: var(--ok); }
 .stage-list li .mini-track { height: 4px; border-radius: 2px; background: var(--track); overflow: hidden; }

@@ -1,4 +1,5 @@
 #include "openastroflow/c_api.h"
+#include "Lanczos3Table.h"
 
 #include "openastroflow/FusedLnIntegration.h"
 #include "openastroflow/CpuFeatures.h"
@@ -1070,6 +1071,38 @@ extern "C" int oaf_native_cpu_drizzle_v1(
       },
       error_message, error_message_capacity,
       "unknown native drizzle failure" );
+}
+
+extern "C" int oaf_native_lanczos3_table_v1(
+   double* values,
+   size_t capacity,
+   uint32_t* node_count,
+   char* error_message,
+   size_t error_message_capacity )
+{
+   using openastroflow::native::detail::Lanczos3TableNodeValues;
+   using openastroflow::native::detail::Lanczos3TableNodes;
+   if ( node_count == nullptr )
+   {
+      CopyError( error_message, error_message_capacity, "node_count is required" );
+      return OAF_NATIVE_INVALID_ARGUMENT;
+   }
+   *node_count = Lanczos3TableNodes;
+   const size_t required = static_cast<size_t>( Lanczos3TableNodes )*6;
+   if ( values == nullptr || capacity < required )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "Lanczos-3 table buffer is smaller than the table" );
+      return OAF_NATIVE_BUFFER_TOO_SMALL;
+   }
+   return GuardedKernelCall(
+      [&]()
+      {
+         const double* table = Lanczos3TableNodeValues();
+         std::copy( table, table + required, values );
+      },
+      error_message, error_message_capacity,
+      "unknown native Lanczos-3 table failure" );
 }
 
 extern "C" int oaf_native_cpu_debayer_bilinear_v1(

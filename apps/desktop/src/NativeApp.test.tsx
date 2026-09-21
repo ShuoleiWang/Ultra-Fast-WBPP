@@ -559,6 +559,65 @@ describe("native product workflow", () => {
     expect(native.startRun).toHaveBeenCalledWith(expect.objectContaining({ reviewSelections: [{ sourceSha256: `sha256:${"9".repeat(64)}`, gatePolicyDigest: `sha256:${"7".repeat(64)}` }] }));
   });
 
+  it("warns before the start about REVIEW frames of a multi-panel project and approves them all at once", async () => {
+    native.lightCount = 10;
+    const mixed = inventory();
+    mixed.assets.filter((asset) => asset.role === "LIGHT").forEach((asset, index) => { asset.filter = index < 5 ? "B" : "L"; });
+    native.inspectPaths.mockResolvedValueOnce(mixed);
+    const inspectQuality = native.inspectQuality.getMockImplementation()!;
+    native.inspectQuality.mockImplementation(async (paths: string[]) => {
+      const report = await inspectQuality(paths);
+      // One B frame and two L frames are REVIEW; the rest PASS.  One more L
+      // frame is REVIEW without a preflight transform: never approvable.
+      report.frames[9].disposition = "REVIEW"; report.frames[9].decision = "REVIEW"; report.frames[9].registrable = false;
+      report.frames[9].previewDataUrl = "data:image/png;base64,iVBORw0KGgo="; report.frames[9].previewSha256 = `sha256:${"6".repeat(64)}`;
+      report.frames[9].evidence = [{ code: "GATE_REGISTRATION_REVIEW", family: "REGISTRATION", severity: "REVIEW", message: "no transform" }];
+      for (const index of [1, 6, 7]) {
+        report.frames[index].disposition = "REVIEW"; report.frames[index].decision = "REVIEW";
+        report.frames[index].previewDataUrl = "data:image/png;base64,iVBORw0KGgo="; report.frames[index].previewSha256 = `sha256:${"6".repeat(64)}`;
+        report.frames[index].evidence = [{ code: "GATE_SOURCE_RETENTION_REVIEW", family: "CONSENSUS", severity: "REVIEW", message: "fewer sources than the reference" }];
+      }
+      report.counts = { PASS: 6, REVIEW: 4, HARD_FAIL: 0 };
+      return report;
+    });
+    render(<App />);
+    await reachRecipe();
+    await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled());
+    // The launch bar says what would be left out, on the review page too.
+    const notice = screen.getByText("4 帧 REVIEW 不会参与叠加").closest(".screening-notice")!;
+    expect(notice).toHaveTextContent("10 张 Light 中 6 张已采纳");
+    expect(screen.getAllByRole("button", { name: "全部批准 3 帧 REVIEW" }).length).toBeGreaterThan(0);
+    // Multi-panel projects can approve: no "unavailable" buttons, except for
+    // the frame that has no transform.
+    expect(screen.queryByText("多面板不可批准")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "人工复核后批准纳入" })).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "无法配准，保持排除" })).toBeDisabled();
+    await userEvent.click(screen.getAllByRole("button", { name: "全部批准 3 帧 REVIEW" })[0]);
+    expect(screen.getByText("1 帧 REVIEW 不会参与叠加")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "已批准（内容绑定）" })).toHaveLength(3);
+    expect(screen.getByRole("cell", { name: "可用 5 / 导入 5 · 至少 2" })).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "可用 4 / 导入 5 · 至少 2" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "撤销全部批准" }));
+    expect(screen.getAllByRole("button", { name: "人工复核后批准纳入" })).toHaveLength(3);
+    await userEvent.click(screen.getAllByRole("button", { name: "全部批准 3 帧 REVIEW" })[0]);
+    await userEvent.click(screen.getByRole("button", { name: /开始处理/ }));
+    const digests = [1, 6, 7].map((index) => `sha256:${index.toString(16).padStart(64, "0")}`);
+    expect(native.startRun).toHaveBeenCalledWith(expect.objectContaining({ reviewSelections: digests.map((sourceSha256) => ({ sourceSha256, gatePolicyDigest: `sha256:${"7".repeat(64)}` })) }));
+  });
+
+  it("tells an unscreened project that the run will leave REVIEW frames out", async () => {
+    native.lightCount = 2; render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
+    await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled());
+    const notice = screen.getByText("还没有筛片").closest(".screening-notice")! as HTMLElement;
+    expect(notice).toHaveTextContent("REVIEW 帧会被直接排除");
+    expect(native.inspectQuality).not.toHaveBeenCalled();
+    await userEvent.click(within(notice).getByRole("button"));
+    expect(native.inspectQuality).toHaveBeenCalledTimes(1);
+  });
+
   it("blocks a one-Light panel before starting and names the missing admission count", async () => {
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
@@ -776,6 +835,31 @@ describe("native run elapsed time", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("PROCESS_FAILED: worker failed");
     await advance(10_000);
     expect(screen.getByRole("timer", { name: "总用时" })).toHaveTextContent("00:00:04");
+  });
+});
+
+describe("native run failure", () => {
+  it("stops the spinner, marks the running stage failed and shows the failure card with the evidence path", async () => {
+    render(<App />); await reachRun();
+    const event = { jobId: "run-native-1", state: "running" as const, fraction: 0.5, overallFraction: 0.9, scope: "project" as const, message: "publishing" };
+    await act(async () => native.handlers?.onProgress({ ...event, stageId: "alignment", state: "succeeded", fraction: 1 }));
+    await act(async () => native.handlers?.onProgress({ ...event, stageId: "publish" }));
+    expect(screen.getByText("发布与桌面校验").closest("li")).toHaveClass("running");
+    expect(document.querySelector(".stage-list .spin")).not.toBeNull();
+    await act(async () => native.handlers?.onError({ jobId: "run-native-1", code: "ASTROMETRY_REQUIRED", message: "one or more filters did not produce a verified new WCS solution", retryable: false }));
+    expect(screen.getByRole("heading", { name: "运行已失败关闭" })).toBeInTheDocument();
+    // No stage keeps spinning; the stage that was running is marked failed and the earlier ones keep their state.
+    expect(document.querySelector(".stage-list .spin")).toBeNull();
+    expect(screen.getByText("发布与桌面校验").closest("li")).toHaveClass("failed");
+    expect(screen.getByText("通道对齐").closest("li")).toHaveClass("done");
+    const card = screen.getByRole("alert");
+    expect(card).toHaveClass("run-failure");
+    expect(card).toHaveTextContent("运行失败 —— 未发布任何产品");
+    expect(card).toHaveTextContent("停止于：发布与桌面校验");
+    expect(card).toHaveTextContent("ASTROMETRY_REQUIRED: one or more filters did not produce a verified new WCS solution");
+    expect(card).toHaveTextContent("解算失败时不会保留积分后的 master");
+    expect(card).toHaveTextContent("/结果/深空 输出/ultra-fast-wbpp-run.unsolved");
+    expect(screen.getByRole("button", { name: "返回导入" })).toHaveClass("primary");
   });
 });
 

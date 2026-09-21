@@ -4,7 +4,7 @@ import type { Translator } from "./i18n";
 import { CalibrationGroups, FrameInventory } from "./FrameInventory";
 import type { InventoryTab } from "./Sidebar";
 import { dispositionLabel } from "./Inspector";
-import { BrandMark, CheckIcon, CpuIcon, FileIcon, FolderIcon, PlayIcon, RevealIcon, SparkIcon } from "./icons";
+import { BrandMark, CheckIcon, CpuIcon, FileIcon, FolderIcon, PlayIcon, RevealIcon, SparkIcon, XIcon } from "./icons";
 import { DRIZZLE_KERNELS, DRIZZLE_SCALES } from "./types";
 import type { DrizzleKernel, DrizzleScale, GateDisposition, InspectedLightQuality, MasterMetadataOverride, OutputArtifact, OutputArtifactKind, ScreeningSummary } from "./types";
 import type { useWorkflow } from "./useWorkflow";
@@ -108,8 +108,20 @@ export function LaunchSettings({ mode, workflow, outputPathText, setOutputPathTe
 }
 
 /** Bottom bar: where the result goes and the start button; the import page adds the optional screening review. */
+/** What the run will leave out, said before the start button is pressed. */
+function ScreeningNotice({ mode, workflow, t }: { mode: "import" | "inspect"; workflow: Workflow; t: Translator }) {
+  if (workflow.demoMode) return null;
+  if (!workflow.qualityReady) {
+    if (!workflow.canStart) return null;
+    return <div className="screening-notice" role="status"><span className="symbol" aria-hidden="true">!</span><div><strong>{t("noticeUnscreenedTitle")}</strong><span>{t("noticeUnscreenedBody")}</span></div><button type="button" className="btn small" disabled={!workflow.canInspect || !workflow.allRequiredConfirmed || workflow.qualityBusy} onClick={() => void workflow.runInspection()}>{workflow.qualityBusy ? t("inspecting") : t("inspect", { count: "" })}</button></div>;
+  }
+  if (workflow.pendingReviewCount === 0) return null;
+  return <div className="screening-notice" role="status"><span className="symbol" aria-hidden="true">!</span><div><strong>{t("noticePendingReviewTitle", { count: workflow.pendingReviewCount })}</strong><span>{t("noticePendingReviewBody", { admitted: workflow.matrix.reduce((sum, cell) => sum + cell.admittedCount, 0), total: workflow.matrix.reduce((sum, cell) => sum + cell.lightCount, 0) })}</span></div>{workflow.unapprovedApprovableCount > 0 && <button type="button" className="btn small" onClick={() => workflow.setAllReviewApprovals(true)}>{t("approveAllReview", { count: workflow.approvableReviewCount })}</button>}{mode === "import" && <button type="button" className="btn small quiet" onClick={() => workflow.setStep("inspect")}>{t("viewQualityResults")}</button>}</div>;
+}
+
 export function LaunchBar({ mode, workflow, lightCount, t }: { mode: "import" | "inspect"; workflow: Workflow; lightCount: number; t: Translator }) {
   return <footer className="launchbar">
+    <ScreeningNotice mode={mode} workflow={workflow} t={t} />
     <div className="output"><FolderIcon /><div style={{ minWidth: 0 }}><small>{t("outputLabel")} · </small><strong title={workflow.outputParent}>{workflow.outputParent ?? (workflow.demoMode ? t("browserNoFiles") : t("outputNotSelected"))}</strong></div><button type="button" className="btn small" disabled={!workflow.nativeRuntime} onClick={() => void workflow.chooseOutputParent()}>{t("chooseOutput")}</button></div>
     <div className="actions">
       {mode === "inspect"
@@ -184,15 +196,17 @@ export function ScreeningView({ workflow, t, outputPathText, setOutputPathText, 
       <div className="chead-row">
         <div className="chips" role="group" aria-label={t("colDecision")}>{chips.map((chip) => <button type="button" key={chip.key} className="chip" aria-pressed={decisionFilter === chip.key} onClick={() => setDecisionFilter(chip.key)}>{chip.dot && <span className={`dot ${chip.dot}`} />}{chip.label} <span className="n">{chip.count}</span></button>)}</div>
         <span className="spacer" />
+        {workflow.approvableReviewCount > 0 && (workflow.unapprovedApprovableCount > 0
+          ? <button type="button" className="btn small" onClick={() => workflow.setAllReviewApprovals(true)}>{t("approveAllReview", { count: workflow.approvableReviewCount })}</button>
+          : <button type="button" className="btn small quiet" onClick={() => workflow.setAllReviewApprovals(false)}>{t("clearReviewApprovals")}</button>)}
         <span className="muted">{workflow.demoMode ? t("demoReviewDescription") : workflow.qualityInspection ? `${t("failClosed")} · POLICY ${workflow.qualityInspection.gatePolicyDigest.slice(7, 19)}` : t("reviewDescription")}</span>
       </div>
     </div>
     <div className="scroll"><div className="stack">
       {workflow.demoMode && <Alert title={t("demoWarningTitle")}>{t("demoWarningBody")}</Alert>}
       {!workflow.demoMode && workflow.qualityInspection && <div className="panel">
-        {workflow.gate.review > 0 && workflow.matrix.length !== 1 && <div className="panel-body"><Alert title={t("multiReviewTitle")}>{t("multiReviewBody")}</Alert></div>}
         <div className="tbl-wrap"><table className="tbl"><thead><tr><th className="thumb-cell" aria-label={t("previewAlt", { name: "" }).trim()} /><th>{t("colFrame")}</th><th className="r">{t("colStars")}</th><th>{t("colConfidence")}</th><th>{t("colDecision")}</th></tr></thead><tbody>
-          {ordered.map((frame) => { const approved = Boolean(frame.sourceSha256 && workflow.approvedReviewDigests.includes(frame.sourceSha256)); const canApprove = workflow.canApproveReview(frame); const unavailable = workflow.matrix.length !== 1 ? t("multiCannotApprove") : t("previewUnavailable"); const selected = selectedPath === frame.path; return <tr key={frame.path} className={`quality-frame quality-${dispositionClass(frame.disposition)}`} aria-selected={selected} onClick={() => setSelectedPath(selected ? undefined : frame.path)}>
+          {ordered.map((frame) => { const approved = Boolean(frame.sourceSha256 && workflow.approvedReviewDigests.includes(frame.sourceSha256)); const canApprove = workflow.canApproveReview(frame); const unavailable = frame.registrable === false ? t("unregistrableReview") : t("previewUnavailable"); const selected = selectedPath === frame.path; return <tr key={frame.path} className={`quality-frame quality-${dispositionClass(frame.disposition)}`} aria-selected={selected} onClick={() => setSelectedPath(selected ? undefined : frame.path)}>
             <td className="thumb-cell"><FrameTile filter={filterOf(frame.path)} preview={frame.previewDataUrl} /></td>
             <td className="clip" title={frame.path}><strong className="frame-kind">{basename(frame.path)}</strong></td>
             <td className="r tnum">{frame.starCount}</td>
@@ -212,6 +226,21 @@ export function ScreeningView({ workflow, t, outputPathText, setOutputPathText, 
   </section>;
 }
 
+/** The failure card of a run that failed closed: what failed, where the engine's evidence is, what to do. */
+function RunFailure({ workflow, t }: { workflow: Workflow; t: Translator }) {
+  const code = workflow.runFailureCode;
+  const message = workflow.errorMessage ?? "";
+  const detail = code && message.startsWith(`${code}: `) ? message.slice(code.length + 2) : message;
+  const failedStage = workflow.stages.find((stage) => stage.status === "FAILED");
+  const evidence = workflow.outputDirectory ? `${workflow.outputDirectory}.unsolved` : undefined;
+  return <section className="run-failure" role="alert" aria-live="assertive">
+    <div className="run-failure-head"><span className="symbol" aria-hidden="true">!</span><div><strong>{t("runFailureTitle")}</strong><span>{failedStage ? t("runFailureStage", { stage: stageLabel(failedStage.stageId, t) }) : t("runFailureNoStage")}</span></div></div>
+    <p className="run-failure-detail">{code && <><code className="run-failure-code">{code}</code>: </>}{detail}</p>
+    {code === "ASTROMETRY_REQUIRED" && <p className="run-failure-hint">{t("astrometryFailedHint")}</p>}
+    {evidence && <p className="run-failure-hint">{t("unsolvedEvidenceHint")} <span className="run-failure-path" title={evidence}>{evidence}</span></p>}
+  </section>;
+}
+
 export function RunView({ workflow, t }: { workflow: Workflow; t: Translator }) {
   const title = workflow.runStatus === "CANCELLED" ? t("cancelledTitle") : workflow.runStatus === "FAILED" ? t("failedTitle") : t("runningTitle");
   const stages = workflow.stages.filter((stage) => (workflow.drizzleEnabled || stage.stageId !== "drizzle") && (workflow.localNormalizationEnabled || stage.stageId !== "local-normalization"));
@@ -222,10 +251,11 @@ export function RunView({ workflow, t }: { workflow: Workflow; t: Translator }) 
         <div><h1 id="run-title">{title}</h1><p>{t("runDescription")}</p><div className="row-actions" style={{ marginTop: 8 }}>{workflow.executionMode === "demo" && <span className="badge-demo">{t("demo")}</span>}<RunElapsed seconds={workflow.runElapsedSeconds} label={t(workflow.runStatus === "RUNNING" || workflow.runStatus === "CANCELLING" ? "runElapsed" : "runTotalTime")} /></div></div>
       </div>
       <p className="muted" role="status" style={{ padding: "0 24px" }}>{workflow.runProgress?.scope === "panel" ? t("currentPanelProgress", { index: workflow.runProgress.panelIndex ?? 0, count: workflow.runProgress.panelCount ?? 0, target: workflow.runProgress.panelTarget ?? "", filter: workflow.runProgress.panelFilter ?? "" }) : workflow.runProgress?.scope === "project" ? t("projectFinalStages") : t("overallProjectProgress")}{workflow.runProgress?.message && <small> · {workflow.runProgress.message}</small>}</p>
-      <ol className="stage-list">{stages.map((stage) => <li key={stage.stageId} className={stage.status.toLowerCase()}><span className="stage-index">{stage.status === "DONE" ? <CheckIcon /> : stage.status === "RUNNING" ? <svg className="ring" viewBox="0 0 16 16" aria-hidden="true"><circle className="spin" cx="8" cy="8" r="5.9" /></svg> : <span className="pend" aria-hidden="true" />}</span><span>{stageLabel(stage.stageId, t)}</span><span className="mini-track"><span style={{ width: `${stage.percent}%` }} /></span><em>{Math.round(stage.percent)}%</em></li>)}</ol>
+      {workflow.runStatus === "FAILED" && <RunFailure workflow={workflow} t={t} />}
+      <ol className="stage-list">{stages.map((stage) => <li key={stage.stageId} className={stage.status.toLowerCase()}><span className="stage-index">{stage.status === "DONE" ? <CheckIcon /> : stage.status === "FAILED" ? <XIcon /> : stage.status === "RUNNING" ? <svg className="ring" viewBox="0 0 16 16" aria-hidden="true"><circle className="spin" cx="8" cy="8" r="5.9" /></svg> : <span className="pend" aria-hidden="true" />}</span><span>{stageLabel(stage.stageId, t)}</span><span className="mini-track"><span style={{ width: `${stage.percent}%` }} /></span><em>{stage.status === "FAILED" ? t("stageFailed") : `${Math.round(stage.percent)}%`}</em></li>)}</ol>
       {workflow.executionMode === "demo" && <p className="mock-notice" style={{ padding: "0 24px" }}><SparkIcon />{t("demoWarningBody")}</p>}
-      {workflow.errorMessage && <p className="error-text" role="alert" style={{ padding: "8px 24px" }}>{workflow.errorMessage}</p>}
-      <div className="run-actions">{workflow.runStatus === "RUNNING" && <button type="button" className="btn" disabled={workflow.runLaunchBusy} onClick={() => void workflow.cancelRun()}>{t("cancel")}</button>}{["CANCELLED", "FAILED"].includes(workflow.runStatus) && <button type="button" className="btn" onClick={() => workflow.setStep("import")}>{t("returnConfig")}</button>}</div>
+      {workflow.errorMessage && workflow.runStatus !== "FAILED" && <p className="error-text" role="alert" style={{ padding: "8px 24px" }}>{workflow.errorMessage}</p>}
+      <div className="run-actions">{workflow.runStatus === "RUNNING" && <button type="button" className="btn" disabled={workflow.runLaunchBusy} onClick={() => void workflow.cancelRun()}>{t("cancel")}</button>}{["CANCELLED", "FAILED"].includes(workflow.runStatus) && <button type="button" className={workflow.runStatus === "FAILED" ? "btn primary" : "btn"} onClick={() => workflow.setStep("import")}>{t("returnConfig")}</button>}</div>
     </div>
   </section>;
 }
@@ -256,7 +286,7 @@ export function ResultView({ workflow, t }: { workflow: Workflow; t: Translator 
           <p>{demo ? t("resultDemoBody") : t("resultBody")}</p>
           <dl className="hero-metrics">
             <div><dt>{t("runTotalTime")}</dt><dd><RunElapsed seconds={workflow.runElapsedSeconds} label={t("runTotalTime")} /></dd></div>
-            {workflow.screening && <div><dt>{t("screeningTitle")}</dt><dd className="tnum">{t("screeningSummary", { admitted: workflow.screening.admitted, excluded: workflow.screening.excluded })}</dd></div>}
+            {workflow.screening && <div className={workflow.screening.excluded > 0 ? "metric-warn" : ""}><dt>{t("screeningTitle")}</dt><dd className="tnum"><strong>{t("framesUsed", { admitted: workflow.screening.admitted, total: workflow.screening.admitted + workflow.screening.excluded })}</strong>{workflow.screening.excluded > 0 && <small> · {t("framesExcluded", { excluded: workflow.screening.excluded })}</small>}</dd></div>}
             {workflow.firstSolved ? <>
               <div><dt>{t("center")}</dt><dd className="tnum">{workflow.firstSolved.centerRaDegrees.toFixed(4)}° · {workflow.firstSolved.centerDecDegrees.toFixed(4)}°</dd></div>
               <div><dt>{t("pixelScale")}</dt><dd className="tnum">{workflow.firstSolved.pixelScaleArcsec.toFixed(3)}″ / px</dd></div>

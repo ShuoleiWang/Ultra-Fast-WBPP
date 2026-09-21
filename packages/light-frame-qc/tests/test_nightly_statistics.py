@@ -176,3 +176,45 @@ def test_night_baselines_are_leave_one_out_and_never_cross_nights() -> None:
     assert singleton == (None,)
     with pytest.raises(ValueError):
         night_robust_baseline([1.0], ["a"], direction="sideways")
+
+
+def test_cloud_frames_inside_a_short_airmass_span_do_not_define_the_slope() -> None:
+    """NGC 6822, Sept 2026: twelve R frames on one night over airmass 1.32-1.52,
+    nine clear (0.03-0.2 mag) and three under cloud (1.8-2.7 mag); three
+    clear frames on the next night.  The cloud pairs have slopes of tens of
+    magnitudes per airmass and used to give a median slope of 14 mag/airmass,
+    nightly offsets of -5.6 and -8.0 mag, and a "2.4 mag dimmer night" review
+    of every clear frame of the first night."""
+
+    airmass = [1.32, 1.34, 1.36, 1.38, 1.40, 1.42, 1.44, 1.46, 1.48, 1.50, 1.52, 1.40, 1.51, 1.53, 1.56]
+    nights = ["night-a"] * 12 + ["night-b"] * 3
+    slope = 0.20
+    extinction = [0.04 + slope * (value - 1.0) for value in airmass]
+    for index, cloud in ((3, 2.7), (7, 1.8), (10, 2.2)):
+        extinction[index] += cloud
+    for index in range(12, 15):
+        extinction[index] += 0.05  # the second night is 0.05 mag dimmer, not magnitudes
+
+    result = fit_nightly_extinction_envelope(airmass, extinction, nights)
+
+    assert result.diagnostics.slope == pytest.approx(slope, abs=1e-9)
+    assert result.diagnostics.discarded_pair_count > 0
+    assert result.diagnostics.night_offsets["night-b"] - result.diagnostics.night_offsets["night-a"] == pytest.approx(0.05, abs=1e-9)
+    clear = [value for index, value in enumerate(result.residuals) if index not in {3, 7, 10}]
+    assert max(abs(value or 0.0) for value in clear) < 1e-9
+    assert result.residuals[3] == pytest.approx(2.7, abs=1e-9)
+
+
+def test_a_cloud_dominated_slope_is_clamped_and_marks_the_fit_unreliable() -> None:
+    airmass = [1.30, 1.36, 1.42, 1.48, 1.30, 1.36, 1.42, 1.48]
+    nights = ["night-a"] * 4 + ["night-b"] * 4
+    # Every same-night pair rises by 0.09 mag per 0.06 airmass: 1.5 mag/airmass,
+    # inside the pair bound but outside the physical range.
+    extinction = [0.05 + 1.5 * (value - 1.3) for value in airmass]
+
+    result = fit_nightly_extinction_envelope(airmass, extinction, nights)
+
+    assert result.diagnostics.unbounded_slope == pytest.approx(1.5, abs=1e-9)
+    assert result.diagnostics.slope == pytest.approx(1.0, abs=1e-9)
+    assert result.diagnostics.reliable is False
+    assert "SLOPE_OUT_OF_RANGE" in result.diagnostics.reliability_reasons

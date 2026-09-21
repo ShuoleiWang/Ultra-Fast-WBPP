@@ -391,7 +391,33 @@ def _kill_lingering_posix_group(process: subprocess.Popen[Any]) -> None:
         pass
 
 
-def _restricted_environment(overrides: Mapping[str, str] | None) -> dict[str, str]:
+def _solver_search_path(executable: str, current: str | None) -> str:
+    """``PATH`` for the solver process: the solver's own directories first.
+
+    ``solve-field`` runs its helpers (``image2pnm``, netpbm's ``pnmfile``,
+    ``astrometry-engine``) through ``/bin/sh`` and looks them up on ``PATH``.
+    A GUI launched from the Finder inherits launchd's minimal ``PATH``
+    without ``/opt/homebrew/bin``, so a solver discovered at a well-known
+    location would still fail with ``pnmfile: command not found`` (exit 255
+    within a second).  Putting the invocation directory and the resolved
+    (symlink target) directory of the executable in front of the inherited
+    ``PATH`` makes the solver process self-sufficient without widening the
+    environment to anything the solver did not come with.
+    """
+
+    directories: list[str] = []
+    path = Path(executable)
+    for candidate in (path.parent, path.resolve().parent):
+        text = str(candidate)
+        if text not in directories:
+            directories.append(text)
+    for entry in (current or "").split(os.pathsep):
+        if entry and entry not in directories:
+            directories.append(entry)
+    return os.pathsep.join(directories)
+
+
+def _restricted_environment(overrides: Mapping[str, str] | None, *, executable: str | None = None) -> dict[str, str]:
     allowed = {
         "PATH",
         "HOME",
@@ -416,6 +442,8 @@ def _restricted_environment(overrides: Mapping[str, str] | None) -> dict[str, st
             if not isinstance(key, str) or not isinstance(value, str) or "\x00" in key + value:
                 raise ValueError("solver environment keys and values must be NUL-free strings")
             environment[key] = value
+    if executable is not None:
+        environment["PATH"] = _solver_search_path(executable, environment.get("PATH"))
     return environment
 
 
@@ -437,7 +465,7 @@ class SolverProcessRuntime:
             raise ValueError("executable_args must be NUL-free strings")
         self.executable = resolved
         self.executable_args = tuple(executable_args)
-        self.environment = _restricted_environment(environment)
+        self.environment = _restricted_environment(environment, executable=resolved)
         configured_log_root = diagnostic_log_root or os.environ.get(
             "OPENASTROFLOW_SOLVER_DIAGNOSTIC_DIR"
         )

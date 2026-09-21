@@ -212,6 +212,10 @@ pub(crate) struct InspectedLightQuality {
     pub confidence: String,
     pub star_count: usize,
     pub summary: String,
+    /// `false` when the quality pass found no transform for the frame: the
+    /// run's registration would fail on it, so it cannot be approved.
+    #[serde(default)]
+    pub registrable: Option<bool>,
     pub preview_data_url: Option<String>,
     pub preview_sha256: Option<String>,
     pub evidence: Vec<InspectedQualityEvidence>,

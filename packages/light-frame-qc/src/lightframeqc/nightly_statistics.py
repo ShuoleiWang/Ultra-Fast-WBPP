@@ -34,6 +34,18 @@ class NightlyExtinctionDiagnostics:
     night_offsets: dict[str, float]
     reliable: bool
     reliability_reasons: tuple[str, ...]
+    discarded_pair_count: int = 0
+    unbounded_slope: float | None = None
+
+
+# Atmospheric extinction is 0.1-0.6 mag per airmass in broadband filters.  A
+# cloud excursion inside a night with a small airmass span produces same-night
+# pair slopes of tens of magnitudes per airmass, and with a few such frames
+# the median of all pairs is pure cloud: every other night then differs by
+# magnitudes from the "clear envelope" of the reference night.  Pairs beyond
+# this bound do not measure the atmosphere and never vote.
+MAXIMUM_PAIR_SLOPE_MAG_PER_AIRMASS = 2.0
+PHYSICAL_SLOPE_RANGE_MAG_PER_AIRMASS = (0.0, 1.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +215,11 @@ def fit_nightly_extinction_envelope(
     median of its clearest 10 percent.  Consequently a short cloud excursion,
     and even a seven-cloud/one-clear bad majority, remains in the residuals.
 
+    Pair slopes beyond ``MAXIMUM_PAIR_SLOPE_MAG_PER_AIRMASS`` are cloud, not
+    atmosphere, and are discarded before the median; a median outside the
+    physical range is clamped to it and marks the fit unreliable
+    (``SLOPE_OUT_OF_RANGE``).
+
     Rows lacking finite airmass, extinction, or night identity receive a
     ``None`` residual.  A fit with fewer than four valid rows, fewer than three
     useful same-night pairs, or insufficient within-night airmass span is
@@ -241,6 +258,7 @@ def fit_nightly_extinction_envelope(
     airmass_span = max(finite_spans) if finite_spans else None
 
     pair_slopes: list[float] = []
+    discarded_pairs = 0
     minimum_pair_span = 0.05
     for indices in by_night.values():
         for left_position, left in enumerate(indices):
@@ -251,14 +269,25 @@ def fit_nightly_extinction_envelope(
                 if abs(delta_airmass) < minimum_pair_span:
                     continue
                 slope = (ext[right] - ext[left]) / delta_airmass
-                if math.isfinite(slope):
-                    pair_slopes.append(float(slope))
+                if not math.isfinite(slope):
+                    continue
+                if abs(slope) > MAXIMUM_PAIR_SLOPE_MAG_PER_AIRMASS:
+                    discarded_pairs += 1
+                    continue
+                pair_slopes.append(float(slope))
 
-    slope = (
+    unbounded_slope = (
         float(np.median(np.asarray(pair_slopes, dtype=np.float64)))
         if pair_slopes
         else None
     )
+    slope = unbounded_slope
+    slope_out_of_range = False
+    if slope is not None:
+        low, high = PHYSICAL_SLOPE_RANGE_MAG_PER_AIRMASS
+        if not low <= slope <= high:
+            slope_out_of_range = True
+            slope = min(max(slope, low), high)
     offsets: dict[str, float] = {}
     residuals: list[float | None] = [None] * len(raw_airmass)
     if slope is not None:
@@ -284,6 +313,8 @@ def fit_nightly_extinction_envelope(
         reasons.append("INSUFFICIENT_WITHIN_NIGHT_AIRMASS_SPAN")
     if slope is None:
         reasons.append("SLOPE_UNRESOLVED")
+    if slope_out_of_range:
+        reasons.append("SLOPE_OUT_OF_RANGE")
 
     diagnostics = NightlyExtinctionDiagnostics(
         total_count=len(raw_airmass),
@@ -296,6 +327,8 @@ def fit_nightly_extinction_envelope(
         night_offsets=offsets,
         reliable=not reasons,
         reliability_reasons=tuple(reasons),
+        discarded_pair_count=discarded_pairs,
+        unbounded_slope=unbounded_slope,
     )
     return NightlyExtinctionFit(tuple(residuals), diagnostics)
 
