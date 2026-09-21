@@ -139,6 +139,10 @@ def inspect_light_quality(
                     "confidence": result.confidence.value,
                     "starCount": result.star_count,
                     "summary": gate.summary,
+                    # A frame without a preflight transform (cloud, no stars)
+                    # fails the run's registration the same way; the GUI must
+                    # not offer to approve it.
+                    "registrable": bool(result.registration.ok),
                     "previewDataUrl": (
                         "data:image/png;base64," + base64.b64encode(preview).decode("ascii")
                         if preview is not None

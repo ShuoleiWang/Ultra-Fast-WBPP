@@ -1050,6 +1050,14 @@ def _apply_review_approvals(
                 "manual approval may admit REVIEW only, never PASS or HARD_FAIL",
                 path=canonical,
             )
+        if not result.registration.ok:
+            # No transform in the quality pass: the registration would fail on
+            # this frame and take the whole run with it.  Refuse now instead.
+            raise E2EError(
+                "REVIEW_APPROVAL_UNREGISTRABLE",
+                "an approved REVIEW frame could not be registered in the quality pass",
+                path=canonical,
+            )
         matched_approvals.add(identity.sha256)
         admitted.add(canonical)
         evidence.append(
@@ -2359,6 +2367,7 @@ def _register_lights(
     allow_projective: bool,
     source_aliases: Mapping[str, Path] | None = None,
     source_sha256_by_path: Mapping[str, str] | None = None,
+    reference_candidates: Sequence[Path] | None = None,
 ) -> _RegistrationProducts:
     try:
         from openastroflow_registration import RegistrationConfig, run_registration
@@ -2383,6 +2392,9 @@ def _register_lights(
             detection=detection,
             registration=selected_registration,
             calibration=calibration_plan,
+            reference_candidates=(
+                [str(path) for path in reference_candidates] if reference_candidates else None
+            ),
             validate_warp=True,
             workers=workers,
         )
@@ -4150,6 +4162,16 @@ def run_e2e(
         _emit(progress, ProgressStage.CALIBRATION, "completed", "calibration masters verified")
 
         _emit(progress, ProgressStage.REGISTRATION, "started", "measuring full-resolution transforms")
+        # A manually admitted REVIEW frame may be integrated, but it never
+        # anchors the registration: a cloud-covered frame scores well on
+        # sharp noise blobs and would leave every real frame unregistered.
+        # The reference comes from the frames that passed the gate on their
+        # own; only when nothing did do the approved frames compete.
+        gate_passed_lights = [
+            path for path in staged_inputs["LIGHT"]
+            if str(registration_source_aliases.get(str(path), path)) not in approved_review_paths
+            and str(path) not in approved_review_paths
+        ]
         registration = _register_lights(
             staged_inputs["LIGHT"],
             calibration_plan,
@@ -4157,6 +4179,7 @@ def run_e2e(
             registration=request.registration_config,
             workers=request.workers,
             allow_projective=True,
+            reference_candidates=gate_passed_lights if gate_passed_lights and len(gate_passed_lights) < len(staged_inputs["LIGHT"]) else None,
             source_aliases=registration_source_aliases,
             source_sha256_by_path={
                 str(path): (

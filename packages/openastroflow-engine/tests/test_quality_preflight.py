@@ -68,6 +68,9 @@ def test_quality_preflight_returns_real_content_bound_frame_gate(tmp_path: Path)
     assert result["frames"][0]["sourceSha256"] == (
         "sha256:" + hashlib.sha256(before).hexdigest()
     )
+    # The synthetic frame has no detectable stars, so even as its own
+    # reference it has no usable transform: the GUI must not offer approval.
+    assert result["frames"][0]["registrable"] is False
     assert result["frames"][0]["disposition"] in {"REVIEW", "HARD_FAIL"}
     assert result["frames"][0]["previewDataUrl"].startswith("data:image/png;base64,")
     assert result["frames"][0]["previewSha256"].startswith("sha256:")

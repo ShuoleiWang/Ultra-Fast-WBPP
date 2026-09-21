@@ -12,15 +12,36 @@ const label = (role: string) => role[0] + role.slice(1).toLowerCase();
 const value = (item: string | number | null | undefined) => item === undefined || item === null || item === "" || item === "UNKNOWN" ? "—" : String(item);
 const filename = (path: string) => path.split(/[\\/]/).pop() ?? path;
 
-function groupAssets(assets: InspectedAsset[]) {
-  const grouped = new Map<string, { key: string; asset: InspectedAsset; paths: string[] }>();
+interface AssetGroup { key: string; asset: InspectedAsset; paths: string[]; exposures: number[]; temperatures: number[]; gains: string[]; offsets: string[]; readoutModes: string[]; dates: string[]; }
+
+const sortedUnique = <T,>(items: T[]) => [...new Set(items)].sort((a, b) => (typeof a === "number" && typeof b === "number" ? a - b : String(a).localeCompare(String(b))));
+/** "300" for one value, "60 / 300" for a few, "60 … 300" for many. */
+const summarize = (values: (string | number)[], separator = " / ") => values.length <= 3 ? values.map(value).join(separator) : `${value(values[0])} … ${value(values[values.length - 1])}`;
+export const temperatureSummary = (temperatures: number[], unrecorded: string) => {
+  if (!temperatures.length) return unrecorded;
+  const low = temperatures[0], high = temperatures[temperatures.length - 1];
+  return Math.abs(high - low) < 0.05 ? `${low.toFixed(1)} °C` : `${low.toFixed(1)} … ${high.toFixed(1)} °C`;
+};
+const dateSummary = (dates: string[]) => dates.length <= 2 ? dates.join(", ") : `${dates[0]} … ${dates[dates.length - 1]}`;
+
+/** One row per channel: the frames of a role, target and filter on the same camera geometry.
+ *  Exposure, temperature, gain/offset and capture dates vary within a channel over a
+ *  multi-night campaign and are shown as ranges instead of splitting the channel. */
+export function groupAssets(assets: InspectedAsset[]): AssetGroup[] {
+  const grouped = new Map<string, AssetGroup>();
   for (const asset of assets) {
-    const key = JSON.stringify([asset.role, asset.target, asset.filter, asset.camera, asset.exposureSeconds, asset.temperatureCelsius, asset.gain, asset.offset, asset.binning, asset.width, asset.height, asset.cfaPattern, asset.readoutMode, asset.observedAt?.slice(0, 10)]);
-    const group = grouped.get(key) ?? { key, asset, paths: [] };
+    const key = JSON.stringify([asset.role, asset.target, asset.filter, asset.camera, asset.binning, asset.width, asset.height, asset.cfaPattern]);
+    const group = grouped.get(key) ?? { key, asset, paths: [], exposures: [], temperatures: [], gains: [], offsets: [], readoutModes: [], dates: [] };
     group.paths.push(asset.path);
+    if (typeof asset.exposureSeconds === "number") group.exposures.push(asset.exposureSeconds);
+    if (typeof asset.temperatureCelsius === "number") group.temperatures.push(asset.temperatureCelsius);
+    group.gains.push(value(asset.gain)); group.offsets.push(value(asset.offset)); group.readoutModes.push(value(asset.readoutMode));
+    if (asset.observedAt) group.dates.push(asset.observedAt.slice(0, 10));
     grouped.set(key, group);
   }
-  return [...grouped.values()].sort((a, b) => ROLES.indexOf(roleFamily(a.asset.role)) - ROLES.indexOf(roleFamily(b.asset.role)) || a.asset.target.localeCompare(b.asset.target) || a.asset.filter.localeCompare(b.asset.filter));
+  return [...grouped.values()]
+    .map((group) => ({ ...group, exposures: sortedUnique(group.exposures), temperatures: sortedUnique(group.temperatures), gains: sortedUnique(group.gains), offsets: sortedUnique(group.offsets), readoutModes: sortedUnique(group.readoutModes), dates: sortedUnique(group.dates) }))
+    .sort((a, b) => ROLES.indexOf(roleFamily(a.asset.role)) - ROLES.indexOf(roleFamily(b.asset.role)) || a.asset.target.localeCompare(b.asset.target) || a.asset.filter.localeCompare(b.asset.filter));
 }
 
 /** The imported frames grouped by acquisition profile, with the manual type hints and confirmations. */
@@ -47,13 +68,13 @@ export function FrameInventory({ workflow, t, tab: controlledTab, setTab: setCon
     </div>
     <div className="tbl-wrap" id="frame-table" role="tabpanel" aria-labelledby={`tab-${tab}`}>
       {visible.length > 0 && <table className="tbl inventory-table"><thead><tr><th className="thumb-cell" /><th>{t("frameType")}</th><th>{t("targetLabel")} / {t("filterLabel")}</th><th className="r">{t("exposureLabel")}</th><th>{t("cameraLabel")} / {t("temperatureLabel")}</th><th>{t("inventoryProfile")}</th><th>{t("captureDates")}</th><th className="r">{t("frames")}</th></tr></thead><tbody>
-        {visible.map(({ key, asset, paths }) => <tr key={key} aria-selected={expanded === key}>
+        {visible.map(({ key, asset, paths, exposures, temperatures, gains, offsets, readoutModes, dates }) => <tr key={key} aria-selected={expanded === key}>
           <td className="thumb-cell"><FrameTile filter={roleFamily(asset.role) === "LIGHT" || roleFamily(asset.role) === "FLAT" ? asset.filter : roleFamily(asset.role)[0]} /></td>
           <td><span className={`kind kind-${roleFamily(asset.role).toLowerCase()}`}>{label(roleFamily(asset.role))}</span><small>{asset.role.startsWith("MASTER_") ? t("existingMaster") : t("rawInput")}</small></td>
-          <td><strong>{value(asset.target)}</strong><small>{value(asset.filter)}</small></td><td className="r tnum">{value(asset.exposureSeconds)} s</td>
-          <td><strong>{value(asset.camera)}</strong><small>{asset.temperatureCelsius === null || asset.temperatureCelsius === undefined ? t("temperatureUnrecorded") : `${value(asset.temperatureCelsius)} °C`}</small></td>
-          <td><span className="tnum">{asset.binning.join("×")} · {asset.width}×{asset.height}</span><small>G {value(asset.gain)} · O {value(asset.offset)} · {value(asset.readoutMode)}</small></td>
-          <td className="tnum">{value(asset.observedAt?.slice(0, 10))}</td>
+          <td><strong>{value(asset.target)}</strong><small>{value(asset.filter)}</small></td><td className="r tnum">{exposures.length ? summarize(exposures) : "—"} s</td>
+          <td><strong>{value(asset.camera)}</strong><small>{temperatureSummary(temperatures, t("temperatureUnrecorded"))}</small></td>
+          <td><span className="tnum">{asset.binning.join("×")} · {asset.width}×{asset.height}</span><small>G {summarize(gains)} · O {summarize(offsets)} · {summarize(readoutModes)}</small></td>
+          <td className="tnum">{dates.length ? dateSummary(dates) : "—"}{dates.length > 1 && <small>{t("nightCount", { count: dates.length })}</small>}</td>
           <td className="r"><button type="button" className="btn small" aria-expanded={expanded === key} aria-label={t("showGroupFiles", { count: paths.length, type: label(roleFamily(asset.role)), target: value(asset.target), filter: value(asset.filter) })} onClick={() => setExpanded(expanded === key ? undefined : key)}>{paths.length}<span className="chev">{expanded === key ? "▾" : "▸"}</span></button></td>
         </tr>)}
       </tbody></table>}

@@ -665,8 +665,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stdout.write(_json(result.serializable()) + "\n")
             return 0 if result.success else 3
         if args.command == "run-project":
-            from .e2e import ProgressEvent, bind_review_approval_selections
-            from .project_e2e import classify_project_layout, run_project_e2e
+            from .e2e import ProgressEvent
+            from .project_e2e import run_project_e2e
             from .runtime import RuntimeConfigurationError, prepare_project_execution
 
             review_selections: Sequence[Mapping[str, str]] = ()
@@ -712,17 +712,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 inventory, recipe, output, **kwargs
             )
             if review_selections:
-                layout = classify_project_layout(inventory)
-                if len(layout.panels) != 1:
-                    raise RuntimeConfigurationError(
-                        "PROJECT_REVIEW_APPROVAL_SCOPE_UNSUPPORTED",
-                        "GUI REVIEW approval is currently limited to one target/filter panel",
-                    )
+                # Bound per target run inside run_project_e2e, so projects
+                # with several targets or filters admit reviewed Lights too.
                 request = replace(
                     request,
-                    e2e_request=bind_review_approval_selections(
-                        request.e2e_request, review_selections
-                    ),
+                    review_selections=tuple(dict(selection) for selection in review_selections),
                 )
 
             def project_progress(event: ProgressEvent) -> None:

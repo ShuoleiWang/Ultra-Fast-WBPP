@@ -499,6 +499,16 @@ typedef struct OafNativeDebayerRequestV1
    size_t plane_count;
 } OafNativeDebayerRequestV1;
 
+// Copies the deterministic Lanczos-3 weight table (node_count rows of six
+// Float64 normalized tap weights; see Lanczos3Table.h) into `values`, which
+// holds `capacity` doubles; writes the row count to `node_count`.
+OAF_NATIVE_API int oaf_native_lanczos3_table_v1(
+   double* values,
+   size_t capacity,
+   uint32_t* node_count,
+   char* error_message,
+   size_t error_message_capacity );
+
 // Bilinear demosaic of a Bayer mosaic (see PortableKernels.h DebayerBilinear).
 OAF_NATIVE_API int oaf_native_cpu_debayer_bilinear_v1(
    const OafNativeDebayerRequestV1* request,

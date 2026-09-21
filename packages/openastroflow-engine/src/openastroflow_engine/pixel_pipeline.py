@@ -89,13 +89,15 @@ from .drizzle_native import DrizzleFrame, DrizzleGroupInputs
 PIPELINE_VERSION = "portable-pixel-pipeline-v1"
 OUTPUT_STATE = "UNSOLVED_WORKING"
 REGISTRATION_RESAMPLERS = frozenset({"bilinear", "lanczos-3-clamped"})
-# v2: tap weights are evaluated through exact trigonometric identities from
-# three transcendental calls per axis instead of twelve; the interpolation
-# contract is unchanged and results differ from v1 by at most one Float32 ulp.
+# v3: tap weights come from the deterministic 2048-interval table
+# (`lanczos_table.py`, cubic Lagrange interpolation of nodes computed by the
+# module's own series) instead of the host's libm; the interpolation contract
+# is unchanged, the weights differ from the exact ones by less than 1e-12
+# before Float32 rounding, and the result no longer depends on the C library.
 LANCZOS3_REGISTRATION_ALGORITHM = (
-    "normalized-lanczos-3-domain-union-support-clamp-v2"
+    "normalized-lanczos-3-domain-union-support-clamp-v3-table2048"
 )
-NUMPY_WARP_KERNEL_ID = "numpy-lanczos3-warp-v2"
+NUMPY_WARP_KERNEL_ID = "numpy-lanczos3-warp-v3-table2048"
 # Fused calibrate+register working set per Light: the Float32 result, one
 # master temporary during subtraction/division, and masks/temporaries.
 FUSED_LIGHT_BYTES_PER_PIXEL = 12
@@ -3555,6 +3557,7 @@ def _run_portable_pipeline_fits(
     metal_unavailable_reason: str | None = None
     artifacts: list[dict[str, Any]] = []
     stage_statistics: dict[str, Any] = {}
+    prefetch_pool: ThreadPoolExecutor | None = None
     try:
         masters_dir = staging / "masters"
         calibrated_dir = staging / "calibrated"
@@ -4308,11 +4311,77 @@ def _run_portable_pipeline_fits(
             "autoCrop": round(time.perf_counter() - crop_started, 3),
             "groups": {},
         }
-        for filter_name, paths in sorted(output_groups.items()):
+        # The global normalization of a group is a pure function of its
+        # registered frames, hints and transforms, so the next group's fit
+        # runs on one helper thread while this group integrates: the fit is
+        # mostly Python-level work whose gaps and the integration's I/O and
+        # Python phases overlap.  The coefficients are identical either way.
+        ordered_groups = sorted(output_groups.items())
+        prefetched: dict[str, Any] = {}
+        pipeline_normalization = (
+            parameters.global_normalization.enabled
+            and not parameters.local_normalization.enabled
+            and len(ordered_groups) > 1
+        )
+
+        # A fit that overlaps another group's integration gets a third of the
+        # cores: the integration's kernels keep the rest, and the fit's
+        # Python-level work does not scale past a few threads anyway.
+        prefetch_workers = max(2, execution_tuning.cpu_workers // 3)
+
+        def _global_normalization_job(
+            group_name: str, group_paths: list[Path], fit_workers: int
+        ) -> Callable[[], Any]:
+            group_registered = [registered[(path, group_name)] for path in group_paths]
+            group_reference_index, _selection = _normalization_reference_index(
+                group_paths, resolved_stellar_scale_hints, resolved_quality_weights
+            )
+            hints: list[StellarScaleHint | None] = []
+            expected = group_paths[group_reference_index]
+            registered_reference_path = group_registered[group_reference_index]
+            for source_path, registered_path in zip(group_paths, group_registered, strict=True):
+                hint = resolved_stellar_scale_hints[source_path]
+                if hint is None:
+                    hints.append(None)
+                    continue
+                hinted_reference = Path(hint.reference_path).expanduser().resolve(strict=True)
+                if hinted_reference != expected:
+                    raise CalibrationError(
+                        "STELLAR_SCALE_HINT_REFERENCE_MISMATCH",
+                        "stellar scale reference differs from the integration-quality reference",
+                        path=str(source_path),
+                    )
+                hints.append(
+                    replace(hint, source_path=str(registered_path), reference_path=str(registered_reference_path))
+                )
+            transforms = [resolved_transforms[path].validated_matrix() for path in group_paths]
+
+            def run() -> tuple[Any, list[StellarScaleHint | None], float]:
+                started = time.perf_counter()
+                result = fit_registered_group_global_normalization(
+                    [str(path) for path in group_registered],
+                    reference_index=group_reference_index,
+                    parameters=parameters.global_normalization,
+                    stellar_scale_hints=hints,
+                    workers=fit_workers,
+                    transforms=transforms,
+                )
+                return result, hints, time.perf_counter() - started
+
+            return run
+
+        for group_position, (filter_name, paths) in enumerate(ordered_groups):
             # ``filter_name`` names the output group (a filter, or a colour
             # channel of a Bayer filter); ``source_filter`` is the Lights' own
             # filter, which owns the flats, exposures and numeric domain.
             source_filter = group_filter[filter_name]
+            if pipeline_normalization and group_position + 1 < len(ordered_groups):
+                next_name, next_paths = ordered_groups[group_position + 1]
+                if prefetch_pool is None:
+                    prefetch_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="oaf-normalize-next")
+                prefetched[next_name] = prefetch_pool.submit(
+                    _global_normalization_job(next_name, next_paths, prefetch_workers)
+                )
             cfa_channel = group_channel[filter_name]
             cfa_pattern = group_cfa_pattern[filter_name]
             group_cfa_metadata = (
@@ -4397,43 +4466,19 @@ def _run_portable_pipeline_fits(
                 }
                 normalization_method = "LOCAL_GRID"
             elif parameters.global_normalization.enabled:
-                group_hints: list[StellarScaleHint | None] = []
-                expected_reference = paths[reference_index]
-                registered_reference = registered_paths[reference_index]
-                for source_path, registered_path in zip(
-                    paths, registered_paths, strict=True
-                ):
-                    hint = resolved_stellar_scale_hints[source_path]
-                    if hint is None:
-                        group_hints.append(None)
-                        continue
-                    hinted_reference = Path(hint.reference_path).expanduser().resolve(
-                        strict=True
-                    )
-                    if hinted_reference != expected_reference:
-                        raise CalibrationError(
-                            "STELLAR_SCALE_HINT_REFERENCE_MISMATCH",
-                            "stellar scale reference differs from the integration-quality reference",
-                            path=str(source_path),
-                        )
-                    group_hints.append(
-                        replace(
-                            hint,
-                            source_path=str(registered_path),
-                            reference_path=str(registered_reference),
-                        )
-                    )
                 normalization_started = time.perf_counter()
-                global_result = fit_registered_group_global_normalization(
-                    [str(path) for path in registered_paths],
-                    reference_index=reference_index,
-                    parameters=parameters.global_normalization,
-                    stellar_scale_hints=group_hints,
-                    workers=execution_tuning.cpu_workers,
-                    transforms=[
-                        resolved_transforms[path].validated_matrix() for path in paths
-                    ],
-                )
+                future = prefetched.pop(filter_name, None)
+                if future is not None:
+                    global_result, group_hints, fit_seconds = future.result()
+                    normalization_prefetched = True
+                else:
+                    global_result, group_hints, fit_seconds = _global_normalization_job(
+                        filter_name, list(paths), execution_tuning.cpu_workers
+                    )()
+                    normalization_prefetched = False
+                group_timing["normalizationFit"] = fit_seconds
+                group_timing["normalizationWait"] = time.perf_counter() - normalization_started
+                group_timing["normalizationPrefetched"] = float(normalization_prefetched)
                 integration_expressions = [
                     FrameExpression(
                         str(path),
@@ -4787,6 +4832,8 @@ def _run_portable_pipeline_fits(
                 "mapStatistics": map_statistics,
             }
 
+        if prefetch_pool is not None:
+            prefetch_pool.shutdown(wait=True)
         shutil.rmtree(work_dir)
         _verify_source_identities(source_identities)
         if _trusted_generated_calibration is not None:
@@ -4929,6 +4976,10 @@ def _run_portable_pipeline_fits(
             },
         )
     finally:
+        if prefetch_pool is not None:
+            # A fit still running for a later group must finish before the
+            # staging tree it reads is removed.
+            prefetch_pool.shutdown(wait=True, cancel_futures=True)
         if metal_executor is not None:
             metal_executor.close()
         if not published and staging.exists():

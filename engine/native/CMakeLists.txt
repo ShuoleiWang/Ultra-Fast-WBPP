@@ -18,6 +18,7 @@ add_library(openastroflow_native_math STATIC
   src/DebayerKernel.cpp
   src/DrizzleKernel.cpp
   src/ImageTile.cpp
+  src/Lanczos3Table.cpp
   src/PortableKernels.cpp
 )
 add_library(OpenAstroFlow::NativeMath ALIAS openastroflow_native_math)
@@ -241,6 +242,8 @@ if(OAF_BUILD_TESTS)
   target_link_libraries(openastroflow_portable_kernel_tests
     PRIVATE OpenAstroFlow::NativeMath OpenAstroFlow::NativeAbi
   )
+  # The weight-table test reads the internal Lanczos3Table.h.
+  target_include_directories(openastroflow_portable_kernel_tests PRIVATE src)
   target_compile_features(openastroflow_portable_kernel_tests PRIVATE cxx_std_20)
   if(NOT MSVC)
     target_compile_options(openastroflow_portable_kernel_tests PRIVATE

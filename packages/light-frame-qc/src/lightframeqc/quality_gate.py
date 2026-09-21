@@ -460,6 +460,7 @@ def evaluate_quality_gate(
             for measurement in cohort_measurements
         ]
         source_baselines = night_robust_baseline(source_values, nights, "high")
+        night_by_path = {result.path: night for result, night in zip(cohort_results, nights, strict=True)}
         hfr_baselines = night_robust_baseline(hfr_values, nights, "low")
         fwhm_baselines = night_robust_baseline(fwhm_values, nights, "low")
         night_hfr = _night_low_envelopes(hfr_values, nights)
@@ -764,8 +765,12 @@ def evaluate_quality_gate(
                         ),
                     )
 
+            # Night offsets are only as good as the slope they were corrected
+            # with: an unreliable fit (small airmass span, cloud-dominated or
+            # clamped slope) does not get to call a whole night dim.
             if (
-                night_id is not None
+                extinction_fit.diagnostics.reliable
+                and night_id is not None
                 and best_night_offset is not None
                 and night_id in extinction_fit.diagnostics.night_offsets
             ):
@@ -821,7 +826,15 @@ def evaluate_quality_gate(
             # frame, so those are suppressed when the extinction model explains
             # the global change.
             retention_values = [_finite(result.features.star_completeness)]
-            if not airmass_explained:
+            # The raw detection count follows the sky brightness (moon,
+            # twilight, haze) as much as the transparency: against a reference
+            # taken on a darker night it measures the night, not the frame,
+            # and a clear moonlit night would be reviewed frame by frame.  The
+            # cross-frame count is therefore compared only with a same-night
+            # reference; the night's own high envelope below covers the rest.
+            reference_night = night_by_path.get(result.reference_path) if result.reference_path else None
+            same_night_reference = night_id is not None and reference_night == night_id
+            if not airmass_explained and same_night_reference:
                 retention_values.append(
                     _finite(result.features.detected_source_ratio)
                 )

@@ -78,6 +78,7 @@ from .e2e import (
     _solution_geometry,
     _stage_e2e_xisf_inputs,
     _verify_sources,
+    bind_review_approval_selections,
     run_e2e,
 )
 from .models import AssetRole, AssetStatus, FrameAsset, ProjectInventory
@@ -301,6 +302,11 @@ class ProjectE2ERequest:
     maximum_seam_normalized_mad: float = 0.25
     minimum_channel_alignment_coverage: float = 0.98
     channel_wcs_tolerance_pixels: float = 0.05
+    # GUI/CLI REVIEW admissions as the reviewer made them: the preflight
+    # Light digest and the gate-policy digest.  They are bound into full
+    # approvals per target run, against that run's own request, so a project
+    # with several targets or filters can admit reviewed frames too.
+    review_selections: tuple[Mapping[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -677,8 +683,27 @@ def _validate_request(request: ProjectE2ERequest) -> tuple[Path, Path, ProjectLa
     if request.e2e_request.review_approvals and len(layout.panels) != 1:
         raise ProjectE2EError(
             "PROJECT_REVIEW_APPROVAL_SCOPE_UNSUPPORTED",
-            "manual REVIEW approvals are currently supported only when the project contains one target/filter panel",
+            "pre-bound REVIEW approvals are supported only when the project contains one target/filter panel; pass review selections instead",
         )
+    if request.e2e_request.review_approvals and request.review_selections:
+        raise ProjectE2EError(
+            "PROJECT_REVIEW_APPROVAL_SCOPE_UNSUPPORTED",
+            "a project request carries either pre-bound approvals or review selections, not both",
+        )
+    digest_pattern = re.compile(r"^sha256:[0-9a-f]{64}$")
+    seen_selection_digests: set[str] = set()
+    for position, selection in enumerate(request.review_selections):
+        if (
+            not isinstance(selection, Mapping)
+            or set(selection) != {"sourceSha256", "gatePolicyDigest"}
+            or any(not isinstance(value, str) or digest_pattern.fullmatch(value) is None for value in selection.values())
+            or selection["sourceSha256"] in seen_selection_digests
+        ):
+            raise ProjectE2EError(
+                "REVIEW_SELECTION_INVALID",
+                f"review selection {position} must carry unique lowercase sourceSha256/gatePolicyDigest values",
+            )
+        seen_selection_digests.add(selection["sourceSha256"])
     numeric = {
         "minimum_mosaic_covered_fraction": request.minimum_mosaic_covered_fraction,
         "minimum_pair_overlap_fraction": request.minimum_pair_overlap_fraction,
@@ -1470,6 +1495,21 @@ def run_project_e2e(
     sources = _all_sources(request.e2e_request)
     if any(Path(item.path) == output or output in Path(item.path).parents for item in sources):
         raise ProjectE2EError("OUTPUT_ALIASES_SOURCE", "output cannot contain or alias a source")
+    # Every REVIEW selection must name a Light of exactly one target run; a
+    # stale digest from another data set is refused before any work starts.
+    run_digests = {
+        group.target_key: {_sha256(Path(path).resolve(strict=True)) for path in group.light_files}
+        for group, _panels in layout.target_runs
+    }
+    unmatched = sorted(
+        digest for digest in {selection["sourceSha256"] for selection in request.review_selections}
+        if sum(digest in digests for digests in run_digests.values()) != 1
+    )
+    if unmatched:
+        raise ProjectE2EError(
+            "REVIEW_APPROVAL_SOURCE_AMBIGUOUS",
+            "review selections must identify exactly one current Light: " + ", ".join(unmatched),
+        )
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", suffix=".project-staging", dir=output.parent))
     # The published directory holds only the final channels, ``previews`` and
     # ``receipt.json`` at its top level; every intermediate stage lives under
@@ -1529,7 +1569,7 @@ def run_project_e2e(
             panel_progress(ProgressEvent(ProgressStage.INVENTORY, "started",
                                          message=f"target {group.target} ({group.filter_name})"))
             sub_output = runs_root / _safe_token(group.target_key)
-            panel_digests = {_sha256(Path(path).resolve(strict=True)) for path in group.light_files}
+            panel_digests = run_digests[group.target_key]
             if direct_approved_panel:
                 sub_request = replace(
                     request.e2e_request,
@@ -1562,6 +1602,15 @@ def run_project_e2e(
                     review_approvals=(),
                     pipeline_parameters=panel_pipeline_parameters,
                 )
+                run_selections = [
+                    selection for selection in request.review_selections
+                    if selection["sourceSha256"] in panel_digests
+                ]
+                if run_selections:
+                    # Bound against this run's own request: its Lights, the
+                    # shared masters it will use, the gate policy and the
+                    # pipeline parameters, exactly what run_e2e re-verifies.
+                    sub_request = bind_review_approval_selections(sub_request, run_selections)
             sub_result = panel_runner(
                 sub_request,
                 solver_backends=solver_backends,

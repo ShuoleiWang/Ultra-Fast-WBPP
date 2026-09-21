@@ -229,6 +229,50 @@ def test_moderate_uniform_night_shift_without_other_anomaly_passes() -> None:
     )
 
 
+def test_moonlit_second_night_with_fewer_faint_detections_is_not_reviewed() -> None:
+    """A clear night under a bright moon detects fewer faint sources than the
+    dark reference night, although its transparency and its bright-star
+    completeness are normal.  The raw count against the other night's
+    reference must not review the whole night (NGC 6822, 2026-08-20)."""
+
+    results, measurements = _cohort(16)
+    for result in results:
+        # No usable extinction model (small airmass span in real campaigns), so
+        # nothing "explains" the count away: the same-night rule has to.
+        result.metadata.airmass = None
+        result.features.transparency_ratio = 1.0
+    for index in range(8, 16):
+        results[index].metadata.observed_at += timedelta(days=3)
+        results[index].features.transparency_ratio = 0.92
+        results[index].features.detected_source_ratio = 0.52
+        results[index].features.star_completeness = 0.95
+        measurements[index].detected_source_count = 52
+        measurements[index].image_median = 3_000.0
+
+    evaluate_quality_gate(results, measurements)
+
+    assert all(
+        result.quality_gate is not None
+        and result.quality_gate.disposition is GateDisposition.PASS
+        and "GATE_SOURCE_RETENTION_REVIEW" not in _codes(result)
+        for result in results[8:]
+    ), [(result.quality_gate.disposition, sorted(_codes(result))) for result in results[8:]]
+
+
+def test_same_night_detection_drop_is_still_reviewed() -> None:
+    results, measurements = _cohort(8)
+    for result in results:
+        result.metadata.airmass = None
+        result.features.transparency_ratio = 1.0
+    results[5].features.detected_source_ratio = 0.55
+    measurements[5].detected_source_count = 55
+
+    evaluate_quality_gate(results, measurements)
+
+    assert results[5].quality_gate is not None
+    assert "GATE_SOURCE_RETENTION_REVIEW" in _codes(results[5])
+
+
 def test_uniformly_defocused_second_night_is_reviewed_against_cohort_best() -> None:
     results, measurements = _cohort(16)
     for index in range(8, 16):

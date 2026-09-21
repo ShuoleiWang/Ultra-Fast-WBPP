@@ -37,7 +37,7 @@ from numpy.typing import NDArray
 
 NATIVE_ABI_VERSION = 1
 DISABLE_ENVIRONMENT_VARIABLE = "OPENASTROFLOW_DISABLE_NATIVE_KERNELS"
-WARP_KERNEL_ID = "native-cpu-lanczos3-warp-v2"
+WARP_KERNEL_ID = "native-cpu-lanczos3-warp-v3-table2048"
 MAD_KERNEL_ID = "native-cpu-mad-rejection-v2"
 MEAN_KERNEL_ID = "native-cpu-masked-mean-v1"
 TILE_OFFSET_KERNEL_ID = "native-cpu-tile-offsets-v1"
@@ -372,6 +372,7 @@ _REQUIRED_SYMBOLS = (
     "oaf_native_cpu_radon_peaks_v1",
     "oaf_native_cpu_drizzle_v1",
     "oaf_native_cpu_debayer_bilinear_v1",
+    "oaf_native_lanczos3_table_v1",
     "oaf_native_default_kernel_threads_v1",
 )
 
@@ -902,6 +903,31 @@ class NativeKernels:
                 )
             )
         return levels
+
+    def lanczos3_table(self) -> NDArray[np.float64]:
+        """The native library's deterministic Lanczos-3 weight table,
+        ``(nodes, 6)`` Float64, for the identity test against the Python
+        reference ``lanczos_table.node_table``."""
+
+        from .lanczos_table import TABLE_NODES
+
+        values = np.empty((TABLE_NODES, 6), dtype=np.float64)
+        count = ctypes.c_uint32(0)
+        error = ctypes.create_string_buffer(_ERROR_BYTES)
+        status = int(
+            self._library.oaf_native_lanczos3_table_v1(
+                values.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+                values.size,
+                ctypes.byref(count),
+                error,
+                ctypes.sizeof(error),
+            )
+        )
+        if status != 0:
+            self._raise(error, status, "native Lanczos-3 table")
+        if int(count.value) != TABLE_NODES:
+            raise NativeKernelError(f"native Lanczos-3 table has {count.value} nodes, expected {TABLE_NODES}")
+        return values
 
     def debayer_bilinear(
         self,

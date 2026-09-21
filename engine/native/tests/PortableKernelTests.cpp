@@ -1,5 +1,6 @@
 #include "openastroflow/PortableKernels.h"
 #include "openastroflow/c_api.h"
+#include "Lanczos3Table.h"
 
 #include <algorithm>
 #include <array>
@@ -1149,6 +1150,60 @@ void TestDebayerBilinearMatchesTheReferenceRules()
                                          "debayer: pattern channels must be 0..2" );
 }
 
+void TestLanczos3TableIsDeterministicAndAccurate()
+{
+   using namespace openastroflow::native::detail;
+   // The series agrees with libm to a few ulps and is exact at integers.
+   for ( int i = -40; i <= 40; ++i )
+   {
+      const double v = static_cast<double>( i )*0.1;
+      Require( std::fabs( DeterministicSinPi( v ) - std::sin( 3.141592653589793*v ) ) < 4.0e-15,
+               "lanczos table: deterministic sin(pi v) matches libm" );
+   }
+   Require( DeterministicSinPi( 3.0 ) == 0.0 && DeterministicSinPi( -2.0 ) == 0.0,
+            "lanczos table: sin(pi n) is exactly zero" );
+   const double* table = Lanczos3TableNodeValues();
+   // Row 1 is f = 0: the centre tap alone; row N+1 is f = 1: the next tap.
+   Require( table[6 + 2] == 1.0 && table[6 + 0] == 0.0 && table[6 + 1] == 0.0 && table[6 + 3] == 0.0,
+            "lanczos table: f = 0 selects the centre tap exactly" );
+   Require( table[(Lanczos3TableIntervals + 1)*6 + 3] == 1.0,
+            "lanczos table: f = 1 selects the next tap exactly" );
+   for ( std::uint32_t node = 0; node < Lanczos3TableNodes; ++node )
+   {
+      double total = 0.0;
+      for ( int tap = 0; tap < 6; ++tap )
+         total += table[node*6 + tap];
+      Require( std::fabs( total - 1.0 ) < 1.0e-15, "lanczos table: every node is normalized" );
+   }
+   // Interpolated weights against the exact sinc product, far below Float32.
+   float weights[6];
+   for ( int i = 0; i < 2000; ++i )
+   {
+      const double f = (static_cast<double>( i ) + 0.37)/2000.0;
+      Lanczos3TableWeights( f, weights );
+      double exact[6];
+      double total = 0.0;
+      for ( int tap = 0; tap < 6; ++tap )
+      {
+         const double d = f - static_cast<double>( tap - 2 );
+         const double x = 3.141592653589793*d;
+         exact[tap] = (std::sin( x )/x)*(std::sin( x/3.0 )/(x/3.0));
+         total += exact[tap];
+      }
+      float sum = 0.0F;
+      for ( int tap = 0; tap < 6; ++tap )
+      {
+         Require( std::fabs( static_cast<double>( weights[tap] ) - exact[tap]/total ) < 1.0e-7,
+                  "lanczos table: interpolated weights match the exact weights within Float32" );
+         sum += weights[tap];
+      }
+      Require( std::fabs( sum - 1.0F ) < 4.0e-7F, "lanczos table: weights sum to one" );
+   }
+   Lanczos3TableWeights( 0.0, weights );
+   Require( weights[2] == 1.0F && weights[0] == 0.0F && weights[5] == 0.0F,
+            "lanczos table: a zero fraction is an exact copy" );
+}
+
 // Dynamic chunking: results of every kernel must not depend on how the
 // range is split among threads. Row/pixel counts that are not multiples
 // of the chunk grains exercise the last, partial chunk on several threads.
@@ -1258,6 +1313,7 @@ int main()
       TestCAbiRoundTrip();
       TestDrizzleBandDropsExactAreasAndIsBandAndThreadInvariant();
       TestDebayerBilinearMatchesTheReferenceRules();
+      TestLanczos3TableIsDeterministicAndAccurate();
       TestDynamicChunkingIsThreadAndGrainInvariant();
       std::cout << "OpenAstroFlowPortableKernelTests passed\n";
       return 0;

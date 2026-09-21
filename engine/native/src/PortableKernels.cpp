@@ -1,4 +1,5 @@
 #include "openastroflow/PortableKernels.h"
+#include "Lanczos3Table.h"
 #include "ParallelRange.h"
 
 #include <algorithm>
@@ -19,9 +20,6 @@ using detail::ParallelRange;
 namespace
 {
 
-// np.pi as stored by NumPy: the nearest Float64 to pi.
-constexpr double Pi = 3.141592653589793;
-
 std::size_t CheckedMultiply( std::size_t left,
                              std::size_t right,
                              const char* role )
@@ -38,57 +36,13 @@ constexpr std::size_t RejectionPixelGrain = 4096;
 constexpr std::size_t MeanPixelGrain = 8192;
 constexpr std::size_t TileGrain = 1;
 
-// Lanczos-3 tap constants for offsets k = -2..3 (see calibration.py):
-//   sin(pi(f-k))   = (-1)^k sin(pi f)
-//   sin(pi(f-k)/3) = sin(pi f/3) cos(k pi/3) - cos(pi f/3) sin(k pi/3)
-constexpr double Sqrt3Half = 0.8660254037844386;
-constexpr double TapSigns[6] = { 1.0, -1.0, 1.0, -1.0, 1.0, -1.0 };
-constexpr double TapCosines[6] = { -0.5, 0.5, 1.0, 0.5, -0.5, -1.0 };
-constexpr double TapSines[6] =
-   { -Sqrt3Half, -Sqrt3Half, 0.0, Sqrt3Half, Sqrt3Half, 0.0 };
-
-// Reproduces _sample_lanczos3_clamped_from's weight evaluation: three
-// Float64 transcendental calls per axis feed all six sinc products through
-// exact identities, each raw weight is stored as Float32, and the normalized
-// weight is Float32 of the Float64 quotient by the Float64 tap total.
+// Lanczos-3 tap weights come from the deterministic table (Lanczos3Table.h):
+// the same values on every platform and library version, and the same
+// values the Python reference computes.  Kept as a thin wrapper so the warp
+// loop reads as before.
 void EvaluateLanczos3Weights( double fraction, float weights[6] )
 {
-   double total = 0.0;
-   float stored[6];
-   const double primarySine = std::sin( Pi*fraction );
-   const double reduced = (Pi*fraction)/3.0;
-   const double reducedSine = std::sin( reduced );
-   const double reducedCosine = std::cos( reduced );
-   for ( int tap = 0; tap < 6; ++tap )
-   {
-      const double distance = fraction - static_cast<double>( tap - 2 );
-      const double absolute = std::fabs( distance );
-      double weight = 0.0;
-      const bool atOrigin = absolute <= 1.0e-14;
-      if ( atOrigin )
-         weight = 1.0;
-      else if ( absolute < 3.0 )
-      {
-         const double phase = Pi*distance;
-         const double primary = (TapSigns[tap]*primarySine)/phase;
-         const double left = reducedSine*TapCosines[tap];
-         const double right = reducedCosine*TapSines[tap];
-         const double secondary = (left - right)/(phase/3.0);
-         weight = primary*secondary;
-      }
-      // Exact integer offsets other than zero are mathematical zeros.
-      if ( absolute > 1.0e-14
-        && std::fabs( distance - std::nearbyint( distance ) ) <= 1.0e-14 )
-         weight = 0.0;
-      total += weight;
-      stored[tap] = static_cast<float>( weight );
-   }
-   if ( !std::isfinite( total ) || std::fabs( total ) < 1.0e-12 )
-      throw std::runtime_error(
-         "Lanczos-3 weight normalization is singular" );
-   for ( int tap = 0; tap < 6; ++tap )
-      weights[tap] = static_cast<float>(
-         static_cast<double>( stored[tap] )/total );
+   detail::Lanczos3TableWeights( fraction, weights );
 }
 
 // np.nanmedian over the finite values of one pixel: the middle sorted value
