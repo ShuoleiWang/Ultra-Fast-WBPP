@@ -43,7 +43,7 @@ import numpy as np
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
-for relative in ("packages/openastroflow-engine/src", "packages/light-frame-qc/src", "engine/native/python"):
+for relative in ("packages/openastroflow-engine/src", "packages/light-frame-qc/src", "packages/openastroflow-registration"):
     candidate = REPOSITORY / relative
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
@@ -211,13 +211,6 @@ def _transforms(paths: list[Path]) -> dict[str, AffineTransform]:
     return result
 
 
-def _timed(function, repeats: int) -> list[float]:
-    samples = []
-    for _ in range(repeats):
-        started = time.perf_counter()
-        function()
-        samples.append(time.perf_counter() - started)
-    return samples
 
 
 def _with_native(enabled: bool):

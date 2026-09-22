@@ -25,7 +25,7 @@ launcher = spec_dir / "launcher.py"
 search_paths = [
     repo_root / "packages" / "openastroflow-engine" / "src",
     repo_root / "packages" / "light-frame-qc" / "src",
-    repo_root / "engine" / "native" / "python",
+    repo_root / "packages" / "openastroflow-registration" / "src",
 ]
 
 datas = filter_entries(

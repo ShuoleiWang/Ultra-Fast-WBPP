@@ -21,7 +21,7 @@ endif
 
 bootstrap:
 	python3 -m venv .venv
-	.venv/bin/python -m pip install -e './packages/light-frame-qc[test]' -e './engine/native/python[test]' -e './packages/openastroflow-engine[test,all]' -r packaging/worker/requirements-build.txt
+	.venv/bin/python -m pip install -e './packages/light-frame-qc[test]' -e './packages/openastroflow-registration[test]' -e './packages/openastroflow-engine[test,all]' -r packaging/worker/requirements-build.txt
 	.venv/bin/python -m pip check
 	npm --prefix apps/desktop ci
 	$(MAKE) native-build
@@ -37,7 +37,7 @@ test: python-test rust-test frontend-test native-test
 python-test:
 	$(PYTHON) -m pytest -q \
 		packages/light-frame-qc/tests \
-		engine/native/python/tests \
+		packages/openastroflow-registration/tests \
 		packages/openastroflow-engine/tests \
 		tests
 

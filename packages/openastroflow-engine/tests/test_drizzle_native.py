@@ -410,3 +410,10 @@ def test_receipt_verification_rejects_tampered_content(tmp_path: Path) -> None:
     with pytest.raises(DrizzleError) as error:
         verify_drizzle_receipt(path)
     assert error.value.code == "DRIZZLE_RECEIPT_INVALID"
+
+
+def test_drizzle_discovery_does_not_advertise_a_fake_executor():
+    from openastroflow_engine.drizzle import drizzle_backends, DrizzleCapabilityProvider
+    provider = drizzle_backends()[0]
+    assert isinstance(provider, DrizzleCapabilityProvider)
+    assert not hasattr(provider, "drizzle")

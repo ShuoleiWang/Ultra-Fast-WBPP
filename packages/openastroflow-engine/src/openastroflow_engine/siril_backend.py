@@ -39,14 +39,14 @@ from typing import Any, Mapping, Sequence
 from astropy.io import fits
 
 from . import platform as platform_services
-from .astap_backend import (
+from .solvers.process import (
     ExecutableProbe,
     SolverExecutionError,
     SolverProcessRuntime,
-    _FileIdentity,
-    _copy_source_to_stage,
-    _regular_identity,
-    _same_stat,
+    FileIdentity as _FileIdentity,
+    copy_source_to_stage as _copy_source_to_stage,
+    regular_identity as _regular_identity,
+    same_stat as _same_stat,
 )
 from .backends import BackendDescriptor, DeviceKind, StageKind
 from .solver import validate_wcs_header
@@ -153,12 +153,6 @@ def _candidate_path(value: str | os.PathLike[str] | None) -> str | None:
     # Preserve a virtual-environment launcher path; the shared runtime hashes
     # its resolved executable before and after every invocation.
     return str(path.absolute())
-
-
-def _sys_platform() -> str:
-    import sys
-
-    return sys.platform
 
 
 def discover_siril_cli(

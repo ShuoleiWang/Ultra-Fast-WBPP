@@ -3,7 +3,6 @@ export type MasterFrameRole = "MASTER_FLAT" | "MASTER_DARK" | "MASTER_BIAS";
 export type FrameRole = RawFrameRole | MasterFrameRole;
 export type GateDisposition = "PASS" | "REVIEW" | "HARD_FAIL";
 export type WorkflowStep = "import" | "inspect" | "blink" | "run" | "result";
-export type RecipeId = "balanced";
 export type RunStatus = "IDLE" | "RUNNING" | "CANCELLING" | "CANCELLED" | "COMPLETED" | "FAILED";
 export type ProgressState = "queued" | "running" | "finalizing" | "succeeded" | "failed" | "cancelled";
 
@@ -19,7 +18,6 @@ export interface SourceSet {
 }
 
 export interface GateSummary { pass: number; review: number; hardFail: number; }
-export interface Recipe { id: RecipeId; name: string; eyebrow: string; description: string; details: string[]; estimatedScale: string; recommended?: boolean; available: boolean; }
 
 export interface RuntimeCapabilities {
   platform: "macos" | "windows" | "linux" | "browser";
@@ -134,10 +132,12 @@ export type DrizzleScale = 1 | 2 | 3 | 4;
 export type DrizzleKernel = "square" | "circular" | "gaussian" | "point";
 export const DRIZZLE_SCALES: readonly DrizzleScale[] = [1, 2, 3, 4];
 export const DRIZZLE_KERNELS: readonly DrizzleKernel[] = ["square", "circular", "gaussian", "point"];
-export interface ProjectRecipeOptions { balanced: true; drizzleEnabled: boolean; drizzleScale: DrizzleScale; drizzleDropShrink: number; drizzleKernel: DrizzleKernel; localNormalizationEnabled: boolean; solverRequired: true; calibrationWorkflow: "mono-standard-v1"; }
+export interface ProjectRecipeOptions { balanced: true; drizzleEnabled: boolean; drizzleScale: DrizzleScale; drizzleDropShrink: number; drizzleKernel: DrizzleKernel; solverRequired: true; calibrationWorkflow: "mono-standard-v1"; }
 export interface ReviewApprovalSelection { sourceSha256: string; gatePolicyDigest: string; }
 export interface RunSource { sourceId: string; role: FrameRole; paths: string[]; recursive: boolean; }
+export interface BlinkReviewProof { sessionDirectory: string; manifestSha256: string; reviewedSourceSha256s: string[]; confirmedChannelIds: string[]; }
 export interface RunRequest {
+  blinkReview?: BlinkReviewProof;
   sources: RunSource[];
   projectName: string;
   /** Target-derived label that names the output folder (`NGC 7331`); empty falls back to projectName. */
@@ -262,7 +262,7 @@ export interface BlinkFrameScore { log10: number | null; z: number | null; rank:
  * is filled by the desktop loader for the frames inside its transport budget;
  * the others are fetched on demand through `loadBlinkPreview`.
  */
-export interface BlinkFramePreviews { filmstrip: string; zoom: string; coverage: number; filmstripDataUrl?: string | null; zoomDataUrl?: string | null; }
+export interface BlinkFramePreviews { filmstrip: string | null; zoom: string | null; coverage: number; filmstripDataUrl?: string | null; error?: string | null; zoomDataUrl?: string | null; }
 export interface BlinkFrame {
   index: number; channelId: string; filter: string; target: string; night: string;
   path: string; name: string; sourceSha256: string; observedAt: string | null; airmass: number | null;
@@ -292,7 +292,7 @@ export interface BlinkManifest {
   channels: BlinkChannel[]; frames: BlinkFrame[];
 }
 /** What the desktop sends to `blink_measure`; the controller creates the session directory and picks the worker count. */
-export interface BlinkMeasureRequest { paths: string[]; masterFlats: Array<{ filter: string; path: string }>; }
+export interface BlinkMeasureRequest { paths: string[]; masterFlats: Array<{ filter: string; path: string }>; masterDarks?: Array<{ path: string; exposureSeconds?: number }>; masterBias?: string; }
 /** The manifest as the controller loaded it, plus the digest of `manifest.json` it read (the selection's `origin`). */
 export interface BlinkMeasureResponse extends BlinkManifest { manifestSha256?: string | null; }
 export interface SelectionDecision { sourceSha256: string; decision: BlinkDecision; defaultDecision: BlinkDecision; flags: string[]; note?: string; }

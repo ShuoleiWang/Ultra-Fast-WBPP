@@ -235,7 +235,9 @@ def test_post_commit_parent_fsync_failure_is_not_reported_as_uncommitted(
             raise OSError("injected parent fsync failure")
         original(path)
 
+    from openastroflow_engine import publication
     monkeypatch.setattr(color_product_module, "_fsync_directory", fail_second_call)
+    monkeypatch.setattr(publication, "_fsync_directory", fail_second_call)
     result = build_color_product(
         ColorProductRequest(
             red_path=str(channels["R"]),

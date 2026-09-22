@@ -23,7 +23,7 @@ updates:
     schedule:
       interval: weekly
   - package-ecosystem: pip
-    directory: "/engine/native/python"
+    directory: "/packages/openastroflow-registration"
     schedule:
       interval: weekly
   - package-ecosystem: pip

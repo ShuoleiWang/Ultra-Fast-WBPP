@@ -9,44 +9,45 @@ The [legacy gate](automatic-screening.md) judges every Light against its own nig
 Blink-style screening replaces the silent decision with a visible one:
 
 1. Every Light is measured once, as the quality check already does (1/4-scale preview, SEP star detection, native-resolution PSF, the QC reference and registration, the spatial features, the unchanged quality gate).
-2. *Flags* are computed per channel from those measurements. A flag sets a default decision and a reason; nothing is excluded silently, and the flags include the cross-night, absolute criteria the gate deliberately does not use.
+2. *Flags* are computed per channel from those measurements. A flag records an advisory default and a reason; the GUI initializes every frame as pending review with KEEP selected, and the flags include the cross-night, absolute criteria the gate deliberately does not use.
 3. A *reference frame* is chosen per channel, and every frame of the channel is registered and photometrically normalised to it, so you blink through frames that differ only where the sky did.
-4. You decide frame by frame (keyboard, playback, "drop this night", "apply the flags", undo). Your decisions go into the run as an explicit *selection*, recorded in the receipt with every override.
+4. You decide frame by frame (keyboard, playback, "drop this night", undo). Your decisions go into the run as an explicit *selection*, recorded in the receipt with every override.
 
 ## The desktop flow
 
-Import and the calibration check are unchanged. The launch bar's primary button becomes **Blink & select (N Lights)**: it runs the worker's `blink-measure` command on the current Lights, then opens the blink view. The legacy optional review ("Screen N Lights first") stays as the secondary button and behaves as before. Starting without a blink session keeps today's behaviour with a clearer label, *Start (automatic screening)*, and the notice that the run screens with the legacy gate, which cannot see a uniformly bad night. Re-importing Lights invalidates a blink session, as it does the legacy quality inspection.
+Import and the calibration check are unchanged. **Blink & select (N Lights)** measures the current Lights and opens a paused, chronological review. Processing is disabled until every frame has been displayed and every channel explicitly confirmed. Confirmation advances to the next unfinished channel. Changing a decision invalidates that channel's confirmation; importing Lights or measuring again resets the review. The optional measurement table remains read-only diagnostic evidence and cannot approve frames or bypass Blink. The headless CLI retains its separate legacy and unattended policies.
+
+Only a decoded main image painted in the visible view counts as reviewed; prefetched images and thumbnails do not. Native WebKit previews are drawn into a canvas to avoid blank transformed IMG layers. Playback waits for the current image, pauses when the document is hidden, and stops at the channel end. Failed previews show a retry action and cannot silently count as viewed; explicitly dropping an unavailable frame acknowledges it. The native controller verifies the manifest digest, exact reviewed-frame and confirmed-channel sets, imported Light paths and explicit decisions before accepting Start. This is a workflow guard, not proof of the observer's attention.
 
 The blink view:
 
-- **Channel chips** (`L 16/44 · 27 flagged`), one per channel (target × filter × camera geometry × exposure bucket); keys `1`–`4` switch.
+- **Channel chips** (`L · 16/44 viewed`, with a check after confirmation), one per channel (target × filter × camera geometry × exposure bucket); keys `1`–`4` switch.
 - **Stage**: the current frame at 1/8 scale in a viewport shared by every frame of the channel (all previews share the reference's grid and size), wheel to zoom at the cursor, drag to pan, double-click to fit; the 1/4-scale image replaces it when zoomed past 1.2×. The overlay shows name, night, decision and the flag chips with their values (`Sky ×2.43`, `Stars 55 %`, `Ext 0.23 mag`), and marks the reference. *Compare with reference* splits the stage reference | current with the same viewport; holding `C` A/B-blinks the two.
-- **Filmstrip**: thumbnails sorted flagged-first (EXCLUDE, then ATTENTION, then clean; within a group by night and time; a *Chronological* toggle), grouped by night with a header row (`2026-08-20 · 23 frames · sky ×2.2 · 0 kept`) that carries **Drop night** / **Keep night** buttons. A tile shows the decision colour bar, flag dots and the reference star.
+- **Filmstrip**: thumbnails sorted chronologically, with an optional flagged-first order, grouped by night with a header row (`2026-08-20 · 23 frames · sky ×2.2 · 0 kept`) that carries **Drop night** / **Keep night** buttons. A tile shows the decision colour bar, flag dots and the reference star.
 - **Metrics** (inspector, or a strip under the stage): sky and sky ratio, stars and ratio, extinction, native FWHM and ratio, ellipticity, registration RMS and matches, overlap, background shape, score rank and z, every flag with its message and threshold, the gate disposition and codes, and the notes.
-- **Launch bar**: kept / total per channel, *Start* with the selection, a blocker for any channel with fewer than two kept Lights, *Back*.
+- **Launch bar**: kept / total per channel, *Start* with the selection, blockers for incomplete review or any channel with fewer than two kept Lights, *Back*.
 
 | Key | Action |
 |---|---|
 | `←` `→`, `Home`, `End` | Step through the filmstrip order |
-| `Space`, `K`, `D` | Toggle keep/drop, keep, drop |
+| `Space`, `K`, `D` | Toggle keep/drop, keep and next, drop and next |
 | `F`, `Shift+F` | Next / previous flagged frame |
 | `R` | Jump to the reference |
 | `C` (hold) | Compare with the reference (A/B while held) |
 | `P`, `[`, `]`, `Esc` | Play / pause at 2–8 frames per second, slower, faster, stop |
 | `N` | Drop the current frame's whole night (undoable) |
-| `A` | Apply the flags (reset every decision to its default) |
 | `Z`, `Cmd/Ctrl+Z` | Undo (up to 100 steps) |
 | `+`, `−`, `0` | Zoom in, out, fit |
 | `1`–`4` | Channel |
 
-Playback skips dropped frames when *kept only* is ticked and pauses when you step by hand; `prefers-reduced-motion` disables auto-play by default.
+Playback starts only on request. *Kept only* is available after all frames in the current channel have been viewed; it cannot skip unseen frames during the initial review. Playback pauses when you step by hand.
 
 ## Flags
 
 Flags are computed per channel from values that already exist per frame after measurement, analysis and the gate. Two severities:
 
-- **EXCLUDE** → default decision *DROP* (pre-marked, shown first, red).
-- **ATTENTION** → default decision *KEEP* (highlighted amber, shown after the excluded ones).
+- **EXCLUDE** → strong quality warning. The manifest retains advisory `defaultDecision: DROP` for reproducibility; the desktop does not apply it automatically.
+- **ATTENTION** → quality hint (amber), also subject to human review.
 
 The gate's evidence-insufficiency codes (`GATE_INSUFFICIENT_COHORT`, `GATE_INSUFFICIENT_NIGHT_BASELINE`, `GATE_NIGHT_UNRESOLVED`, `GATE_MORPHOLOGY_SAMPLE_REVIEW`, `GATE_SOURCE_COUNT_MISSING`, `GATE_FINITE_FRACTION_REVIEW`, `GATE_DYNAMIC_RANGE_MISSING`, `GATE_REFERENCE_NOT_CONNECTED`) become *notes*, not flags: they say the gate could not judge, not that the frame is bad. The single-frame B night of the campaign, which the maintainer kept, is the case.
 
@@ -63,7 +64,7 @@ Computed once per channel:
 
 | Flag | Value | ATTENTION | EXCLUDE | Why these thresholds |
 |---|---|---|---|---|
-| `BLINK_SKY_BRIGHT` | sky / skyClean | ≥ 1.6 | ≥ 1.6 **and** source ratio ≤ 0.60 (combined rule) | The moonlit L night sat at 1.89–2.43 with source ratios 0.52–0.58, its four cloud frames at 2.0–2.9; the dark night never exceeded 1.17, the changing-sky night 0.87–0.91, and no R/G/B frame exceeded 1.09. The largest within-night variation of a clean night was 1.33 (moonset), so 1.6 keeps a margin on its own. The second condition exists because a brighter but transparent night is not a defect: it stays ATTENTION, and only a bright sky *with* lost stars is pre-dropped. |
+| `BLINK_SKY_BRIGHT` | sky / skyClean | ≥ 1.6 | ≥ 1.6 **and** source ratio ≤ 0.60 (combined rule) | The moonlit L night sat at 1.89–2.43 with source ratios 0.52–0.58, its four cloud frames at 2.0–2.9; the dark night never exceeded 1.17, the changing-sky night 0.87–0.91, and no R/G/B frame exceeded 1.09. The largest within-night variation of a clean night was 1.33 (moonset), so 1.6 keeps a margin on its own. The second condition exists because a brighter but transparent night is not a defect: it stays ATTENTION, and only a bright sky *with* lost stars receives the EXCLUDE advisory. |
 | `BLINK_SOURCES_LOW` | stars / sourcesBest | ≤ 0.60 | ≤ 0.45 | Moonlit frames 0.52–0.58 (attention; excluded through the combined rule); the dark night 0.81–1.02 except one frame at 0.57 that the maintainer also dropped; cloud frames 0.00–0.35 (excluded). In R, thick cloud gave 0.27 / 0.15 / 0.01 (excluded) and light cloud 0.57 / 0.55 (attention, kept by the maintainer); in G four frames at 0.06–0.43 are excluded; in B one frame at 0.56 is attention and was dropped by hand. |
 | `BLINK_EXTINCTION` | extinction (mag) | ≥ 0.50 | ≥ 1.00 | Light cloud the maintainer kept measured 0.54–0.91 mag; frames dropped by hand measured 0.76–0.85 (attention) and 1.20–2.80 (excluded). The moonlit night's 0.22–0.34 mag does not reach the flag; the sky flag catches it. The dark night stayed ≤ 0.18. |
 | `BLINK_BACKGROUND_SHAPE` | P95 − P5, over the outer cells (the central 40 % holds the target and is excluded), of the frame's normalised background-difference grid minus the median grid of the frames that share its meridian-flip orientation. The QC analysis already differences each frame's 16 × 16 SEP background, normalised to unit cell spread, against the reference's; comparing with the frame's own flip family (registered, not HARD_FAIL, extinction below 0.60 mag, at least three members) keeps vignetting, which rotates with the camera at a flip, from posing as a shape change. The result is a shape difference invariant to sky level and vignetting; a family with fewer than three members has no statistic | ≥ 0.50 | never alone | Dark-night frames 0.03–0.14 and moonlit frames 0.13–0.18: the same shape as the reference, consistent with the −10 % tilt common to every frame. The four moonlit cloud frames 1.16–1.35 and the changing-sky night 0.58–1.19 differ in shape; one late dark-night frame whose tilt reversed sign measured 1.02. Shape alone never excludes: it marks what to look at. |
@@ -216,14 +217,14 @@ The measurement, analysis and gate run again inside the run, unchanged, and `qc/
 
 ## Keeping mildly gradient-affected frames
 
-Nothing changes in the pipeline when you keep a few frames with a stronger sky gradient: the global normalization's additive grid and its flattest-convex-combination low-order target (receipt `lowOrderTarget`) remove the plane, and the integration weights down-weight the noisier frames. The flags (`BLINK_SKY_BRIGHT`, `BLINK_BACKGROUND_SHAPE`) make you aware; the decision is yours. LocalNormalization stays an explicit recipe option ([XISF and LocalNormalization](xisf-and-local-normalization.md)); the blink flow does not switch it on.
+Nothing changes in the pipeline when you keep a few frames with a stronger sky gradient: the global normalization's additive grid and its flattest-convex-combination low-order target (receipt `lowOrderTarget`) remove the plane, and the integration weights down-weight the noisier frames. The flags (`BLINK_SKY_BRIGHT`, `BLINK_BACKGROUND_SHAPE`) make you aware; the decision is yours. The former LocalNormalization option has been retired; the supported normalization is described in [the normalization guide](normalization-and-xisf.md).
 
 ## Limits
 
 - **A moonlit night is only visible when a darker clean night exists in the channel.** `skyClean` needs at least three clean frames; a channel with a single hazy night has nothing darker to compare with and gets no sky flag (the extinction, source and shape flags still apply).
 - **Gradient amplitude needs flats.** Without master flats the raw-preview gradient is proportional to the sky level and is not computed; the sky flag carries that information.
 - **Previews are 1/8 and 1/4 scale**, the filmstrip a quality-85 JPEG. They are for blinking and for spotting gradients, cloud and trails, not for judging single pixels; the run reads the original frames.
-- **The flags are defaults, not verdicts.** Thresholds were fixed on one campaign; the light-cloud band (source ratio 0.45–0.60, extinction 0.5–1.0 mag) is left to the observer on purpose.
+- **Flags are suggestions, not human decisions.** Thresholds were fixed on one campaign; the light-cloud band (source ratio 0.45–0.60, extinction 0.5–1.0 mag) is left to the observer on purpose.
 - **The reference is for blinking.** The run's registration and normalization references follow the pipeline's own rules (above).
 - **The legacy gate still runs** and its dispositions are recorded; an explicit selection replaces its admitted set, it does not change its evidence.
 

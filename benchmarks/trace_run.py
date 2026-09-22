@@ -49,7 +49,7 @@ REPOSITORY = Path(__file__).resolve().parents[1]
 for relative in (
     "packages/openastroflow-engine/src",
     "packages/light-frame-qc/src",
-    "engine/native/python",
+    "packages/openastroflow-registration",
 ):
     candidate = str(REPOSITORY / relative)
     if candidate not in sys.path:

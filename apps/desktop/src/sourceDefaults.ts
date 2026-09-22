@@ -1,10 +1,4 @@
-import type { FrameRole, Recipe, SourceSet } from "./types";
-
-export const STEPS = [
-  { id: "import", short: "01", label: "Import", caption: "Lights and calibration" },
-  { id: "inspect", short: "02", label: "Review", caption: "Groups and frame quality" },
-  { id: "recipe", short: "03", label: "Process", caption: "Recipe, run, result" },
-] as const;
+import type { FrameRole,SourceSet } from "./types";
 
 const SOURCE_META: Record<FrameRole, Pick<SourceSet, "label" | "hint" | "reuseAllowed">> = {
   LIGHT: { label: "Light", hint: "N.I.N.A. target exposures", reuseAllowed: false },
@@ -26,15 +20,3 @@ export const emptySources = (): SourceSet[] =>
     confirmed: false,
   }));
 
-export const RECIPES: Recipe[] = [
-  {
-    id: "balanced",
-    name: "Balanced",
-    eyebrow: "RECOMMENDED",
-    description: "Conservative calibration, quality weighting, and robust rejection.",
-    details: ["Conservative quality gate", "Adaptive registration and rejection", "Final solve per channel"],
-    estimatedScale: "Dataset dependent",
-    recommended: true,
-    available: true,
-  },
-];

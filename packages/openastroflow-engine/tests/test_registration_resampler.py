@@ -457,14 +457,7 @@ def test_exact_half_turn_worker_budget_includes_scaled_copy_buffers(tmp_path: Pa
     source = _write_declared_frame(tmp_path / "input.fits", np.ones(shape))
     info = _registration_info(source)
     transform = _half_turn(shape)
-    jobs = [
-        pipeline._RegistrationJob(source, tmp_path / f"{i}.fits", transform, info)
-        for i in range(6)
-    ]
-    budget = shape[1] * 32 * 3 + 2
-    assert pipeline._registration_worker_count(
-        jobs, max_memory_bytes=budget, resampler="lanczos-3-clamped", cpu_workers=8
-    ) == 3
+    assert pipeline._registration_bytes_per_pixel(transform, "lanczos-3-clamped", shape) == 32
     with pytest.raises(CalibrationError, match="MEMORY_BUDGET_TOO_SMALL"):
         pipeline._register_frame(
             source, tmp_path / "too-small.fits", transform, info,

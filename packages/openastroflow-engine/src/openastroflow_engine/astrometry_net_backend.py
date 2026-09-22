@@ -17,21 +17,21 @@ from astropy.wcs import WCS
 import numpy as np
 
 from . import platform as platform_services
-from .astap_backend import (
+from .solvers.process import (
     ExecutableProbe,
     SolverExecutionError,
     SolverProcessRuntime,
-    _copy_source_to_stage,
-    _failure,
-    _input_shape,
-    _is_executable_file,
-    _publish_solved_copy,
-    _require_unchanged_identity,
-    _receipt,
-    _regular_identity,
-    _same_stat,
-    _validate_request,
-    _wcs_header_sha256,
+    copy_source_to_stage as _copy_source_to_stage,
+    failure as _failure,
+    input_shape as _input_shape,
+    is_executable_file as _is_executable_file,
+    publish_solved_copy as _publish_solved_copy,
+    require_unchanged_identity as _require_unchanged_identity,
+    build_execution_receipt as _receipt,
+    regular_identity as _regular_identity,
+    same_stat as _same_stat,
+    validate_request as _validate_request,
+    wcs_header_sha256 as _wcs_header_sha256,
 )
 from .backends import BackendDescriptor, DeviceKind, StageKind
 from .catalogs import (

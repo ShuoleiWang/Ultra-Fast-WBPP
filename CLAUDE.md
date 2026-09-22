@@ -11,7 +11,7 @@ Ultra-Fast WBPP preprocesses astrophotography Lights into verified, plate-solved
 - **Local by default.** Edit locally; commit, push, open or merge a pull request only when the maintainer asks for that action. When a PR is requested it is one commit (amend + `--force-with-lease`), Conventional Commit subject, template filled honestly, and no AI attribution anywhere in the commit or PR text (no co-author trailers, no "generated with" footer).
 - **Nothing private in the tree.** No acquisition data, no benchmark/evaluation result files, no absolute home paths, no secrets. Run `.venv/bin/python scripts/check_public_tree.py .` and `.venv/bin/python scripts/check_local_links.py .` before handing over. Harness receipts record basenames, not paths.
 - **Sources read-only, outputs create-only, fail closed.** Never add a path that publishes unverified science or overwrites anything.
-- **Prove, don't claim.** A pipeline change is verified on the real reference project: wall time before/after, the four solved-master hashes against a same-OS baseline (bit-identical) or `benchmarks/master_tolerance_gate.py` when pixels may move, and `benchmarks/evaluate_masters.py` PASS/WARN/FAIL per filter when quality could move. Report per-filter numbers with confidence intervals; state what was skipped.
+- **Prove, don't claim.** A pipeline change is verified on the real reference project: wall time before/after, the four solved-master hashes against a same-OS baseline (bit-identical) or `tools/validation/master_tolerance_gate.py` when pixels may move, and `tools/validation/evaluate_masters.py` PASS/WARN/FAIL per filter when quality could move. Report per-filter numbers with confidence intervals; state what was skipped.
 - **Performance is a feature.** A change that costs measurable run time needs a strong reason; the native kernels stay value-identical to the NumPy reference; defaults (`legacy-gate`, kernel ids) stay reproducible.
 - **Minimum user effort** is the product goal for the desktop: judge UX changes by operations saved; keep `useWorkflow.ts`, `bridge.ts` and the existing test assertions as contracts; both languages in `i18n.ts`.
 - **Delegate the long-running work.** Full runs, builds, benchmark sweeps, surveys and CI watching go to subagents with a precise brief (inputs, expected outputs, the provenance fields to report). Design, core code and review stay in the main session. Don't poll: a project run is ~76 s on the M3 Pro, the evaluator ~2 min per filter pair.
@@ -22,7 +22,7 @@ Ultra-Fast WBPP preprocesses astrophotography Lights into verified, plate-solved
 
 ```bash
 make bootstrap && make test            # first time; python + rust + frontend + native tests
-.venv/bin/python -m pytest -q packages/light-frame-qc/tests engine/native/python/tests packages/openastroflow-engine/tests tests
+.venv/bin/python -m pytest -q packages/light-frame-qc/tests packages/openastroflow-registration/tests packages/openastroflow-engine/tests tests
 cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked
 npm --prefix apps/desktop test && npm --prefix apps/desktop run build
 make native-release-install            # Release kernels into the engine package (the only library to install)
@@ -45,3 +45,23 @@ make desktop-dev | make demo | CARGO_PROFILE_RELEASE_STRIP=none make desktop-bui
 ## Where to look
 
 `docs/README.md` (documentation map) · `docs/architecture.md` (execution path, boundaries, science) · `docs/features.md` (advantages and evidence) · `docs/validation-matrix.md` (what is and is not validated) · `docs/recipes/` (user guides) · `benchmarks/README.md` (measurement tools) · `apps/desktop/README.md` (desktop code map) · `engine/native/README.md` (kernel contracts) · `CHANGELOG.md` (what changed, with numbers).
+
+## Review cleanup layout
+
+The engine's canonical orchestration modules are `workflows/single_target.py`
+and `workflows/project.py`, with request/progress types in `workflows/contracts.py`
+and solve coordination in `workflows/solve.py`. `e2e.py` and `project_e2e.py` are
+compatibility aliases. Use `calibration_inputs.py` for content-bound master
+metadata, `image_io/fits.py` for FITS primitives, `solvers/process.py` for shared
+solver execution and `publication.py` for create-only color/mosaic publication.
+The registration package is `packages/openastroflow-registration/src`.
+Scientific evaluators live in `tools/validation`; benchmark paths are compatibility
+commands. The desktop controller is split into `project/` and `sidecar/` modules;
+its existing command names and the UI bridge contract stay stable.
+
+LocalNormalization is retired: old enabled recipes fail explicitly, disabled
+legacy fields remain readable, and stellar/background normalization is unchanged.
+Do not restore an unvalidated alternative behind a GUI checkbox. Counterfactual
+v2 uses fixed global-row statistics and masks NaNs before region weighting;
+its algorithm ID distinguishes it from historical v1 receipts. The evaluator
+must report unmeasured standard gates and never certify their absence as PASS.

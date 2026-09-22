@@ -36,7 +36,7 @@ Plate-solving changes must preserve the distinction between `SEED` and `SOLVED`.
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
-.venv/bin/python -m pytest -q packages/light-frame-qc/tests engine/native/python/tests packages/openastroflow-engine/tests tests
+.venv/bin/python -m pytest -q packages/light-frame-qc/tests packages/openastroflow-registration/tests packages/openastroflow-engine/tests tests
 npm --prefix apps/desktop test
 npm --prefix apps/desktop run build
 cmake -S engine/native -B build/native -DOAF_BUILD_TESTS=ON

@@ -30,13 +30,13 @@ jobs:
           cache: pip
           cache-dependency-path: |
             packages/light-frame-qc/pyproject.toml
-            engine/native/python/pyproject.toml
+            packages/openastroflow-registration/pyproject.toml
             packages/openastroflow-engine/pyproject.toml
       - name: Install local packages
         run: >-
           python -m pip install
           -e "./packages/light-frame-qc[test]"
-          -e "./engine/native/python[test]"
+          -e "./packages/openastroflow-registration[test]"
           -e "./packages/openastroflow-engine[test,all]"
       - name: Replace the PyPI SEP wheel with the deterministic patched build (Windows)
         if: runner.os == 'Windows'
@@ -65,7 +65,7 @@ jobs:
         run: >-
           python -m pytest -q
           packages/light-frame-qc/tests
-          engine/native/python/tests
+          packages/openastroflow-registration/tests
           packages/openastroflow-engine/tests
           tests
       - name: Enforce public-tree boundary
@@ -109,11 +109,6 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
-      - name: Windows interface contracts (not scientific acceptance)
-        if: runner.os == 'Windows'
-        run: |
-          cargo test -p openastroflow-app-core --test fs_contract
-          cargo test -p openastroflow-desktop platform::windows::tests
 
   frontend:
     name: React desktop shell

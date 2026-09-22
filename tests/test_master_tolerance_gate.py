@@ -14,7 +14,7 @@ REPOSITORY = Path(__file__).resolve().parents[1]
 
 
 def _load_module():
-    spec = importlib.util.spec_from_file_location("master_tolerance_gate", REPOSITORY / "benchmarks" / "master_tolerance_gate.py")
+    spec = importlib.util.spec_from_file_location("master_tolerance_gate", REPOSITORY / "tools" / "validation" / "master_tolerance_gate.py")
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)

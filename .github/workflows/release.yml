@@ -33,7 +33,7 @@ jobs:
           cache: pip
           cache-dependency-path: |
             packages/light-frame-qc/pyproject.toml
-            engine/native/python/pyproject.toml
+            packages/openastroflow-registration/pyproject.toml
             packages/openastroflow-engine/pyproject.toml
             packaging/worker/requirements-build.txt
 
@@ -78,7 +78,7 @@ jobs:
         run: >-
           python -m pip install
           -e "./packages/light-frame-qc[test]"
-          -e "./engine/native/python[test]"
+          -e "./packages/openastroflow-registration[test]"
           -e "./packages/openastroflow-engine[test,all]"
           -r packaging/worker/requirements-build.txt
 
@@ -105,7 +105,7 @@ jobs:
       - name: Test source tree and release gates
         shell: bash
         run: |
-          python -m pytest -q packages/light-frame-qc/tests engine/native/python/tests packages/openastroflow-engine/tests tests
+          python -m pytest -q packages/light-frame-qc/tests packages/openastroflow-registration/tests packages/openastroflow-engine/tests tests
           python scripts/check_public_tree.py .
           python scripts/check_local_links.py .
           cargo fmt --all -- --check

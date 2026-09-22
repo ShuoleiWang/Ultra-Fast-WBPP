@@ -23,32 +23,14 @@ class DrizzleCapabilities:
         }
 
 
-@dataclass(frozen=True, slots=True)
-class DrizzleRequest:
-    registered_inputs: tuple[str, ...]
-    output_path: str
-    scale: int
-    drop_shrink: float
-    cfa_drizzle: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class DrizzleResult:
-    completed: bool
-    output_path: str | None = None
-    error: str | None = None
-
-
 @runtime_checkable
-class DrizzleBackend(Backend, Protocol):
+class DrizzleCapabilityProvider(Backend, Protocol):
     @property
     def drizzle_capabilities(self) -> DrizzleCapabilities: ...
 
-    def drizzle(self, request: DrizzleRequest) -> DrizzleResult: ...
-
 
 @dataclass(frozen=True, slots=True)
-class DeclarativeDrizzleBackend:
+class NativeDrizzleCapabilities:
     descriptor: BackendDescriptor
     drizzle_capabilities: DrizzleCapabilities
 
@@ -82,14 +64,8 @@ class DeclarativeDrizzleBackend:
             errors.append("kernel must be square, circular, gaussian or point")
         return tuple(errors)
 
-    def drizzle(self, request: DrizzleRequest) -> DrizzleResult:
-        return DrizzleResult(
-            completed=False,
-            error=self.descriptor.reason or "drizzle execution backend is unavailable",
-        )
 
-
-def drizzle_backends() -> tuple[DeclarativeDrizzleBackend, ...]:
+def drizzle_backends() -> tuple[NativeDrizzleCapabilities, ...]:
     """The native drizzle backend's declared contract (the execution seam is
     ``drizzle_native``; availability follows the native kernel library)."""
 
@@ -106,7 +82,7 @@ def drizzle_backends() -> tuple[DeclarativeDrizzleBackend, ...]:
         supports_rejection_maps=True,
     )
     return (
-        DeclarativeDrizzleBackend(
+        NativeDrizzleCapabilities(
             descriptor=BackendDescriptor(
                 backend_id="native-drizzle",
                 stage=StageKind.DRIZZLE,
@@ -130,10 +106,12 @@ def drizzle_backends() -> tuple[DeclarativeDrizzleBackend, ...]:
 
 
 __all__ = [
-    "DeclarativeDrizzleBackend",
+    "NativeDrizzleCapabilities",
     "DrizzleBackend",
     "DrizzleCapabilities",
-    "DrizzleRequest",
-    "DrizzleResult",
     "drizzle_backends",
 ]
+
+# Historical capability imports; execution is integrate_drizzle_group.
+DrizzleBackend = DrizzleCapabilityProvider
+DeclarativeDrizzleBackend = NativeDrizzleCapabilities

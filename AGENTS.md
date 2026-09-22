@@ -15,7 +15,7 @@ It is an independent implementation with no PixInsight/PCL source or binaries. M
 1. **Inputs are read-only, outputs are create-only.** The engine never modifies a source file or an earlier result; every run publishes into a directory that did not exist (`OUTPUT_EXISTS` otherwise, through the platform layer's no-replace rename), and intermediates live under the output volume, never in a system temp directory.
 2. **Fail closed.** No product without its receipt; no `SOLVED` WCS without an engine-verified solution (a header or N.I.N.A. hint is a `SEED`, never promoted); the desktop shows "done" only after Rust re-verified receipt, hashes and final sky coordinates. Do not add "best effort" paths that publish partial science.
 3. **Never commit** acquisition data (FITS/XISF/XDRZ), benchmark or evaluation result files, absolute home-directory paths (a macOS or Windows user folder in any string), API keys or signing material, proprietary application code, or third-party catalogs. `scripts/check_public_tree.py .` and `scripts/check_local_links.py .` run in CI and locally as `make source-check`. Fixtures are tiny and synthetic under `tests/fixtures` (and `packages/**/tests/fixtures`). Receipts written by harnesses must be share-safe (basenames, not paths).
-4. **Scientific changes are contracts.** State the mathematical contract, keep the NumPy/CPU reference implementation, hold the native kernel value-identical to it with a differential test (`packages/openastroflow-engine/tests/test_native_kernels.py`, `engine/native/tests`), give the algorithm a versioned identifier that receipts record, and keep the previous identifier reproducible. When a change may legitimately move pixels (a different numerical evaluation), state and check what it may do with [`benchmarks/master_tolerance_gate.py`](benchmarks/master_tolerance_gate.py). Never loosen a scientific threshold to make a test pass. Discuss algorithm changes in an issue first.
+4. **Scientific changes are contracts.** State the mathematical contract, keep the NumPy/CPU reference implementation, hold the native kernel value-identical to it with a differential test (`packages/openastroflow-engine/tests/test_native_kernels.py`, `engine/native/tests`), give the algorithm a versioned identifier that receipts record, and keep the previous identifier reproducible. When a change may legitimately move pixels (a different numerical evaluation), state and check what it may do with [`tools/validation/master_tolerance_gate.py`](tools/validation/master_tolerance_gate.py). Never loosen a scientific threshold to make a test pass. Discuss algorithm changes in an issue first.
 5. **Performance changes are proven, not claimed.** A pipeline change is verified on a real project by comparing the SHA-256 of the solved masters with a baseline built from the base commit on the same OS (bit-identical), or by the tolerance gate plus unchanged evaluator statuses when pixels may move; report wall time before and after. A change that costs run time needs a strong reason.
 6. **Defaults stay reproducible.** `selection.policy: legacy-gate` is the default and reproduces the historical admission exactly; kernel ABIs `v1`/`v2` remain callable; `include-all` is diagnostic. New behaviour goes behind a recipe field with a documented default.
 7. **Receipts name what ran.** Algorithm ids, kernel ids, backend, selection policy, platform facts and their sources (`platform.hardware`, `platform.tuning`, `platform.nativeKernels`, `execution.sourceExtraction`) are part of every receipt. A fact that was not measured is reported as `fallback`/`unavailable`, not invented.
@@ -30,7 +30,7 @@ It is an independent implementation with no PixInsight/PCL source or binaries. M
 | `packages/openastroflow-engine/src/openastroflow_engine/` | The engine: `e2e.py` (one run), `project_e2e.py` (multi-target/filter projects, colour products), `pixel_pipeline.py` (fused calibrate+warp, normalization, integration), `calibration.py`, `global_normalization.py`, `residual_background.py`, `transient_rejection.py` (fast-Radon trail corridors), `drizzle_native.py`, `selection/` (unattended policy, guards, counterfactual, region weight maps), `native_kernels.py` (ctypes bridge), `lanczos_table.py`, `platform/` (OS services), `astap_backend.py` / `astrometry_net_backend.py` / `catalog_correspondence.py` (solvers and verification), `recipe.py`, `cli.py`, `worker.py` (NDJSON protocol) | Large orchestration modules; keep public imports and receipt schemas stable. `reference/` holds NumPy oracles used by tests. |
 | `packages/light-frame-qc/src/lightframeqc/` | Light measurement and the quality gate: `measure.py`, `analysis.py`, `quality_gate.py`, `nightly_statistics.py`, `native_psf.py` (native-resolution star stamps), `cfa.py` (Bayer), `source_extraction.py` (SEP determinism self-test), `registration.py`, `content_hash.py` | Its README is in Chinese. Measurements carry provenance fields; check them before trusting a number. |
 | `engine/native/` | C++20 kernels (`PortableKernels.cpp`: Lanczos-3 warp, MAD rejection, masked mean; `DrizzleKernel.cpp`, `DebayerKernel.cpp`, `Lanczos3Table.cpp`, `FusedLnIntegration.cpp`), Metal integration (`MetalFusedLnIntegration.mm`), C ABI (`c_api.cpp`), tests | Operation-for-operation reproductions of the NumPy reference; `-fno-fast-math -ffp-contract=off`, MSVC `/fp:strict`. New kernels need a Python reference, a differential test and a thread-count invariance test. |
-| `engine/native/python/` | Registration worker package (`openastroflow-registration`) | Portable reference path for detection, transform estimation, warping, crop and weights. |
+| `packages/openastroflow-registration/` | Registration library (`openastroflow-registration`) | Portable reference path for detection, transform estimation, warping, crop and weights. |
 | `apps/desktop/` | React 19 interface (`src/`) and Tauri Rust bridge (`src-tauri/src/`: `project.rs` run lifecycle and verification, `sidecar.rs` worker discovery, `catalog.rs` index management, `platform/` process trees) | See `apps/desktop/README.md` for the code map and checks. |
 | `crates/app-core/` | OS-neutral project, validation and execution contracts shared by GUI and workers | Schema source of truth for `protocol/`. |
 | `protocol/` | NDJSON worker protocol v1 (schema, examples) | Versioned; additive changes only. |
@@ -58,7 +58,7 @@ make check              # source-check + cargo fmt/clippy + make test
 The individual suites, as CI runs them:
 
 ```bash
-.venv/bin/python -m pytest -q packages/light-frame-qc/tests engine/native/python/tests packages/openastroflow-engine/tests tests
+.venv/bin/python -m pytest -q packages/light-frame-qc/tests packages/openastroflow-registration/tests packages/openastroflow-engine/tests tests
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
@@ -78,7 +78,7 @@ Desktop bundle on macOS: `make desktop-build-macos-prerelease` (release kernels 
 ## Before you finish a change
 
 - Run the suites your change touches, and `make source-check` always. A scientific or native change also runs the native ctest and the differential Python tests; a desktop change runs Vitest, `tsc` (through `npm run build`), `cargo test -p openastroflow-desktop --lib --locked`, fmt and clippy.
-- A pipeline change is reproduced on a real project (the maintainer keeps a private 61-Light, four-night L/R/G/B NGC 7331 set; ask for the recipe) and reported with: wall time before/after, the four master hashes against a same-OS baseline or the tolerance-gate result, and `benchmarks/evaluate_masters.py` PASS/WARN/FAIL per filter when quality could move. Keep the real-data outputs and reports out of the repository.
+- A pipeline change is reproduced on a real project (the maintainer keeps a private 61-Light, four-night L/R/G/B NGC 7331 set; ask for the recipe) and reported with: wall time before/after, the four master hashes against a same-OS baseline or the tolerance-gate result, and `tools/validation/evaluate_masters.py` PASS/WARN/FAIL per filter when quality could move. Keep the real-data outputs and reports out of the repository.
 - A quality-control change is checked for silent failures: look at the provenance fields of the new measurement (for example `fwhmSource`, error keys) on real frames, not only at the summary numbers.
 - Update `CHANGELOG.md`, the relevant `docs/` page and both READMEs when the user-visible behaviour or a headline number changed.
 - Fill the pull request template honestly: what was validated, what was skipped.
@@ -102,3 +102,23 @@ Desktop bundle on macOS: `make desktop-build-macos-prerelease` (release kernels 
 - Real acquisition data is private and never enters the repository; docs cite it as "the reference data set" with frame counts, sensor geometry and machine. Numbers in the README come from `CHANGELOG.md`, `docs/windows.md`, `docs/recipes/*.md`, `benchmarks/README.md` and `docs/validation-matrix.md`; when you improve a headline number, update those first and the READMEs from them.
 - `docs/validation-matrix.md` is the honest register of what is and is not validated. Do not turn an unchecked row into a claim.
 - The maintainer's working language is Chinese; several design records in `docs/` are Chinese and marked as such in the docs index. Product documentation stays English with the mirrored `docs/README.zh-CN.md`.
+
+## Review cleanup layout
+
+The engine's canonical orchestration modules are `workflows/single_target.py`
+and `workflows/project.py`, with request/progress types in `workflows/contracts.py`
+and solve coordination in `workflows/solve.py`. `e2e.py` and `project_e2e.py` are
+compatibility aliases. Use `calibration_inputs.py` for content-bound master
+metadata, `image_io/fits.py` for FITS primitives, `solvers/process.py` for shared
+solver execution and `publication.py` for create-only color/mosaic publication.
+The registration package is `packages/openastroflow-registration/src`.
+Scientific evaluators live in `tools/validation`; benchmark paths are compatibility
+commands. The desktop controller is split into `project/` and `sidecar/` modules;
+its existing command names and the UI bridge contract stay stable.
+
+LocalNormalization is retired: old enabled recipes fail explicitly, disabled
+legacy fields remain readable, and stellar/background normalization is unchanged.
+Do not restore an unvalidated alternative behind a GUI checkbox. Counterfactual
+v2 uses fixed global-row statistics and masks NaNs before region weighting;
+its algorithm ID distinguishes it from historical v1 receipts. The evaluator
+must report unmeasured standard gates and never certify their absence as PASS.

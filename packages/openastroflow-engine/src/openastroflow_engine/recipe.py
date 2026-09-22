@@ -391,8 +391,14 @@ class DrizzleRecipe:
 
 @dataclass(frozen=True, slots=True)
 class LocalNormalizationRecipe:
+    """Disabled legacy recipe field; the experimental pixel path was retired."""
+
     enabled: bool = False
     tile_size_pixels: int = 256
+
+    def __post_init__(self) -> None:
+        if self.enabled is not False:
+            raise RecipeError("LOCAL_NORMALIZATION_REMOVED: use the default stellar-scale and background normalization")
 
     @classmethod
     def from_dict(cls, raw: Any) -> LocalNormalizationRecipe:
@@ -402,6 +408,8 @@ class LocalNormalizationRecipe:
         tile_size = value.get("tileSizePixels", 256)
         if not isinstance(enabled, bool):
             raise RecipeError("localNormalization.enabled must be boolean")
+        if enabled:
+            raise RecipeError("LOCAL_NORMALIZATION_REMOVED: use the default stellar-scale and background normalization")
         if isinstance(tile_size, bool) or not isinstance(tile_size, int) or tile_size < 64:
             raise RecipeError("localNormalization.tileSizePixels must be an integer >= 64")
         return cls(enabled=enabled, tile_size_pixels=tile_size)
