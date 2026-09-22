@@ -1,6 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useState } from "react";
-import type { Translator } from "./i18n";
+import { blinkFlagLabel, type Translator } from "./i18n";
 import { CalibrationGroups, FrameInventory } from "./FrameInventory";
 import type { InventoryTab } from "./Sidebar";
 import { dispositionLabel } from "./Inspector";
@@ -102,7 +102,7 @@ export function LaunchSettings({ mode, workflow, outputPathText, setOutputPathTe
         <div className="compute" aria-label={t("computeBackend")}><CpuIcon /><strong>{workflow.capabilities?.chip ?? t("detectingHardware")}</strong><span>{workflow.capabilities?.cpuBackend ?? "Portable CPU"} · {workflow.capabilities?.gpuBackend ?? "GPU probe"} · {computeLabel(workflow.capabilities, t)}</span></div>
       </div></details>
     </div>
-    {!workflow.canStart && !workflow.demoMode && <div className="blockers" role="status"><strong>{t("blockers")}</strong><ul>{!workflow.capabilities?.available && <li>{workflow.capabilities?.unavailableReason ?? t("blockerEngine")}</li>}{!workflow.calibrationReady && <li>{t("blockerCalibration")}</li>}{!workflow.allRequiredConfirmed && <li>{t("blockerTypes")}</li>}{workflow.matrix.length === 0 && <li>{t("blockerLights")}</li>}{workflow.insufficientPanels.map((cell) => <li key={cell.panelId}>{t("insufficientPanelLights", { target: cell.target, filter: cell.filter, count: workflow.qualityReady ? cell.admittedCount : cell.lightCount, required: workflow.minimumAdmittedLights })}</li>)}{!workflow.solverSetupReady && <li>{t("blockerSolver")}</li>}{!workflow.outputParent && <li>{t("blockerOutput")}</li>}{!workflow.masterOverridesReady && <li>{t("blockerMaster")}</li>}{workflow.cfaBlockedAssets.length > 0 && <li>{t("blockerCfaUnknownPattern")}</li>}</ul>{workflow.qualityReady && workflow.insufficientPanels.length > 0 && mode !== "inspect" && <button type="button" className="btn small" onClick={() => workflow.setStep("inspect")}>{t("reviewLightAdmission")}</button>}</div>}
+    {!workflow.canStart && !workflow.demoMode && <div className="blockers" role="status"><strong>{t("blockers")}</strong><ul>{!workflow.capabilities?.available && <li>{workflow.capabilities?.unavailableReason ?? t("blockerEngine")}</li>}{!workflow.calibrationReady && <li>{t("blockerCalibration")}</li>}{!workflow.allRequiredConfirmed && <li>{t("blockerTypes")}</li>}{workflow.matrix.length === 0 && <li>{t("blockerLights")}</li>}{workflow.insufficientPanels.map((cell) => <li key={cell.panelId}>{workflow.blinkReady && workflow.nativeRuntime ? t("blockerBlinkChannel", { target: cell.target, filter: cell.filter, kept: cell.admittedCount, total: cell.lightCount, required: workflow.minimumAdmittedLights }) : t("insufficientPanelLights", { target: cell.target, filter: cell.filter, count: workflow.admissionKnown ? cell.admittedCount : cell.lightCount, required: workflow.minimumAdmittedLights })}</li>)}{!workflow.solverSetupReady && <li>{t("blockerSolver")}</li>}{!workflow.outputParent && <li>{t("blockerOutput")}</li>}{!workflow.masterOverridesReady && <li>{t("blockerMaster")}</li>}{workflow.cfaBlockedAssets.length > 0 && <li>{t("blockerCfaUnknownPattern")}</li>}</ul>{workflow.blinkReady && workflow.nativeRuntime && workflow.insufficientPanels.length > 0 ? <button type="button" className="btn small" onClick={() => void workflow.runBlink()}>{t("blinkOpen")}</button> : workflow.qualityReady && workflow.insufficientPanels.length > 0 && mode !== "inspect" && <button type="button" className="btn small" onClick={() => workflow.setStep("inspect")}>{t("reviewLightAdmission")}</button>}</div>}
   </div>;
 }
 
@@ -128,23 +128,36 @@ function SolverRows({ workflow, t }: { workflow: Workflow; t: Translator }) {
 /** What the run will leave out, said before the start button is pressed. */
 function ScreeningNotice({ mode, workflow, t }: { mode: "import" | "inspect"; workflow: Workflow; t: Translator }) {
   if (workflow.demoMode) return null;
+  // With a blink session the run applies the user's decisions, nothing else.
+  if (workflow.blinkReady) {
+    const kept = workflow.blinkChannels.reduce((sum, channel) => sum + channel.kept, 0);
+    const total = workflow.blinkChannels.reduce((sum, channel) => sum + channel.total, 0);
+    return <div className="screening-notice blinked" role="status"><span className="symbol" aria-hidden="true">✓</span><div><strong>{t("noticeBlinkedTitle")}</strong><span>{t("noticeBlinkedBody", { kept, total, dropped: total - kept })}</span></div><button type="button" className="btn small" disabled={workflow.inputBusy} onClick={() => void workflow.runBlink()}>{t("blinkOpen")}</button></div>;
+  }
   if (!workflow.qualityReady) {
     if (!workflow.canStart) return null;
-    return <div className="screening-notice" role="status"><span className="symbol" aria-hidden="true">!</span><div><strong>{t("noticeUnscreenedTitle")}</strong><span>{t("noticeUnscreenedBody")}</span></div><button type="button" className="btn small" disabled={!workflow.canInspect || !workflow.allRequiredConfirmed || workflow.qualityBusy} onClick={() => void workflow.runInspection()}>{workflow.qualityBusy ? t("inspecting") : t("inspect", { count: "" })}</button></div>;
+    return <div className="screening-notice" role="status"><span className="symbol" aria-hidden="true">!</span><div><strong>{t("noticeUnscreenedTitle")}</strong><span>{t("noticeUnscreenedBody")} {t("noticeNotBlinkedBody")}</span></div><button type="button" className="btn small" disabled={!workflow.canInspect || !workflow.allRequiredConfirmed || workflow.qualityBusy} onClick={() => void workflow.runInspection()}>{workflow.qualityBusy ? t("inspecting") : t("inspect", { count: "" })}</button></div>;
   }
   if (workflow.pendingReviewCount === 0) return null;
   return <div className="screening-notice" role="status"><span className="symbol" aria-hidden="true">!</span><div><strong>{t("noticePendingReviewTitle", { count: workflow.pendingReviewCount })}</strong><span>{t("noticePendingReviewBody", { admitted: workflow.matrix.reduce((sum, cell) => sum + cell.admittedCount, 0), total: workflow.matrix.reduce((sum, cell) => sum + cell.lightCount, 0) })}</span></div>{workflow.unapprovedApprovableCount > 0 && <button type="button" className="btn small" onClick={() => workflow.setAllReviewApprovals(true)}>{t("approveAllReview", { count: workflow.approvableReviewCount })}</button>}{mode === "import" && <button type="button" className="btn small quiet" onClick={() => workflow.setStep("inspect")}>{t("viewQualityResults")}</button>}</div>;
 }
 
 export function LaunchBar({ mode, workflow, lightCount, t }: { mode: "import" | "inspect"; workflow: Workflow; lightCount: number; t: Translator }) {
+  // Blink & select is the primary action until a session exists; then the
+  // start with the decisions is.  The legacy review stays as the secondary button.
+  const blinkPrimary = !workflow.blinkReady;
+  const blinkButton = <button type="button" className={`btn ${blinkPrimary ? "primary" : ""}`} disabled={!workflow.canInspect || !workflow.allRequiredConfirmed || workflow.inputBusy} onClick={() => void workflow.runBlink()}>{workflow.blinkBusy ? t("blinkMeasuring", { count: lightCount, seconds: workflow.blinkElapsedSeconds }) : workflow.blinkReady ? t("blinkOpen") : t("blinkAndSelect", { count: lightCount || "" })}</button>;
+  const kept = workflow.blinkChannels.reduce((sum, channel) => sum + channel.kept, 0);
+  const total = workflow.blinkChannels.reduce((sum, channel) => sum + channel.total, 0);
+  const startLabel = workflow.blinkReady ? t("startSelected", { kept, total }) : workflow.demoMode ? t("start") : t("startAutomatic");
   return <footer className="launchbar">
     <ScreeningNotice mode={mode} workflow={workflow} t={t} />
     <div className="output"><FolderIcon /><div style={{ minWidth: 0 }}><small>{t("outputLabel")} · </small><strong title={workflow.outputParent}>{workflow.outputParent ?? (workflow.demoMode ? t("browserNoFiles") : t("outputNotSelected"))}</strong></div><button type="button" className="btn small" disabled={!workflow.nativeRuntime} onClick={() => void workflow.chooseOutputParent()}>{t("chooseOutput")}</button></div>
     <div className="actions">
       {mode === "inspect"
-        ? <button type="button" className="btn quiet" onClick={() => workflow.setStep("import")}>{t("back")}</button>
-        : <>{workflow.browserDemoAvailable && <button type="button" className="btn quiet" onClick={workflow.loadDemo}>{t("loadDemo")}</button>}<button type="button" className="btn" disabled={!workflow.canInspect || !workflow.allRequiredConfirmed || workflow.qualityBusy} onClick={() => void workflow.runInspection()}>{workflow.qualityBusy ? t("inspecting") : workflow.qualityReady ? t("viewQualityResults") : t("inspect", { count: lightCount || "" })}</button></>}
-      <button type="button" className="btn primary" disabled={!workflow.canStart} onClick={() => void workflow.startRun()}><PlayIcon />{t("start")}</button>
+        ? <><button type="button" className="btn quiet" onClick={() => workflow.setStep("import")}>{t("back")}</button>{blinkButton}</>
+        : <>{workflow.browserDemoAvailable && <button type="button" className="btn quiet" onClick={workflow.loadDemo}>{t("loadDemo")}</button>}<button type="button" className="btn quiet" disabled={!workflow.canInspect || !workflow.allRequiredConfirmed || workflow.qualityBusy} onClick={() => void workflow.runInspection()}>{workflow.qualityBusy ? t("inspecting") : workflow.qualityReady ? t("viewQualityResults") : t("inspect", { count: lightCount || "" })}</button>{blinkButton}</>}
+      <button type="button" className={`btn ${blinkPrimary && !workflow.demoMode ? "" : "primary"}`} disabled={!workflow.canStart} onClick={() => void workflow.startRun()}><PlayIcon />{startLabel}</button>
     </div>
   </footer>;
 }
@@ -234,7 +247,7 @@ export function ScreeningView({ workflow, t, outputPathText, setOutputPathText, 
         {ordered.length === 0 && <p className="table-empty">{t("inventoryEmpty")}</p>}
         {(decisionFilter === "ALL" || decisionFilter === "PASS") && passingFrames.length > visiblePassFrames && <div className="pass-pagination"><span>{t("passBatchStatus", { shown: Math.min(visiblePassFrames, passingFrames.length), total: passingFrames.length })}</span><button type="button" className="btn small" onClick={() => setVisiblePassFrames((current) => current + PASS_FRAME_BATCH)}>{t("showMorePass", { count: Math.min(PASS_FRAME_BATCH, passingFrames.length - visiblePassFrames) })}</button></div>}
       </div>}
-      <section className="panel matrix-section" aria-labelledby="matrix-title"><div className="panel-heading"><span id="matrix-title">{t("panelMatrix")}</span><small>{t("matrixCounts", { targets: targets.length, filters: filters.length, panels: workflow.matrix.length })}</small></div>{workflow.matrix.length ? <div className="tbl-wrap"><table className="tbl compact"><thead><tr><th scope="col">{t("targetLabel")}</th>{filters.map((filter) => <th scope="col" key={filter}>{filter}</th>)}</tr></thead><tbody>{targets.map((target) => <tr key={target}><th scope="row">{target}</th>{filters.map((filter) => { const cell = workflow.matrix.find((item) => item.target === target && item.filter === filter); return <td key={filter} className={cell ? "matrix-present" : "matrix-empty"}>{cell ? workflow.qualityReady ? t("panelAdmittedCounts", { admitted: cell.admittedCount, total: cell.lightCount, required: workflow.minimumAdmittedLights }) : `${cell.lightCount} ${t("frames")}` : "—"}</td>; })}</tr>)}</tbody></table></div> : <p className="table-empty">{t("noGroups")}</p>}</section>
+      <section className="panel matrix-section" aria-labelledby="matrix-title"><div className="panel-heading"><span id="matrix-title">{t("panelMatrix")}</span><small>{t("matrixCounts", { targets: targets.length, filters: filters.length, panels: workflow.matrix.length })}</small></div>{workflow.matrix.length ? <div className="tbl-wrap"><table className="tbl compact"><thead><tr><th scope="col">{t("targetLabel")}</th>{filters.map((filter) => <th scope="col" key={filter}>{filter}</th>)}</tr></thead><tbody>{targets.map((target) => <tr key={target}><th scope="row">{target}</th>{filters.map((filter) => { const cell = workflow.matrix.find((item) => item.target === target && item.filter === filter); return <td key={filter} className={cell ? "matrix-present" : "matrix-empty"}>{cell ? workflow.admissionKnown ? t("panelAdmittedCounts", { admitted: cell.admittedCount, total: cell.lightCount, required: workflow.minimumAdmittedLights }) : `${cell.lightCount} ${t("frames")}` : "—"}</td>; })}</tr>)}</tbody></table></div> : <p className="table-empty">{t("noGroups")}</p>}</section>
       <CalibrationGroups workflow={workflow} t={t} />
       <MetadataConfirmations workflow={workflow} t={t} />
       <LaunchSettings mode="inspect" workflow={workflow} outputPathText={outputPathText} setOutputPathText={setOutputPathText} t={t} />
@@ -329,13 +342,25 @@ export function ResultView({ workflow, t }: { workflow: Workflow; t: Translator 
   </section>;
 }
 
+/** The decision badge of a screened frame: the user's blink decision when there was one, else the gate's disposition. */
+function screeningBadge(frame: ScreeningSummary["frames"][number], t: Translator) {
+  if (frame.reason === "USER_DROP") return <span className="badge stop">{t("screeningUserDrop")}</span>;
+  if (frame.reason === "USER_KEEP_OVERRIDE") return <span className="badge check">{t("screeningUserKeepOverride")}</span>;
+  return <span className={`badge ${frame.admitted ? "ok" : frame.disposition === "REVIEW" ? "check" : "stop"}`}>{frame.admitted ? t("screeningAdmittedReview") : dispositionLabel(frame.disposition, t)}</span>;
+}
+function screeningWhy(frame: ScreeningSummary["frames"][number], t: Translator): string {
+  const flags = (frame.flags ?? []).map((code) => blinkFlagLabel(code, t));
+  if (flags.length) return flags.join("; ");
+  return frame.evidence.length ? frame.evidence.slice(0, 2).join("; ") : frame.summary || t("noReviewEvidence");
+}
+
 /** The run's own screening: how many Lights went in and why the others did not. */
 export function ScreeningSection({ screening, t }: { screening: ScreeningSummary; t: Translator }) {
   const decided = screening.frames;
   return <section className="panel screening-section" aria-labelledby="screening-title">
     <div className="panel-heading"><span id="screening-title">{t("screeningTitle")}</span><small>{t("screeningSummary", { admitted: screening.admitted, excluded: screening.excluded })}</small></div>
-    {decided.length === 0 ? <p className="screening-clean">{t("screeningAllPassed")}</p> : <div className="tbl-wrap"><table className="tbl"><tbody>{decided.map((frame) => <tr key={`${frame.target ?? ""}/${frame.name}`} className={`quality-frame quality-${dispositionClass(frame.disposition)}`}><td className="thumb-cell">{frame.previewDataUrl ? <img className="thumb" src={frame.previewDataUrl} alt={t("previewAlt", { name: frame.name })} /> : <FrameTile />}</td><td className="clip" title={frame.name}><strong className="frame-kind">{frame.name}</strong><small>{frame.target ? `${frame.target} · ` : ""}{frame.starCount ?? "—"} {t("starsLabel")}</small></td><td className="dec-cell"><div className="dec"><span className={`badge ${frame.admitted ? "ok" : frame.disposition === "REVIEW" ? "check" : "stop"}`}>{frame.admitted ? t("screeningAdmittedReview") : dispositionLabel(frame.disposition, t)}</span><span className="why">{frame.evidence.length ? frame.evidence.slice(0, 2).join("; ") : frame.summary || t("noReviewEvidence")}</span></div></td></tr>)}</tbody></table></div>}
-    {decided.some((frame) => frame.disposition === "REVIEW" && !frame.admitted) && <p className="screening-hint">{t("screeningReviewHint")}</p>}
+    {decided.length === 0 ? <p className="screening-clean">{t("screeningAllPassed")}</p> : <div className="tbl-wrap"><table className="tbl"><tbody>{decided.map((frame) => <tr key={`${frame.target ?? ""}/${frame.name}`} className={`quality-frame quality-${dispositionClass(frame.disposition)}`}><td className="thumb-cell">{frame.previewDataUrl ? <img className="thumb" src={frame.previewDataUrl} alt={t("previewAlt", { name: frame.name })} /> : <FrameTile />}</td><td className="clip" title={frame.name}><strong className="frame-kind">{frame.name}</strong><small>{frame.target ? `${frame.target} · ` : ""}{frame.starCount ?? "—"} {t("starsLabel")}</small></td><td className="dec-cell"><div className="dec">{screeningBadge(frame, t)}<span className="why">{screeningWhy(frame, t)}</span></div></td></tr>)}</tbody></table></div>}
+    {decided.some((frame) => frame.disposition === "REVIEW" && !frame.admitted && !frame.reason) && <p className="screening-hint">{t("screeningReviewHint")}</p>}
   </section>;
 }
 

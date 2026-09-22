@@ -45,8 +45,11 @@ from .statistics import (
 
 
 def _catalog(frame: FrameMeasurement) -> dict[str, np.ndarray]:
+    # A frame without any detection (full cloud) still needs an (N, 2)
+    # catalog: registration then reports INSUFFICIENT_STARS_FOR_ESTIMATE
+    # instead of raising on a (0,) array.
     return {
-        "points": np.asarray([(star.x, star.y) for star in frame.stars], dtype=np.float64),
+        "points": np.asarray([(star.x, star.y) for star in frame.stars], dtype=np.float64).reshape(-1, 2),
         "flux": np.asarray([star.flux for star in frame.stars], dtype=np.float64),
     }
 

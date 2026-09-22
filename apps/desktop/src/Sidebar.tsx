@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { BlinkIcon } from "./BlinkView";
 import type { Translator } from "./i18n";
 import { BiasIcon, DarkIcon, FlatIcon, ImportIcon, LightIcon, ProcessIcon, ResultIcon } from "./icons";
 import type { RawFrameRole, WorkflowStep } from "./types";
@@ -7,7 +8,7 @@ import type { useWorkflow } from "./useWorkflow";
 type Workflow = ReturnType<typeof useWorkflow>;
 export type InventoryTab = RawFrameRole | "ALL";
 
-const userStep = (step: WorkflowStep) => step === "import" || step === "inspect" ? 0 : step === "run" ? 1 : 2;
+const userStep = (step: WorkflowStep) => step === "import" || step === "inspect" || step === "blink" ? 0 : step === "run" ? 1 : 2;
 
 /** Source-list sidebar: the project's three states, the imported sources and the run's results. */
 export function Sidebar({ workflow, t, inventoryTab, setInventoryTab }: { workflow: Workflow; t: Translator; inventoryTab: InventoryTab; setInventoryTab: (tab: InventoryTab) => void }) {
@@ -20,14 +21,21 @@ export function Sidebar({ workflow, t, inventoryTab, setInventoryTab }: { workfl
     { target: "result", label: t("stepResult"), icon: <ResultIcon />, state: workflow.artifacts.length ? String(workflow.artifacts.length) : "" },
   ];
   const onImport = workflow.step === "import";
-  const pick = (tab: InventoryTab) => { setInventoryTab(tab); if (!workflow.runNavigationLocked && workflow.step === "inspect") workflow.setStep("import"); };
+  const pick = (tab: InventoryTab) => { setInventoryTab(tab); if (!workflow.runNavigationLocked && (workflow.step === "inspect" || workflow.step === "blink")) workflow.setStep("import"); };
+  // The blink session's decisions, reachable while the project is being configured.
+  const blinkKept = workflow.blinkChannels.reduce((sum, channel) => sum + channel.kept, 0);
+  const blinkTotal = workflow.blinkChannels.reduce((sum, channel) => sum + channel.total, 0);
+  const blinkRow = workflow.blinkSession && <button type="button" className="sb-row child" aria-current={workflow.step === "blink" ? "step" : undefined} disabled={workflow.runNavigationLocked || workflow.inputBusy || currentStep !== 0 || workflow.step === "blink"} onClick={() => void workflow.runBlink()}><BlinkIcon /><span className="sb-name">{t("stepBlink")}</span><span className={`sb-state tnum ${workflow.blinkReady ? "ok" : ""}`}>{blinkKept}/{blinkTotal}</span></button>;
   return <nav className="sidebar" aria-label={t("workflowLabel")}>
     <div className="sidebar-scroll">
       <div className="sb-head">{t("sidebarProject")}</div>
       {steps.map((item, index) => {
         const active = index === currentStep;
         const disabled = workflow.runNavigationLocked || workflow.inputBusy || index !== 0 || currentStep === 0;
-        return <button type="button" key={item.target} className="sb-row" aria-current={active ? "step" : undefined} disabled={disabled} onClick={() => !disabled && workflow.setStep(item.target)}>{item.icon}<span className="sb-name">{item.label}</span><span className={`sb-state ${item.state === "✓" ? "ok" : ""}`}>{item.state}</span></button>;
+        return <div key={item.target} className="sb-step">
+          <button type="button" className="sb-row" aria-current={active ? "step" : undefined} disabled={disabled} onClick={() => !disabled && workflow.setStep(item.target)}>{item.icon}<span className="sb-name">{item.label}</span><span className={`sb-state ${item.state === "✓" ? "ok" : ""}`}>{item.state}</span></button>
+          {item.target === "import" && blinkRow}
+        </div>;
       })}
       {workflow.importedTotal > 0 && <>
         <div className="sb-head">{t("sidebarSources")}</div>

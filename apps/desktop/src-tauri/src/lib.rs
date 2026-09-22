@@ -129,6 +129,29 @@ async fn inspect_quality(
 }
 
 #[tauri::command]
+async fn blink_measure(
+    app: AppHandle,
+    request: sidecar::BlinkMeasureRequest,
+) -> Result<sidecar::BlinkManifest, String> {
+    tauri::async_runtime::spawn_blocking(move || sidecar::blink_measure(&app, request))
+        .await
+        .map_err(|error| format!("blink measurement task failed: {error}"))?
+}
+
+#[tauri::command]
+async fn load_blink_preview(
+    app: AppHandle,
+    session_directory: String,
+    relative_path: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        project::load_blink_preview(&app, &session_directory, &relative_path)
+    })
+    .await
+    .map_err(|error| format!("blink preview task failed: {error}"))?
+}
+
+#[tauri::command]
 async fn hash_sources(
     request: sidecar::HashSourcesRequest,
 ) -> Result<sidecar::HashSourcesResponse, String> {
@@ -209,6 +232,8 @@ pub fn run() {
             inspect_paths,
             inspect_calibration,
             inspect_quality,
+            blink_measure,
+            load_blink_preview,
             hash_sources,
             start_pipeline,
             cancel_pipeline

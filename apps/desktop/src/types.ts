@@ -2,7 +2,7 @@ export type RawFrameRole = "LIGHT" | "FLAT" | "DARK" | "BIAS";
 export type MasterFrameRole = "MASTER_FLAT" | "MASTER_DARK" | "MASTER_BIAS";
 export type FrameRole = RawFrameRole | MasterFrameRole;
 export type GateDisposition = "PASS" | "REVIEW" | "HARD_FAIL";
-export type WorkflowStep = "import" | "inspect" | "run" | "result";
+export type WorkflowStep = "import" | "inspect" | "blink" | "run" | "result";
 export type RecipeId = "balanced";
 export type RunStatus = "IDLE" | "RUNNING" | "CANCELLING" | "CANCELLED" | "COMPLETED" | "FAILED";
 export type ProgressState = "queued" | "running" | "finalizing" | "succeeded" | "failed" | "cancelled";
@@ -146,6 +146,8 @@ export interface RunRequest {
   masterMetadataOverrides: MasterMetadataOverrideRequest[];
   rawFrameMetadataOverrides: Array<Pick<RawFrameMetadataOverride, "sourceSha256" | "cfaPattern">>;
   reviewSelections: ReviewApprovalSelection[];
+  /** The blink decisions (`selection-v1`); sent instead of `reviewSelections` when a blink session exists. */
+  selection?: SelectionFile;
   outputParentDirectory: string;
 }
 export interface CalibrationInspectionRequest {
@@ -197,8 +199,13 @@ export interface PipelineProgressEvent { jobId: string; stageId?: string; state:
 export interface PipelineArtifactEvent { jobId: string; stage: { stageId: string; kind: string; status: string }; artifact: ArtifactReceipt; }
 export interface GateCheck { code: string; required: boolean; passed: boolean; artifactIds: string[]; message: string; }
 export interface ResultGateReport { decision: "ready" | "blocked"; checks: GateCheck[]; }
-/** One Light the run's quality gate did not pass, with the reasons and a small preview. */
-export interface ScreeningFrame { name: string; target?: string; disposition: GateDisposition; admitted: boolean; summary: string; evidence: string[]; starCount?: number; previewDataUrl?: string; }
+/**
+ * One Light the run's quality gate did not pass, with the reasons and a small
+ * preview.  With an explicit selection, `reason` says the user decided
+ * (`USER_DROP`, or `USER_KEEP_OVERRIDE` for a KEEP over an EXCLUDE flag) and
+ * `flags` carries the blink flag codes of the frame.
+ */
+export interface ScreeningFrame { name: string; target?: string; disposition: GateDisposition; admitted: boolean; summary: string; evidence: string[]; starCount?: number; previewDataUrl?: string; reason?: "USER_DROP" | "USER_KEEP_OVERRIDE" | string; flags?: string[]; }
 /** The run's Light screening: counts plus every frame that needed a decision. */
 export interface ScreeningSummary { admitted: number; excluded: number; counts: Partial<Record<GateDisposition, number>>; frames: ScreeningFrame[]; }
 export interface PipelineCompleteEvent { jobId: string; outputDirectory: string; artifacts: OutputArtifact[]; gate: ResultGateReport; screening?: ScreeningSummary; }
@@ -238,3 +245,60 @@ export interface CatalogProgressEvent { jobId: string; catalogId: string; artifa
 export interface CatalogCompleteEvent { jobId: string; catalogId: string; install: Record<string, unknown>; }
 export interface CatalogErrorEvent { jobId: string; catalogId: string; code: string; message: string; }
 export interface CatalogEventHandlers { onProgress(event: CatalogProgressEvent): void; onComplete(event: CatalogCompleteEvent): void; onError(event: CatalogErrorEvent): void; }
+
+/* ── Blink screening (`blink-manifest-v1` in, `selection-v1` out) ───────── */
+export type BlinkSeverity = "EXCLUDE" | "ATTENTION";
+export type BlinkDecision = "KEEP" | "DROP";
+/** One flag of a frame: the engine's code, severity and the number that set it; `message` is the engine's English text (tooltip only). */
+export interface BlinkFlag { code: string; severity: BlinkSeverity; value: number | null; threshold: number | null; combined?: boolean; message: string; }
+export interface BlinkFrameMetrics {
+  sky: number | null; skyRatio: number | null; starCount: number | null; sourceRatio: number | null; extinctionMag: number | null;
+  transparency: number | null; fwhmNative: number | null; fwhmRatio: number | null; ellipticity: number | null; eccentricity: number | null;
+  registrationRms: number | null; matchedStars: number | null; overlap: number | null; backgroundShape: number | null; gradientRatio: number | null;
+}
+export interface BlinkFrameScore { log10: number | null; z: number | null; rank: number | null; }
+/**
+ * Preview locations relative to the session directory.  `filmstripDataUrl`
+ * is filled by the desktop loader for the frames inside its transport budget;
+ * the others are fetched on demand through `loadBlinkPreview`.
+ */
+export interface BlinkFramePreviews { filmstrip: string; zoom: string; coverage: number; filmstripDataUrl?: string | null; zoomDataUrl?: string | null; }
+export interface BlinkFrame {
+  index: number; channelId: string; filter: string; target: string; night: string;
+  path: string; name: string; sourceSha256: string; observedAt: string | null; airmass: number | null;
+  reference: boolean; defaultDecision: BlinkDecision;
+  flags: BlinkFlag[]; notes: string[];
+  gate: { disposition: GateDisposition; codes: string[] };
+  metrics: BlinkFrameMetrics; score: BlinkFrameScore; previews: BlinkFramePreviews;
+  transformToReference: number[][] | null;
+  normalization: { skyOffset: number | null; fluxScale: number | null; registered: boolean };
+}
+export interface BlinkNightSummary {
+  night: string; frameCount: number; medianSky: number | null; skyRatio: number | null; medianSourceRatio: number | null; medianExtinction: number | null;
+  exclude: number; attention: number; defaultDropNight: boolean;
+}
+export interface BlinkChannel {
+  channelId: string; target: string; filter: string; frameCount: number;
+  reference: { index: number; sourceSha256: string; rule: string } | null;
+  statistics: { skyClean: number | null; cleanCount: number; sourcesBest: number | null; fwhmBest: number | null };
+  stretch: { black: number; white: number; softness: number; skyReference: number; sigmaReference: number } | null;
+  previewGeometry: { filmstrip: [number, number]; zoom: [number, number]; sourceShape: [number, number] };
+  nights: BlinkNightSummary[];
+}
+export interface BlinkManifest {
+  schemaVersion: 1; kind: "blink-manifest-v1"; sessionId: string; sessionDirectory: string; createdAt: string; engineVersion: string;
+  gatePolicyDigest: string; flagsPolicyDigest: string; flagsPolicy: Record<string, unknown>; inventorySha256: string;
+  timings: Record<string, number>; counts: { frames: number; exclude: number; attention: number; clean: number };
+  channels: BlinkChannel[]; frames: BlinkFrame[];
+}
+/** What the desktop sends to `blink_measure`; the controller creates the session directory and picks the worker count. */
+export interface BlinkMeasureRequest { paths: string[]; masterFlats: Array<{ filter: string; path: string }>; }
+/** The manifest as the controller loaded it, plus the digest of `manifest.json` it read (the selection's `origin`). */
+export interface BlinkMeasureResponse extends BlinkManifest { manifestSha256?: string | null; }
+export interface SelectionDecision { sourceSha256: string; decision: BlinkDecision; defaultDecision: BlinkDecision; flags: string[]; note?: string; }
+export interface SelectionOrigin { sessionId: string; blinkManifestSha256: string; flagsPolicyDigest: string; createdAt: string; }
+/** `selection-v1`: one decision per Light of the project (`undecided` says what a Light without one gets; the desktop always sends every Light). */
+export interface SelectionFile {
+  schemaVersion: 1; kind: "ultra-fast-wbpp-selection"; policy: "explicit-v1";
+  origin?: SelectionOrigin; undecided: "ERROR" | "DROP" | "KEEP"; decisions: SelectionDecision[];
+}

@@ -45,7 +45,10 @@ class GatePolicy:
     version: str = "quality-gate-v1"
     # Implementation evidence changes must invalidate previous manual
     # approvals even when the user-facing thresholds remain identical.
-    evidence_revision: int = field(default=3, init=False)
+    # Revision 4: nightly z-scores are bounded on tiny nights (the peer
+    # scale never falls below 2 % of the centre, and a night with fewer than
+    # five peers borrows the whole cohort's spread).
+    evidence_revision: int = field(default=4, init=False)
     minimum_pass_group_frames: int = 8
     minimum_night_frames_for_pass: int = 3
     minimum_registration_matches: int = 30
@@ -235,9 +238,28 @@ def _add_family(
         families[item.family] = item
 
 
+# A night with fewer peers than this borrows the cohort-wide spread: one or
+# two peers cannot establish a scale, and a z-score of 25 on a three-frame
+# night said nothing about the frame.
+MINIMUM_PEERS_FOR_NIGHT_SCALE = 5
+
+
+def _madn(values: np.ndarray, center: float) -> float:
+    return 1.4826 * float(np.median(np.abs(values - center)))
+
+
 def _night_peer_stats(
     values: list[float | None], nights: list[str | None], index: int
 ) -> tuple[float | None, float | None]:
+    """Median and robust scale of the frame's same-night peers.
+
+    The scale is never below 2 % of the centre (a perfectly stable peer
+    set has MAD 0 and must not make a large outlier invisible, nor a small
+    one enormous), and a night with fewer than
+    ``MINIMUM_PEERS_FOR_NIGHT_SCALE`` peers uses at least the spread of the
+    whole cohort, so z-scores on tiny nights stay bounded.
+    """
+
     current_night = nights[index]
     if current_night is None:
         return None, None
@@ -252,7 +274,13 @@ def _night_peer_stats(
     if not peers.size:
         return None, None
     center = float(np.median(peers))
-    scale = 1.4826 * float(np.median(np.abs(peers - center)))
+    scale = max(_madn(peers, center), abs(center) * 0.02)
+    if peers.size < MINIMUM_PEERS_FOR_NIGHT_SCALE:
+        cohort = np.asarray(
+            [value for value in values if value is not None], dtype=np.float64
+        )
+        if cohort.size >= 2:
+            scale = max(scale, _madn(cohort, float(np.median(cohort))))
     return center, scale if scale > 1e-9 else None
 
 

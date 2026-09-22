@@ -1,0 +1,4459 @@
+{
+ "schemaVersion": 1,
+ "kind": "blink-regression-fixture-v1",
+ "description": "NGC 6822, 97 raw Lights over six nights (L on 2026-08-17/08-20/09-09, R/G/B on 2026-09-06/07/08/09); per-frame blink inputs from the quality analysis plus the user's blink decision.  Basenames only; no digests, paths or coordinates.",
+ "gatePolicyDigest": "sha256:483c98f6bc4e648626093d7cd5609098a8bba76c0d0cf38466bb9ae8d6d57037",
+ "frames": [
+  {
+   "id": "B-09-06-01",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_B_0_CAA0.00°_2026-09-06_21-11-50_-8.10°C_HFR2.44_Focus17104_00150.65.fits",
+   "channel_id": "B",
+   "target": "NGC 6822",
+   "filter_name": "B",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T21:11:50.766000",
+   "airmass": 1.33965851137939,
+   "sky": 728.4375,
+   "sky_mad": 14.5,
+   "star_count": 2790,
+   "transparency": 0.8216780732827595,
+   "extinction_mag": 0.18865529037174592,
+   "fwhm_native": 4.284257331040137,
+   "ellipticity": 0.1248712472718439,
+   "eccentricity": 0.48389013183292395,
+   "registration_ok": true,
+   "matched_stars": 2217,
+   "registration_rms": 0.37405381353609984,
+   "overlap": 1.0,
+   "background_shape": 0.03355691775908689,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.9998943478285962,
+     0.00655066049167246,
+     1565.0412977031729
+    ],
+    [
+     -0.006550660491672469,
+     -0.9998943478285959,
+     1045.4883188048414
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "B-09-06-02",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_B_0_CAA0.00°_2026-09-06_21-16-52_-8.20°C_HFR2.48_Focus17104_00160.58.fits",
+   "channel_id": "B",
+   "target": "NGC 6822",
+   "filter_name": "B",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T21:16:52.376000",
+   "airmass": 1.33414420855214,
+   "sky": 727.625,
+   "sky_mad": 14.4375,
+   "star_count": 2803,
+   "transparency": 0.8167594413056194,
+   "extinction_mag": 0.19489841139063474,
+   "fwhm_native": 4.470971499243452,
+   "ellipticity": 0.11846357991169454,
+   "eccentricity": 0.47211602393680163,
+   "registration_ok": true,
+   "matched_stars": 2218,
+   "registration_rms": 0.38645391731769846,
+   "overlap": 1.0,
+   "background_shape": 0.037652980212894836,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.9998754372227717,
+     0.0065097953622793685,
+     1565.0631494367158
+    ],
+    [
+     -0.0065097953622793615,
+     -0.9998754372227721,
+     1045.3201719568433
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "B-09-06-03",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_B_0_CAA0.00°_2026-09-06_21-21-53_-8.40°C_HFR2.44_Focus17104_00170.76.fits",
+   "channel_id": "B",
+   "target": "NGC 6822",
+   "filter_name": "B",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T21:21:53.964000",
+   "airmass": 1.32942529994429,
+   "sky": 727.6875,
+   "sky_mad": 14.4375,
+   "star_count": 2754,
+   "transparency": 0.8054222677544708,
+   "extinction_mag": 0.20983879316304477,
+   "fwhm_native": 4.300351547416036,
+   "ellipticity": 0.11569562957973506,
+   "eccentricity": 0.4669108101259256,
+   "registration_ok": true,
+   "matched_stars": 2224,
+   "registration_rms": 0.3802831930694973,
+   "overlap": 1.0,
+   "background_shape": 0.0379524657852097,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.999879337450948,
+     0.006478153644963598,
+     1565.204044266859
+    ],
+    [
+     -0.006478153644963598,
+     -0.999879337450948,
+     1045.3404783160374
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "B-09-06-04",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_B_0_CAA0.00°_2026-09-06_22-13-01_-10.00°C_HFR2.48_Focus17090_00180.57.fits",
+   "channel_id": "B",
+   "target": "NGC 6822",
+   "filter_name": "B",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T22:13:01.068000",
+   "airmass": 1.32365420702223,
+   "sky": 682.4375,
+   "sky_mad": 12.0625,
+   "star_count": 2789,
+   "transparency": 0.7164383341499883,
+   "extinction_mag": 0.3366622812845709,
+   "fwhm_native": 4.471656948472101,
+   "ellipticity": 0.13892875965395046,
+   "eccentricity": 0.5084843351067128,
+   "registration_ok": true,
+   "matched_stars": 2225,
+   "registration_rms": 0.36762601283943447,
+   "overlap": 1.0,
+   "background_shape": 0.038848866354233874,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     0.9999906314158215,
+     -0.00027786927998288007,
+     5.424197594773432
+    ],
+    [
+     0.0002778692799828836,
+     0.9999906314158217,
+     -0.5144666746829216
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "B-09-06-05",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_B_0_CAA0.00°_2026-09-06_22-18-02_-10.00°C_HFR2.54_Focus17090_00190.62.fits",
+   "channel_id": "B",
+   "target": "NGC 6822",
+   "filter_name": "B",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T22:18:02.649000",
+   "airmass": 1.32719451074761,
+   "sky": 680.0625,
+   "sky_mad": 11.875,
+   "star_count": 2647,
+   "transparency": 0.7027653951583912,
+   "extinction_mag": 0.35776041429281863,
+   "fwhm_native": 4.667713829600359,
+   "ellipticity": 0.12650827060437841,
+   "eccentricity": 0.4868389863984253,
+   "registration_ok": true,
+   "matched_stars": 2218,
+   "registration_rms": 0.36827171684584814,
+   "overlap": 1.0,
+   "background_shape": 0.030944175471176713,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.000006721354151,
+     -0.0002249958246766601,
+     5.340463322525693
+    ],
+    [
+     0.00022499582467667173,
+     1.000006721354151,
+     -0.4650014576461672
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "B-09-06-06",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_B_0_CAA0.00°_2026-09-06_22-23-04_-10.00°C_HFR2.54_Focus17090_00200.59.fits",
+   "channel_id": "B",
+   "target": "NGC 6822",
+   "filter_name": "B",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T22:23:04.234000",
+   "airmass": 1.33146747195359,
+   "sky": 676.1875,
+   "sky_mad": 11.75,
+   "star_count": 2727,
+   "transparency": 0.6930452665813136,
+   "extinction_mag": 0.3730959788138478,
+   "fwhm_native": 4.721914032438944,
+   "ellipticity": 0.13498521501743532,
+   "eccentricity": 0.5017463690439548,
+   "registration_ok": true,
+   "matched_stars": 2219,
+   "registration_rms": 0.36414211164078775,
+   "overlap": 1.0,
+   "background_shape": 0.04359735955140352,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.000019210556615,
+     -0.00019316458510441819,
+     5.266721885964671
+    ],
+    [
+     0.00019316458510441862,
+     1.000019210556615,
+     -0.5198134062071063
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "B-09-06-07",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_B_0_CAA0.00°_2026-09-06_23-04-34_-10.00°C_HFR2.56_Focus17097_00210.71.fits",
+   "channel_id": "B",
+   "target": "NGC 6822",
+   "filter_name": "B",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T23:04:34.764000",
+   "airmass": 1.39798210417073,
+   "sky": 671.9375,
+   "sky_mad": 11.375,
+   "star_count": 2124,
+   "transparency": 0.47015488918637616,
+   "extinction_mag": 0.7977233228006613,
+   "fwhm_native": 4.900786389864331,
+   "ellipticity": 0.1113027087461359,
+   "eccentricity": 0.45849441056358,
+   "registration_ok": true,
+   "matched_stars": 1929,
+   "registration_rms": 0.36738935251020577,
+   "overlap": 1.0,
+   "background_shape": 0.10615646659076561,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     0.9999699929363418,
+     8.881807147077811e-05,
+     5.035485174419819
+    ],
+    [
+     -8.881807147077043e-05,
+     0.9999699929363418,
+     -5.78582101638716
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "B-09-06-08",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_B_0_CAA0.00°_2026-09-06_23-09-36_-10.00°C_HFR2.51_Focus17097_00220.67.fits",
+   "channel_id": "B",
+   "target": "NGC 6822",
+   "filter_name": "B",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T23:09:36.378000",
+   "airmass": 1.41018923553174,
+   "sky": 664.0,
+   "sky_mad": 11.0,
+   "star_count": 2541,
+   "transparency": 0.5959748383717944,
+   "extinction_mag": 0.5408662598970331,
+   "fwhm_native": 4.65437462334251,
+   "ellipticity": 0.11883586372826882,
+   "eccentricity": 0.4728104957788452,
+   "registration_ok": true,
+   "matched_stars": 2174,
+   "registration_rms": 0.3688639282449576,
+   "overlap": 1.0,
+   "background_shape": 0.036491521379396055,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     0.9999948930347976,
+     0.00012563004395624628,
+     4.945260202833083
+    ],
+    [
+     -0.00012563004395625636,
+     0.9999948930347978,
+     -5.850965792003819
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "B-09-07-01",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_B_0_CAA0.00°_2026-09-07_23-30-20_-10.00°C_HFR2.60_Focus17103_00270.64.fits",
+   "channel_id": "B",
+   "target": "NGC 6822",
+   "filter_name": "B",
+   "night": "2026-09-07",
+   "observed_at": "2026-09-07T23:30:20.032000",
+   "airmass": 1.48653299661868,
+   "sky": 654.8125,
+   "sky_mad": 10.375,
+   "star_count": 2531,
+   "transparency": 0.5853771501489996,
+   "extinction_mag": 0.5641638442687552,
+   "fwhm_native": 5.065761661941931,
+   "ellipticity": 0.10176676378386934,
+   "eccentricity": 0.4395190623373134,
+   "registration_ok": true,
+   "matched_stars": 2195,
+   "registration_rms": 0.39384106986009715,
+   "overlap": 1.0,
+   "background_shape": 0.11115766924229402,
+   "gate_disposition": "REVIEW",
+   "gate_codes": [
+    "GATE_INSUFFICIENT_NIGHT_BASELINE"
+   ],
+   "transform": [
+    [
+     1.000032265033158,
+     0.00019564916052788376,
+     -1.0259817493870287
+    ],
+    [
+     -0.0001956491605278772,
+     1.000032265033158,
+     -3.2607673045542356
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "B-09-08-01",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_B_0_CAA0.00°_2026-09-08_20-54-01_-8.80°C_HFR2.65_Focus17102_00320.74.fits",
+   "channel_id": "B",
+   "target": "NGC 6822",
+   "filter_name": "B",
+   "night": "2026-09-08",
+   "observed_at": "2026-09-08T20:54:01.724000",
+   "airmass": 1.35268209938716,
+   "sky": 733.5625,
+   "sky_mad": 14.6875,
+   "star_count": 2701,
+   "transparency": 0.805488220013915,
+   "extinction_mag": 0.21091273091939458,
+   "fwhm_native": 5.073822544508571,
+   "ellipticity": 0.13040897817417557,
+   "eccentricity": 0.4937726722048077,
+   "registration_ok": true,
+   "matched_stars": 2210,
+   "registration_rms": 0.38638312796755153,
+   "overlap": 1.0,
+   "background_shape": 0.025906877250347547,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.999943226531805,
+     0.006568821375139498,
+     1565.1794735118829
+    ],
+    [
+     -0.006568821375139508,
+     -0.9999432265318049,
+     1052.9633171014734
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "B-09-08-02",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_B_0_CAA0.00°_2026-09-08_20-59-03_-9.00°C_HFR2.69_Focus17102_00330.90.fits",
+   "channel_id": "B",
+   "target": "NGC 6822",
+   "filter_name": "B",
+   "night": "2026-09-08",
+   "observed_at": "2026-09-08T20:59:03.319000",
+   "airmass": 1.34566262120822,
+   "sky": 736.5625,
+   "sky_mad": 14.875,
+   "star_count": 2546,
+   "transparency": 0.7324194499869379,
+   "extinction_mag": 0.313810068444688,
+   "fwhm_native": 5.235389152619311,
+   "ellipticity": 0.1034185293453409,
+   "eccentricity": 0.44287883950210205,
+   "registration_ok": true,
+   "matched_stars": 2175,
+   "registration_rms": 0.37871050483995566,
+   "overlap": 1.0,
+   "background_shape": 0.021037701009978173,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.9999394483675368,
+     0.00653719625797549,
+     1565.1281924457828
+    ],
+    [
+     -0.006537196257975498,
+     -0.9999394483675368,
+     1052.8547436001259
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "B-09-08-03",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_B_0_CAA0.00°_2026-09-08_21-04-04_-8.80°C_HFR2.61_Focus17102_00340.79.fits",
+   "channel_id": "B",
+   "target": "NGC 6822",
+   "filter_name": "B",
+   "night": "2026-09-08",
+   "observed_at": "2026-09-08T21:04:04.939000",
+   "airmass": 1.33939689179851,
+   "sky": 726.9375,
+   "sky_mad": 14.375,
+   "star_count": 2608,
+   "transparency": 0.7329076007314369,
+   "extinction_mag": 0.3127733899423296,
+   "fwhm_native": 4.9136972038560724,
+   "ellipticity": 0.10535043336829009,
+   "eccentricity": 0.44676856752203775,
+   "registration_ok": true,
+   "matched_stars": 2183,
+   "registration_rms": 0.3840740672051519,
+   "overlap": 1.0,
+   "background_shape": 0.04800626326161697,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.9999042446485354,
+     0.006507545157349648,
+     1565.1509426051014
+    ],
+    [
+     -0.006507545157349649,
+     -0.9999042446485357,
+     1052.850674446885
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "B-09-08-04",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_B_0_CAA0.00°_2026-09-08_21-09-23_-8.70°C_HFR2.56_Focus17102_00350.63.fits",
+   "channel_id": "B",
+   "target": "NGC 6822",
+   "filter_name": "B",
+   "night": "2026-09-08",
+   "observed_at": "2026-09-08T21:09:23.698000",
+   "airmass": 1.33364566668552,
+   "sky": 720.625,
+   "sky_mad": 14.0,
+   "star_count": 2678,
+   "transparency": 0.7682604113267036,
+   "extinction_mag": 0.2613377566505605,
+   "fwhm_native": 4.843779032136762,
+   "ellipticity": 0.11550384184030771,
+   "eccentricity": 0.4665471954147782,
+   "registration_ok": true,
+   "matched_stars": 2203,
+   "registration_rms": 0.37816231615339585,
+   "overlap": 1.0,
+   "background_shape": 0.04227758322488916,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.9998912527910457,
+     0.006464025756749353,
+     1564.1338715062407
+    ],
+    [
+     -0.006464025756749351,
+     -0.999891252791046,
+     1053.9654132160658
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "B-09-08-05",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_B_0_CAA0.00°_2026-09-08_21-14-25_-8.80°C_HFR2.61_Focus17102_00360.83.fits",
+   "channel_id": "B",
+   "target": "NGC 6822",
+   "filter_name": "B",
+   "night": "2026-09-08",
+   "observed_at": "2026-09-08T21:14:25.284000",
+   "airmass": 1.32901017718058,
+   "sky": 716.5625,
+   "sky_mad": 13.8125,
+   "star_count": 2648,
+   "transparency": 0.7549693982421246,
+   "extinction_mag": 0.28005374731702837,
+   "fwhm_native": 5.008144369414685,
+   "ellipticity": 0.10588056272366364,
+   "eccentricity": 0.44782857421634853,
+   "registration_ok": true,
+   "matched_stars": 2195,
+   "registration_rms": 0.37432051312225134,
+   "overlap": 1.0,
+   "background_shape": 0.023861776336221583,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.9998951403111542,
+     0.00641976345349748,
+     1564.10066869278
+    ],
+    [
+     -0.006419763453497464,
+     -0.9998951403111546,
+     1053.9007035562747
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "B-09-08-06",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_B_0_CAA0.00°_2026-09-08_21-19-26_-8.60°C_HFR2.63_Focus17102_00370.96.fits",
+   "channel_id": "B",
+   "target": "NGC 6822",
+   "filter_name": "B",
+   "night": "2026-09-08",
+   "observed_at": "2026-09-08T21:19:26.913000",
+   "airmass": 1.32512427899643,
+   "sky": 715.0,
+   "sky_mad": 13.75,
+   "star_count": 2644,
+   "transparency": 0.750550308470118,
+   "extinction_mag": 0.28623330392975205,
+   "fwhm_native": 5.113180848170542,
+   "ellipticity": 0.08780190297244905,
+   "eccentricity": 0.40974946158610404,
+   "registration_ok": true,
+   "matched_stars": 2195,
+   "registration_rms": 0.3887319657042259,
+   "overlap": 1.0,
+   "background_shape": 0.03868673305173091,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.9999053245087373,
+     0.006390747921755096,
+     1564.2271798850693
+    ],
+    [
+     -0.006390747921755081,
+     -0.9999053245087374,
+     1053.735257581511
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "B-09-09-01",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_B_0_CAA0.00°_2026-09-09_22-56-40_0.00°C_HFR2.52_Focus17101_00000.66.fits",
+   "channel_id": "B",
+   "target": "NGC 6822",
+   "filter_name": "B",
+   "night": "2026-09-09",
+   "observed_at": "2026-09-09T22:56:40.812000",
+   "airmass": 1.40693337818223,
+   "sky": 641.4375,
+   "sky_mad": 10.0,
+   "star_count": 3854,
+   "transparency": 1.0,
+   "extinction_mag": -0.021226721652397362,
+   "fwhm_native": 4.620145765208317,
+   "ellipticity": 0.12796414816057333,
+   "eccentricity": 0.48944200178027786,
+   "registration_ok": true,
+   "matched_stars": 2500,
+   "registration_rms": 0.0,
+   "overlap": 1.0,
+   "background_shape": 0.067293586263698,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": true,
+   "gradient_adu": null
+  },
+  {
+   "id": "B-09-09-02",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_B_0_CAA0.00°_2026-09-09_23-01-42_0.00°C_HFR2.54_Focus17101_00010.64.fits",
+   "channel_id": "B",
+   "target": "NGC 6822",
+   "filter_name": "B",
+   "night": "2026-09-09",
+   "observed_at": "2026-09-09T23:01:42.402000",
+   "airmass": 1.41991093936343,
+   "sky": 639.0625,
+   "sky_mad": 9.8125,
+   "star_count": 3792,
+   "transparency": 0.9778460949622195,
+   "extinction_mag": 0.0037458920563056136,
+   "fwhm_native": 4.70841540735919,
+   "ellipticity": 0.1250942423168147,
+   "eccentricity": 0.48429318482694356,
+   "registration_ok": true,
+   "matched_stars": 2406,
+   "registration_rms": 0.17254501497074984,
+   "overlap": 1.0,
+   "background_shape": 0.05394114445619132,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000029474596424,
+     2.4575553774539538e-05,
+     -0.09521675856763068
+    ],
+    [
+     -2.457555377453167e-05,
+     1.0000029474596421,
+     -0.021184012515448103
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "B-09-09-03",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_B_0_CAA0.00°_2026-09-09_23-06-43_-0.00°C_HFR2.54_Focus17101_00020.56.fits",
+   "channel_id": "B",
+   "target": "NGC 6822",
+   "filter_name": "B",
+   "night": "2026-09-09",
+   "observed_at": "2026-09-09T23:06:43.978000",
+   "airmass": 1.43390826792683,
+   "sky": 637.6875,
+   "sky_mad": 9.75,
+   "star_count": 3759,
+   "transparency": 0.9652787237272791,
+   "extinction_mag": 0.01849018844231627,
+   "fwhm_native": 4.722534082363236,
+   "ellipticity": 0.12625386503829633,
+   "eccentricity": 0.4863822393848223,
+   "registration_ok": true,
+   "matched_stars": 2390,
+   "registration_rms": 0.1866550287890824,
+   "overlap": 1.0,
+   "background_shape": 0.06814156724880843,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000212134273994,
+     5.8652848963055414e-05,
+     -0.11911868948084248
+    ],
+    [
+     -5.865284896304833e-05,
+     1.0000212134273991,
+     -0.09012850622889346
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "G-09-06-01",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_G_0_CAA0.00°_2026-09-06_20-55-50_-7.90°C_HFR2.53_Focus17099_00180.80.fits",
+   "channel_id": "G",
+   "target": "NGC 6822",
+   "filter_name": "G",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T20:55:50.266000",
+   "airmass": 1.36263871063384,
+   "sky": 745.5625,
+   "sky_mad": 15.625,
+   "star_count": 3084,
+   "transparency": 0.8943660677237895,
+   "extinction_mag": 0.11905902332703494,
+   "fwhm_native": 4.617591382989531,
+   "ellipticity": 0.13290216176680114,
+   "eccentricity": 0.4981378714084217,
+   "registration_ok": true,
+   "matched_stars": 2243,
+   "registration_rms": 0.3699683791535856,
+   "overlap": 1.0,
+   "background_shape": 0.022588626761414984,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.9998744058846383,
+     0.006762814267446659,
+     1565.956515316889
+    ],
+    [
+     -0.006762814267446664,
+     -0.9998744058846384,
+     1048.8978884313667
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "G-09-06-02",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_G_0_CAA0.00°_2026-09-06_21-00-51_-7.90°C_HFR2.49_Focus17099_00190.77.fits",
+   "channel_id": "G",
+   "target": "NGC 6822",
+   "filter_name": "G",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T21:00:51.886000",
+   "airmass": 1.35449571321664,
+   "sky": 745.0625,
+   "sky_mad": 15.5625,
+   "star_count": 3098,
+   "transparency": 0.8912901211400732,
+   "extinction_mag": 0.12239242541006604,
+   "fwhm_native": 4.469720067478164,
+   "ellipticity": 0.12399277380471807,
+   "eccentricity": 0.4822979780133223,
+   "registration_ok": true,
+   "matched_stars": 2244,
+   "registration_rms": 0.3737358958858131,
+   "overlap": 1.0,
+   "background_shape": 0.01818396940243809,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.9998624096004519,
+     0.006734654212963634,
+     1566.014991343137
+    ],
+    [
+     -0.006734654212963642,
+     -0.9998624096004519,
+     1048.8013519975802
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "G-09-06-03",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_G_0_CAA0.00°_2026-09-06_21-05-53_-7.90°C_HFR2.49_Focus17099_00200.70.fits",
+   "channel_id": "G",
+   "target": "NGC 6822",
+   "filter_name": "G",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T21:05:53.506000",
+   "airmass": 1.3472860243553,
+   "sky": 737.75,
+   "sky_mad": 15.1875,
+   "star_count": 3143,
+   "transparency": 0.8973766692392595,
+   "extinction_mag": 0.11464273781760191,
+   "fwhm_native": 4.473601298904594,
+   "ellipticity": 0.1257662316747003,
+   "eccentricity": 0.4855051527956863,
+   "registration_ok": true,
+   "matched_stars": 2250,
+   "registration_rms": 0.36974896578485283,
+   "overlap": 1.0,
+   "background_shape": 0.018165521568789554,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.9998616823199447,
+     0.006700188070631545,
+     1566.0379928744492
+    ],
+    [
+     -0.006700188070631552,
+     -0.9998616823199447,
+     1048.7655873659478
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "G-09-06-04",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_G_0_CAA0.00°_2026-09-06_21-46-02_-9.00°C_HFR2.49_Focus17105_00210.90.fits",
+   "channel_id": "G",
+   "target": "NGC 6822",
+   "filter_name": "G",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T21:46:02.229000",
+   "airmass": 1.31721163255898,
+   "sky": 706.5625,
+   "sky_mad": 13.5,
+   "star_count": 3218,
+   "transparency": 0.8682904624964018,
+   "extinction_mag": 0.14891337705126684,
+   "fwhm_native": 4.443515197930877,
+   "ellipticity": 0.09172786517273124,
+   "eccentricity": 0.4183798861039041,
+   "registration_ok": true,
+   "matched_stars": 2247,
+   "registration_rms": 0.3797207359884642,
+   "overlap": 1.0,
+   "background_shape": 0.02951390265910975,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.9997914324291666,
+     0.0064326867569224015,
+     1566.4469616344622
+    ],
+    [
+     -0.006432686756922406,
+     -0.9997914324291663,
+     1045.9353418387961
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "G-09-06-05",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_G_0_CAA0.00°_2026-09-06_22-02-01_-10.00°C_HFR2.49_Focus17085_00220.63.fits",
+   "channel_id": "G",
+   "target": "NGC 6822",
+   "filter_name": "G",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T22:02:01.779000",
+   "airmass": 1.31854261969689,
+   "sky": 697.875,
+   "sky_mad": 13.125,
+   "star_count": 3184,
+   "transparency": 0.8290951540062047,
+   "extinction_mag": 0.19913156121123082,
+   "fwhm_native": 4.487745743613445,
+   "ellipticity": 0.132379511205435,
+   "eccentricity": 0.49722699788314,
+   "registration_ok": true,
+   "matched_stars": 2257,
+   "registration_rms": 0.3553698391319609,
+   "overlap": 1.0,
+   "background_shape": 0.07083755143282965,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     0.9999625315065487,
+     -0.0004674921207973971,
+     5.985729909411361
+    ],
+    [
+     0.0004674921207974026,
+     0.9999625315065487,
+     0.9078156229493857
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "G-09-06-06",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_G_0_CAA0.00°_2026-09-06_22-07-03_-10.00°C_HFR2.50_Focus17085_00230.59.fits",
+   "channel_id": "G",
+   "target": "NGC 6822",
+   "filter_name": "G",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T22:07:03.374000",
+   "airmass": 1.32044018470541,
+   "sky": 689.0,
+   "sky_mad": 12.625,
+   "star_count": 3203,
+   "transparency": 0.814798262260821,
+   "extinction_mag": 0.21811214605481416,
+   "fwhm_native": 4.440444091553536,
+   "ellipticity": 0.1473068050029247,
+   "eccentricity": 0.5224120167125559,
+   "registration_ok": true,
+   "matched_stars": 2259,
+   "registration_rms": 0.35900779680528433,
+   "overlap": 1.0,
+   "background_shape": 0.05335774331100411,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     0.9999653809711321,
+     -0.00042831286004736576,
+     5.818677751518408
+    ],
+    [
+     0.0004283128600473695,
+     0.999965380971132,
+     0.8402146030542781
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "G-09-06-07",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_G_0_CAA0.00°_2026-09-06_22-48-40_-10.00°C_HFR2.57_Focus17092_00240.58.fits",
+   "channel_id": "G",
+   "target": "NGC 6822",
+   "filter_name": "G",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T22:48:40.559000",
+   "airmass": 1.36557542904995,
+   "sky": 676.4375,
+   "sky_mad": 11.875,
+   "star_count": 2979,
+   "transparency": 0.7283533132480633,
+   "extinction_mag": 0.34213889313646645,
+   "fwhm_native": 4.770017405440591,
+   "ellipticity": 0.11602686480300739,
+   "eccentricity": 0.4675376681693902,
+   "registration_ok": true,
+   "matched_stars": 2249,
+   "registration_rms": 0.36416111750160085,
+   "overlap": 1.0,
+   "background_shape": 0.05898581510189798,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     0.9999598088611518,
+     -0.0001201858004288165,
+     5.029383957237087
+    ],
+    [
+     0.00012018580042881789,
+     0.999959808861152,
+     -2.532910559860852
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "G-09-06-08",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_G_0_CAA0.00°_2026-09-06_22-53-42_-10.00°C_HFR2.58_Focus17092_00250.74.fits",
+   "channel_id": "G",
+   "target": "NGC 6822",
+   "filter_name": "G",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T22:53:42.152000",
+   "airmass": 1.37484228864154,
+   "sky": 692.125,
+   "sky_mad": 12.6875,
+   "star_count": 2312,
+   "transparency": 0.4972979557533217,
+   "extinction_mag": 0.7569158015543365,
+   "fwhm_native": 4.95585092423106,
+   "ellipticity": 0.12467525765550219,
+   "eccentricity": 0.4835355161471683,
+   "registration_ok": true,
+   "matched_stars": 2071,
+   "registration_rms": 0.3900812231001601,
+   "overlap": 1.0,
+   "background_shape": 0.25329833530281964,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     0.9999619980943307,
+     -9.387753209977153e-05,
+     4.978468431607325
+    ],
+    [
+     9.387753209977172e-05,
+     0.9999619980943307,
+     -2.6198035686887806
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "G-09-06-09",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_G_0_CAA0.00°_2026-09-06_22-58-43_-10.00°C_HFR2.52_Focus17092_00260.59.fits",
+   "channel_id": "G",
+   "target": "NGC 6822",
+   "filter_name": "G",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T22:58:43.734000",
+   "airmass": 1.38502165379263,
+   "sky": 680.625,
+   "sky_mad": 12.0,
+   "star_count": 2836,
+   "transparency": 0.6741191369838017,
+   "extinction_mag": 0.42712481444874467,
+   "fwhm_native": 4.635032219359447,
+   "ellipticity": 0.11644914838551668,
+   "eccentricity": 0.4683352352869911,
+   "registration_ok": true,
+   "matched_stars": 2238,
+   "registration_rms": 0.3697393589502647,
+   "overlap": 1.0,
+   "background_shape": 0.09011876380847844,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     0.9999795992340256,
+     -6.112334073229804e-05,
+     4.8938098592625465
+    ],
+    [
+     6.112334073229229e-05,
+     0.9999795992340258,
+     -2.627156448785229
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "G-09-06-10",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_G_0_CAA0.00°_2026-09-06_23-38-51_-10.00°C_HFR2.79_Focus17095_00274.51.fits",
+   "channel_id": "G",
+   "target": "NGC 6822",
+   "filter_name": "G",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T23:38:51.919000",
+   "airmass": 1.50320245543135,
+   "sky": 710.125,
+   "sky_mad": 14.125,
+   "star_count": 1607,
+   "transparency": 0.30637754947449325,
+   "extinction_mag": 1.2892331493613427,
+   "fwhm_native": 5.669900191143457,
+   "ellipticity": 0.14254683576080562,
+   "eccentricity": 0.5145620187462276,
+   "registration_ok": true,
+   "matched_stars": 1518,
+   "registration_rms": 0.38756057508685243,
+   "overlap": 1.0,
+   "background_shape": 0.5169560814605941,
+   "gate_disposition": "REVIEW",
+   "gate_codes": [
+    "GATE_SPATIAL_DIMMING_REVIEW"
+   ],
+   "transform": [
+    [
+     0.9998684094856012,
+     0.0001928064968721872,
+     12.526602117881794
+    ],
+    [
+     -0.0001928064968721847,
+     0.9998684094856012,
+     -11.855613820918734
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "G-09-06-11",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_G_0_CAA0.00°_2026-09-06_23-43-53_-10.00°C_HFR2.51_Focus17095_00280.59.fits",
+   "channel_id": "G",
+   "target": "NGC 6822",
+   "filter_name": "G",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T23:43:53.515000",
+   "airmass": 1.5232807046002,
+   "sky": 702.125,
+   "sky_mad": 13.0,
+   "star_count": 1711,
+   "transparency": 0.31197204632299713,
+   "extinction_mag": 1.27059020327346,
+   "fwhm_native": 4.6634377281552695,
+   "ellipticity": 0.11775806660108162,
+   "eccentricity": 0.4707963152447129,
+   "registration_ok": true,
+   "matched_stars": 1580,
+   "registration_rms": 0.38116258821250454,
+   "overlap": 1.0,
+   "background_shape": 0.17449656001285827,
+   "gate_disposition": "REVIEW",
+   "gate_codes": [
+    "GATE_SOURCE_RETENTION_REVIEW"
+   ],
+   "transform": [
+    [
+     0.9999854175514972,
+     0.00020234181529870087,
+     12.347708920460946
+    ],
+    [
+     -0.00020234181529869336,
+     0.9999854175514974,
+     -11.979309566773338
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "G-09-08-01",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_G_0_CAA0.00°_2026-09-08_21-52-04_-9.20°C_HFR2.33_Focus17098_00300.74.fits",
+   "channel_id": "G",
+   "target": "NGC 6822",
+   "filter_name": "G",
+   "night": "2026-09-08",
+   "observed_at": "2026-09-08T21:52:04.297000",
+   "airmass": 1.31800965225472,
+   "sky": 729.125,
+   "sky_mad": 14.125,
+   "star_count": 1996,
+   "transparency": 0.43274459564054885,
+   "extinction_mag": 0.9050367225152673,
+   "fwhm_native": 3.9064827471128485,
+   "ellipticity": 0.09465070454530133,
+   "eccentricity": 0.42466769740549,
+   "registration_ok": true,
+   "matched_stars": 1833,
+   "registration_rms": 0.3772223097930245,
+   "overlap": 1.0,
+   "background_shape": 0.1776618987394897,
+   "gate_disposition": "REVIEW",
+   "gate_codes": [
+    "GATE_NOISE_REVIEW"
+   ],
+   "transform": [
+    [
+     0.9998496516953997,
+     -0.00046889387359043275,
+     5.313969364128752
+    ],
+    [
+     0.0004688938735904243,
+     0.9998496516953999,
+     2.988012222942018
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "G-09-08-02",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_G_0_CAA0.00°_2026-09-08_21-57-05_-9.10°C_HFR2.29_Focus17098_003143.47.fits",
+   "channel_id": "G",
+   "target": "NGC 6822",
+   "filter_name": "G",
+   "night": "2026-09-08",
+   "observed_at": "2026-09-08T21:57:05.968000",
+   "airmass": 1.31819366955482,
+   "sky": 526.0625,
+   "sky_mad": 2.9375,
+   "star_count": 1279,
+   "transparency": 0.085594215191633,
+   "extinction_mag": 2.6645140198817714,
+   "fwhm_native": 3.9207242825323503,
+   "ellipticity": 0.13865959822226148,
+   "eccentricity": 0.5080282229611459,
+   "registration_ok": true,
+   "matched_stars": 1105,
+   "registration_rms": 0.5157567733596979,
+   "overlap": 1.0,
+   "background_shape": 0.3070616206017666,
+   "gate_disposition": "REVIEW",
+   "gate_codes": [
+    "GATE_SOURCE_RETENTION_STRONG"
+   ],
+   "transform": [
+    [
+     0.9998294881468133,
+     -0.000491092554892673,
+     5.195813363784396
+    ],
+    [
+     0.0004910925548926736,
+     0.9998294881468132,
+     2.77300923030748
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "G-09-08-03",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_G_0_CAA0.00°_2026-09-08_22-02-07_-8.80°C_HFR0.00_Focus17098_003230.79.fits",
+   "channel_id": "G",
+   "target": "NGC 6822",
+   "filter_name": "G",
+   "night": "2026-09-08",
+   "observed_at": "2026-09-08T22:02:07.564000",
+   "airmass": 1.31788424374234,
+   "sky": 501.5,
+   "sky_mad": 1.5,
+   "star_count": 256,
+   "transparency": null,
+   "extinction_mag": null,
+   "fwhm_native": 3.7104351737955517,
+   "ellipticity": 0.39796943167899657,
+   "eccentricity": 0.7984729630702578,
+   "registration_ok": false,
+   "matched_stars": 0,
+   "registration_rms": null,
+   "overlap": null,
+   "background_shape": null,
+   "gate_disposition": "REVIEW",
+   "gate_codes": [
+    "GATE_SOURCE_RETENTION_STRONG",
+    "GATE_TRAILING_REVIEW",
+    "GATE_REGISTRATION_REVIEW"
+   ],
+   "transform": null,
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "G-09-09-01",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_G_0_CAA0.00°_2026-09-09_23-12-37_-0.00°C_HFR2.61_Focus17096_00000.85.fits",
+   "channel_id": "G",
+   "target": "NGC 6822",
+   "filter_name": "G",
+   "night": "2026-09-09",
+   "observed_at": "2026-09-09T23:12:37.462000",
+   "airmass": 1.45166205427655,
+   "sky": 640.5,
+   "sky_mad": 10.125,
+   "star_count": 4004,
+   "transparency": 1.0107972066936033,
+   "extinction_mag": -0.009361607944535145,
+   "fwhm_native": 4.9341907609957385,
+   "ellipticity": 0.13365397192321682,
+   "eccentricity": 0.4994442349106248,
+   "registration_ok": true,
+   "matched_stars": 2414,
+   "registration_rms": 0.1638000096601184,
+   "overlap": 1.0,
+   "background_shape": 0.09643573854735413,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     0.9999858993283369,
+     -3.1400962657351244e-05,
+     0.056851569897162335
+    ],
+    [
+     3.140096265735666e-05,
+     0.9999858993283368,
+     -0.02385552039652339
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "G-09-09-02",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_G_0_CAA0.00°_2026-09-09_23-17-39_-0.00°C_HFR2.61_Focus17096_00010.83.fits",
+   "channel_id": "G",
+   "target": "NGC 6822",
+   "filter_name": "G",
+   "night": "2026-09-09",
+   "observed_at": "2026-09-09T23:17:39.072000",
+   "airmass": 1.46810327828009,
+   "sky": 640.375,
+   "sky_mad": 10.0625,
+   "star_count": 4041,
+   "transparency": 1.0,
+   "extinction_mag": 0.0031205359815116296,
+   "fwhm_native": 4.969156618652427,
+   "ellipticity": 0.13982010906729503,
+   "eccentricity": 0.5099907403424103,
+   "registration_ok": true,
+   "matched_stars": 2500,
+   "registration_rms": 0.0,
+   "overlap": 1.0,
+   "background_shape": 0.09663941501332203,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": true,
+   "gradient_adu": null
+  },
+  {
+   "id": "G-09-09-03",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_G_0_CAA0.00°_2026-09-09_23-22-40_-0.00°C_HFR2.61_Focus17096_00020.70.fits",
+   "channel_id": "G",
+   "target": "NGC 6822",
+   "filter_name": "G",
+   "night": "2026-09-09",
+   "observed_at": "2026-09-09T23:22:40.656000",
+   "airmass": 1.48578010619729,
+   "sky": 640.3125,
+   "sky_mad": 10.0625,
+   "star_count": 3971,
+   "transparency": 0.9882009442582819,
+   "extinction_mag": 0.01689121603697182,
+   "fwhm_native": 4.982121473083124,
+   "ellipticity": 0.13589319072817224,
+   "eccentricity": 0.5033084647972895,
+   "registration_ok": true,
+   "matched_stars": 2417,
+   "registration_rms": 0.1853908480468085,
+   "overlap": 1.0,
+   "background_shape": 0.07648745757045969,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000121073241104,
+     3.307827297683642e-05,
+     -0.07282990983912896
+    ],
+    [
+     -3.3078272976838776e-05,
+     1.0000121073241106,
+     -0.09057385579382071
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-17-01",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-17_21-43-35_-9.90°C_HFR2.37_Focus17097_00000.61.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-17",
+   "observed_at": "2026-08-17T21:43:35.470000",
+   "airmass": 1.43345492514717,
+   "sky": 1247.3125,
+   "sky_mad": 44.75,
+   "star_count": 5091,
+   "transparency": 1.015400785022139,
+   "extinction_mag": 0.023105239459790042,
+   "fwhm_native": 4.005697369079757,
+   "ellipticity": 0.08322726585812656,
+   "eccentricity": 0.399409256194738,
+   "registration_ok": true,
+   "matched_stars": 2436,
+   "registration_rms": 0.19622398574983882,
+   "overlap": 1.0,
+   "background_shape": 0.09918767633321929,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000636247484258,
+     -0.000327588641807899,
+     1.2726440866551911
+    ],
+    [
+     0.0003275886418078901,
+     1.000063624748426,
+     -0.8137023580278537
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-17-02",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-17_21-48-37_-10.00°C_HFR2.41_Focus17097_00010.60.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-17",
+   "observed_at": "2026-08-17T21:48:37.048000",
+   "airmass": 1.41946047136718,
+   "sky": 1280.3125,
+   "sky_mad": 46.125,
+   "star_count": 4626,
+   "transparency": 0.880759141096393,
+   "extinction_mag": 0.17685635566756738,
+   "fwhm_native": 4.095778101846203,
+   "ellipticity": 0.08147610449345144,
+   "eccentricity": 0.3953654402062773,
+   "registration_ok": true,
+   "matched_stars": 2433,
+   "registration_rms": 0.21340357540205454,
+   "overlap": 1.0,
+   "background_shape": 0.12231382080027431,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000613488166632,
+     -0.00032336927507657664,
+     1.3604253728560707
+    ],
+    [
+     0.0003233692750765824,
+     1.0000613488166632,
+     -0.7109238437953991
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-17-03",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-17_21-53-38_-10.00°C_HFR2.39_Focus17097_00020.50.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-17",
+   "observed_at": "2026-08-17T21:53:38.736000",
+   "airmass": 1.40648621406106,
+   "sky": 1230.3125,
+   "sky_mad": 43.8125,
+   "star_count": 4949,
+   "transparency": 0.9577310863520769,
+   "extinction_mag": 0.08524158067036246,
+   "fwhm_native": 4.0747430478471145,
+   "ellipticity": 0.08243391664890454,
+   "eccentricity": 0.39758330282310717,
+   "registration_ok": true,
+   "matched_stars": 2429,
+   "registration_rms": 0.19333683471287977,
+   "overlap": 1.0,
+   "background_shape": 0.08101736266964898,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000495930739481,
+     -0.0002989643185321052,
+     1.2608941131981055
+    ],
+    [
+     0.00029896431853211624,
+     1.000049593073948,
+     -0.6975772997873264
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-17-04",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-17_21-58-50_-10.00°C_HFR2.46_Focus17097_00030.81.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-17",
+   "observed_at": "2026-08-17T21:58:50.768000",
+   "airmass": 1.39415379044122,
+   "sky": 1164.9375,
+   "sky_mad": 40.375,
+   "star_count": 5313,
+   "transparency": 1.0370491733108733,
+   "extinction_mag": -0.001764454280087084,
+   "fwhm_native": 4.29504203973143,
+   "ellipticity": 0.08635313041990045,
+   "eccentricity": 0.40650879161676556,
+   "registration_ok": true,
+   "matched_stars": 2438,
+   "registration_rms": 0.18084471290727935,
+   "overlap": 1.0,
+   "background_shape": 0.10684653891398244,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000438251208164,
+     -0.0002771184086692115,
+     1.0020629738207845
+    ],
+    [
+     0.00027711840866920256,
+     1.0000438251208164,
+     -0.99163652292998
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-17-05",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-17_22-03-52_-10.00°C_HFR2.44_Focus17097_00040.63.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-17",
+   "observed_at": "2026-08-17T22:03:52.392000",
+   "airmass": 1.38321779289384,
+   "sky": 1142.875,
+   "sky_mad": 39.125,
+   "star_count": 5330,
+   "transparency": 1.0289828573934705,
+   "extinction_mag": 0.006166770965332143,
+   "fwhm_native": 4.247804274037725,
+   "ellipticity": 0.08777001035482812,
+   "eccentricity": 0.40967846649431117,
+   "registration_ok": true,
+   "matched_stars": 2444,
+   "registration_rms": 0.19039310317313024,
+   "overlap": 1.0,
+   "background_shape": 0.1114297045493936,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000308373220876,
+     -0.00025565343401260044,
+     0.9859248424949101
+    ],
+    [
+     0.00025565343401261247,
+     1.0000308373220872,
+     -0.9903828166567337
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-17-06",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-17_22-08-54_-10.00°C_HFR2.52_Focus17097_00050.57.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-17",
+   "observed_at": "2026-08-17T22:08:54.084000",
+   "airmass": 1.37326807828729,
+   "sky": 1123.625,
+   "sky_mad": 38.125,
+   "star_count": 5345,
+   "transparency": 1.0350228372508412,
+   "extinction_mag": -0.0006851967739258391,
+   "fwhm_native": 4.505841623829092,
+   "ellipticity": 0.08486512941432722,
+   "eccentricity": 0.4031478247964931,
+   "registration_ok": true,
+   "matched_stars": 2442,
+   "registration_rms": 0.17370970819198936,
+   "overlap": 1.0,
+   "background_shape": 0.10490020634806513,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000338835950724,
+     -0.00023611369916317083,
+     1.0242486944624716
+    ],
+    [
+     0.0002361136991631743,
+     1.0000338835950726,
+     -0.9199226217709793
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-17-07",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-17_22-14-03_-10.00°C_HFR2.58_Focus17097_00060.93.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-17",
+   "observed_at": "2026-08-17T22:14:03.683000",
+   "airmass": 1.3639113242766,
+   "sky": 1100.6875,
+   "sky_mad": 36.9375,
+   "star_count": 5381,
+   "transparency": 1.037979463526139,
+   "extinction_mag": -0.004250106162707351,
+   "fwhm_native": 4.736003448620356,
+   "ellipticity": 0.09185606876312374,
+   "eccentricity": 0.41865809140985455,
+   "registration_ok": true,
+   "matched_stars": 2447,
+   "registration_rms": 0.2125923123461194,
+   "overlap": 1.0,
+   "background_shape": 0.13105531334311032,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     0.9999988981234076,
+     -0.00020923883110661947,
+     1.2531363982699304
+    ],
+    [
+     0.0002092388311066205,
+     0.9999988981234075,
+     -1.3747893352689289
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-17-08",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-17_22-19-05_-9.90°C_HFR2.57_Focus17097_00070.64.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-17",
+   "observed_at": "2026-08-17T22:19:05.266000",
+   "airmass": 1.3556631340568,
+   "sky": 1098.75,
+   "sky_mad": 36.625,
+   "star_count": 5315,
+   "transparency": 1.0028329406977992,
+   "extinction_mag": 0.03273790930084138,
+   "fwhm_native": 4.758362318272802,
+   "ellipticity": 0.08755743243640535,
+   "eccentricity": 0.4092047909029842,
+   "registration_ok": true,
+   "matched_stars": 2437,
+   "registration_rms": 0.20464305306658215,
+   "overlap": 1.0,
+   "background_shape": 0.10762586095952778,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000056834584665,
+     -0.0001869286627184912,
+     1.1906732040813495
+    ],
+    [
+     0.00018692866271848761,
+     1.0000056834584665,
+     -1.3314261786116504
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-17-09",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-17_22-26-20_-10.00°C_HFR2.43_Focus17094_00080.58.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-17",
+   "observed_at": "2026-08-17T22:26:20.137000",
+   "airmass": 1.34523064166209,
+   "sky": 1072.0,
+   "sky_mad": 35.0625,
+   "star_count": 5451,
+   "transparency": 0.9907090984083442,
+   "extinction_mag": 0.045422383717744,
+   "fwhm_native": 4.148330637717706,
+   "ellipticity": 0.09160124420267113,
+   "eccentricity": 0.41810486502743216,
+   "registration_ok": true,
+   "matched_stars": 2444,
+   "registration_rms": 0.1663460934080501,
+   "overlap": 1.0,
+   "background_shape": 0.0979905124173074,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000178801518935,
+     -0.00016499505260107397,
+     1.032689666804913
+    ],
+    [
+     0.00016499505260106825,
+     1.0000178801518935,
+     -1.1277609488236067
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-17-10",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-17_22-31-33_-10.00°C_HFR2.55_Focus17094_00090.69.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-17",
+   "observed_at": "2026-08-17T22:31:33.393000",
+   "airmass": 1.33886125760478,
+   "sky": 1075.8125,
+   "sky_mad": 34.625,
+   "star_count": 5008,
+   "transparency": 0.8755597559178755,
+   "extinction_mag": 0.17925481436465582,
+   "fwhm_native": 4.668174607171274,
+   "ellipticity": 0.08814053560202001,
+   "eccentricity": 0.41049945034146584,
+   "registration_ok": true,
+   "matched_stars": 2436,
+   "registration_rms": 0.19595536366176736,
+   "overlap": 1.0,
+   "background_shape": 0.10566073943503478,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000128354126612,
+     -0.00013244173780772175,
+     0.8534380758452471
+    ],
+    [
+     0.0001324417378077152,
+     1.0000128354126612,
+     -1.2123534206435806
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-17-11",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-17_22-36-34_-10.00°C_HFR2.56_Focus17094_00100.66.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-17",
+   "observed_at": "2026-08-17T22:36:34.983000",
+   "airmass": 1.33343792795217,
+   "sky": 1220.1875,
+   "sky_mad": 42.625,
+   "star_count": 3239,
+   "transparency": 0.47003912311764384,
+   "extinction_mag": 0.8543631081779464,
+   "fwhm_native": 4.702494493866933,
+   "ellipticity": 0.0744571365132517,
+   "eccentricity": 0.37864284999026515,
+   "registration_ok": true,
+   "matched_stars": 2396,
+   "registration_rms": 0.22593982102463062,
+   "overlap": 1.0,
+   "background_shape": 0.09518679623074969,
+   "gate_disposition": "REVIEW",
+   "gate_codes": [
+    "GATE_SOURCE_RETENTION_REVIEW"
+   ],
+   "transform": [
+    [
+     1.000019681234311,
+     -0.00011607025501691978,
+     0.7053088270819217
+    ],
+    [
+     0.00011607025501693291,
+     1.0000196812343105,
+     -1.1116755474101865
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-17-12",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-17_22-41-36_-10.00°C_HFR2.52_Focus17094_00110.60.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-17",
+   "observed_at": "2026-08-17T22:41:36.613000",
+   "airmass": 1.32882436834354,
+   "sky": 1009.875,
+   "sky_mad": 31.625,
+   "star_count": 5667,
+   "transparency": 1.0040599396442296,
+   "extinction_mag": 0.03006834923886848,
+   "fwhm_native": 4.4744363088043775,
+   "ellipticity": 0.09486319237180585,
+   "eccentricity": 0.4251202806999214,
+   "registration_ok": true,
+   "matched_stars": 2437,
+   "registration_rms": 0.1858882119065466,
+   "overlap": 1.0,
+   "background_shape": 0.17392624454427624,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000067482596113,
+     -8.803436063873821e-05,
+     0.688402537949969
+    ],
+    [
+     8.803436063874401e-05,
+     1.0000067482596111,
+     -1.0368216695881074
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-17-13",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-17_22-46-58_-10.00°C_HFR2.46_Focus17094_00120.58.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-17",
+   "observed_at": "2026-08-17T22:46:58.578000",
+   "airmass": 1.32478507225881,
+   "sky": 1010.0,
+   "sky_mad": 31.625,
+   "star_count": 5637,
+   "transparency": 0.9972606545649676,
+   "extinction_mag": 0.03724377154719616,
+   "fwhm_native": 4.249367503441784,
+   "ellipticity": 0.09891411695286745,
+   "eccentricity": 0.43364067080149366,
+   "registration_ok": true,
+   "matched_stars": 2451,
+   "registration_rms": 0.14724853745260888,
+   "overlap": 1.0,
+   "background_shape": 0.12104651502909189,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000067316501697,
+     -5.419747047129414e-05,
+     0.012421212816320804
+    ],
+    [
+     5.419747047131077e-05,
+     1.0000067316501697,
+     -0.1310638106067472
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-17-14",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-17_22-52-00_-10.00°C_HFR2.50_Focus17094_00130.77.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-17",
+   "observed_at": "2026-08-17T22:52:00.246000",
+   "airmass": 1.32174778350544,
+   "sky": 998.5625,
+   "sky_mad": 30.75,
+   "star_count": 5652,
+   "transparency": 0.9801503713170073,
+   "extinction_mag": 0.05588184750482132,
+   "fwhm_native": 4.395495749661776,
+   "ellipticity": 0.09717084610481053,
+   "eccentricity": 0.4299994405541666,
+   "registration_ok": true,
+   "matched_stars": 2459,
+   "registration_rms": 0.12499669103050678,
+   "overlap": 1.0,
+   "background_shape": 0.12268819821470506,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000051067329327,
+     -3.28132848594224e-05,
+     0.03394447110827059
+    ],
+    [
+     3.281328485943213e-05,
+     1.0000051067329325,
+     -0.09506427820508634
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-17-15",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-17_22-57-01_-10.00°C_HFR2.48_Focus17094_00140.67.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-17",
+   "observed_at": "2026-08-17T22:57:01.934000",
+   "airmass": 1.31946605745639,
+   "sky": 985.5625,
+   "sky_mad": 30.1875,
+   "star_count": 5768,
+   "transparency": 1.0,
+   "extinction_mag": 0.03399953314658688,
+   "fwhm_native": 4.317681730692488,
+   "ellipticity": 0.1002858935107081,
+   "eccentricity": 0.4364796760097952,
+   "registration_ok": true,
+   "matched_stars": 2500,
+   "registration_rms": 0.0,
+   "overlap": 1.0,
+   "background_shape": 0.11621972180409593,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": true,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-17-16",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-17_23-02-20_-10.00°C_HFR2.50_Focus17094_00150.71.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-17",
+   "observed_at": "2026-08-17T23:02:20.796000",
+   "airmass": 1.31779506966619,
+   "sky": 978.1875,
+   "sky_mad": 29.5625,
+   "star_count": 5700,
+   "transparency": 0.9661719090221157,
+   "extinction_mag": 0.07127996767350639,
+   "fwhm_native": 4.475084576316521,
+   "ellipticity": 0.09542964905132711,
+   "eccentricity": 0.42632438375560316,
+   "registration_ok": true,
+   "matched_stars": 2442,
+   "registration_rms": 0.19178121456700117,
+   "overlap": 1.0,
+   "background_shape": 0.11929379021593392,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     0.9999930723279201,
+     2.2087301135060336e-05,
+     0.736291445397228
+    ],
+    [
+     -2.208730113506222e-05,
+     0.99999307232792,
+     0.23315746349578603
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-17-17",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-17_23-07-22_-10.00°C_HFR2.54_Focus17094_00160.75.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-17",
+   "observed_at": "2026-08-17T23:07:22.372000",
+   "airmass": 1.31702798541256,
+   "sky": 966.375,
+   "sky_mad": 29.0625,
+   "star_count": 5697,
+   "transparency": 0.9871490714120662,
+   "extinction_mag": 0.047920776231255485,
+   "fwhm_native": 4.624979360237086,
+   "ellipticity": 0.1044017560853901,
+   "eccentricity": 0.44486376517008086,
+   "registration_ok": true,
+   "matched_stars": 2436,
+   "registration_rms": 0.18307216009562274,
+   "overlap": 1.0,
+   "background_shape": 0.12082495486960962,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000104040160678,
+     5.1283673545073194e-05,
+     0.7087944674573237
+    ],
+    [
+     -5.128367354507116e-05,
+     1.0000104040160678,
+     0.265831936754239
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-17-18",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-17_23-20-20_-10.00°C_HFR2.52_Focus17078_00170.77.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-17",
+   "observed_at": "2026-08-17T23:20:20.688000",
+   "airmass": 1.31835268146039,
+   "sky": 959.5,
+   "sky_mad": 29.1875,
+   "star_count": 5706,
+   "transparency": 0.9454411494205394,
+   "extinction_mag": 0.09485761277268498,
+   "fwhm_native": 4.527900558498847,
+   "ellipticity": 0.08680019550314383,
+   "eccentricity": 0.40751210442463925,
+   "registration_ok": true,
+   "matched_stars": 2392,
+   "registration_rms": 0.23555987171907566,
+   "overlap": 0.99609375,
+   "background_shape": 0.039214886745550806,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -1.0000647536297058,
+     -0.005990158952511264,
+     1568.9914144112404
+    ],
+    [
+     0.005990158952511267,
+     -1.0000647536297058,
+     1034.283830890438
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-01",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_21-15-27_-10.10°C_HFR2.46_Focus17093_00180.80.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T21:15:27.070000",
+   "airmass": 1.4872854905121,
+   "sky": 2647.0,
+   "sky_mad": 121.375,
+   "star_count": 2947,
+   "transparency": 0.8407439932344761,
+   "extinction_mag": 0.23073107193777453,
+   "fwhm_native": 4.470084952888732,
+   "ellipticity": 0.0744283726128272,
+   "eccentricity": 0.37857253278052355,
+   "registration_ok": true,
+   "matched_stars": 2345,
+   "registration_rms": 0.23947511855059636,
+   "overlap": 0.99609375,
+   "background_shape": 0.05696054636883602,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.000048307092418,
+     -0.0004234300792125424,
+     6.594510535677955
+    ],
+    [
+     0.00042343007921253803,
+     1.000048307092418,
+     -1.1712723623959391
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-02",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_21-20-28_-10.00°C_HFR2.40_Focus17093_00190.81.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T21:20:28.652000",
+   "airmass": 1.46943206045699,
+   "sky": 2637.25,
+   "sky_mad": 120.9375,
+   "star_count": 2959,
+   "transparency": 0.8363532570981362,
+   "extinction_mag": 0.23552345188881701,
+   "fwhm_native": 4.230312500437497,
+   "ellipticity": 0.075478925820333,
+   "eccentricity": 0.38113092416373706,
+   "registration_ok": true,
+   "matched_stars": 2353,
+   "registration_rms": 0.2174050301143479,
+   "overlap": 0.99609375,
+   "background_shape": 0.03925818743206219,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.000043739369976,
+     -0.0004095903331613363,
+     6.968211067022139
+    ],
+    [
+     0.00040959033316133184,
+     1.0000437393699757,
+     -0.9124896872123145
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-03",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_21-25-49_-10.00°C_HFR2.47_Focus17093_00200.81.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T21:25:49.926000",
+   "airmass": 1.45185655490308,
+   "sky": 2586.8125,
+   "sky_mad": 117.6875,
+   "star_count": 3004,
+   "transparency": 0.8391282658297894,
+   "extinction_mag": 0.23104818191724397,
+   "fwhm_native": 4.461448709565534,
+   "ellipticity": 0.07110664797337363,
+   "eccentricity": 0.37034732422100014,
+   "registration_ok": true,
+   "matched_stars": 2350,
+   "registration_rms": 0.2238226853093909,
+   "overlap": 0.99609375,
+   "background_shape": 0.03554869602176766,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.000063832352295,
+     -0.0003809938422180918,
+     8.181349918287083
+    ],
+    [
+     0.00038099384221808454,
+     1.0000638323522952,
+     -1.1932664518078582
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-04",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_21-30-51_-10.00°C_HFR2.61_Focus17093_00211.28.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T21:30:51.614000",
+   "airmass": 1.43650738302116,
+   "sky": 2558.4375,
+   "sky_mad": 116.0,
+   "star_count": 2937,
+   "transparency": 0.832172554678801,
+   "extinction_mag": 0.23931812812479167,
+   "fwhm_native": 5.042433633948164,
+   "ellipticity": 0.07402501696726915,
+   "eccentricity": 0.3775847802183796,
+   "registration_ok": true,
+   "matched_stars": 2351,
+   "registration_rms": 0.23076585299711644,
+   "overlap": 0.99609375,
+   "background_shape": 0.05010593452147073,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000796147332898,
+     -0.0003692553815755696,
+     8.19380292457845
+    ],
+    [
+     0.0003692553815755632,
+     1.0000796147332895,
+     -1.1421657942929642
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-05",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_21-38-04_-10.00°C_HFR2.52_Focus17093_00221.09.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T21:38:04.582000",
+   "airmass": 1.41638149491721,
+   "sky": 2498.1875,
+   "sky_mad": 112.1875,
+   "star_count": 3032,
+   "transparency": 0.8340047319135135,
+   "extinction_mag": 0.23592401823913636,
+   "fwhm_native": 4.702914342953154,
+   "ellipticity": 0.07254500440016981,
+   "eccentricity": 0.3739347952938366,
+   "registration_ok": true,
+   "matched_stars": 2353,
+   "registration_rms": 0.21973487966824456,
+   "overlap": 0.99609375,
+   "background_shape": 0.03738941544843906,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000663753368169,
+     -0.00034975817567745265,
+     7.927676901737982
+    ],
+    [
+     0.000349758175677461,
+     1.0000663753368169,
+     -0.8174099098743
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-06",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_21-43-21_-10.00°C_HFR2.54_Focus17093_00231.16.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T21:43:21.824000",
+   "airmass": 1.40308478351475,
+   "sky": 2472.75,
+   "sky_mad": 110.6875,
+   "star_count": 3037,
+   "transparency": 0.8404698669959807,
+   "extinction_mag": 0.2268751007453432,
+   "fwhm_native": 4.803833754528608,
+   "ellipticity": 0.07031607186577049,
+   "eccentricity": 0.36835824106840254,
+   "registration_ok": true,
+   "matched_stars": 2363,
+   "registration_rms": 0.21978449198956967,
+   "overlap": 0.99609375,
+   "background_shape": 0.03846688648805655,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000716968668921,
+     -0.00032985936032187244,
+     7.552880334416386
+    ],
+    [
+     0.00032985936032188686,
+     1.000071696866892,
+     -1.5457853008106213
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-07",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_21-48-23_-10.00°C_HFR2.43_Focus17093_00240.99.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T21:48:23.490000",
+   "airmass": 1.39142802719843,
+   "sky": 2432.25,
+   "sky_mad": 107.9375,
+   "star_count": 3109,
+   "transparency": 0.8406468509068139,
+   "extinction_mag": 0.22606365555406677,
+   "fwhm_native": 4.330909949435384,
+   "ellipticity": 0.07181361551328064,
+   "eccentricity": 0.3721154816238448,
+   "registration_ok": true,
+   "matched_stars": 2370,
+   "registration_rms": 0.23337483970594,
+   "overlap": 0.99609375,
+   "background_shape": 0.05999736907836905,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000594704472223,
+     -0.00030871599823980683,
+     7.414751771776878
+    ],
+    [
+     0.00030871599823980135,
+     1.000059470447222,
+     -1.3929059615719552
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-08",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_21-53-25_-10.00°C_HFR2.43_Focus17093_00250.70.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T21:53:25.154000",
+   "airmass": 1.38065832400884,
+   "sky": 2419.125,
+   "sky_mad": 110.8125,
+   "star_count": 2975,
+   "transparency": 0.7918520871311282,
+   "extinction_mag": 0.29044898209005343,
+   "fwhm_native": 4.354059152363317,
+   "ellipticity": 0.07353964333886698,
+   "eccentricity": 0.37639235849752084,
+   "registration_ok": true,
+   "matched_stars": 2361,
+   "registration_rms": 0.23490999511260113,
+   "overlap": 0.99609375,
+   "background_shape": 0.09552727362580758,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000493360435974,
+     -0.00028524459205652125,
+     7.1800623321864805
+    ],
+    [
+     0.00028524459205651827,
+     1.0000493360435976,
+     -1.3989897889888425
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-09",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_21-58-40_-10.00°C_HFR2.50_Focus17093_00260.74.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T21:58:40.481000",
+   "airmass": 1.37039284469007,
+   "sky": 2302.375,
+   "sky_mad": 91.0625,
+   "star_count": 3176,
+   "transparency": 0.8205767331558769,
+   "extinction_mag": 0.25124787573870055,
+   "fwhm_native": 4.600653261565084,
+   "ellipticity": 0.07412494804233422,
+   "eccentricity": 0.37782983720503305,
+   "registration_ok": true,
+   "matched_stars": 2365,
+   "registration_rms": 0.2273586584045692,
+   "overlap": 0.99609375,
+   "background_shape": 0.7650200879014495,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000532498485655,
+     -0.0002691602761246464,
+     7.894628398276268
+    ],
+    [
+     0.0002691602761246494,
+     1.000053249848565,
+     -0.4629321941094986
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-10",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_22-03-42_-10.00°C_HFR2.46_Focus17093_00271.02.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T22:03:42.053000",
+   "airmass": 1.36159735914167,
+   "sky": 2208.125,
+   "sky_mad": 96.9375,
+   "star_count": 3232,
+   "transparency": 0.8434452665644829,
+   "extinction_mag": 0.2209638349792462,
+   "fwhm_native": 4.456303634324069,
+   "ellipticity": 0.07125047358703934,
+   "eccentricity": 0.3707078550523697,
+   "registration_ok": true,
+   "matched_stars": 2376,
+   "registration_rms": 0.22068765298987256,
+   "overlap": 0.99609375,
+   "background_shape": 0.040405366002672624,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000382378714432,
+     -0.00023961221496891522,
+     7.970766277215148
+    ],
+    [
+     0.00023961221496892116,
+     1.0000382378714427,
+     -0.36846546379433676
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-11",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_22-08-43_-10.00°C_HFR2.53_Focus17093_00280.93.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T22:08:43.695000",
+   "airmass": 1.35357839655616,
+   "sky": 2231.5625,
+   "sky_mad": 98.0625,
+   "star_count": 3179,
+   "transparency": 0.8264641662332044,
+   "extinction_mag": 0.242645079575369,
+   "fwhm_native": 4.646776641855265,
+   "ellipticity": 0.06618445823376096,
+   "eccentricity": 0.357754851757213,
+   "registration_ok": true,
+   "matched_stars": 2371,
+   "registration_rms": 0.22010433557756862,
+   "overlap": 0.99609375,
+   "background_shape": 0.04895760175845042,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000587421565776,
+     -0.0002238734235061515,
+     7.8698544259553955
+    ],
+    [
+     0.00022387342350614866,
+     1.0000587421565774,
+     -0.33055767810594716
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-12",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_22-14-00_-10.00°C_HFR2.46_Focus17093_00290.68.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T22:14:00.004000",
+   "airmass": 1.346111621851,
+   "sky": 2271.0625,
+   "sky_mad": 99.4375,
+   "star_count": 3081,
+   "transparency": 0.7915171166436075,
+   "extinction_mag": 0.28918103395316663,
+   "fwhm_native": 4.407795672986715,
+   "ellipticity": 0.07588277032924023,
+   "eccentricity": 0.3821090369186487,
+   "registration_ok": true,
+   "matched_stars": 2367,
+   "registration_rms": 0.22004819225038663,
+   "overlap": 0.99609375,
+   "background_shape": 0.04929968752829774,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000426941552096,
+     -0.00018802637146278479,
+     6.838845421445058
+    ],
+    [
+     0.0001880263714627849,
+     1.0000426941552096,
+     -0.25248376307604303
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-13",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_22-21-12_-10.00°C_HFR2.48_Focus17089_00300.96.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T22:21:12.121000",
+   "airmass": 1.33727198482232,
+   "sky": 2359.875,
+   "sky_mad": 104.0,
+   "star_count": 2962,
+   "transparency": 0.7613721108462621,
+   "extinction_mag": 0.3308974182408818,
+   "fwhm_native": 4.539481922984432,
+   "ellipticity": 0.06691997711246456,
+   "eccentricity": 0.3596688350249383,
+   "registration_ok": true,
+   "matched_stars": 2359,
+   "registration_rms": 0.24168155704273703,
+   "overlap": 0.99609375,
+   "background_shape": 0.06368976029184158,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000515447612823,
+     -0.00015843198335823273,
+     6.327547936768269
+    ],
+    [
+     0.00015843198335823067,
+     1.000051544761282,
+     0.18529756954160348
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-14",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_22-26-13_-10.00°C_HFR2.43_Focus17089_00310.63.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T22:26:13.785000",
+   "airmass": 1.33210892991919,
+   "sky": 2331.1875,
+   "sky_mad": 102.5625,
+   "star_count": 2977,
+   "transparency": 0.7627782260563498,
+   "extinction_mag": 0.3286359583575621,
+   "fwhm_native": 4.336498652409286,
+   "ellipticity": 0.07425593549228882,
+   "eccentricity": 0.37815066710075057,
+   "registration_ok": true,
+   "matched_stars": 2362,
+   "registration_rms": 0.23630650358503644,
+   "overlap": 0.99609375,
+   "background_shape": 0.06599099497133665,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.000053937180025,
+     -0.00013468539342985857,
+     6.210176222743598
+    ],
+    [
+     0.00013468539342985974,
+     1.0000539371800252,
+     0.23132279757635388
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-15",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_22-31-23_-10.00°C_HFR2.46_Focus17089_00320.58.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T22:31:23.513000",
+   "airmass": 1.32761243846259,
+   "sky": 2268.25,
+   "sky_mad": 99.5625,
+   "star_count": 3011,
+   "transparency": 0.7652164334386776,
+   "extinction_mag": 0.3249461317834609,
+   "fwhm_native": 4.4744608671613815,
+   "ellipticity": 0.07393651364364173,
+   "eccentricity": 0.3773677506590979,
+   "registration_ok": true,
+   "matched_stars": 2370,
+   "registration_rms": 0.22232590237109473,
+   "overlap": 0.99609375,
+   "background_shape": 0.054239696682657004,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000530811561237,
+     -0.00010893069810186454,
+     6.330027610017851
+    ],
+    [
+     0.00010893069810186283,
+     1.0000530811561237,
+     -0.21401763398137064
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-16",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_22-36-25_-10.00°C_HFR2.44_Focus17089_00330.73.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T22:36:25.103000",
+   "airmass": 1.32392789072631,
+   "sky": 2220.1875,
+   "sky_mad": 97.5625,
+   "star_count": 3082,
+   "transparency": 0.7717678937577319,
+   "extinction_mag": 0.31550585589007596,
+   "fwhm_native": 4.3852580305519675,
+   "ellipticity": 0.0708320710878787,
+   "eccentricity": 0.36965789573761176,
+   "registration_ok": true,
+   "matched_stars": 2370,
+   "registration_rms": 0.23899408667473518,
+   "overlap": 0.99609375,
+   "background_shape": 0.06514117711401421,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000491503148135,
+     -7.572459428654178e-05,
+     6.169402298506384
+    ],
+    [
+     7.57245942865398e-05,
+     1.0000491503148132,
+     -0.12750305064264467
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-17",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_22-41-26_-10.00°C_HFR2.52_Focus17089_00340.81.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T22:41:26.686000",
+   "airmass": 1.32108538121468,
+   "sky": 2201.4375,
+   "sky_mad": 96.8125,
+   "star_count": 3039,
+   "transparency": 0.7574251119777465,
+   "extinction_mag": 0.33573124983956704,
+   "fwhm_native": 4.704977570981146,
+   "ellipticity": 0.06679129606112044,
+   "eccentricity": 0.3593348228222762,
+   "registration_ok": true,
+   "matched_stars": 2373,
+   "registration_rms": 0.22388687254887774,
+   "overlap": 0.99609375,
+   "background_shape": 0.06610397091565483,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000525297968759,
+     -5.178946291454335e-05,
+     6.2518323762406
+    ],
+    [
+     5.1789462914548695e-05,
+     1.0000525297968756,
+     -0.08302749622998817
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-18",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_22-46-44_-10.00°C_HFR2.50_Focus17089_00350.70.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T22:46:44.521000",
+   "airmass": 1.31882693739108,
+   "sky": 2113.25,
+   "sky_mad": 92.0,
+   "star_count": 3162,
+   "transparency": 0.7837008512755064,
+   "extinction_mag": 0.2985917808689985,
+   "fwhm_native": 4.592419522243772,
+   "ellipticity": 0.07227369493976804,
+   "eccentricity": 0.3732611724971481,
+   "registration_ok": true,
+   "matched_stars": 2371,
+   "registration_rms": 0.22854833536593527,
+   "overlap": 0.99609375,
+   "background_shape": 0.0780864665338492,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000606559857945,
+     -2.4555588312564854e-05,
+     7.4066267459973005
+    ],
+    [
+     2.455558831257608e-05,
+     1.0000606559857945,
+     0.8634146454702432
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-19",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_22-51-46_-10.00°C_HFR2.51_Focus17089_00360.66.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T22:51:46.133000",
+   "airmass": 1.31742453538826,
+   "sky": 2055.5625,
+   "sky_mad": 88.5625,
+   "star_count": 3284,
+   "transparency": 0.8000206229393462,
+   "extinction_mag": 0.27614450108420197,
+   "fwhm_native": 4.633884861242609,
+   "ellipticity": 0.06776638098644039,
+   "eccentricity": 0.3618569578870423,
+   "registration_ok": true,
+   "matched_stars": 2367,
+   "registration_rms": 0.23479339498510612,
+   "overlap": 0.99609375,
+   "background_shape": 0.07627976606953515,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000661365064378,
+     8.136126005548565e-06,
+     7.295646641174471
+    ],
+    [
+     -8.136126005542566e-06,
+     1.0000661365064376,
+     0.9105912668295559
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-20",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_23-10-49_-10.00°C_HFR2.65_Focus17089_00373.04.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T23:10:49.200000",
+   "airmass": 1.31914433647001,
+   "sky": 2459.3125,
+   "sky_mad": 113.8125,
+   "star_count": 857,
+   "transparency": 0.11777310895467126,
+   "extinction_mag": 2.3563680980023305,
+   "fwhm_native": 5.53040741600153,
+   "ellipticity": 0.10884461367157022,
+   "eccentricity": 0.45369817013587366,
+   "registration_ok": true,
+   "matched_stars": 846,
+   "registration_rms": 0.3037520201712323,
+   "overlap": 1.0,
+   "background_shape": 0.3302817396257124,
+   "gate_disposition": "REVIEW",
+   "gate_codes": [
+    "GATE_SOURCE_RETENTION_STRONG"
+   ],
+   "transform": [
+    [
+     -1.0001089666594627,
+     -0.0059423471599230155,
+     1565.3214079614513
+    ],
+    [
+     0.005942347159923019,
+     -1.000108966659463,
+     1041.3736348176647
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-21",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_23-19-33_-9.90°C_HFR2.66_Focus17089_00384.01.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T23:19:33.558000",
+   "airmass": 1.32338359614904,
+   "sky": 2182.3125,
+   "sky_mad": 99.25,
+   "star_count": 1860,
+   "transparency": 0.3406086066820258,
+   "extinction_mag": 1.2035563656999804,
+   "fwhm_native": 5.319546691710953,
+   "ellipticity": 0.10043826207475015,
+   "eccentricity": 0.43679363110948705,
+   "registration_ok": true,
+   "matched_stars": 1761,
+   "registration_rms": 0.290963092877779,
+   "overlap": 1.0,
+   "background_shape": 0.23976854606642417,
+   "gate_disposition": "REVIEW",
+   "gate_codes": [
+    "GATE_SOURCE_RETENTION_REVIEW"
+   ],
+   "transform": [
+    [
+     -1.0000015260818031,
+     -0.006076668511623712,
+     1559.068916705835
+    ],
+    [
+     0.00607666851162372,
+     -1.0000015260818034,
+     1041.037793520305
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-22",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_23-28-04_-10.00°C_HFR0.00_Focus17089_003910.72.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T23:28:04.132000",
+   "airmass": 1.33012081691459,
+   "sky": 3003.6875,
+   "sky_mad": 140.8125,
+   "star_count": 6,
+   "transparency": null,
+   "extinction_mag": null,
+   "fwhm_native": 8.91942884298787,
+   "ellipticity": 0.1137537299435945,
+   "eccentricity": 0.46318619200827277,
+   "registration_ok": false,
+   "matched_stars": 0,
+   "registration_rms": null,
+   "overlap": null,
+   "background_shape": null,
+   "gate_disposition": "REVIEW",
+   "gate_codes": [
+    "GATE_SOURCE_RETENTION_STRONG",
+    "GATE_MORPHOLOGY_SAMPLE_REVIEW",
+    "GATE_REGISTRATION_REVIEW"
+   ],
+   "transform": null,
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-08-20-23",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-08-20_23-37-28_-10.00°C_HFR3.44_Focus17089_00405.92.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-08-20",
+   "observed_at": "2026-08-20T23:37:28.179000",
+   "airmass": 1.33963904874511,
+   "sky": 3167.5625,
+   "sky_mad": 156.4375,
+   "star_count": 520,
+   "transparency": 0.07800731301952255,
+   "extinction_mag": 2.804669885755712,
+   "fwhm_native": 7.04157937644098,
+   "ellipticity": 0.09137672640371375,
+   "eccentricity": 0.41761674616706684,
+   "registration_ok": true,
+   "matched_stars": 506,
+   "registration_rms": 0.2912554492060009,
+   "overlap": 1.0,
+   "background_shape": 0.5873679042234394,
+   "gate_disposition": "HARD_FAIL",
+   "gate_codes": [
+    "GATE_BACKGROUND_REVIEW",
+    "GATE_SOURCE_RETENTION_STRONG",
+    "GATE_FOCUS_SEEING_REVIEW",
+    "GATE_MULTI_FAMILY_CLOUD_HARD"
+   ],
+   "transform": [
+    [
+     -0.9999940816188669,
+     -0.006203230493266675,
+     1522.823535984021
+    ],
+    [
+     0.006203230493266659,
+     -0.9999940816188667,
+     1048.8831922479849
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-09-09-01",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-09-09_23-46-06_-0.00°C_HFR2.52_Focus17095_00000.72.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-09-09",
+   "observed_at": "2026-09-09T23:46:06.279000",
+   "airmass": 1.5863004404078,
+   "sky": 995.25,
+   "sky_mad": 31.9375,
+   "star_count": 4855,
+   "transparency": 0.7152680262958806,
+   "extinction_mag": 0.4111692228636507,
+   "fwhm_native": 4.571623741978369,
+   "ellipticity": 0.09355362482254903,
+   "eccentricity": 0.42232093119766134,
+   "registration_ok": true,
+   "matched_stars": 2334,
+   "registration_rms": 0.29046924675414754,
+   "overlap": 0.99609375,
+   "background_shape": 0.1875665930555348,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -1.0000955811481989,
+     -0.006508324347930556,
+     1573.9186681312763
+    ],
+    [
+     0.006508324347930547,
+     -1.0000955811481989,
+     1045.4272624256237
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-09-09-02",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-09-09_23-51-07_0.00°C_HFR2.60_Focus17095_00010.62.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-09-09",
+   "observed_at": "2026-09-09T23:51:07.856000",
+   "airmass": 1.61229746805334,
+   "sky": 955.3125,
+   "sky_mad": 27.5625,
+   "star_count": 4735,
+   "transparency": 0.6739095158312937,
+   "extinction_mag": 0.4771371316748976,
+   "fwhm_native": 4.849851651186878,
+   "ellipticity": 0.09388853952097581,
+   "eccentricity": 0.4230389539257372,
+   "registration_ok": true,
+   "matched_stars": 2321,
+   "registration_rms": 0.28985067350812005,
+   "overlap": 0.99609375,
+   "background_shape": 0.922168443010634,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -1.0001227760266658,
+     -0.006517406155541799,
+     1573.9506078094946
+    ],
+    [
+     0.006517406155541798,
+     -1.0001227760266658,
+     1045.5359764550844
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "L-09-09-03",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_L_0_CAA0.00°_2026-09-09_23-56-09_-0.00°C_HFR2.64_Focus17095_00020.74.fits",
+   "channel_id": "L",
+   "target": "NGC 6822",
+   "filter_name": "L",
+   "night": "2026-09-09",
+   "observed_at": "2026-09-09T23:56:09.438000",
+   "airmass": 1.63995288371307,
+   "sky": 953.125,
+   "sky_mad": 26.0,
+   "star_count": 4317,
+   "transparency": 0.564702957271217,
+   "extinction_mag": 0.670473719252126,
+   "fwhm_native": 5.015899055761149,
+   "ellipticity": 0.09552888541747984,
+   "eccentricity": 0.4265347874173818,
+   "registration_ok": true,
+   "matched_stars": 2288,
+   "registration_rms": 0.31594211104451314,
+   "overlap": 0.99609375,
+   "background_shape": 0.40748609821707893,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -1.0001086728567568,
+     -0.006519665966629138,
+     1573.965555826324
+    ],
+    [
+     0.006519665966629135,
+     -1.0001086728567568,
+     1045.524101469317
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "R-09-06-01",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_R_0_CAA0.00°_2026-09-06_20-37-41_-7.60°C_HFR2.49_Focus17095_00180.75.fits",
+   "channel_id": "R",
+   "target": "NGC 6822",
+   "filter_name": "R",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T20:37:41.895000",
+   "airmass": 1.39925787273574,
+   "sky": 652.25,
+   "sky_mad": 10.5625,
+   "star_count": 3296,
+   "transparency": 0.915688706729787,
+   "extinction_mag": 0.05091237333321168,
+   "fwhm_native": 4.425868898585561,
+   "ellipticity": 0.09772452929662184,
+   "eccentricity": 0.4311599918165845,
+   "registration_ok": true,
+   "matched_stars": 2181,
+   "registration_rms": 0.392293043256797,
+   "overlap": 1.0,
+   "background_shape": 0.029763174646383915,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.9998325084529036,
+     0.006909387078023887,
+     1566.4956181891084
+    ],
+    [
+     -0.0069093870780238854,
+     -0.9998325084529037,
+     1050.0000908562374
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "R-09-06-02",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_R_0_CAA0.00°_2026-09-06_20-44-49_-7.70°C_HFR2.36_Focus17093_00190.52.fits",
+   "channel_id": "R",
+   "target": "NGC 6822",
+   "filter_name": "R",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T20:44:49.759000",
+   "airmass": 1.38340674983141,
+   "sky": 652.1875,
+   "sky_mad": 10.5625,
+   "star_count": 3413,
+   "transparency": 0.9208739201479412,
+   "extinction_mag": 0.04398902827419818,
+   "fwhm_native": 3.950020643623673,
+   "ellipticity": 0.10178273243816793,
+   "eccentricity": 0.43955174923296136,
+   "registration_ok": true,
+   "matched_stars": 2188,
+   "registration_rms": 0.3900150005172057,
+   "overlap": 1.0,
+   "background_shape": 0.0295258643633835,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.9998421839123189,
+     0.006888920491140825,
+     1566.1676772925055
+    ],
+    [
+     -0.006888920491140822,
+     -0.999842183912319,
+     1049.5507605558762
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "R-09-06-03",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_R_0_CAA0.00°_2026-09-06_20-49-51_-7.90°C_HFR2.34_Focus17093_00200.66.fits",
+   "channel_id": "R",
+   "target": "NGC 6822",
+   "filter_name": "R",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T20:49:51.334000",
+   "airmass": 1.37341056803148,
+   "sky": 649.0625,
+   "sky_mad": 10.375,
+   "star_count": 3447,
+   "transparency": 0.9297667173336734,
+   "extinction_mag": 0.033054663726831704,
+   "fwhm_native": 3.903272892524525,
+   "ellipticity": 0.10488835517564477,
+   "eccentricity": 0.445842060936199,
+   "registration_ok": true,
+   "matched_stars": 2192,
+   "registration_rms": 0.38474048445645537,
+   "overlap": 1.0,
+   "background_shape": 0.027801597587618264,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.999847453592949,
+     0.006862809672698522,
+     1566.2496556666347
+    ],
+    [
+     -0.006862809672698526,
+     -0.999847453592949,
+     1049.517525021739
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "R-09-06-04",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_R_0_CAA0.00°_2026-09-06_21-30-04_-8.70°C_HFR2.55_Focus17099_00210.94.fits",
+   "channel_id": "R",
+   "target": "NGC 6822",
+   "filter_name": "R",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T21:30:04.082000",
+   "airmass": 1.32337543947971,
+   "sky": 619.0,
+   "sky_mad": 8.6875,
+   "star_count": 3613,
+   "transparency": 0.9226666536095023,
+   "extinction_mag": 0.03887583444102466,
+   "fwhm_native": 4.682475253401153,
+   "ellipticity": 0.11579370204805617,
+   "eccentricity": 0.4670965600450406,
+   "registration_ok": true,
+   "matched_stars": 2194,
+   "registration_rms": 0.39276648927422575,
+   "overlap": 1.0,
+   "background_shape": 0.03510966871869897,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.999784418453087,
+     0.0066235418708768335,
+     1565.3780254261756
+    ],
+    [
+     -0.006623541870876835,
+     -0.9997844184530869,
+     1048.9022890102246
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "R-09-06-05",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_R_0_CAA0.00°_2026-09-06_21-35-05_-8.70°C_HFR2.53_Focus17099_00220.69.fits",
+   "channel_id": "R",
+   "target": "NGC 6822",
+   "filter_name": "R",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T21:35:05.679000",
+   "airmass": 1.32063384805463,
+   "sky": 606.9375,
+   "sky_mad": 8.0625,
+   "star_count": 3682,
+   "transparency": 0.9231135771567975,
+   "extinction_mag": 0.03821297062151387,
+   "fwhm_native": 4.651198756329234,
+   "ellipticity": 0.11216910506083388,
+   "eccentricity": 0.46016986210693916,
+   "registration_ok": true,
+   "matched_stars": 2188,
+   "registration_rms": 0.38228393518491033,
+   "overlap": 1.0,
+   "background_shape": 0.041846712078130135,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.9997748780495453,
+     0.006587428900287385,
+     1565.4859429088094
+    ],
+    [
+     -0.006587428900287385,
+     -0.9997748780495452,
+     1048.8450359499916
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "R-09-06-06",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_R_0_CAA0.00°_2026-09-06_21-40-07_-8.80°C_HFR2.55_Focus17099_00230.79.fits",
+   "channel_id": "R",
+   "target": "NGC 6822",
+   "filter_name": "R",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T21:40:07.255000",
+   "airmass": 1.31865248339622,
+   "sky": 603.625,
+   "sky_mad": 7.875,
+   "star_count": 3737,
+   "transparency": 0.9216853974489967,
+   "extinction_mag": 0.039794981733048046,
+   "fwhm_native": 4.68626583592972,
+   "ellipticity": 0.11965357824167067,
+   "eccentricity": 0.4743312952961314,
+   "registration_ok": true,
+   "matched_stars": 2192,
+   "registration_rms": 0.3908105617094562,
+   "overlap": 1.0,
+   "background_shape": 0.038808569954955005,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.9998031159812392,
+     0.006552784352938202,
+     1565.525499852812
+    ],
+    [
+     -0.006552784352938211,
+     -0.999803115981239,
+     1048.8391433392162
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "R-09-06-07",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_R_0_CAA0.00°_2026-09-06_22-32-37_-10.00°C_HFR2.46_Focus17086_00240.65.fits",
+   "channel_id": "R",
+   "target": "NGC 6822",
+   "filter_name": "R",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T22:32:37.698000",
+   "airmass": 1.34173302726739,
+   "sky": 583.125,
+   "sky_mad": 6.6875,
+   "star_count": 3609,
+   "transparency": 0.8056484147214614,
+   "extinction_mag": 0.18704188395687407,
+   "fwhm_native": 4.358075393174902,
+   "ellipticity": 0.10049137877966496,
+   "eccentricity": 0.4369030102325822,
+   "registration_ok": true,
+   "matched_stars": 2219,
+   "registration_rms": 0.37940858957183626,
+   "overlap": 1.0,
+   "background_shape": 0.043493085843118146,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     0.9999071755489557,
+     -0.00030091474810599816,
+     5.102013171306112
+    ],
+    [
+     0.0003009147481060051,
+     0.9999071755489556,
+     -1.124949906186032
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "R-09-06-08",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_R_0_CAA0.00°_2026-09-06_22-37-39_-10.00°C_HFR2.41_Focus17086_00250.67.fits",
+   "channel_id": "R",
+   "target": "NGC 6822",
+   "filter_name": "R",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T22:37:39.284000",
+   "airmass": 1.34831012654049,
+   "sky": 580.25,
+   "sky_mad": 6.5625,
+   "star_count": 3703,
+   "transparency": 0.8202367278180283,
+   "extinction_mag": 0.16788660151133886,
+   "fwhm_native": 4.218364740848984,
+   "ellipticity": 0.10314724083106563,
+   "eccentricity": 0.4423292081369593,
+   "registration_ok": true,
+   "matched_stars": 2212,
+   "registration_rms": 0.36377480400257245,
+   "overlap": 1.0,
+   "background_shape": 0.043557730084387306,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     0.9999301843004356,
+     -0.00026194101824105034,
+     5.05792358153667
+    ],
+    [
+     0.00026194101824105837,
+     0.9999301843004355,
+     -1.1960737889709208
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "R-09-06-09",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_R_0_CAA0.00°_2026-09-06_22-42-40_-10.00°C_HFR2.45_Focus17086_00260.68.fits",
+   "channel_id": "R",
+   "target": "NGC 6822",
+   "filter_name": "R",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T22:42:40.861000",
+   "airmass": 1.355684937231,
+   "sky": 581.125,
+   "sky_mad": 6.5625,
+   "star_count": 3613,
+   "transparency": 0.7920847193062936,
+   "extinction_mag": 0.20617428394205622,
+   "fwhm_native": 4.327971346834444,
+   "ellipticity": 0.10459985031408137,
+   "eccentricity": 0.44526236304277333,
+   "registration_ok": true,
+   "matched_stars": 2207,
+   "registration_rms": 0.3781051451406937,
+   "overlap": 1.0,
+   "background_shape": 0.0627708394709866,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     0.9999346094984487,
+     -0.00022284957471611889,
+     5.0038167491889
+    ],
+    [
+     0.00022284957471612943,
+     0.9999346094984487,
+     -1.1973177695408594
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "R-09-06-10",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_R_0_CAA0.00°_2026-09-06_23-22-50_-10.00°C_HFR3.75_Focus17089_00274.55.fits",
+   "channel_id": "R",
+   "target": "NGC 6822",
+   "filter_name": "R",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T23:22:50.458000",
+   "airmass": 1.4473690467274,
+   "sky": 593.125,
+   "sky_mad": 6.75,
+   "star_count": 1205,
+   "transparency": 0.18005494705991412,
+   "extinction_mag": 1.8191749315179317,
+   "fwhm_native": 8.044519588583011,
+   "ellipticity": 0.1837500117332792,
+   "eccentricity": 0.5776988459868845,
+   "registration_ok": true,
+   "matched_stars": 1147,
+   "registration_rms": 0.4627400887747849,
+   "overlap": 1.0,
+   "background_shape": 0.43677235400184566,
+   "gate_disposition": "REVIEW",
+   "gate_codes": [
+    "GATE_SOURCE_RETENTION_STRONG",
+    "GATE_FOCUS_SEEING_REVIEW"
+   ],
+   "transform": [
+    [
+     1.0000039154424196,
+     0.00010902036147165612,
+     6.452086747882731
+    ],
+    [
+     -0.00010902036147165249,
+     1.0000039154424196,
+     -3.7297736444117504
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "R-09-06-11",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_R_0_CAA0.00°_2026-09-06_23-27-52_-9.90°C_HFR2.72_Focus17089_00281.38.fits",
+   "channel_id": "R",
+   "target": "NGC 6822",
+   "filter_name": "R",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T23:27:52.060000",
+   "airmass": 1.46357913134597,
+   "sky": 609.5,
+   "sky_mad": 7.5,
+   "star_count": 693,
+   "transparency": 0.07817284457793094,
+   "extinction_mag": 2.7258582926117256,
+   "fwhm_native": 5.550283939146528,
+   "ellipticity": 0.1376272578132266,
+   "eccentricity": 0.5062738918147615,
+   "registration_ok": true,
+   "matched_stars": 653,
+   "registration_rms": 0.41874361035000784,
+   "overlap": 1.0,
+   "background_shape": 0.4214969642626515,
+   "gate_disposition": "REVIEW",
+   "gate_codes": [
+    "GATE_SOURCE_RETENTION_STRONG"
+   ],
+   "transform": [
+    [
+     1.0000266216457128,
+     -7.972289072903683e-05,
+     8.740770667574793
+    ],
+    [
+     7.972289072901922e-05,
+     1.0000266216457128,
+     -4.672131676658182
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "R-09-06-12",
+   "userDecision": "DROP",
+   "path": "NGC 6822_300.00s_R_0_CAA0.00°_2026-09-06_23-32-53_-10.00°C_HFR2.55_Focus17089_00291.09.fits",
+   "channel_id": "R",
+   "target": "NGC 6822",
+   "filter_name": "R",
+   "night": "2026-09-06",
+   "observed_at": "2026-09-06T23:32:53.642000",
+   "airmass": 1.48099849852196,
+   "sky": 619.875,
+   "sky_mad": 8.0625,
+   "star_count": 48,
+   "transparency": null,
+   "extinction_mag": null,
+   "fwhm_native": 2.354619644423418,
+   "ellipticity": 0.2364834327567158,
+   "eccentricity": 0.6457882404821502,
+   "registration_ok": false,
+   "matched_stars": 0,
+   "registration_rms": null,
+   "overlap": null,
+   "background_shape": null,
+   "gate_disposition": "REVIEW",
+   "gate_codes": [
+    "GATE_SOURCE_RETENTION_STRONG",
+    "GATE_REGISTRATION_REVIEW"
+   ],
+   "transform": null,
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "R-09-08-01",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_R_0_CAA0.00°_2026-09-08_21-25-17_-8.90°C_HFR2.53_Focus17091_00301.08.fits",
+   "channel_id": "R",
+   "target": "NGC 6822",
+   "filter_name": "R",
+   "night": "2026-09-08",
+   "observed_at": "2026-09-08T21:25:17.894000",
+   "airmass": 1.32155322090341,
+   "sky": 600.9375,
+   "sky_mad": 7.625,
+   "star_count": 3441,
+   "transparency": 0.8068901526932861,
+   "extinction_mag": 0.18436074741338565,
+   "fwhm_native": 4.628944440659641,
+   "ellipticity": 0.10601602783482678,
+   "eccentricity": 0.4480989371910837,
+   "registration_ok": true,
+   "matched_stars": 2165,
+   "registration_rms": 0.3979959859971105,
+   "overlap": 1.0,
+   "background_shape": 0.07357499334204008,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.9998525063336272,
+     0.006527930511155426,
+     1565.5138841100334
+    ],
+    [
+     -0.006527930511155418,
+     -0.9998525063336274,
+     1057.204331966393
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "R-09-08-02",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_R_0_CAA0.00°_2026-09-08_21-30-19_-9.40°C_HFR2.48_Focus17091_00310.71.fits",
+   "channel_id": "R",
+   "target": "NGC 6822",
+   "filter_name": "R",
+   "night": "2026-09-08",
+   "observed_at": "2026-09-08T21:30:19.574000",
+   "airmass": 1.31930693363408,
+   "sky": 612.1875,
+   "sky_mad": 8.125,
+   "star_count": 2566,
+   "transparency": 0.5164749891987024,
+   "extinction_mag": 0.6686612333611163,
+   "fwhm_native": 4.429894430706764,
+   "ellipticity": 0.10576671475068516,
+   "eccentricity": 0.4476010495789693,
+   "registration_ok": true,
+   "matched_stars": 2117,
+   "registration_rms": 0.4117911091679425,
+   "overlap": 1.0,
+   "background_shape": 0.527389511120343,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.9998516516024439,
+     0.006501903256967441,
+     1565.4937973714848
+    ],
+    [
+     -0.006501903256967442,
+     -0.9998516516024439,
+     1057.1595616642837
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "R-09-08-03",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_R_0_CAA0.00°_2026-09-08_21-37-32_-9.50°C_HFR2.54_Focus17092_00320.92.fits",
+   "channel_id": "R",
+   "target": "NGC 6822",
+   "filter_name": "R",
+   "night": "2026-09-08",
+   "observed_at": "2026-09-08T21:37:32.460000",
+   "airmass": 1.31736155114842,
+   "sky": 613.4375,
+   "sky_mad": 8.125,
+   "star_count": 2476,
+   "transparency": 0.4879825634065898,
+   "extinction_mag": 0.7301764421494521,
+   "fwhm_native": 4.72645852188795,
+   "ellipticity": 0.11505511194037799,
+   "eccentricity": 0.4656957636433253,
+   "registration_ok": true,
+   "matched_stars": 2082,
+   "registration_rms": 0.4185200574098161,
+   "overlap": 1.0,
+   "background_shape": 0.4208198238334934,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     -0.9998270528184866,
+     0.006482235340345635,
+     1565.4492808374234
+    ],
+    [
+     -0.006482235340345637,
+     -0.9998270528184865,
+     1056.7698030622923
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "R-09-09-01",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_R_0_CAA0.00°_2026-09-09_23-28-35_-0.00°C_HFR2.50_Focus17090_00000.74.fits",
+   "channel_id": "R",
+   "target": "NGC 6822",
+   "filter_name": "R",
+   "night": "2026-09-09",
+   "observed_at": "2026-09-09T23:28:35.535000",
+   "airmass": 1.50817420495305,
+   "sky": 563.6875,
+   "sky_mad": 5.6875,
+   "star_count": 4723,
+   "transparency": 1.0,
+   "extinction_mag": -0.039272164987515346,
+   "fwhm_native": 4.5427386855797485,
+   "ellipticity": 0.15553993755487605,
+   "eccentricity": 0.5356185237043033,
+   "registration_ok": true,
+   "matched_stars": 2500,
+   "registration_rms": 0.0,
+   "overlap": 1.0,
+   "background_shape": 0.05736446067588967,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": true,
+   "gradient_adu": null
+  },
+  {
+   "id": "R-09-09-02",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_R_0_CAA0.00°_2026-09-09_23-33-37_-0.00°C_HFR2.54_Focus17090_00010.72.fits",
+   "channel_id": "R",
+   "target": "NGC 6822",
+   "filter_name": "R",
+   "night": "2026-09-09",
+   "observed_at": "2026-09-09T23:33:37.137000",
+   "airmass": 1.52872816505525,
+   "sky": 566.1875,
+   "sky_mad": 5.8125,
+   "star_count": 4470,
+   "transparency": 0.956698287801047,
+   "extinction_mag": 0.009818041246878857,
+   "fwhm_native": 4.759271120410901,
+   "ellipticity": 0.15459706661562833,
+   "eccentricity": 0.5341290857321848,
+   "registration_ok": true,
+   "matched_stars": 2411,
+   "registration_rms": 0.20777463054931627,
+   "overlap": 1.0,
+   "background_shape": 0.09231290849766327,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.0000131920027202,
+     3.136697048225185e-05,
+     -0.005734752307375857
+    ],
+    [
+     -3.136697048225508e-05,
+     1.0000131920027204,
+     -0.005918019771513627
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  },
+  {
+   "id": "R-09-09-03",
+   "userDecision": "KEEP",
+   "path": "NGC 6822_300.00s_R_0_CAA0.00°_2026-09-09_23-40-51_0.00°C_HFR2.47_Focus17095_00020.79.fits",
+   "channel_id": "R",
+   "target": "NGC 6822",
+   "filter_name": "R",
+   "night": "2026-09-09",
+   "observed_at": "2026-09-09T23:40:51.316000",
+   "airmass": 1.56086621722753,
+   "sky": 568.375,
+   "sky_mad": 5.9375,
+   "star_count": 4475,
+   "transparency": 0.9276380878991854,
+   "extinction_mag": 0.04491600554517197,
+   "fwhm_native": 4.460105659765663,
+   "ellipticity": 0.14773635667224377,
+   "eccentricity": 0.5231122997230584,
+   "registration_ok": true,
+   "matched_stars": 2336,
+   "registration_rms": 0.5107830644621646,
+   "overlap": 1.0,
+   "background_shape": 0.0682398319978047,
+   "gate_disposition": "PASS",
+   "gate_codes": [],
+   "transform": [
+    [
+     1.000001213929022,
+     7.046468529458422e-05,
+     0.025322538663203886
+    ],
+    [
+     -7.046468529459627e-05,
+     1.0000012139290222,
+     -1.8684276490881189
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "source_sha256": null,
+   "is_qc_reference": false,
+   "gradient_adu": null
+  }
+ ]
+}

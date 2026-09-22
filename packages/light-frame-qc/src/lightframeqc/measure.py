@@ -414,6 +414,37 @@ def save_thumbnail_png(
     return str(destination.resolve(strict=True))
 
 
+def save_linear_preview(preview: ImagePreview, output_path: str | os.PathLike[str]) -> str:
+    """Write the linear preview as a new float16 ``.npy`` (never overwriting).
+
+    Blink sessions keep the measured preview so the normalized previews are
+    rendered from the same single read of the frame.  Float16 keeps the sky
+    to about one ADU and clips only the saturated top of the 16-bit range.
+    """
+
+    destination = Path(output_path).expanduser()
+    if destination.suffix.casefold() != ".npy":
+        raise FrameMeasurementError("LINEAR_PREVIEW_FORMAT", "linear preview path must end in .npy")
+    if destination.exists():
+        raise FrameMeasurementError(
+            "LINEAR_PREVIEW_EXISTS", f"refusing to overwrite {destination}"
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    limit = float(np.finfo(np.float16).max)
+    data = np.clip(np.nan_to_num(preview.data, nan=0.0, posinf=limit, neginf=-limit), -limit, limit)
+    encoded = BytesIO()
+    np.save(encoded, np.asarray(data, dtype=np.float16), allow_pickle=False)
+    try:
+        with destination.open("xb") as stream:
+            stream.write(encoded.getbuffer())
+            stream.flush()
+    except FileExistsError as error:
+        raise FrameMeasurementError(
+            "LINEAR_PREVIEW_EXISTS", f"refusing to overwrite {destination}"
+        ) from error
+    return str(destination.resolve(strict=True))
+
+
 def measure_frame(
     path: str | os.PathLike[str],
     *,
@@ -421,8 +452,13 @@ def measure_frame(
     thumbnail_path: str | os.PathLike[str] | None = None,
     image_index: int = 0,
     max_full_decode_bytes: int | None = DEFAULT_MAX_FULL_DECODE_BYTES,
+    linear_path: str | os.PathLike[str] | None = None,
 ) -> FrameMeasurement:
-    """Read and measure one frame, raising a coded error on failure."""
+    """Read and measure one frame, raising a coded error on failure.
+
+    ``linear_path`` keeps the linear preview (:func:`save_linear_preview`)
+    from the same read for a blink session's normalized previews.
+    """
 
     selected_config = config or DEFAULT_CONFIG
     selected_config.validate()
@@ -439,6 +475,8 @@ def measure_frame(
             settings=MeasurementSettings.from_config(selected_config),
             thumbnail_path=thumbnail_path,
         )
+        if linear_path is not None:
+            save_linear_preview(preview, linear_path)
         measurement.native_psf = _native_psf_summary(path, measurement)
     except Exception as error:
         try:
@@ -508,6 +546,7 @@ def measure_frame_safe(
     thumbnail_path: str | os.PathLike[str] | None = None,
     image_index: int = 0,
     max_full_decode_bytes: int | None = DEFAULT_MAX_FULL_DECODE_BYTES,
+    linear_path: str | os.PathLike[str] | None = None,
 ) -> FrameMeasurement:
     """Measure one frame while representing expected decode/SEP errors as data."""
 
@@ -518,6 +557,7 @@ def measure_frame_safe(
             thumbnail_path=thumbnail_path,
             image_index=image_index,
             max_full_decode_bytes=max_full_decode_bytes,
+            linear_path=linear_path,
         )
     except (
         FileIdentityError,
@@ -546,14 +586,18 @@ def _thumbnail_name(run_token: str, index: int, path: Path) -> str:
     return f"{run_token}-{index:06d}-{stem}-{digest}.png"
 
 
-_MeasureTask = tuple[str, str | None, QcConfig]
+_MeasureTask = tuple[str, str | None, QcConfig, str | None]
+
+
+def linear_preview_name(index: int) -> str:
+    return f"{index:04d}.npy"
 
 
 def _measure_task(task: _MeasureTask) -> FrameMeasurement:
     """One frame of :func:`measure_paths`, importable so a child process can run it."""
 
-    path, thumbnail, config = task
-    return measure_frame_safe(path, config=config, thumbnail_path=thumbnail)
+    path, thumbnail, config, linear = task
+    return measure_frame_safe(path, config=config, thumbnail_path=thumbnail, linear_path=linear)
 
 
 def measure_paths(
@@ -564,6 +608,7 @@ def measure_paths(
     *,
     stats: dict[str, Any] | None = None,
     runner: FrameRunner | None = None,
+    linear_directory: str | os.PathLike[str] | None = None,
 ) -> list[FrameMeasurement]:
     """Measure paths in stable order, optionally with bounded parallelism.
 
@@ -574,7 +619,9 @@ def measure_paths(
     ``stats`` receives the parallelism that ran (``parallelism``, ``workers``);
     see :mod:`lightframeqc.parallel` for how it is chosen.  ``runner`` shares
     a caller-owned worker pool (its start-up is paid once for several
-    stages); otherwise the call opens and closes its own.
+    stages); otherwise the call opens and closes its own.  With
+    ``linear_directory`` every frame's linear preview is kept there as
+    ``NNNN.npy`` (:func:`linear_preview_name`, N = position in ``paths``).
     """
 
     config.validate()
@@ -589,6 +636,10 @@ def measure_paths(
     if config.make_thumbnails:
         thumbnail_root = report_root / "thumbnails"
         thumbnail_root.mkdir(parents=True, exist_ok=True)
+    linear_root: Path | None = None
+    if linear_directory is not None:
+        linear_root = Path(linear_directory).expanduser()
+        linear_root.mkdir(parents=True, exist_ok=True)
     # A fresh token makes rerunning into an existing report directory safe.
     # Old review thumbnails remain recoverable and no file is overwritten.
     run_token = secrets.token_hex(5)
@@ -599,6 +650,7 @@ def measure_paths(
             if thumbnail_root is not None
             else None,
             config,
+            str(linear_root / linear_preview_name(index)) if linear_root is not None else None,
         )
         for index, frame_path in enumerate(ordered_paths)
     ]
@@ -614,10 +666,12 @@ def measure_paths(
 __all__ = [
     "FrameMeasurementError",
     "MeasurementSettings",
+    "linear_preview_name",
     "measure_frame",
     "measure_frame_safe",
     "measure_paths",
     "measure_preview",
     "measurement_star_catalog",
+    "save_linear_preview",
     "save_thumbnail_png",
 ]

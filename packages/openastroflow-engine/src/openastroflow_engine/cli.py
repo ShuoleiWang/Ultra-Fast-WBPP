@@ -196,6 +196,7 @@ def _load_project_request(path: str) -> tuple[list[str], str | None, str, Recipe
         "solverHints",
         "execution",
         "reviewSelections",
+        "selection",
     }
     unknown = sorted(set(raw) - allowed)
     if unknown or raw.get("schemaVersion") != 1:
@@ -250,7 +251,34 @@ def _load_project_request(path: str) -> tuple[list[str], str | None, str, Recipe
             "PROJECT_REQUEST_INVALID",
             "reviewSelections must be an array of exact source/policy digest objects",
         )
+    # The blink review's decisions (schema selection-v1); they replace the
+    # legacy REVIEW selections rather than adding to them.
+    options["selection"] = None
+    if raw.get("selection") is not None:
+        from .e2e import parse_explicit_selection
+
+        if selections:
+            raise RuntimeConfigurationError(
+                "SELECTION_POLICY_CONFLICT",
+                "a request carries either selection or reviewSelections, not both",
+            )
+        options["selection"] = parse_explicit_selection(raw["selection"])
     return paths, project_name, output, recipe, options
+
+
+def _load_selection_file(path: str | None) -> Any:
+    """The ``--selection`` file as an ``ExplicitSelection`` (or ``None``)."""
+
+    if path is None:
+        return None
+    from .e2e import E2EError, parse_explicit_selection
+
+    source = Path(path).expanduser()
+    try:
+        raw = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise E2EError("SELECTION_INVALID", f"cannot read selection {source}: {error}") from error
+    return parse_explicit_selection(raw)
 
 
 def _load_quality_request(path: str) -> list[str]:
@@ -282,6 +310,17 @@ def _load_quality_request(path: str) -> list[str]:
             "lightPaths must contain between 1 and 10000 non-empty paths",
         )
     return paths
+
+
+def _load_blink_request(path: str) -> Any:
+    from .blink_session import BlinkRequest, BlinkSessionError
+
+    try:
+        source = Path(path).expanduser().resolve(strict=True)
+        raw = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise BlinkSessionError("BLINK_REQUEST_INVALID", str(error)) from error
+    return BlinkRequest.from_mapping(raw)
 
 
 def _verify_expected_source_roles(inventory: Any, expected: Mapping[str, str]) -> None:
@@ -375,6 +414,20 @@ def _build_parser() -> argparse.ArgumentParser:
     quality.add_argument("--workers", type=int)
     quality.add_argument("--compact", action="store_true")
 
+    blink = subparsers.add_parser(
+        "blink-measure",
+        help="measure Lights, flag the obvious junk, pick a reference per channel and render normalized previews for blinking",
+    )
+    blink.add_argument(
+        "--request-json", required=True, help="private schema-1 blink request (Light paths, new session directory)"
+    )
+    blink.add_argument("--compact", action="store_true")
+    blink.add_argument(
+        "--progress-json",
+        action="store_true",
+        help="emit one JSON progress record per line on stderr",
+    )
+
     calibration = subparsers.add_parser(
         "calibration-check", help="read-only calibration metadata and library checks"
     )
@@ -437,6 +490,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="ordered comma-separated solver ids (default recipe: automatic ready chain)",
     )
     run.add_argument("--workers", type=int, help="QC worker count; defaults to the hardware profile")
+    run.add_argument(
+        "--selection",
+        help="selection-v1 JSON (the blink review's KEEP/DROP per Light); replaces the automatic screening",
+    )
     run.add_argument("--ra", type=float, dest="ra_hint_degrees", help="optional center RA in degrees")
     run.add_argument("--dec", type=float, dest="dec_hint_degrees", help="optional center Dec in degrees")
     run.add_argument("--fov", type=float, dest="field_of_view_degrees", help="optional field width in degrees")
@@ -468,6 +525,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run_project.add_argument("--mode", choices=("ordinary", "drizzle"))
     run_project.add_argument("--solver-chain")
     run_project.add_argument("--workers", type=int)
+    run_project.add_argument("--selection", help="selection-v1 JSON; positional mode only")
     run_project.add_argument("--ra", type=float, dest="ra_hint_degrees")
     run_project.add_argument("--dec", type=float, dest="dec_hint_degrees")
     run_project.add_argument("--fov", type=float, dest="field_of_view_degrees")
@@ -601,6 +659,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             sys.stdout.write(_json(payload, compact=args.compact) + "\n")
             return 0
+        if args.command == "blink-measure":
+            from .blink_session import run_blink_session
+
+            def blink_progress(stage: str, message: str) -> None:
+                if args.progress_json:
+                    sys.stderr.write(
+                        _json({"type": "progress", "stage": stage, "message": message}, compact=True) + "\n"
+                    )
+                    sys.stderr.flush()
+
+            with platform_services.current().keep_awake():
+                manifest = run_blink_session(
+                    _load_blink_request(args.request_json),
+                    progress=blink_progress if args.progress_json else None,
+                )
+            sys.stdout.write(_json(manifest, compact=args.compact) + "\n")
+            return 0
         if args.command == "controller-plan":
             from .controller import controller_plan_envelope
 
@@ -663,6 +738,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "dec_hint_degrees": args.dec_hint_degrees,
                 "field_of_view_degrees": args.field_of_view_degrees,
                 "search_radius_degrees": args.search_radius_degrees,
+                "explicit_selection": _load_selection_file(args.selection),
             }
             if project_requires_orchestration(inventory):
                 _, request, solvers = prepare_project_execution(
@@ -693,10 +769,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             review_selections: Sequence[Mapping[str, str]] = ()
             if args.request_json:
-                if args.inputs or args.output or args.recipe:
+                if args.inputs or args.output or args.recipe or args.selection:
                     raise RuntimeConfigurationError(
                         "PROJECT_REQUEST_AMBIGUOUS",
-                        "--request-json cannot be mixed with positional inputs, --output, or --recipe",
+                        "--request-json cannot be mixed with positional inputs, --output, --recipe or --selection",
                     )
                 inputs, name, output, recipe, options = _load_project_request(args.request_json)
                 inventory = inventory_project(inputs, name=name)
@@ -712,6 +788,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "field_of_view_degrees": hints.get("fieldOfViewDegrees"),
                     "search_radius_degrees": hints.get("searchRadiusDegrees"),
                     "solver_chain": recipe.solver.backend,
+                    "explicit_selection": options["selection"],
                 }
             else:
                 if not args.inputs or not args.output:
@@ -729,6 +806,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "field_of_view_degrees": args.field_of_view_degrees,
                     "search_radius_degrees": args.search_radius_degrees,
                     "solver_chain": args.solver_chain,
+                    "explicit_selection": _load_selection_file(args.selection),
                 }
             _, request, solvers = prepare_project_execution(
                 inventory, recipe, output, **kwargs

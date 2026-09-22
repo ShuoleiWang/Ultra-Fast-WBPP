@@ -21,23 +21,26 @@ For interface-only work, run `make demo`. The browser preview is explicitly mark
 |---|---|
 | `src/App.tsx` | Window shell: toolbar, sidebar, content views, inspector |
 | `src/Toolbar.tsx`, `src/Sidebar.tsx`, `src/Inspector.tsx` | The macOS-style chrome around the content ([design](../../docs/gui-redesign-plan.md)) |
-| `src/views.tsx` | Import, screening, processing and result views, launch bar, master forms, solver setup |
-| `src/useWorkflow.ts` | Import, review, processing state, progress, and timer |
-| `src/bridge.ts` | Typed frontend calls and native events |
+| `src/views.tsx` | Import, legacy screening review, processing and result views, launch bar, master forms, solver setup |
+| `src/BlinkView.tsx` | Blink & select: channel chips, the shared-viewport stage with compare mode, the flagged-first filmstrip with night headers, playback, keyboard decisions, drop night / apply flags / undo, the launch bar in blink mode ([recipe](../../docs/recipes/blink-screening.md)) |
+| `src/useWorkflow.ts` | Import, blink session and decisions, legacy review, processing state, progress, and timer; `startRun` sends the selection when a blink session is current |
+| `src/bridge.ts` | Typed frontend calls and native events (`blinkMeasure`, `loadBlinkPreview` among them) |
 | `src/FrameInventory.tsx` | Input groups, manual type hints and calibration status |
 | `src/i18n.ts` | English and Simplified Chinese interface text |
 | `src/icons.tsx` | SF Symbols-style line icons and the brand mark |
 | `src/demoAutopilot.ts` | `?demo=` stages for documentation screenshots (browser demo only) |
 | `scripts/brand_icon.py`, `scripts/screenshots.py` | Reproducible application icon and README screenshots |
-| `src-tauri/src/project.rs` | Project requests, worker execution, and result verification |
-| `src-tauri/src/sidecar.rs` | Worker discovery, integrity, and launch |
+| `src-tauri/src/project.rs` | Project requests (including the validated `selection`), worker execution, bounded blink preview loading, and result verification |
+| `src-tauri/src/sidecar.rs` | Worker discovery, integrity, launch, and the `quality-check` / `blink-measure` sidecar calls with their transport budgets |
 | `src-tauri/src/platform/` | Process-tree control (`ManagedChild`: process groups on POSIX, Job Objects on Windows) and hardware profiles |
 
 The standard workflow is monochrome. Missing optional master metadata remains unknown; known conflicts still block calibration, and Bayer (one-shot-colour) Lights are processed as R/G/B colour channel groups ([recipe](../../docs/recipes/osc-cfa.md)). Advanced overrides are bound to source content. See [calibration conventions](../../docs/recipes/calibration.md).
 
 Every worker process is started through `platform::ManagedChild` with UTF-8 stdio. On macOS and Linux the worker leads its own process group; on Windows it runs inside a Job Object with kill-on-close, so cancelling a run or quitting the application also stops the worker pools and solver processes it started. The worker's progress stream is decoded leniently: a stray console byte never ends progress reporting.
 
-**Review** runs the real Light quality gate. `PASS` frames are admitted; `REVIEW` frames are excluded by default and can be approved only in the supported single-panel workflow; `HARD_FAIL` frames cannot be approved. **Process** repeats the required checks and writes into a new destination. Before showing success, Rust verifies the published receipt, product paths, sizes, hashes, and final astrometry evidence.
+**Blink & select** is the primary screening path: the worker's `blink-measure` command measures every Light, computes per-channel flags and a reference frame, and renders registered, normalised previews (1/8 scale inline within a 200 KB / 32 MB budget, 1/4 scale on demand through `load_blink_preview`, which refuses paths outside the session directory and files over 2 MB) into a create-only session under the platform cache root (`Ultra-Fast-WBPP/blink-sessions/`); the desktop keeps at most three sessions, removing older ones before a new measurement, and removes them at *Clear*. Every Light gets a decision (initialised from its flag default) and the run request carries them as a `selection-v1` object with the manifest's digest as origin; a channel with fewer than two kept Lights blocks the start, and re-importing Lights invalidates the session. A run started without a blink session is labelled *Start (automatic screening)* and uses the legacy gate.
+
+**Review** (legacy, optional) runs the real Light quality gate. `PASS` frames are admitted; `REVIEW` frames are excluded by default and can be approved only in the supported single-panel workflow; `HARD_FAIL` frames cannot be approved. A request cannot carry both a selection and review approvals. **Process** repeats the required checks and writes into a new destination. Before showing success, Rust verifies the published receipt, product paths, sizes, hashes, and final astrometry evidence.
 
 ## Checks
 
@@ -51,7 +54,7 @@ cargo fmt --all -- --check
 cargo clippy -p openastroflow-desktop --all-targets --no-deps -- -D warnings
 ```
 
-Frontend tests cover import and calibration, review decisions, cancellation, progress/timing, the platform solver routes, and final-result display. Rust tests cover worker protocol, process-tree termination, and result verification; the Job Object tests run only on Windows (`cargo test -p openastroflow-desktop platform::windows::tests`). These checks do not replace installed-app or real-data acceptance; consult the [validation matrix](../../docs/validation-matrix.md).
+Frontend tests cover import and calibration, the blink view (flagged-first order and night headers, keyboard stepping and decisions, playback with fake timers, drop night, apply flags and undo, the per-channel blocker, the selection in the run request, session invalidation on re-import), legacy review decisions, cancellation, progress/timing, the platform solver routes, and final-result display. Rust tests cover worker protocol (including the `blink-measure` contract against the fake sidecar and the preview budgets), the validated `selection` in the project request, process-tree termination, and result verification; the Job Object tests run only on Windows (`cargo test -p openastroflow-desktop platform::windows::tests`). These checks do not replace installed-app or real-data acceptance; consult the [validation matrix](../../docs/validation-matrix.md).
 
 ## Packaging
 
