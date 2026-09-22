@@ -15,9 +15,9 @@ PATH):
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\python -m pip install -e ./packages/light-frame-qc[test] -e ./engine/native/python[test] -e ./packages/openastroflow-engine[test,all]
+.venv\Scripts\python -m pip install -e ./packages/light-frame-qc[test] -e ./packages/openastroflow-registration[test] -e ./packages/openastroflow-engine[test,all]
 .venv\Scripts\python scripts\build_native_runtime.py --build-dir build\native-release
-.venv\Scripts\python -m pytest -q packages/light-frame-qc/tests engine/native/python/tests packages/openastroflow-engine/tests tests
+.venv\Scripts\python -m pytest -q packages/light-frame-qc/tests packages/openastroflow-registration/tests packages/openastroflow-engine/tests tests
 ```
 
 `build_native_runtime.py` uses CMake's Visual Studio generator, which locates

@@ -209,64 +209,54 @@ def test_parallel_warps_preserve_fits_and_ordered_provenance(
     assert light_kinds == ["CALIBRATED_LIGHT", "REGISTERED_LIGHT"] * len(lights)
 
 
-@pytest.mark.parametrize(('budget_rows', 'cpu_workers', 'expected_workers'),
-                         [(3, 8, 3), (10, 12, 8), (10, 2, 2)])
-def test_parallel_warps_share_budget_and_keep_result_order(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    budget_rows: int, cpu_workers: int, expected_workers: int,
-) -> None:
+@pytest.mark.parametrize(("budget_jobs", "cpu_workers", "expected_workers"), [(3, 8, 3), (10, 12, 10), (10, 2, 2)])
+def test_fused_jobs_share_budget_and_keep_result_order(tmp_path, monkeypatch, budget_jobs, cpu_workers, expected_workers):
+    from types import SimpleNamespace
     import openastroflow_engine.pixel_pipeline as pipeline
-    from openastroflow_engine.calibration import PixelStatistics, read_frame_info
-
-    source = _write_frame(tmp_path / "source.fits", "Light", np.ones((12, 16)))
-    info = read_frame_info(source)
-    transform = AffineTransform.from_value(((1, 0, 0.2), (0, 1, 0.3), (0, 0, 1)))
-    jobs = [pipeline._RegistrationJob(source, tmp_path / f"{i}.fits", transform, info) for i in range(expected_workers * 2)]
-    one_row = info.shape[1] * 192
-    budget = one_row * budget_rows + 2
+    info = SimpleNamespace(shape=(12, 16))
+    jobs = [SimpleNamespace(index=i, info=info, transform=AffineTransform.identity(), cfa_pattern=None) for i in range(20)]
+    budget = pipeline._fused_job_bytes(jobs[0], "lanczos-3-clamped") * budget_jobs
     barrier = threading.Barrier(expected_workers)
-    lock = threading.Lock()
-    observed = []
+    seen = []
 
-    def register(_source, destination, *_args, max_memory_bytes, **_kwargs):
-        with lock:
-            observed.append((threading.get_ident(), max_memory_bytes))
-        barrier.wait(timeout=5)
-        return PixelStatistics(1, 0, 0.0, 1.0, float(destination.stem))
+    def process(job, *, max_memory_bytes, **kwargs):
+        seen.append(max_memory_bytes)
+        # Only synchronize the first round; the final round may be shorter.
+        if job.index < expected_workers:
+            barrier.wait(timeout=5)
+        return SimpleNamespace(index=job.index, execution={"warpBackend": "test"})
 
-    monkeypatch.setattr(pipeline, "_register_frame", register)
-    results = pipeline._register_frames(jobs, max_memory_bytes=budget, resampler="lanczos-3-clamped", cpu_workers=cpu_workers)
-    assert [item.mean for item in results] == list(range(len(jobs)))
-    assert len({thread for thread, _memory in observed}) == expected_workers
-    assert {memory for _thread, memory in observed} == {budget // expected_workers}
+    monkeypatch.setattr(pipeline, "_process_light_job", process)
+    results, execution = pipeline._calibrate_and_register_frames(
+        jobs, master_cache=SimpleNamespace(decoded_bytes=0), max_memory_bytes=budget,
+        resampler="lanczos-3-clamped", cpu_workers=cpu_workers, division_floor=1e-6,
+    )
+    assert [r.index for r in results] == list(range(20))
+    assert execution["cpuWorkersUsed"] == expected_workers
+    assert set(seen) == {budget // expected_workers}
 
 
-def test_parallel_warp_failure_waits_for_active_writer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_fused_failure_waits_for_active_writer(monkeypatch):
+    from types import SimpleNamespace
     import openastroflow_engine.pixel_pipeline as pipeline
-    from openastroflow_engine.calibration import PixelStatistics, read_frame_info
-
-    source = _write_frame(tmp_path / "source.fits", "Light", np.ones((12, 16)))
-    info = read_frame_info(source)
-    jobs = [pipeline._RegistrationJob(source, tmp_path / f"{i}.fits", AffineTransform.identity(), info) for i in range(2)]
+    jobs = [SimpleNamespace(index=i, info=SimpleNamespace(shape=(12, 16)), transform=AffineTransform.identity(), cfa_pattern=None) for i in range(2)]
     barrier = threading.Barrier(2)
-    failed = threading.Event()
-    release_writer = threading.Event()
-    writer_finished = threading.Event()
+    failed, release_writer, writer_finished = threading.Event(), threading.Event(), threading.Event()
 
-    def register(_source, destination, *_args, **_kwargs):
+    def process(job, **kwargs):
         barrier.wait(timeout=5)
-        if destination.stem == "0":
+        if job.index == 0:
             failed.set()
             raise CalibrationError("TEST_WARP_FAILURE", "injected warp failure")
         assert release_writer.wait(timeout=5)
         writer_finished.set()
-        return PixelStatistics(1, 0, 0.0, 1.0, 0.5)
+        return SimpleNamespace(execution={"warpBackend": "test"})
 
-    monkeypatch.setattr(pipeline, "_register_frame", register)
+    monkeypatch.setattr(pipeline, "_process_light_job", process)
     with ThreadPoolExecutor(max_workers=1) as caller:
-        pending = caller.submit(pipeline._register_frames, jobs, max_memory_bytes=4096, resampler="bilinear", cpu_workers=2)
+        pending = caller.submit(pipeline._calibrate_and_register_frames, jobs,
+            master_cache=SimpleNamespace(decoded_bytes=0), max_memory_bytes=1024**2,
+            resampler="bilinear", cpu_workers=2, division_floor=1e-6)
         try:
             assert failed.wait(timeout=5)
             assert not pending.done()

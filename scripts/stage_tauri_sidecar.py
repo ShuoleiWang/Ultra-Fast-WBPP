@@ -103,30 +103,6 @@ def load_verified_pair(
     return runtime, payload
 
 
-def _copy_create_only(source: Path, destination: Path, *, executable: bool) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    descriptor: int | None = None
-    created = False
-    try:
-        mode = 0o700 if executable else 0o600
-        descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
-        created = True
-        with os.fdopen(descriptor, "wb") as output, source.open("rb") as input_stream:
-            descriptor = None
-            shutil.copyfileobj(input_stream, output, length=1024 * 1024)
-            output.flush()
-            os.fsync(output.fileno())
-        if executable and os.name != "nt":
-            os.chmod(destination, 0o700)
-    except Exception:
-        if descriptor is not None:
-            os.close(descriptor)
-        if created:
-            try:
-                destination.unlink()
-            except FileNotFoundError:
-                pass
-        raise
 
 
 def _write_payload_create_only(destination: Path, payload: Mapping[str, Any]) -> None:

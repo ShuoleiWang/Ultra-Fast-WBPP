@@ -1012,7 +1012,8 @@ def test_failed_publication_rolls_back_only_its_new_output(
             "DIRECTORY_SYNC_FAILED", f"synthetic failure for {path}"
         )
 
-    monkeypatch.setattr(astap_backend_module, "_fsync_directory", fail_sync)
+    from openastroflow_engine.solvers import process
+    monkeypatch.setattr(process, "fsync_directory", fail_sync)
     result = backend.solve(SolveRequest(str(source), str(output)))
 
     assert result.status == SolverStatus.FAILED

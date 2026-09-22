@@ -27,7 +27,7 @@ Astrometry.net's `solve-field` has no maintained native Windows build, so the Wi
 ## Reproducibility
 
 - **Same machine, same inputs:** two runs of the same project produce bit-identical masters (verified on the laptop with the patched SEP build).
-- **Windows versus macOS:** per-frame measurements agree to the rounding of different math libraries; a frame that sits exactly on a gate boundary can be decided differently, which changes the admitted set and therefore the masters. Cross-platform results are compared with the tolerance gate (`benchmarks/master_tolerance_gate.py`), never with file hashes.
+- **Windows versus macOS:** per-frame measurements agree to the rounding of different math libraries; a frame that sits exactly on a gate boundary can be decided differently, which changes the admitted set and therefore the masters. Cross-platform results are compared with the tolerance gate (`tools/validation/master_tolerance_gate.py`), never with file hashes.
 
 ## Performance on this class of hardware
 

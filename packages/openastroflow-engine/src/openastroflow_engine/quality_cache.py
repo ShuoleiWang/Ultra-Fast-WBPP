@@ -5,7 +5,6 @@ from __future__ import annotations
 from . import platform as platform_services
 import os
 from pathlib import Path
-import sys
 
 
 def quality_cache_directory() -> Path | None:

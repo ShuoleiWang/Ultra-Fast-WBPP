@@ -14,20 +14,25 @@ overwritten.
 """
 
 from __future__ import annotations
+from .publication import (
+    ColorProductError,
+    _canonical_json,
+    _sha256,
+    _fsync_directory,
+    _best_effort_fsync_directory,
+    _publish_directory_no_replace,
+)
 
-import ctypes
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import errno
 import hashlib
-import json
 import math
 import os
 from pathlib import Path
 import re
 import stat
 import struct
-import sys
 import tempfile
 from typing import Any, Callable, Mapping
 import zlib
@@ -39,7 +44,6 @@ import astropy.units as u
 import numpy as np
 from numpy.typing import NDArray
 
-from lightframeqc.content_hash import file_sha256
 from . import platform as platform_services
 from .platform import NoReplaceError, remove_tree
 from .solver import validate_wcs_header
@@ -47,16 +51,6 @@ from .solver import validate_wcs_header
 
 COLOR_PRODUCT_VERSION = "openastroflow-color-product-v1"
 _CHANNELS = ("R", "G", "B")
-
-
-class ColorProductError(RuntimeError):
-    """Stable, user-actionable failure at the color-product boundary."""
-
-    def __init__(self, code: str, message: str, *, path: str | None = None) -> None:
-        self.code = code
-        self.path = path
-        detail = f"{path}: {message}" if path else message
-        super().__init__(f"{code}: {detail}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,23 +102,6 @@ class _Channel:
 
 
 DirectoryPublisher = Callable[[Path, Path], None]
-
-
-def _canonical_json(value: Mapping[str, Any]) -> bytes:
-    return (
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\n"
-    ).encode("utf-8")
-
-
-def _sha256(path: Path) -> str:
-    return "sha256:" + file_sha256(path)
 
 
 def _regular_identity(path: Path) -> dict[str, Any]:
@@ -583,49 +560,6 @@ def _artifact(path: Path, root: Path, kind: str) -> dict[str, Any]:
         "sha256": _sha256(path),
         "sizeBytes": info.st_size,
     }
-
-
-def _fsync_directory(path: Path) -> None:
-    platform_services.current().fsync_directory(path)
-
-
-def _best_effort_fsync_directory(path: Path) -> None:
-    """Sync a committed directory when supported, without creating ambiguity."""
-
-    try:
-        _fsync_directory(path)
-    except OSError:
-        # The atomic rename has already committed.  Reporting failure here
-        # would leave a complete create-only product while telling the caller
-        # to retry, which can only produce OUTPUT_EXISTS.
-        return
-
-
-def _publish_directory_no_replace(source: Path, destination: Path) -> None:
-    """Atomically publish one directory without replacing an existing path."""
-
-    try:
-        platform_services.current().rename_directory_no_replace(source, destination)
-    except NoReplaceError as error:
-        if error.code == "OUTPUT_EXISTS":
-            message = (
-                "refusing to overwrite output directory"
-                if error.precheck
-                else "output appeared during publication"
-            )
-            raise ColorProductError("OUTPUT_EXISTS", message, path=str(destination)) from error
-        raise ColorProductError(
-            "ATOMIC_DIRECTORY_PUBLISH_UNSUPPORTED",
-            "platform has no create-only atomic directory publication primitive",
-        ) from error
-    except OSError as error:
-        if os.path.lexists(destination):
-            raise ColorProductError(
-                "OUTPUT_EXISTS", "output appeared during publication", path=str(destination)
-            ) from error
-        raise ColorProductError(
-            "ATOMIC_PUBLICATION_FAILED", os.strerror(error.errno) if error.errno else str(error), path=str(destination)
-        ) from error
 
 
 def build_color_product(

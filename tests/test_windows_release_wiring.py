@@ -46,9 +46,7 @@ def test_ci_windows_python_job_tests_against_the_patched_sep_and_static_crt_kern
     assert _index(steps, "pip check") > _index(steps, "scripts/build_sep_wheel.py --install")
 
     rust = _steps(CI_WORKFLOW, "rust")
-    windows_rust = rust[_index(rust, "platform::windows::tests")]
-    assert windows_rust["if"] == "runner.os == 'Windows'"
-    assert "cargo test -p openastroflow-desktop platform::windows::tests" in windows_rust["run"]
+    assert "cargo test --workspace --locked" in rust[_index(rust, "cargo test --workspace")]["run"]
 
 
 def test_release_windows_job_attests_the_installed_msi_before_collecting_installers() -> None:

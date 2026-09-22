@@ -345,7 +345,8 @@ def _integrate(samples, accepted, weights):
 def _accumulate(samples, accepted, weights):
     integrated = _integrate(samples, accepted, weights)
     accumulator = LeaveOneOutAccumulator(
-        [f"/f/{index}.fits" for index in range(6)], minimum_blocks=12, background_segment_blocks=2
+        [f"/f/{index}.fits" for index in range(6)], minimum_blocks=12, background_segment_blocks=2,
+        statistics_rows=32,
     )
     tile_starts = (0, 32, 64, 96)
     for first_row in tile_starts:
@@ -554,3 +555,33 @@ def test_background_harm_does_not_remove_a_frame_that_deepens_the_master() -> No
     annotated = {item.path: item for item in annotate_with_counterfactual(decisions, report, parameters)}
     assert annotated[paths[6]].suggestion is None
     assert annotated[paths[7]].suggestion == "EXCLUDE_CONFIRMED_HARMFUL"
+
+
+@pytest.mark.parametrize("band_rows", [1, 7, 20, 32, 65])
+def test_counterfactual_is_invariant_to_io_bands_and_masks_nan_samples(band_rows: int) -> None:
+    """A unit region map and arbitrary I/O bands must preserve the oracle."""
+    rng = np.random.default_rng(7)
+    samples = rng.normal(100, 1, (6, 1027, 96)).astype(np.float32)
+    samples[0] = 100 + (samples[0] - 100) * 4
+    samples[1, ::8, ::8] = np.nan
+    accepted = np.isfinite(samples)
+    weights = np.ones(6)
+    integrated = np.nanmean(samples, axis=0)
+    paths = [f"frame-{i}" for i in range(6)]
+
+    def run(rows: int, region: bool):
+        accumulator = LeaveOneOutAccumulator(paths)
+        for y in range(0, samples.shape[1], rows):
+            tile = samples[:, y:y + rows]
+            accumulator(TileObservation(
+                y, tile, accepted[:, y:y + rows], weights, integrated[y:y + rows],
+                np.ones_like(tile) if region else None,
+            ))
+        report = accumulator.finalize(bootstrap=30)
+        assert report.tiles_used == 16
+        decisions = decide([_features(path) for path in paths], SelectionParameters(policy="unattended-v1"))
+        harmful = confirmed_harmful(annotate_with_counterfactual(decisions, report, SelectionParameters(policy="unattended-v1")))
+        assert [item.path for item in harmful] == [paths[0]]
+        return report.serializable()
+
+    assert run(band_rows, True) == run(64, False)

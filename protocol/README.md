@@ -1,6 +1,6 @@
 # Ultra-Fast WBPP control-plane protocol
 
-This directory is the checked-in contract between the desktop controller and processing workers. Version 1 uses newline-delimited JSON (NDJSON), one UTF-8 JSON object per line. The Rust source of truth is `crates/app-core`; the files under `schema/` are generated snapshots.
+This directory is the checked-in contract for the versioned NDJSON controller/worker interface. The current desktop project route uses `run-project` with separate result/progress streams; see [architecture](../docs/architecture.md). Version 1 uses newline-delimited JSON (NDJSON), one UTF-8 JSON object per line. The Rust source of truth is `crates/app-core`; the files under `schema/` are generated snapshots.
 
 ## Transport and direction
 

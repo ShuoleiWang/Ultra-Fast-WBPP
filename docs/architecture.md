@@ -64,8 +64,7 @@ contracts; it is not the transport used for every desktop operation. See
 2. Measure Light quality (1/4-scale previews, SEP detection, native-resolution
    PSF stamps, the QC reference and registration, spatial features) and run the
    quality gate; then admit frames by one of three routes. The *legacy gate*
-   (default of the command line and of a desktop run started without a blink
-   session) excludes `HARD_FAIL` and unapproved `REVIEW` frames. An unattended
+   (default of headless runs without an explicit selection) excludes `HARD_FAIL` and unapproved `REVIEW` frames. An unattended
    `selection.policy` decides and weights every frame from the same evidence.
    An explicit selection (`selection-v1`, policy `explicit-v1`, made in the
    desktop's blink view or written by hand and passed as `--selection` or the
@@ -117,8 +116,8 @@ contracts; it is not the transport used for every desktop operation. See
 
 Quality screening, relative normalization and background-gradient removal are
 separate responsibilities. A passing Light can contain a smooth sky gradient.
-LocalNormalization is optional and is not equivalent to PixInsight's algorithm;
-unsafe local models retain explicit fallback evidence. Final images may still
+The supported normalization uses stellar scale and a guarded additive background grid;
+unsafe grids retain explicit scalar-fallback evidence. The old LocalNormalization branch has been retired. Final images may still
 need background modeling. Scientific thresholds must not change merely to make
 an acceptance test pass.
 
@@ -249,3 +248,35 @@ prefers `solve-field` where both are installed. Without the managed index set
 ASTAP stays diagnostic-only, and the Siril adapter is diagnostic-only. No online
 image-upload solver fallback is implemented. Executable licenses and catalog
 redistribution permissions are separate; see [licensing](licensing.md).
+
+## Module ownership after the review cleanup
+
+- `workflows/contracts.py` owns run requests, explicit selections and progress.
+  `workflows/single_target.py` and `workflows/project.py` coordinate runs;
+  `workflows/solve.py` owns final solve/geometry verification. `e2e.py` and
+  `project_e2e.py` are compatibility module aliases, not parallel executors.
+- `calibration_inputs.py` owns content-bound metadata and generated-master reuse.
+  `image_io/fits.py` owns FITS reading/writing and sampling; `calibration.py`
+  retains expression evaluation and ordinary integration. `PixelTransform`
+  accepts affine and projective matrices; `AffineTransform` remains an alias.
+- `solvers/process.py` owns shared external-process and publication evidence.
+  Adapters no longer obtain these services from the ASTAP implementation.
+  `publication.py` shares color/mosaic create-only primitives.
+- `drizzle.py` describes capabilities; `drizzle_native.integrate_drizzle_group`
+  executes the native group contract. A capability provider has no dummy
+  `drizzle()` operation accepting obsolete registered-only inputs.
+- The registration library lives under `packages/openastroflow-registration/src`.
+  `engine/native` contains only native kernels, their ABI, tests and benchmarks.
+- Desktop Rust `sidecar/` separates bundle discovery, inspection, blink and
+  the versioned worker transport; `project/` separates requests, previews,
+  completion checks and execution. Parent modules preserve command boundaries.
+  `workflow/model.ts` holds UI-independent decisions; `useWorkflow.ts` owns
+  React lifecycle and state. `sourceDefaults.ts` replaces the obsolete demo recipe table.
+- Scientific acceptance commands live under `tools/validation`; the old
+  benchmark command paths forward to them. Performance tools stay in `benchmarks`.
+
+The main desktop command remains `start_project` → `run-project` (result JSON
+on stdout, progress on stderr). The separate NDJSON worker v1 interface remains
+available for existing clients and its contracts; it is not the desktop project
+transport. Package names, CLI aliases, environment variables, bundle identifiers,
+wire IDs and on-disk staging names are deliberately unchanged.

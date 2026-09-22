@@ -1,12 +1,12 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useState } from "react";
-import { blinkFlagLabel, type Translator } from "./i18n";
-import { CalibrationGroups, FrameInventory } from "./FrameInventory";
-import type { InventoryTab } from "./Sidebar";
+import { CalibrationGroups,FrameInventory } from "./FrameInventory";
 import { dispositionLabel } from "./Inspector";
-import { BrandMark, CheckIcon, CpuIcon, FileIcon, FolderIcon, PlayIcon, RevealIcon, SparkIcon, XIcon } from "./icons";
-import { DRIZZLE_KERNELS, DRIZZLE_SCALES } from "./types";
-import type { DrizzleKernel, DrizzleScale, GateDisposition, InspectedLightQuality, MasterMetadataOverride, OutputArtifact, OutputArtifactKind, ScreeningSummary, SolverBackendStatus } from "./types";
+import type { InventoryTab } from "./Sidebar";
+import { blinkFlagLabel,type Translator } from "./i18n";
+import { BrandMark,CheckIcon,CpuIcon,FileIcon,FolderIcon,PlayIcon,RevealIcon,SparkIcon,XIcon } from "./icons";
+import type { DrizzleKernel,DrizzleScale,GateDisposition,MasterMetadataOverride,OutputArtifact,OutputArtifactKind,ScreeningSummary,SolverBackendStatus } from "./types";
+import { DRIZZLE_KERNELS,DRIZZLE_SCALES } from "./types";
 import type { useWorkflow } from "./useWorkflow";
 
 export type Workflow = ReturnType<typeof useWorkflow>;
@@ -91,7 +91,6 @@ export function LaunchSettings({ mode, workflow, outputPathText, setOutputPathTe
           <div className="field-row"><label htmlFor="drizzle-kernel">{t("drizzleKernel")}</label><select id="drizzle-kernel" value={workflow.drizzleKernel} disabled={workflow.runNavigationLocked} onChange={(event) => workflow.setDrizzleKernel(event.target.value as DrizzleKernel)}>{DRIZZLE_KERNELS.map((kernel) => <option key={kernel} value={kernel}>{t(`drizzleKernel_${kernel}` as const)}</option>)}</select></div>
           <DropShrinkField value={workflow.drizzleDropShrink} disabled={workflow.runNavigationLocked} onCommit={workflow.setDrizzleDropShrink} t={t} />
         </div>}
-        <label className={`toggle ${workflow.localNormalizationEnabled ? "enabled" : ""}`}><input type="checkbox" checked={workflow.localNormalizationEnabled} onChange={(event) => workflow.setLocalNormalizationEnabled(event.target.checked)} /><span><strong>{t("localNormalization")}</strong><small>{t("localNormalizationHint")}</small></span></label>
         <section className="panel" aria-labelledby="solver-title"><div className="panel-heading"><span id="solver-title">{t("solverSetup")}</span><div className="setup-actions"><small>{workflow.solverSetupReady ? t("ready") : t("actionRequired")}</small>{workflow.nativeRuntime && <button type="button" className="btn small" disabled={workflow.solverSetupBusy || workflow.catalogStatus === "DOWNLOADING" || workflow.catalogStatus === "VERIFYING"} onClick={() => void workflow.recheckSolverSetup()}>{workflow.solverSetupBusy ? t("checkingSetup") : t("recheckSetup")}</button>}</div></div>
           <div className="panel-body">
             <SolverRows workflow={workflow} t={t} />
@@ -125,33 +124,23 @@ function SolverRows({ workflow, t }: { workflow: Workflow; t: Translator }) {
   return <>{windows ? [astap, solveField] : [solveField, astap]}</>;
 }
 
-/** What the run will leave out, said before the start button is pressed. */
-function ScreeningNotice({ mode, workflow, t }: { mode: "import" | "inspect"; workflow: Workflow; t: Translator }) {
-  if (workflow.demoMode) return null;
-  // With a blink session the run applies the user's decisions, nothing else.
-  if (workflow.blinkReady) {
-    const kept = workflow.blinkChannels.reduce((sum, channel) => sum + channel.kept, 0);
-    const total = workflow.blinkChannels.reduce((sum, channel) => sum + channel.total, 0);
-    return <div className="screening-notice blinked" role="status"><span className="symbol" aria-hidden="true">✓</span><div><strong>{t("noticeBlinkedTitle")}</strong><span>{t("noticeBlinkedBody", { kept, total, dropped: total - kept })}</span></div><button type="button" className="btn small" disabled={workflow.inputBusy} onClick={() => void workflow.runBlink()}>{t("blinkOpen")}</button></div>;
-  }
-  if (!workflow.qualityReady) {
-    if (!workflow.canStart) return null;
-    return <div className="screening-notice" role="status"><span className="symbol" aria-hidden="true">!</span><div><strong>{t("noticeUnscreenedTitle")}</strong><span>{t("noticeUnscreenedBody")} {t("noticeNotBlinkedBody")}</span></div><button type="button" className="btn small" disabled={!workflow.canInspect || !workflow.allRequiredConfirmed || workflow.qualityBusy} onClick={() => void workflow.runInspection()}>{workflow.qualityBusy ? t("inspecting") : t("inspect", { count: "" })}</button></div>;
-  }
-  if (workflow.pendingReviewCount === 0) return null;
-  return <div className="screening-notice" role="status"><span className="symbol" aria-hidden="true">!</span><div><strong>{t("noticePendingReviewTitle", { count: workflow.pendingReviewCount })}</strong><span>{t("noticePendingReviewBody", { admitted: workflow.matrix.reduce((sum, cell) => sum + cell.admittedCount, 0), total: workflow.matrix.reduce((sum, cell) => sum + cell.lightCount, 0) })}</span></div>{workflow.unapprovedApprovableCount > 0 && <button type="button" className="btn small" onClick={() => workflow.setAllReviewApprovals(true)}>{t("approveAllReview", { count: workflow.approvableReviewCount })}</button>}{mode === "import" && <button type="button" className="btn small quiet" onClick={() => workflow.setStep("inspect")}>{t("viewQualityResults")}</button>}</div>;
+/** Manual decisions are the only GUI admission source. */
+function ScreeningNotice({ workflow, t }: { workflow: Workflow; t: Translator }) {
+  if (workflow.demoMode || !workflow.blinkReviewComplete) return null;
+  const kept = workflow.blinkChannels.reduce((sum, channel) => sum + channel.kept, 0);
+  const total = workflow.blinkChannels.reduce((sum, channel) => sum + channel.total, 0);
+  return <div className="screening-notice blinked" role="status"><span className="symbol" aria-hidden="true">✓</span><div><strong>{t("noticeBlinkedTitle")}</strong><span>{t("noticeBlinkedBody", { kept, total, dropped: total - kept })}</span></div><button type="button" className="btn small" disabled={workflow.inputBusy} onClick={() => void workflow.runBlink()}>{t("blinkOpen")}</button></div>;
 }
 
 export function LaunchBar({ mode, workflow, lightCount, t }: { mode: "import" | "inspect"; workflow: Workflow; lightCount: number; t: Translator }) {
-  // Blink & select is the primary action until a session exists; then the
-  // start with the decisions is.  The legacy review stays as the secondary button.
-  const blinkPrimary = !workflow.blinkReady;
+  // Blink is primary until every channel has been reviewed and confirmed.
+  const blinkPrimary = !workflow.blinkReviewComplete;
   const blinkButton = <button type="button" className={`btn ${blinkPrimary ? "primary" : ""}`} disabled={!workflow.canInspect || !workflow.allRequiredConfirmed || workflow.inputBusy} onClick={() => void workflow.runBlink()}>{workflow.blinkBusy ? t("blinkMeasuring", { count: lightCount, seconds: workflow.blinkElapsedSeconds }) : workflow.blinkReady ? t("blinkOpen") : t("blinkAndSelect", { count: lightCount || "" })}</button>;
   const kept = workflow.blinkChannels.reduce((sum, channel) => sum + channel.kept, 0);
   const total = workflow.blinkChannels.reduce((sum, channel) => sum + channel.total, 0);
-  const startLabel = workflow.blinkReady ? t("startSelected", { kept, total }) : workflow.demoMode ? t("start") : t("startAutomatic");
+  const startLabel = workflow.blinkReviewComplete ? t("startSelected", { kept, total }) : t("start");
   return <footer className="launchbar">
-    <ScreeningNotice mode={mode} workflow={workflow} t={t} />
+    {!workflow.blinkReviewComplete && !workflow.demoMode ? <div className="screening-notice" role="status"><span className="symbol">!</span><div><strong>{t("blinkHumanReviewTitle")}</strong><span>{t("blockerBlinkReview")}</span></div></div> : <ScreeningNotice workflow={workflow} t={t} />}
     <div className="output"><FolderIcon /><div style={{ minWidth: 0 }}><small>{t("outputLabel")} · </small><strong title={workflow.outputParent}>{workflow.outputParent ?? (workflow.demoMode ? t("browserNoFiles") : t("outputNotSelected"))}</strong></div><button type="button" className="btn small" disabled={!workflow.nativeRuntime} onClick={() => void workflow.chooseOutputParent()}>{t("chooseOutput")}</button></div>
     <div className="actions">
       {mode === "inspect"
@@ -226,9 +215,6 @@ export function ScreeningView({ workflow, t, outputPathText, setOutputPathText, 
       <div className="chead-row">
         <div className="chips" role="group" aria-label={t("colDecision")}>{chips.map((chip) => <button type="button" key={chip.key} className="chip" aria-pressed={decisionFilter === chip.key} onClick={() => setDecisionFilter(chip.key)}>{chip.dot && <span className={`dot ${chip.dot}`} />}{chip.label} <span className="n">{chip.count}</span></button>)}</div>
         <span className="spacer" />
-        {workflow.approvableReviewCount > 0 && (workflow.unapprovedApprovableCount > 0
-          ? <button type="button" className="btn small" onClick={() => workflow.setAllReviewApprovals(true)}>{t("approveAllReview", { count: workflow.approvableReviewCount })}</button>
-          : <button type="button" className="btn small quiet" onClick={() => workflow.setAllReviewApprovals(false)}>{t("clearReviewApprovals")}</button>)}
         <span className="muted">{workflow.demoMode ? t("demoReviewDescription") : workflow.qualityInspection ? `${t("failClosed")} · POLICY ${workflow.qualityInspection.gatePolicyDigest.slice(7, 19)}` : t("reviewDescription")}</span>
       </div>
     </div>
@@ -236,12 +222,12 @@ export function ScreeningView({ workflow, t, outputPathText, setOutputPathText, 
       {workflow.demoMode && <Alert title={t("demoWarningTitle")}>{t("demoWarningBody")}</Alert>}
       {!workflow.demoMode && workflow.qualityInspection && <div className="panel">
         <div className="tbl-wrap"><table className="tbl"><thead><tr><th className="thumb-cell" aria-label={t("previewAlt", { name: "" }).trim()} /><th>{t("colFrame")}</th><th className="r">{t("colStars")}</th><th>{t("colConfidence")}</th><th>{t("colDecision")}</th></tr></thead><tbody>
-          {ordered.map((frame) => { const approved = Boolean(frame.sourceSha256 && workflow.approvedReviewDigests.includes(frame.sourceSha256)); const canApprove = workflow.canApproveReview(frame); const unavailable = frame.registrable === false ? t("unregistrableReview") : t("previewUnavailable"); const selected = selectedPath === frame.path; return <tr key={frame.path} className={`quality-frame quality-${dispositionClass(frame.disposition)}`} aria-selected={selected} onClick={() => setSelectedPath(selected ? undefined : frame.path)}>
+          {ordered.map((frame) => { const selected = selectedPath === frame.path; return <tr key={frame.path} className={`quality-frame quality-${dispositionClass(frame.disposition)}`} aria-selected={selected} onClick={() => setSelectedPath(selected ? undefined : frame.path)}>
             <td className="thumb-cell"><FrameTile filter={filterOf(frame.path)} preview={frame.previewDataUrl} /></td>
             <td className="clip" title={frame.path}><strong className="frame-kind">{basename(frame.path)}</strong></td>
             <td className="r tnum">{frame.starCount}</td>
             <td><small>{frame.confidence}</small></td>
-            <td className="dec-cell"><div className="dec">{frame.disposition === "PASS" ? <><span className="dot ok" /><span>{t("dispositionPass")}</span></> : <span className={`badge ${frame.disposition === "REVIEW" ? (approved ? "ok" : "check") : "stop"}`}>{frame.disposition === "REVIEW" && approved ? t("dispositionApproved") : dispositionLabel(frame.disposition, t)}</span>}<span className="why">{frame.evidence.length ? frame.evidence.map((item) => item.message).slice(0, 2).join("; ") : frame.disposition === "PASS" ? "" : t("noReviewEvidence")}</span>{frame.disposition === "REVIEW" && <button type="button" className="btn small" disabled={!canApprove} aria-pressed={approved} onClick={(event) => { event.stopPropagation(); workflow.toggleReviewApproval(frame); }}>{approved ? t("approvedReview") : canApprove ? t("approveReview") : unavailable}</button>}{frame.disposition === "HARD_FAIL" && <em>{t("cannotPromote")}</em>}</div></td>
+            <td className="dec-cell"><div className="dec">{frame.disposition === "PASS" ? <><span className="dot ok" /><span>{t("dispositionPass")}</span></> : <span className={`badge ${frame.disposition === "REVIEW" ? "check" : "stop"}`}>{dispositionLabel(frame.disposition, t)}</span>}<span className="why">{frame.evidence.length ? frame.evidence.map((item) => item.message).slice(0, 2).join("; ") : frame.disposition === "PASS" ? "" : t("noReviewEvidence")}</span></div></td>
           </tr>; })}
         </tbody></table></div>
         {ordered.length === 0 && <p className="table-empty">{t("inventoryEmpty")}</p>}
@@ -273,7 +259,7 @@ function RunFailure({ workflow, t }: { workflow: Workflow; t: Translator }) {
 
 export function RunView({ workflow, t }: { workflow: Workflow; t: Translator }) {
   const title = workflow.runStatus === "CANCELLED" ? t("cancelledTitle") : workflow.runStatus === "FAILED" ? t("failedTitle") : t("runningTitle");
-  const stages = workflow.stages.filter((stage) => (workflow.drizzleEnabled || stage.stageId !== "drizzle") && (workflow.localNormalizationEnabled || stage.stageId !== "local-normalization"));
+  const stages = workflow.stages.filter((stage) => (workflow.drizzleEnabled || stage.stageId !== "drizzle"));
   return <section className="view" aria-labelledby="run-title">
     <div className="scroll">
       <div className="proc-head">

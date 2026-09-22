@@ -8,7 +8,7 @@ A recipe is a versioned scientific contract, not a loose collection of GUI toggl
 |---|---|---|
 | One or more mono N.I.N.A. folders, ordinary integration | [N.I.N.A. mono](nina-mono.md) then [calibration](calibration.md) | 38-frame private B-channel real-data acceptance on one M3 Pro/QHY268M fixture |
 | Undersampled mono with measured dithers | [Drizzle](drizzle.md) | Native 1×–4× drizzle of the ordinary integration's inputs; NGC 7331 2× real-data run recorded |
-| Strong gradients/transparency changes | [XISF and LocalNormalization](xisf-and-local-normalization.md) | Conservative opt-in synthetic validation; not PixInsight-equivalent and no retained real-data acceptance |
+| Strong gradients/transparency changes | [XISF and normalization](normalization-and-xisf.md) | Stellar scale and guarded background correction; no PixInsight-equivalence claim |
 | Required final celestial WCS | [Astrometry](astrometry.md) then [offline catalogs](offline-solver-catalogs.md) | Real managed Astrometry.net solve; solver/indexes are user-installed and no field is guaranteed before it solves |
 | Four mono-camera panels with R/G/B or L/R/G/B | [Four-panel RGB/LRGB](project-mosaic-rgb.md) | Synthetic 4-panel execution; shared raw-Dark reuse and `PROPAGATED_VERIFIED` post-reprojection WCS provenance regressions pass; no retained real-data mosaic acceptance yet |
 | One-shot colour (Bayer) | [OSC / CFA](osc-cfa.md) | Synthetic RGGB set built from real mono Lights: channel photometry exact, 1× debayer widens stars 5–10 %, 2× Bayer drizzle recovers full resolution; no real OSC data yet |

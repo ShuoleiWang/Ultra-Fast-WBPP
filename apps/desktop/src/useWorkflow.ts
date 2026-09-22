@@ -1,227 +1,42 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { desktopBridge, hasTauriRuntime, listenForCatalogEvents, listenForDesktopDrops, listenForPipelineEvents } from "./bridge";
-import { emptySources } from "./data";
+import { useCallback,useEffect,useMemo,useRef,useState } from "react";
+import { desktopBridge,hasTauriRuntime,listenForCatalogEvents,listenForDesktopDrops,listenForPipelineEvents } from "./bridge";
 import { demoBlinkManifest } from "./demoAutopilot";
 import type { Translator } from "./i18n";
+import { emptySources } from "./sourceDefaults";
 import type {
-  BlinkChannel,
   BlinkDecision,
-  BlinkFrame,
   BlinkMeasureResponse,
   CalibrationInspection,
   CatalogCompleteEvent,
-  DrizzleKernel,
-  DrizzleScale,
   CatalogDoctorResponse,
   CatalogErrorEvent,
   CatalogInfo,
   CatalogListResponse,
   CatalogProgressEvent,
+  DrizzleKernel,
+  DrizzleScale,
   FrameRole,
   GateSummary,
   InspectedAsset,
-  InspectedLightQuality,
-  MasterFrameRole,
   MasterMetadataOverride,
-  MasterMetadataOverrideRequest,
   OutputArtifact,
-  PanelCell,
   PipelineCompleteEvent,
   PipelineErrorEvent,
   PipelineProgressEvent,
+  QualityInspection,
   RunStatus,
   RuntimeCapabilities,
-  QualityInspection,
   ScreeningSummary,
   SelectionFile,
-  SolverBackendStatus,
   SolverDoctorResponse,
   SourceSet,
   StageProgress,
-  WorkflowStep,
+  WorkflowStep
 } from "./types";
 
-const DEMO_COUNTS: Record<FrameRole, number> = {
-  LIGHT: 370, FLAT: 36, DARK: 24, BIAS: 64, MASTER_FLAT: 0, MASTER_DARK: 0, MASTER_BIAS: 0,
-};
-const MASTER_ROLES = new Set<FrameRole>(["MASTER_FLAT", "MASTER_DARK", "MASTER_BIAS"]);
-const STAGE_DEFINITIONS = [
-  { stageId: "prepare", name: "Preparation" },
-  { stageId: "quality-control", name: "Quality Gate" },
-  { stageId: "calibrate", name: "Calibration" },
-  { stageId: "register", name: "Registration" },
-  { stageId: "local-normalization", name: "LocalNormalization" },
-  { stageId: "integrate", name: "Integration and rejection" },
-  { stageId: "drizzle", name: "Drizzle" },
-  { stageId: "solve", name: "Astrometric solve" },
-  { stageId: "mosaic", name: "Mosaic verification" },
-  { stageId: "alignment", name: "Channel alignment" },
-  { stageId: "color", name: "Color and previews" },
-  { stageId: "preview", name: "Panel previews" },
-  { stageId: "verify", name: "Verification" },
-  { stageId: "publish", name: "Publication" },
-];
-const initialStages = (scope?: "panel" | "project"): StageProgress[] => STAGE_DEFINITIONS
-  .filter((stage) => scope === "project" ? ["prepare", "mosaic", "alignment", "color", "verify", "publish"].includes(stage.stageId)
-    : scope === "panel" ? !["mosaic", "alignment", "color"].includes(stage.stageId) : true)
-  .map((stage) => ({ ...stage, status: "WAITING", percent: 0 }));
-const DEMO_ARTIFACTS: OutputArtifact[] = [{ kind: "PREVIEW", name: "DEMO_result.png", path: "/explicit-browser-demo/result.png", detail: "DEMO ONLY · no file was created" }];
-const deduplicate = (values: string[]) => [...new Set(values)];
-const known = (value: string | undefined | null) => Boolean(value?.trim() && !["UNKNOWN", "UNSPECIFIED"].includes(value.trim().toUpperCase()));
-const numberKnown = (value: number | undefined | null) => typeof value === "number" && Number.isFinite(value);
-const monoCfa = (value: string) => ["NONE", "MONO", "MONOCHROME"].includes(value.trim().toUpperCase());
-const unknownCfa = (value: string | undefined | null) => !value?.trim() || ["UNKNOWN", "UNSPECIFIED"].includes(value.trim().toUpperCase());
-const BAYER_PATTERNS = ["RGGB", "BGGR", "GRBG", "GBRG"];
-const bayerCfa = (value: string) => BAYER_PATTERNS.includes(value.trim().toUpperCase());
-const safeSourceId = (role: FrameRole, index: number) => `${role.toLowerCase().replaceAll("_", "-")}-${String(index + 1).padStart(4, "0")}`;
-const OUTPUT_PARENT_STORAGE_KEY = "ultra-fast-wbpp.outputParent";
-/** The output folder chosen last time, so a returning user only drops files and starts. */
-function storedOutputParent(): string | undefined {
-  try { return window.localStorage.getItem(OUTPUT_PARENT_STORAGE_KEY) ?? undefined; } catch { return undefined; }
-}
-function rememberOutputParent(value: string | undefined) {
-  try { if (value) window.localStorage.setItem(OUTPUT_PARENT_STORAGE_KEY, value); else window.localStorage.removeItem(OUTPUT_PARENT_STORAGE_KEY); } catch { /* storage is a convenience only */ }
-}
-
-function buildMasterOverride(master: InspectedAsset, current?: MasterMetadataOverride): MasterMetadataOverride {
-  if (current) return current;
-  const fromString = (field: "camera" | "filter" | "cfaPattern" | "readoutMode") => known(master[field]) ? master[field] : "";
-  const fromNumber = (field: "gain" | "offset" | "temperatureCelsius" | "exposureSeconds") => numberKnown(master[field]) ? Number(master[field]) : null;
-  return {
-    sourceSha256: master.sourceSha256 ?? "",
-    sourcePath: master.path,
-    role: master.role as MasterFrameRole,
-    camera: fromString("camera"),
-    gain: fromNumber("gain"),
-    offset: fromNumber("offset"),
-    binning: [master.binning?.[0] > 0 ? master.binning[0] : null, master.binning?.[1] > 0 ? master.binning[1] : null],
-    filter: fromString("filter"),
-    cfaPattern: fromString("cfaPattern"),
-    readoutMode: fromString("readoutMode"),
-    temperatureCelsius: fromNumber("temperatureCelsius"),
-    exposureSeconds: fromNumber("exposureSeconds"),
-    biasIncluded: null,
-    numericDomain: null,
-    normalizedUnitScale: null,
-    needsMetadataOverride: false,
-    confirmed: true,
-  };
-}
-
-// Only explicit advanced edits are sent. Missing acquisition metadata stays missing.
-function masterOverrideRequests(items: MasterMetadataOverride[]): MasterMetadataOverrideRequest[] {
-  return items.filter((item) => item.confirmed && item.needsMetadataOverride).map((item) => {
-    const result: MasterMetadataOverrideRequest = { sourceSha256: item.sourceSha256 };
-    for (const field of ["camera", "filter", "cfaPattern", "readoutMode"] as const) if (known(item[field])) result[field] = item[field];
-    for (const field of ["gain", "offset", "temperatureCelsius", "exposureSeconds"] as const) if (numberKnown(item[field])) result[field] = item[field]!;
-    if (item.binning.every((value) => numberKnown(value) && value! > 0)) result.binning = item.binning as [number, number];
-    if (item.biasIncluded !== null) result.biasIncluded = item.biasIncluded;
-    if (item.numericDomain !== null) {
-      result.numericDomain = item.numericDomain;
-      if (item.normalizedUnitScale !== null) result.normalizedUnitScale = item.normalizedUnitScale;
-    }
-    return result;
-  });
-}
-
-/** Words a mosaic's panel names end with that say nothing about the object. */
-const PANEL_WORDS = /^(panel|tile|part|p|frame|field|mosaic)$/i;
-
-/**
- * Output-folder label: the target itself, the leading words a mosaic's panels
- * share (`NGC 7000 Panel 1` + `NGC 7000 Panel 2` → `NGC 7000`), the targets
- * joined when they share none, or the project name without any target.
- */
-export function runLabel(cells: Array<{ target: string }>, fallback: string): string {
-  const targets = [...new Set(cells.map((cell) => cell.target.trim()).filter(Boolean))];
-  if (!targets.length) return fallback;
-  if (targets.length === 1) return targets[0];
-  const words = targets.map((target) => target.split(/[\s_-]+/).filter(Boolean));
-  const shared: string[] = [];
-  for (let index = 0; index < Math.min(...words.map((list) => list.length)); index += 1) {
-    const word = words[0][index];
-    if (!words.every((list) => list[index].localeCompare(word, undefined, { sensitivity: "accent" }) === 0)) break;
-    shared.push(word);
-  }
-  if (shared.length && PANEL_WORDS.test(shared[shared.length - 1])) shared.pop();
-  if (shared.length) return shared.join(" ");
-  return targets.length <= 3 ? targets.join(" + ") : `${targets.slice(0, 2).join(" + ")} + ${targets.length - 2} more`;
-}
-
-function panelMatrix(assets: InspectedAsset[], admittedPaths: ReadonlySet<string> = new Set()): Array<PanelCell & { admittedCount: number }> {
-  const groups = new Map<string, PanelCell & { admittedCount: number }>();
-  for (const asset of assets.filter((item) => item.role === "LIGHT")) {
-    const target = known(asset.target) ? asset.target : "UNKNOWN TARGET";
-    const filter = known(asset.filter) ? asset.filter : "UNKNOWN FILTER";
-    const key = `${target}\u0000${filter}`;
-    const cell = groups.get(key) ?? { panelId: `panel-${groups.size + 1}`, target, filter, lightCount: 0, admittedCount: 0 };
-    cell.lightCount += 1;
-    if (admittedPaths.has(asset.path)) cell.admittedCount += 1;
-    groups.set(key, cell);
-  }
-  const filterOrder = ["L", "R", "G", "B", "HA", "OIII", "SII"];
-  const filterRank = (value: string) => {
-    const index = filterOrder.indexOf(value.trim().toUpperCase());
-    return index < 0 ? filterOrder.length : index;
-  };
-  return [...groups.values()].sort((a, b) => a.target.localeCompare(b.target)
-    || filterRank(a.filter) - filterRank(b.filter)
-    || a.filter.localeCompare(b.filter));
-}
-
-export type SolverBackendId = "astrometry-net" | "astap";
-
-/**
- * Whether the strict final gate would accept this backend's solutions: it must
- * run, and it must produce the managed-catalog correspondence evidence.  An
- * engine that predates the `scienceReady` field only ever produced that
- * evidence with solve-field, so its absence counts as ready for solve-field
- * and as not ready for ASTAP.
- */
-export function solverScienceReady(backend: SolverBackendStatus | undefined): boolean {
-  if (!backend?.executionReady) return false;
-  if (backend.scienceReady === undefined) return backend.backendId === "astrometry-net";
-  return backend.scienceReady === true;
-}
-
-// Approval works for any project: the engine binds each selection to the
-// target run that owns the Light, so multi-target and multi-filter projects
-// admit reviewed frames too.
-function reviewCanBeApproved(frame: InspectedLightQuality, inspection: QualityInspection | undefined): boolean {
-  const digest = /^sha256:[0-9a-f]{64}$/;
-  return Boolean(inspection && frame.disposition === "REVIEW" && frame.registrable !== false
-    && frame.sourceSha256 && digest.test(frame.sourceSha256)
-    && digest.test(inspection.gatePolicyDigest) && frame.previewDataUrl
-    && inspection.frames.includes(frame)
-    && inspection.frames.filter((item) => item.sourceSha256 === frame.sourceSha256).length === 1);
-}
-
-const CONTENT_DIGEST = /^sha256:[0-9a-f]{64}$/;
-/** Undo depth of the blink decisions. */
-const DECISION_HISTORY_LIMIT = 100;
-/** The minimum kept Lights per blink channel (the engine's `QC_INSUFFICIENT_LIGHTS` bound). */
-const MINIMUM_KEPT_PER_CHANNEL = 2;
-
-/** A measured blink session: the manifest, where its previews live and the Lights it was measured for. */
-export interface BlinkSession { manifest: BlinkMeasureResponse; sessionDirectory: string; inventoryKey: string; demo: boolean; }
-/** One blink channel with the decision counts the launch bar and chips show. */
-export interface BlinkChannelSummary extends BlinkChannel { frames: BlinkFrame[]; total: number; kept: number; flagged: number; exclude: number; attention: number; }
-
-const inventoryKeyOf = (paths: string[]) => [...paths].sort().join("\n");
-const defaultDecisions = (manifest: BlinkMeasureResponse): Record<string, BlinkDecision> => Object.fromEntries(manifest.frames.map((frame) => [frame.sourceSha256, frame.defaultDecision]));
-
-/**
- * Whether a session still describes the current Lights: every imported Light
- * is in the manifest with a usable, unique content digest (the selection is
- * keyed by digest, so a duplicate or malformed one could not be sent).
- */
-function blinkSessionCovers(session: BlinkSession, lightPaths: string[]): boolean {
-  if (inventoryKeyOf(lightPaths) !== session.inventoryKey || !lightPaths.length) return false;
-  const frames = session.manifest.frames;
-  const byPath = new Set(frames.map((frame) => frame.path));
-  const digests = frames.map((frame) => frame.sourceSha256);
-  return lightPaths.every((path) => byPath.has(path)) && digests.every((digest) => CONTENT_DIGEST.test(digest)) && new Set(digests).size === digests.length;
-}
+import { CONTENT_DIGEST,DECISION_HISTORY_LIMIT,DEMO_ARTIFACTS,DEMO_COUNTS,MASTER_ROLES,MINIMUM_KEPT_PER_CHANNEL,STAGE_DEFINITIONS,bayerCfa,blinkSessionCovers,buildMasterOverride,deduplicate,initialStages,inventoryKeyOf,known,masterOverrideRequests,monoCfa,panelMatrix,rememberOutputParent,runLabel,safeSourceId,solverScienceReady,storedOutputParent,unknownCfa,type BlinkChannelSummary,type BlinkSession,type SolverBackendId } from "./workflow/model";
+export { runLabel,solverScienceReady } from "./workflow/model";
+export type { BlinkChannelSummary,BlinkSession,SolverBackendId } from "./workflow/model";
 
 export function useWorkflow(t: Translator) {
   const nativeRuntime = hasTauriRuntime();
@@ -238,7 +53,6 @@ export function useWorkflow(t: Translator) {
   const [calibrationRevision, setCalibrationRevision] = useState(0);
   const [qualityBusy, setQualityBusy] = useState(false);
   const [qualityElapsedSeconds, setQualityElapsedSeconds] = useState(0);
-  const [approvedReviewDigests, setApprovedReviewDigests] = useState<string[]>([]);
   // Blink screening: the measured session, the per-frame decisions keyed by
   // content digest, and their undo stack.  Refs mirror the two so a burst of
   // keyboard actions in one event commits in order.
@@ -254,6 +68,17 @@ export function useWorkflow(t: Translator) {
   const decisionHistoryRef = useRef(decisionHistory);
   decisionHistoryRef.current = decisionHistory;
   const [blinkChannel, setBlinkChannel] = useState<string>();
+  const [viewedFrames, setViewedFrames] = useState<Record<string, true>>({});
+  const viewedFramesRef = useRef<Record<string, true>>({});
+  const [confirmedChannels, setConfirmedChannels] = useState<Record<string, true>>({});
+  const confirmedChannelsRef = useRef<Record<string, true>>({});
+  const [previewFailures, setPreviewFailures] = useState<Record<string, string>>({});
+  const previewFailuresRef = useRef<Record<string, string>>({});
+  const resetBlinkReview = () => {
+    viewedFramesRef.current = {}; setViewedFrames({});
+    confirmedChannelsRef.current = {}; setConfirmedChannels({});
+    previewFailuresRef.current = {}; setPreviewFailures({});
+  };
   const blinkInFlightRef = useRef(false);
   const [capabilities, setCapabilities] = useState<RuntimeCapabilities | null>(null);
   const [runStatus, setRunStatus] = useState<RunStatus>("IDLE");
@@ -286,7 +111,6 @@ export function useWorkflow(t: Translator) {
   const [drizzleKernel, setDrizzleKernel] = useState<DrizzleKernel>("square");
   // Opt-in per session. The native recipe selects local or global normalization
   // from this flag; it must not infer the choice from a visible progress stage.
-  const [localNormalizationEnabled, setLocalNormalizationEnabled] = useState(false);
   const [catalogList, setCatalogList] = useState<CatalogListResponse>();
   const [catalogDoctor, setCatalogDoctor] = useState<CatalogDoctorResponse>();
   const [solverDoctor, setSolverDoctor] = useState<SolverDoctorResponse>();
@@ -358,6 +182,7 @@ export function useWorkflow(t: Translator) {
     decisionsRef.current = {}; setDecisions({});
     decisionHistoryRef.current = []; setDecisionHistory([]);
     setBlinkChannel(undefined);
+    resetBlinkReview();
   }, []);
 
   const refreshSolverSetup = useCallback(async () => {
@@ -394,7 +219,7 @@ export function useWorkflow(t: Translator) {
       // Reimporting any Light still invalidates it, even at the same path; the
       // blink session and its decisions go with it.
       if (touchesLights) { setQualityInspection(undefined); setGate({ pass: 0, review: 0, hardFail: 0 }); clearBlinkSession(); }
-      setApprovedReviewDigests([]);
+
       setSources((current) => {
         const next = current.map((source) => ({ ...source }));
         for (const group of inspected.sources) {
@@ -635,7 +460,7 @@ export function useWorkflow(t: Translator) {
     if (inventoryInFlightRef.current || qualityInFlightRef.current || blinkInFlightRef.current || runLaunchInFlightRef.current || runStatus === "RUNNING" || runStatus === "CANCELLING") return;
     stopRunClock(); setRunElapsedSeconds(0);
     jobIdRef.current = undefined; pendingProgressRef.current = []; pendingTerminalRef.current = undefined;
-    setSources(emptySources()); setAssets([]); setMasterOverrides([]); setGate({ pass: 0, review: 0, hardFail: 0 }); setQualityInspection(undefined); setApprovedReviewDigests([]); clearBlinkSession(); setSelectedRole(undefined); setStep("import"); setDemoMode(false); setArtifacts([]); setScreening(undefined); setOutputDirectory(undefined); setRunStatus("IDLE"); setRunLaunchBusy(false); setErrorMessage(undefined);
+    setSources(emptySources()); setAssets([]); setMasterOverrides([]); setGate({ pass: 0, review: 0, hardFail: 0 }); setQualityInspection(undefined); clearBlinkSession(); setSelectedRole(undefined); setStep("import"); setDemoMode(false); setArtifacts([]); setScreening(undefined); setOutputDirectory(undefined); setRunStatus("IDLE"); setRunLaunchBusy(false); setErrorMessage(undefined);
   };
   const runInspection = async (force = false) => {
     if (demoMode && !nativeRuntime) { setStep("inspect"); return; }
@@ -643,7 +468,7 @@ export function useWorkflow(t: Translator) {
     if (!nativeRuntime || !lightPaths.length || inventoryInFlightRef.current || qualityInFlightRef.current || blinkInFlightRef.current) return;
     if (!force && qualityReady) { setStep("inspect"); return; }
     qualityInFlightRef.current = true;
-    setQualityBusy(true); setErrorMessage(undefined); setApprovedReviewDigests([]);
+    setQualityBusy(true); setErrorMessage(undefined);
     try {
       const inspection = await desktopBridge.inspectQuality(lightPaths);
       setQualityInspection(inspection);
@@ -652,24 +477,11 @@ export function useWorkflow(t: Translator) {
     } catch (error) { setErrorMessage(t("qcPreflightFailed", { error: String(error) })); }
     finally { qualityInFlightRef.current = false; setQualityBusy(false); }
   };
-  const toggleReviewApproval = (frame: InspectedLightQuality) => {
-    if (!canApproveReview(frame)) return;
-    setApprovedReviewDigests((current) => current.includes(frame.sourceSha256!)
-      ? current.filter((digest) => digest !== frame.sourceSha256)
-      : [...current, frame.sourceSha256!]);
-  };
-  // One click for a whole campaign: every REVIEW frame that can be approved
-  // (or none of them).  The engine still re-measures each one in the run.
-  const setAllReviewApprovals = (approve: boolean) => {
-    setApprovedReviewDigests(approve
-      ? (qualityInspection?.frames ?? []).filter((frame) => canApproveReview(frame)).map((frame) => frame.sourceSha256!)
-      : []);
-  };
-
   const installBlinkSession = (manifest: BlinkMeasureResponse, lightPaths: string[], demo: boolean) => {
     const session: BlinkSession = { manifest, sessionDirectory: manifest.sessionDirectory, inventoryKey: inventoryKeyOf(lightPaths), demo };
     blinkSessionRef.current = session; setBlinkSession(session);
-    const defaults = defaultDecisions(manifest);
+    const defaults = Object.fromEntries(manifest.frames.map((frame) => [frame.sourceSha256, "KEEP" as const]));
+    resetBlinkReview();
     decisionsRef.current = defaults; setDecisions(defaults);
     decisionHistoryRef.current = []; setDecisionHistory([]);
     setBlinkChannel(manifest.channels[0]?.channelId);
@@ -685,23 +497,55 @@ export function useWorkflow(t: Translator) {
     setBlinkBusy(true); setErrorMessage(undefined);
     try {
       const masterFlats = assets.filter((asset) => asset.role === "MASTER_FLAT" && known(asset.filter)).map((asset) => ({ filter: asset.filter, path: asset.path }));
-      const manifest = await desktopBridge.blinkMeasure({ paths: lightPaths, masterFlats });
+      const masterDarks = assets.filter((asset) => asset.role === "MASTER_DARK").map((asset) => ({ path: asset.path, ...(asset.exposureSeconds ? { exposureSeconds: asset.exposureSeconds } : {}) }));
+      const biases = assets.filter((asset) => asset.role === "MASTER_BIAS");
+      const manifest = await desktopBridge.blinkMeasure({ paths: lightPaths, masterFlats, masterDarks, ...(biases.length === 1 ? { masterBias: biases[0].path } : {}) });
       installBlinkSession(manifest, lightPaths, false);
       setStep("blink");
     } catch (error) { setErrorMessage(t("blinkFailed", { error: String(error) })); }
     finally { blinkInFlightRef.current = false; setBlinkBusy(false); }
+  };
+  const invalidateReviewedChannels = (changed: string[]) => {
+    const ids = new Set(blinkSessionRef.current?.manifest.frames.filter((f) => changed.includes(f.sourceSha256)).map((f) => f.channelId));
+    const next = Object.fromEntries(Object.entries(confirmedChannelsRef.current).filter(([id]) => !ids.has(id))) as Record<string, true>;
+    confirmedChannelsRef.current = next; setConfirmedChannels(next);
+  };
+  const markFrameViewed = useCallback((digest: string) => {
+    if (viewedFramesRef.current[digest] || !blinkSessionRef.current?.manifest.frames.some((f) => f.sourceSha256 === digest)) return;
+    const next = { ...viewedFramesRef.current, [digest]: true as const };
+    viewedFramesRef.current = next; setViewedFrames(next);
+  }, []);
+  const reportPreviewFailure = useCallback((digest: string, error: string | undefined) => {
+    if (previewFailuresRef.current[digest] === error) return;
+    const next = { ...previewFailuresRef.current };
+    if (error) next[digest] = error; else delete next[digest];
+    previewFailuresRef.current = next; setPreviewFailures(next);
+  }, []);
+  const confirmBlinkChannel = (channelId: string) => {
+    const session = blinkSessionRef.current;
+    const frames = session?.manifest.frames.filter((f) => f.channelId === channelId) ?? [];
+    if (!frames.length || frames.some((f) => !viewedFramesRef.current[f.sourceSha256] || (previewFailuresRef.current[f.sourceSha256] && decisionsRef.current[f.sourceSha256] !== "DROP"))) return;
+    const next = { ...confirmedChannelsRef.current, [channelId]: true as const };
+    confirmedChannelsRef.current = next; setConfirmedChannels(next);
+    const pending = session?.manifest.channels.find((c) => !next[c.channelId]);
+    if (pending) setBlinkChannel(pending.channelId);
   };
   // Every decision change goes through here so it can be undone (bounded stack).
   const commitDecisions = (update: (current: Record<string, BlinkDecision>) => Record<string, BlinkDecision> | undefined) => {
     const current = decisionsRef.current;
     const next = update(current);
     if (!next || next === current) return;
+    invalidateReviewedChannels(Object.keys(next).filter((digest) => next[digest] !== current[digest]));
     decisionsRef.current = next; setDecisions(next);
     const history = [...decisionHistoryRef.current, current].slice(-DECISION_HISTORY_LIMIT);
     decisionHistoryRef.current = history; setDecisionHistory(history);
   };
-  const setDecision = (sourceSha256: string, decision: BlinkDecision) => commitDecisions((current) => !(sourceSha256 in current) || current[sourceSha256] === decision ? undefined : { ...current, [sourceSha256]: decision });
-  const toggleDecision = (sourceSha256: string) => commitDecisions((current) => sourceSha256 in current ? { ...current, [sourceSha256]: current[sourceSha256] === "KEEP" ? "DROP" : "KEEP" } : undefined);
+  const setDecision = (sourceSha256: string, decision: BlinkDecision) => {
+    commitDecisions((current) => !(sourceSha256 in current) || current[sourceSha256] === decision ? undefined : { ...current, [sourceSha256]: decision });
+    // An unreadable preview can only leave the review through an explicit drop.
+    if (decision === "DROP" && previewFailuresRef.current[sourceSha256]) markFrameViewed(sourceSha256);
+  };
+  const toggleDecision = (sourceSha256: string) => { if (sourceSha256 in decisionsRef.current) setDecision(sourceSha256, decisionsRef.current[sourceSha256] === "KEEP" ? "DROP" : "KEEP"); };
   // A filmstrip range (shift-click): one undo step for the whole range.
   const setDecisionsBulk = (sourceSha256s: string[], decision: BlinkDecision) => commitDecisions((current) => {
     const changed = sourceSha256s.filter((digest) => digest in current && current[digest] !== decision);
@@ -711,17 +555,12 @@ export function useWorkflow(t: Translator) {
     const frames = (blinkSessionRef.current?.manifest.frames ?? []).filter((frame) => frame.channelId === channelId && frame.night === night && current[frame.sourceSha256] !== decision);
     return frames.length ? { ...current, ...Object.fromEntries(frames.map((frame) => [frame.sourceSha256, decision])) } : undefined;
   });
-  const applyFlags = () => commitDecisions((current) => {
-    const manifest = blinkSessionRef.current?.manifest;
-    if (!manifest) return undefined;
-    const defaults = defaultDecisions(manifest);
-    return manifest.frames.some((frame) => current[frame.sourceSha256] !== defaults[frame.sourceSha256]) ? defaults : undefined;
-  });
   const undo = () => {
     const history = decisionHistoryRef.current;
     if (!history.length) return;
     const previous = history[history.length - 1];
     decisionHistoryRef.current = history.slice(0, -1); setDecisionHistory(decisionHistoryRef.current);
+    invalidateReviewedChannels(Object.keys(previous).filter((digest) => previous[digest] !== decisionsRef.current[digest]));
     decisionsRef.current = previous; setDecisions(previous);
   };
   const selectBlinkChannel = (channelId: string) => { if (blinkSessionRef.current?.manifest.channels.some((channel) => channel.channelId === channelId)) setBlinkChannel(channelId); };
@@ -762,8 +601,7 @@ export function useWorkflow(t: Translator) {
     setJobId(undefined); setRunProgress(undefined); setExecutionMode("native"); setArtifacts([]); setScreening(undefined); setOutputDirectory(undefined); setRunStatus("RUNNING"); setRunFailureCode(undefined); setOverallProgress(0); setStages(initialStages()); setStep("run");
     // Include launch-command work, but exclude the earlier review and screening.
     startRunClock();
-    // A blink session decides every Light explicitly; the legacy REVIEW
-    // approvals are the alternative, never both (the engine rejects the pair).
+    // A completed Blink review decides every Light explicitly.
     const selection = selectionForRun();
     try {
       let sourceIndex = 0;
@@ -771,11 +609,16 @@ export function useWorkflow(t: Translator) {
         sources: sources.filter((source) => source.paths.length).flatMap((source) => source.paths.map((path) => ({ sourceId: safeSourceId(source.role, sourceIndex++), role: source.role, paths: [path], recursive: false }))),
         projectName,
         runLabel: runLabel(matrix, projectName),
-        recipe: { balanced: true, drizzleEnabled, drizzleScale, drizzleDropShrink, drizzleKernel, localNormalizationEnabled, solverRequired: true, calibrationWorkflow: "mono-standard-v1" },
+        recipe: { balanced: true, drizzleEnabled, drizzleScale, drizzleDropShrink, drizzleKernel, solverRequired: true, calibrationWorkflow: "mono-standard-v1" },
         masterMetadataOverrides: masterOverrideRequests(masterOverrides),
         rawFrameMetadataOverrides: [],
-        reviewSelections: selection ? [] : validApprovedReviewDigests.map((sourceSha256) => ({ sourceSha256, gatePolicyDigest: qualityInspection!.gatePolicyDigest })),
-        ...(selection ? { selection } : {}),
+        reviewSelections: [],
+        ...(selection ? { selection, blinkReview: {
+          sessionDirectory: blinkSession!.sessionDirectory,
+          manifestSha256: blinkSession!.manifest.manifestSha256!,
+          reviewedSourceSha256s: Object.keys(viewedFramesRef.current),
+          confirmedChannelIds: Object.keys(confirmedChannelsRef.current),
+        } } : {}),
         outputParentDirectory: outputParent,
       });
       if (!receipt.accepted) throw new Error(t("runNotAccepted"));
@@ -852,13 +695,6 @@ export function useWorkflow(t: Translator) {
   // the verified offline catalog is required by both.
   const solverSetupReady = Boolean(catalogDoctor?.ok && solverDoctor?.backends.some(solverScienceReady));
   const qualityReady = Boolean(qualityInspection && qualityInspection.frames.length === (sources.find((source) => source.role === "LIGHT")?.fileCount ?? 0));
-  const canApproveReview = (frame: InspectedLightQuality) => reviewCanBeApproved(frame, qualityInspection);
-  const validApprovedReviewDigests = useMemo(() => approvedReviewDigests.filter((digest) => qualityInspection?.frames.some((frame) => frame.sourceSha256 === digest && reviewCanBeApproved(frame, qualityInspection))), [approvedReviewDigests, qualityInspection]);
-  // REVIEW frames that will stay out of the stack unless approved, for the launch notice.
-  const pendingReviewCount = useMemo(() => qualityReady ? (qualityInspection?.frames ?? []).filter((frame) => frame.disposition === "REVIEW" && !(frame.sourceSha256 && validApprovedReviewDigests.includes(frame.sourceSha256))).length : 0, [qualityInspection, qualityReady, validApprovedReviewDigests]);
-  const approvableReviewCount = useMemo(() => qualityReady ? (qualityInspection?.frames ?? []).filter((frame) => reviewCanBeApproved(frame, qualityInspection)).length : 0, [qualityInspection, qualityReady]);
-  // Approvable frames the reviewer has not approved yet (frames without a transform are never approvable).
-  const unapprovedApprovableCount = Math.max(0, approvableReviewCount - validApprovedReviewDigests.length);
   const lightSourcePaths = sources.find((source) => source.role === "LIGHT")?.paths ?? [];
   // A session is usable while it describes exactly the current Lights (the
   // browser demo's bundled session stands in for its labelled demo files).
@@ -867,42 +703,41 @@ export function useWorkflow(t: Translator) {
     const frames = blinkSession!.manifest.frames.filter((frame) => frame.channelId === channel.channelId);
     return {
       ...channel, frames, total: frames.length,
+      viewed: frames.filter((f) => viewedFrames[f.sourceSha256]).length,
+      confirmed: Boolean(confirmedChannels[channel.channelId]),
       kept: frames.filter((frame) => decisions[frame.sourceSha256] === "KEEP").length,
       flagged: frames.filter((frame) => frame.flags.length > 0).length,
       exclude: frames.filter((frame) => frame.defaultDecision === "DROP").length,
       attention: frames.filter((frame) => frame.defaultDecision === "KEEP" && frame.flags.length > 0).length,
     };
-  }), [blinkSession, decisions]);
+  }), [blinkSession, decisions, viewedFrames, confirmedChannels]);
+  const blinkReviewComplete = blinkReady && blinkChannels.length > 0 && blinkChannels.every((c) => c.confirmed && c.viewed === c.total)
+    && !Object.keys(previewFailures).some((digest) => decisions[digest] !== "DROP");
   const selectionForRun = (): SelectionFile | undefined => {
-    if (!blinkSession || !blinkReady || !nativeRuntime) return undefined;
+    if (!blinkSession || !blinkReviewComplete || !nativeRuntime) return undefined;
     const { manifest } = blinkSession;
     const digest = manifest.manifestSha256 ?? "";
-    // `origin` is recorded, not enforced: it is sent only when the controller
-    // gave the manifest's digest, so a hand-checkable file never carries a blank.
+    // The controller binds GUI review and decisions to this measured session.
     const origin = CONTENT_DIGEST.test(digest) ? { sessionId: manifest.sessionId, blinkManifestSha256: digest, flagsPolicyDigest: manifest.flagsPolicyDigest, createdAt: new Date().toISOString() } : undefined;
     return {
       schemaVersion: 1, kind: "ultra-fast-wbpp-selection", policy: "explicit-v1", ...(origin ? { origin } : {}), undecided: "ERROR",
-      decisions: manifest.frames.map((frame) => ({ sourceSha256: frame.sourceSha256, decision: decisions[frame.sourceSha256] ?? frame.defaultDecision, defaultDecision: frame.defaultDecision, flags: frame.flags.map((item) => item.code) })),
+      decisions: manifest.frames.map((frame) => ({ sourceSha256: frame.sourceSha256, decision: decisions[frame.sourceSha256] ?? "KEEP", defaultDecision: frame.defaultDecision, flags: frame.flags.map((item) => item.code) })),
     };
   };
   const blinkAdmittedPaths = useMemo(() => blinkReady && nativeRuntime ? new Set(blinkSession!.manifest.frames.filter((frame) => decisions[frame.sourceSha256] === "KEEP").map((frame) => frame.path)) : undefined, [blinkReady, blinkSession, decisions, nativeRuntime]);
-  const qualityAdmittedPaths = useMemo(() => new Set(qualityInspection?.frames.filter((frame) => frame.disposition === "PASS" || (frame.disposition === "REVIEW" && frame.sourceSha256 && validApprovedReviewDigests.includes(frame.sourceSha256))).map((frame) => frame.path) ?? []), [qualityInspection, validApprovedReviewDigests]);
-  const admittedPaths = blinkAdmittedPaths ?? qualityAdmittedPaths;
+  const admittedPaths = useMemo(() => blinkAdmittedPaths ?? new Set(lightSourcePaths), [blinkAdmittedPaths, lightSourcePaths]);
   const matrix = useMemo(() => panelMatrix(assets, admittedPaths), [assets, admittedPaths]);
   const minimumAdmittedLights = 2;
-  const insufficientQualityPanels = qualityReady ? matrix.filter((cell) => cell.admittedCount < minimumAdmittedLights) : [];
   // Blink channels with fewer kept Lights than a stack needs (the launch bar's blocker).
   const insufficientBlinkPanels = blinkReady ? blinkChannels.filter((channel) => channel.kept < MINIMUM_KEPT_PER_CHANNEL) : [];
   // Whether the admitted counts are known: blink decisions or the legacy screening.
-  const admissionKnown = Boolean(blinkAdmittedPaths) || qualityReady;
-  // Screening before the run is optional: the run screens every Light itself
-  // and lists the excluded frames with its result.  Before a screening, a
-  // panel only needs enough Lights to register; after one, enough admitted.
+  const admissionKnown = Boolean(blinkAdmittedPaths);
+  // Before manual review, only the imported counts are known.
   const insufficientPanels = blinkAdmittedPaths ? matrix.filter((cell) => cell.admittedCount < minimumAdmittedLights || insufficientBlinkPanels.some((channel) => channel.target === cell.target && channel.filter === cell.filter))
-    : qualityReady ? insufficientQualityPanels : matrix.filter((cell) => cell.lightCount < minimumAdmittedLights);
+    : matrix.filter((cell) => cell.lightCount < minimumAdmittedLights);
   const panelsReady = matrix.length > 0 && insufficientPanels.length === 0;
   const runNavigationLocked = runLaunchBusy || runStatus === "RUNNING" || runStatus === "CANCELLING";
-  const canStart = demoMode && !nativeRuntime ? !runNavigationLocked : Boolean(!runNavigationLocked && !inputBusy && nativeRuntime && capabilities?.available && outputParent && calibrationReady && allRequiredConfirmed && masterOverridesReady && cfaBlockedAssets.length === 0 && solverSetupReady && panelsReady);
+  const canStart = demoMode && !nativeRuntime ? !runNavigationLocked : Boolean(!runNavigationLocked && !inputBusy && nativeRuntime && capabilities?.available && outputParent && calibrationReady && allRequiredConfirmed && masterOverridesReady && cfaBlockedAssets.length === 0 && solverSetupReady && panelsReady && blinkReviewComplete);
   const importedTotal = useMemo(() => sources.reduce((sum, source) => sum + source.fileCount, 0), [sources]);
   const firstSolved = artifacts.find((artifact) => artifact.receipt?.astrometry)?.receipt?.astrometry;
 
@@ -912,12 +747,13 @@ export function useWorkflow(t: Translator) {
     browserDemoAvailable: !nativeRuntime, pickFiles, pickDirectories, chooseOutputParent, useOutputParentPath, outputParent, outputDirectory, canStart, inventoryBusy, inputBusy, errorMessage, runFailureCode, calibrationReady,
     firstSolved, demoMode, projectName, matrix, masterOverrides, updateMasterOverride, resetMasterOverride, confirmMasterOverride, masterOverridesReady, runNavigationLocked,
     cfaBlockedAssets, cfaAssets, cfaPattern,
-    qualityInspection, qualityBusy, qualityElapsedSeconds, qualityReady, approvedReviewDigests: validApprovedReviewDigests, toggleReviewApproval, canApproveReview, setAllReviewApprovals, pendingReviewCount, approvableReviewCount, unapprovedApprovableCount,
-    insufficientQualityPanels, insufficientPanels, minimumAdmittedLights, admissionKnown,
+    qualityInspection, qualityBusy, qualityElapsedSeconds, qualityReady,
+    insufficientPanels, minimumAdmittedLights, admissionKnown,
     blinkSession, blinkBusy, blinkElapsedSeconds, blinkReady, blinkChannels, blinkChannel, selectBlinkChannel, decisions, canUndo: decisionHistory.length > 0,
-    runBlink, setDecision, toggleDecision, setDecisionsBulk, setNightDecision, applyFlags, undo, selectionForRun, insufficientBlinkPanels, minimumKeptPerChannel: MINIMUM_KEPT_PER_CHANNEL, loadBlinkPreview,
+    runBlink, setDecision, toggleDecision, setDecisionsBulk, setNightDecision, undo, selectionForRun,
+    viewedFrames, confirmedChannels, previewFailures, markFrameViewed, reportPreviewFailure, confirmBlinkChannel, blinkReviewComplete, insufficientBlinkPanels, minimumKeptPerChannel: MINIMUM_KEPT_PER_CHANNEL, loadBlinkPreview,
     calibrationInspection, calibrationBusy, calibrationError, recheckCalibration,
-    drizzleEnabled, setDrizzleEnabled, drizzleScale, setDrizzleScale, drizzleDropShrink, setDrizzleDropShrink, drizzleKernel, setDrizzleKernel, localNormalizationEnabled, setLocalNormalizationEnabled,
+    drizzleEnabled, setDrizzleEnabled, drizzleScale, setDrizzleScale, drizzleDropShrink, setDrizzleDropShrink, drizzleKernel, setDrizzleKernel,
     catalogList, catalogDoctor, solverDoctor, recommendedCatalog, solveField, astap, solveFieldReady, astapReady, primarySolver, solverSetupReady, catalogTermsAccepted, setCatalogTermsAccepted,
     catalogProgress, catalogStatus, catalogError, startCatalogInstall, cancelCatalogInstall, openCatalogTerms, revealOutput, solverSetupBusy, recheckSolverSetup,
   };

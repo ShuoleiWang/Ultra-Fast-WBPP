@@ -1,6 +1,6 @@
 # Master light evaluation standard
 
-How an Ultra-Fast WBPP master is judged against the PixInsight WBPP master of the same raw data. Implemented by [`benchmarks/evaluate_masters.py`](../benchmarks/evaluate_masters.py); the script covers the verdict metrics of every family below (the §9 attribution against a truth reference and the §3.6 LSB metric are not yet implemented and are reported as WARN/INFO).
+How an Ultra-Fast WBPP master is judged against the PixInsight WBPP master of the same raw data. Implemented by [`tools/validation/evaluate_masters.py`](../tools/validation/evaluate_masters.py); the script covers the verdict metrics of every family below (the §9 attribution against a truth reference and the §3.6 LSB metric are not yet implemented and are reported as WARN/INFO).
 
 
 Version 1.0. Answers, per filter, with numbers and PASS/WARN/FAIL: "Is O at least as good as P in every
@@ -315,6 +315,11 @@ visually and scientifically relevant aspect, and better in SNR?" Implementable w
      be attributed without T1 → WARN.
 
 ## 10. Implementation notes
+
+The current evaluator does not implement every gate in this standard. It lists
+common-footprint area, own/common STF agreement and LSB flux as unmeasured,
+and therefore does not certify EQUIVALENT/BETTER. Failed measured gates still
+produce WORSE. See [tool coverage](../tools/validation/README.md).
 - Script `evaluate_masters.py --ours O_L.fits --pi P_L.fits [--ours-rgb O_R,O_G,O_B --pi-rgb ...]
   [--frames DIR] --out report/`. Outputs `report/<filter>.json` (every value, CI, status, a, b, T, star
   counts) and `report/summary.md` (the §8 table). Save the matched star table and the trail list as CSV.

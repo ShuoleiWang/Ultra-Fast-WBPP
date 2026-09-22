@@ -1086,7 +1086,7 @@ def source_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
     roots = [
         REPO_ROOT / "packages" / "openastroflow-engine" / "src",
         REPO_ROOT / "packages" / "light-frame-qc" / "src",
-        REPO_ROOT / "engine" / "native" / "python",
+        REPO_ROOT / "packages" / "openastroflow-registration" / "src",
     ]
     existing = environment.get("PYTHONPATH")
     values = [str(path) for path in roots]

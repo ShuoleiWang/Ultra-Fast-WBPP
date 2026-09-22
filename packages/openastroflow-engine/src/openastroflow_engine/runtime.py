@@ -37,7 +37,6 @@ from .pixel_pipeline import (
     PipelineParameters,
     RawFrameMetadataOverride,
 )
-from .local_normalization import LocalNormalizationParameters
 from .global_normalization import GlobalNormalizationParameters
 from .planning import (
     ExecutionPlan,
@@ -315,12 +314,8 @@ def build_e2e_request(
         calibration_workflow=recipe.calibration.workflow,
         integration=integration,
         registration_memory_bytes=tuning.registration_memory_bytes,
-        local_normalization=LocalNormalizationParameters(
-            enabled=recipe.local_normalization.enabled,
-            tile_size_pixels=recipe.local_normalization.tile_size_pixels,
-        ),
         global_normalization=GlobalNormalizationParameters(
-            enabled=not recipe.local_normalization.enabled,
+            enabled=True,
         ),
         ordinary_integration_backend=pixel_backend_for_hardware_profile(
             requested_hardware_profile

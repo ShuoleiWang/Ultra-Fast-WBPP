@@ -23,7 +23,7 @@ Start with the [project README](../README.md) (also in [简体中文](README.zh-
 | [recipes/drizzle.md](recipes/drizzle.md) | 1×–4× native drizzle: options, products, measured quality |
 | [recipes/osc-cfa.md](recipes/osc-cfa.md) | One-shot-colour (Bayer) Lights: pipeline and the synthetic validation |
 | [recipes/astrometry.md](recipes/astrometry.md), [recipes/offline-solver-catalogs.md](recipes/offline-solver-catalogs.md) | `SEED` versus `SOLVED`, installing the solver and index set |
-| [recipes/xisf-and-local-normalization.md](recipes/xisf-and-local-normalization.md) | XISF inputs, global normalization, the optional LocalNormalization and its limits |
+| [recipes/normalization-and-xisf.md](recipes/normalization-and-xisf.md) | XISF inputs, supported stellar/background normalization and retired LN compatibility |
 | [recipes/project-mosaic-rgb.md](recipes/project-mosaic-rgb.md) | Multi-panel projects and RGB/LRGB products |
 | [windows.md](windows.md) | Windows x64: requirements, the ASTAP route, Windows-specific behaviour, what is validated |
 | [hardware.md](hardware.md) | Apple Silicon profiles and tuning, what `performance-validated` means |
@@ -32,12 +32,12 @@ Start with the [project README](../README.md) (also in [简体中文](README.zh-
 
 | Page | What it fixes |
 |---|---|
-| [master-evaluation-standard.md](master-evaluation-standard.md) | How a master is judged against the PixInsight WBPP master of the same data (metrics, tolerances, verdicts); implemented by `benchmarks/evaluate_masters.py` |
+| [master-evaluation-standard.md](master-evaluation-standard.md) | How a master is judged against the PixInsight WBPP master of the same data (metrics, tolerances, verdicts); implemented by `tools/validation/evaluate_masters.py` |
 | [../benchmarks/README.md](../benchmarks/README.md) | The measurement tools (evaluator, tolerance gate, tracer, kernel and stage benchmarks) and the retained numbers |
 | [../engine/native/README.md](../engine/native/README.md) | Native kernel contracts: value identity with the NumPy reference, parity gates, thread invariance |
-| [../protocol/README.md](../protocol/README.md), [../packages/openastroflow-engine/docs/worker-protocol.md](../packages/openastroflow-engine/docs/worker-protocol.md), [../packages/openastroflow-engine/docs/backend-contracts.md](../packages/openastroflow-engine/docs/backend-contracts.md) | The desktop ↔ worker NDJSON protocol and backend truth flags |
+| [../protocol/README.md](../protocol/README.md), [../packages/openastroflow-engine/docs/worker-protocol.md](../packages/openastroflow-engine/docs/worker-protocol.md), [../packages/openastroflow-engine/docs/backend-contracts.md](../packages/openastroflow-engine/docs/backend-contracts.md) | The separate worker NDJSON protocol and backend truth flags; the desktop project route is documented in architecture.md |
 | [../apps/desktop/README.md](../apps/desktop/README.md), [../crates/app-core/README.md](../crates/app-core/README.md) | Desktop code map and checks; the shared Rust contracts |
-| [../packages/openastroflow-engine/README.md](../packages/openastroflow-engine/README.md), [../packages/light-frame-qc/README.md](../packages/light-frame-qc/README.md) (Chinese), [../engine/native/python/README.md](../engine/native/python/README.md) | The engine CLI, the quality-control package, the registration worker |
+| [../packages/openastroflow-engine/README.md](../packages/openastroflow-engine/README.md), [../packages/light-frame-qc/README.md](../packages/light-frame-qc/README.md) (Chinese), [../packages/openastroflow-registration/README.md](../packages/openastroflow-registration/README.md) | The engine CLI, the quality-control package, the registration library |
 | [../packaging/worker/README.md](../packaging/worker/README.md), [../scripts/windows/README.md](../scripts/windows/README.md) | Sidecar packaging and the Windows build machine |
 
 ## Design records (dated; kept as evidence, Chinese unless noted)

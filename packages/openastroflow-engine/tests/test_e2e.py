@@ -18,7 +18,7 @@ import pytest
 
 # The registration package is a sibling distribution.  The product build
 # installs it; repository tests exercise the exact checked-in implementation.
-REGISTRATION_SOURCE = Path(__file__).resolve().parents[3] / "engine" / "native" / "python"
+REGISTRATION_SOURCE = Path(__file__).resolve().parents[3] / "packages" / "openastroflow-registration" / "src"
 if str(REGISTRATION_SOURCE) not in sys.path:
     sys.path.insert(0, str(REGISTRATION_SOURCE))
 
@@ -502,8 +502,14 @@ def test_real_m3_pro_e2e_receipt_proves_metal_production_path(
     synthetic_project: dict[str, tuple[Path, ...]],
 ) -> None:
     output = tmp_path / "real-metal-e2e"
+    request = _request(synthetic_project, output)
+    # Auto now prefers native CPU kernels; this opt-in test must explicitly
+    # request the Metal adapter whose execution evidence it verifies.
+    request = replace(request, pipeline_parameters=replace(
+        request.pipeline_parameters, ordinary_integration_backend="m3-pro-tuned"
+    ))
     result = run_e2e(
-        _request(synthetic_project, output),
+        request,
         solver_backends=(FakeSolver(),),
     )
 
@@ -875,7 +881,9 @@ def test_e2e_reuses_identity_bound_digests_and_excludes_review_light(
         return original_pixel_hash(path)
 
     monkeypatch.setattr(e2e_module, "_sha256", count_e2e)
+    from openastroflow_engine import calibration_inputs
     monkeypatch.setattr(pixel_module, "_hash_file", count_pixel)
+    monkeypatch.setattr(calibration_inputs, "_hash_file", count_pixel)
     result = run_e2e(request, solver_backends=(FakeSolver(),))
 
     assert result.success is True

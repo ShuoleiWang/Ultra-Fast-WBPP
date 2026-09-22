@@ -241,7 +241,7 @@ def test_unknown_recipe_keys_fail_closed() -> None:
         Recipe.from_dict({"magicAutoProcess": True})
 
 
-def test_recipe_parses_content_bound_master_override_and_local_normalization() -> None:
+def test_recipe_parses_content_bound_master_override_and_disabled_legacy_normalization() -> None:
     recipe = Recipe.from_dict(
         {
             "calibration": {
@@ -262,7 +262,7 @@ def test_recipe_parses_content_bound_master_override_and_local_normalization() -
                     }
                 ]
             },
-            "localNormalization": {"enabled": True, "tileSizePixels": 384},
+            "localNormalization": {"enabled": False, "tileSizePixels": 384},
         }
     )
     assert recipe.calibration.master_metadata_overrides[0].gain == 100
@@ -271,7 +271,7 @@ def test_recipe_parses_content_bound_master_override_and_local_normalization() -
         == "NORMALIZED_UNIT"
     )
     assert recipe.calibration.master_metadata_overrides[0].normalized_unit_scale == 1
-    assert recipe.local_normalization.enabled is True
+    assert recipe.local_normalization.enabled is False
     assert recipe.local_normalization.tile_size_pixels == 384
 
 
@@ -330,3 +330,12 @@ def test_native_drizzle_backend_reports_scales_kernels_and_cfa() -> None:
     assert backend.validate_options({"scale": 5}) != ()
     assert backend.validate_options({"kernel": "lanczos3"}) != ()
     assert backend.validate_options({"scale": 3, "kernel": "circular", "dropShrink": 0.7}) == ()
+
+
+def test_retired_local_normalization_is_rejected_explicitly():
+    from openastroflow_engine.recipe import LocalNormalizationRecipe
+
+    with pytest.raises(RecipeError, match="LOCAL_NORMALIZATION_REMOVED"):
+        Recipe.from_dict({"localNormalization": {"enabled": True}})
+    with pytest.raises(RecipeError, match="LOCAL_NORMALIZATION_REMOVED"):
+        LocalNormalizationRecipe(enabled=True)

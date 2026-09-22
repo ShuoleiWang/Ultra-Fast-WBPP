@@ -4,7 +4,6 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import StrEnum
 import math
-from pathlib import Path
 from typing import Any
 
 
@@ -390,12 +389,3 @@ class RunResult:
             "warnings": self.warnings,
             "frames": [frame.serializable() for frame in self.frames],
         }
-
-
-def relative_thumbnail(path: str | None, report_directory: Path) -> str | None:
-    if path is None:
-        return None
-    try:
-        return str(Path(path).resolve().relative_to(report_directory.resolve()))
-    except ValueError:
-        return Path(path).resolve().as_uri()

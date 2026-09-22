@@ -31,7 +31,7 @@ from typing import Any, Sequence
 import numpy as np
 from numpy.typing import NDArray
 
-COUNTERFACTUAL_MODE = "analytic-leave-one-out-block8-v1"
+COUNTERFACTUAL_MODE = "analytic-leave-one-out-block8-fixed-rows-v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,14 +101,6 @@ class CounterfactualReport:
         }
 
 
-def _madn(values: NDArray[np.floating]) -> float:
-    finite = values[np.isfinite(values)]
-    if finite.size == 0:
-        return float("nan")
-    median = float(np.median(finite))
-    return float(1.4826 * np.median(np.abs(finite - median)))
-
-
 def _plane_residual_madn(
     means: NDArray[np.float64], design: NDArray[np.float64]
 ) -> NDArray[np.float64]:
@@ -135,8 +127,8 @@ class LeaveOneOutAccumulator:
     ) -> None:
         if block < 2:
             raise ValueError("block must be at least 2")
-        if statistics_rows < block:
-            raise ValueError("statistics_rows must be at least one block")
+        if statistics_rows < block or statistics_rows % block:
+            raise ValueError("statistics_rows must be a positive multiple of block")
         self.paths = tuple(str(path) for path in paths)
         self.block = int(block)
         # Integration bands can be thousands of rows; statistics are gathered
@@ -153,6 +145,11 @@ class LeaveOneOutAccumulator:
         self._weights: NDArray[np.float64] | None = None
         self.tiles_observed = 0
         self.tiles_used = 0
+        self._next_row = 0
+        self._pending_rows = 0
+        self._sums: NDArray[np.float64] | None = None
+        self._counts: NDArray[np.float64] | None = None
+        self._image: NDArray[np.float32] | None = None
 
     def __call__(self, observation: TileObservation) -> None:
         samples = observation.samples
@@ -161,58 +158,67 @@ class LeaveOneOutAccumulator:
         frames, rows, width = samples.shape
         if frames != len(self.paths):
             raise ValueError("observation frame count does not match the accumulator")
-        self.tiles_observed += 1
+        if observation.first_row != self._next_row:
+            raise ValueError("observations must cover consecutive rows starting at zero")
         if self._weights is None:
             self._weights = weights.copy()
-        for start in range(0, rows, self.statistics_rows):
-            stop = min(rows, start + self.statistics_rows)
-            if stop - start < self.block:
-                continue
-            self._observe_rows(
-                observation.first_row + start,
-                samples[:, start:stop],
-                accepted[:, start:stop],
-                weights,
-                observation.integrated[start:stop],
-                (
-                    observation.sample_weights[:, start:stop]
-                    if observation.sample_weights is not None
-                    else None
-                ),
-            )
+            shape = (frames, self.statistics_rows // self.block, width // self.block)
+            self._sums = np.zeros(shape, dtype=np.float64)
+            self._counts = np.zeros(shape, dtype=np.float64)
+            self._image = np.empty((self.statistics_rows, width), dtype=np.float32)
+        elif not np.array_equal(weights, self._weights) or width != self._image.shape[1]:
+            raise ValueError("observation geometry and frame weights must stay constant")
+        # Reduce one row at a time in a fixed order, independent of I/O bands.
+        # Retain block sums, not a second 64-row stack of every full-size frame.
+        columns = width // self.block * self.block
+        for row in range(rows):
+            mask = accepted[:, row, :columns]
+            values = np.where(mask, samples[:, row, :columns], np.float32(0))
+            if observation.sample_weights is None:
+                membership = mask
+            else:
+                membership = np.where(mask, observation.sample_weights[:, row, :columns], np.float32(0))
+                values = values * membership
+            slot = self._pending_rows // self.block
+            self._sums[:, slot] += values.reshape(frames, -1, self.block).sum(axis=2, dtype=np.float64)
+            self._counts[:, slot] += membership.reshape(frames, -1, self.block).sum(axis=2, dtype=np.float64)
+            self._image[self._pending_rows] = observation.integrated[row]
+            self._pending_rows += 1
+            self._next_row += 1
+            if self._pending_rows == self.statistics_rows:
+                self._flush_rows()
 
-    def _observe_rows(
+    def _flush_rows(self) -> None:
+        rows = self._pending_rows // self.block * self.block
+        if rows:
+            self.tiles_observed += 1
+            self._observe_blocks(
+                self._next_row - self._pending_rows,
+                self._sums[:, :rows // self.block],
+                self._counts[:, :rows // self.block],
+                self._weights,
+                self._image[:rows],
+            )
+        self._pending_rows = 0
+        if self._sums is not None:
+            self._sums.fill(0)
+            self._counts.fill(0)
+
+    def _observe_blocks(
         self,
         first_row: int,
-        samples: NDArray[np.float32],
-        accepted: NDArray[np.bool_],
+        sums: NDArray[np.float64],
+        counts: NDArray[np.float64],
         weights: NDArray[np.float64],
         integrated: NDArray[np.float32],
-        sample_weights: NDArray[np.float32] | None = None,
     ) -> None:
-        frames, rows, width = samples.shape
+        rows, width = integrated.shape
+        frames = sums.shape[0]
         block = self.block
         rows_b, cols_b = rows // block, width // block
         if rows_b == 0 or cols_b == 0:
             return
         used_rows, used_cols = rows_b * block, cols_b * block
-        a = accepted[:, :used_rows, :used_cols]
-        x = samples[:, :used_rows, :used_cols]
-        if sample_weights is None:
-            # Unit sample weights: the block sums count accepted samples.
-            values = np.where(a, x, np.float32(0))
-            membership: NDArray[Any] = a
-        else:
-            # Region-weighted samples: a sample contributes its region weight
-            # to the block weight, exactly as the reduction kernel weights it.
-            membership = np.where(a, sample_weights[:, :used_rows, :used_cols], np.float32(0))
-            values = membership * x
-        sums = values.reshape(frames, rows_b, block, cols_b, block).sum(
-            axis=(2, 4), dtype=np.float64
-        )
-        counts = membership.reshape(frames, rows_b, block, cols_b, block).sum(
-            axis=(2, 4), dtype=np.float64
-        )
         total_sum = np.einsum("f,fij->ij", weights, sums)
         total_weight = np.einsum("f,fij->ij", weights, counts)
         numerator = np.concatenate(
@@ -281,6 +287,7 @@ class LeaveOneOutAccumulator:
         bootstrap: int = 200,
         seed: int = 0,
     ) -> CounterfactualReport:
+        self._flush_rows()
         frames = len(self.paths)
         weights = (
             self._weights if self._weights is not None else np.ones(frames, dtype=np.float64)

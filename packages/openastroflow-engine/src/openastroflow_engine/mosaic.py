@@ -29,7 +29,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .platform import remove_tree
-from .color_product import (
+from .publication import (
     ColorProductError,
     DirectoryPublisher,
     _canonical_json,

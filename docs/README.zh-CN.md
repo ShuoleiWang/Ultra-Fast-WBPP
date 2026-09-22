@@ -46,7 +46,7 @@
 - **快在关键处。** 热点循环是多线程原生内核，与 NumPy 参考实现逐位一致；每张 Light 只解码一次，在内存里完成校准并直接重采样进堆栈。优化目标由真实运行的追踪器决定，而不是凭感觉：四个版本里从 170 秒 → 97 秒 → 82 秒 → 76 秒，凡承诺逐位一致的步骤主图都逐位一致。
 - **机器能为自己辩护的筛片。** 每张 Light 由测量证据判定（透明度、消光、原生分辨率 PSF、拖线、遮挡、视场一致性），复核页与正式运行用的是同一份代码。无人值守策略（配方选项）更进一步：用积分过程中*就地*测量的留一反事实复核每一帧，只有主图因它而更好，它才留下；局部有云或局部遮挡的帧通过逐帧区域权重图保留清晰部分，而不是整帧丢弃。
 - **未经校验绝不发布。** 原始素材只读，结果只写入新目录，每个产品都带有含哈希与全部算法标识的回执；桌面端校验最终天球坐标后才显示"完成"。跑两次得到相同的字节。
-- **用标准对比 WBPP，而不是用眼睛。** [`benchmarks/evaluate_masters.py`](../benchmarks/evaluate_masters.py) 把主图与同一批数据的 PixInsight WBPP 主图在 PSF、噪声增益、深度、背景平坦度、伪影、测光上逐项打分并给出置信区间。在参考数据集上，亮度主图判定为 **EQUIVALENT**，四个滤镜的分箱噪声增益均为 1.01–1.03（[评估标准](master-evaluation-standard.md)）。
+- **用标准对比 WBPP，而不是用眼睛。** [`tools/validation/evaluate_masters.py`](../tools/validation/evaluate_masters.py) 把主图与同一批数据的 PixInsight WBPP 主图在 PSF、噪声增益、深度、背景平坦度、伪影、测光上逐项打分并给出置信区间。历史测量中，四个滤镜的分箱噪声增益为 1.01–1.03；标准门禁尚未全部测量，当前不认证完整等价性（[评估标准](master-evaluation-standard.md)）。
 
 ### 与 PixInsight WBPP 对比
 
@@ -55,12 +55,12 @@
 | 61 × 26 MP Light，M3 Pro | **76 秒** | 24 分 11 秒（WBPP 3.0.1，默认流程，含 LocalNormalization） |
 | 筛片 | 测量证据 → 带理由的门禁判定；无人值守策略再加积分内反事实复核，局部云、遮挡用区域权重图 | 整帧加权与阈值剔除 |
 | 可信度 | 素材只读、结果只新建、含哈希与算法标识的回执、"完成"前校验 WCS、重跑逐位一致 | 控制台日志 |
-| 主图质量 | 对 WBPP 主图：L EQUIVALENT，G₈ 1.01–1.03，PSF / 背景 / 测光均在容差内 | 参考基准 |
+| 主图质量 | 历史 G₈ 1.01–1.03；当前评价器不会忽略失败项或未测量门禁 | 参考基准 |
 | Drizzle | 原生 1×–4×，是普通主图的精确测光孪生；支持 Bayer drizzle | DrizzleIntegration |
 | 平台与许可 | macOS Apple Silicon、Windows x64 · MIT，不需要 PixInsight | macOS、Windows、Linux · 商业授权 |
 | 预处理之后 | 线性主图、预览、回执；不做后期 | 完整的处理平台 |
 
-WBPP 的耗时是对相同输入、其默认流程的一次测量；两者的阶段并不完全相同。完整的对比、每一行背后的证据以及本项目*不做*什么，见 [docs/features.md](features.md)（英文）。单色已在真实数据上验证；彩色相机、马赛克与 LocalNormalization 目前仅有合成数据验证。
+WBPP 的耗时是对相同输入、其默认流程的一次测量；两者的阶段并不完全相同。完整的对比、每一行背后的证据以及本项目*不做*什么，见 [docs/features.md](features.md)（英文）。单色已在真实数据上验证；彩色相机与马赛克目前仅有合成数据验证。
 
 ## 值得一提的功能
 
@@ -69,7 +69,7 @@ WBPP 的耗时是对相同输入、其默认流程的一次测量；两者的阶
 - **积分科学。** 跨夜、跨子午线翻转的射影配准；按每帧自身噪声判定的拒绝尺度模型 v2；用快速 Radon 变换按整条长度找出卫星拖线并按走廊剔除；在传感器坐标系分离残余平场结构的归一化；所有通道共用一个网格并互相校验解算结果。→ [features §4](features.md#4-integration-science)
 - **Drizzle 与彩色。** 原生 1×–4× drizzle，输入与普通积分完全相同（2×：半光半径小 2.5–4.4%，有效噪声低 6–7%，通量比 0.993–0.994）；Bayer Light 作为彩色通道组处理，逐通道平场缩放，Bayer drizzle。→ [drizzle](recipes/drizzle.md)、[OSC](recipes/osc-cfa.md)
 - **校验后发布。** `SEED` 与 `SOLVED` WCS 的区分；每张主图独立解算并对星表校验（Windows 上 ASTAP 的解由引擎对管理索引星表校验）；每个产品都有回执；桌面端在显示成功前再校验一次。→ [天文解算](recipes/astrometry.md)、[Windows](windows.md)
-- **不碍事的桌面端。** 一次导入所有夜晚，逐通道 blink 筛片、废片预先标记（传统复核页仍可选用），诚实的失败状态，浅色/深色，中英双语，可复现的图标与截图。→ [blink 筛片](recipes/blink-screening.md)、[桌面端指南](../apps/desktop/README.md)、[设计记录](gui-redesign-plan.md)
+- **不碍事的桌面端。** 一次导入所有夜晚，逐通道完成并确认 Blink 人工筛片，每个通道有独立参考帧，算法提供质量提示，诚实的失败状态，浅色/深色，中英双语，可复现的图标与截图。→ [blink 筛片](recipes/blink-screening.md)、[桌面端指南](../apps/desktop/README.md)、[设计记录](gui-redesign-plan.md)
 - **两个平台，一个平台层。** 在 M3 Pro 与 Ryzen 7 5800H Windows 笔记本上验证（同一项目 267–289 秒）；Windows 静态 CRT 包逐个 DLL 导入做了验证。→ [硬件](hardware.md)、[Windows](windows.md)
 - **给贡献者的工具。** 真实运行追踪器（Perfetto）、主图评估器、容差门、缺陷注入 harness、原生 vs NumPy 基准、内核的一条构建-测试-安装链、安装包验证、公开树与链接检查。→ [features §10](features.md#10-tools-contributors-actually-get)
 
@@ -97,8 +97,8 @@ flowchart LR
 ```
 
 1. **一起导入。** 把所有夜晚一次拖入：Light、原始校准帧和已有 Master。类型、目标、滤镜和采集配置来自头信息；冲突会被显示，绝不猜测。Bayer Light 会被识别并按彩色通道组处理。
-2. **Blink 筛片。** 每张 Light 只测量一次（透明度、消光、原生分辨率 PSF、拖线、遮挡、视场一致性），可计算出的废片——整晚月光或薄雾、星点数量坍缩、厚云、拖线、无法配准的帧——会带着理由预先标记出来。每个通道选出一张参考帧，其余帧都配准并归一化到它，你用同一套拉伸逐通道 blink、逐帧决定：键盘、连播、整晚丢弃、应用标记、撤销。你的决定作为显式选择进入运行，回执记录每一次改判。不 blink 直接开始，则由传统门禁自动筛片（它看不出整晚一致地差的夜晚，并会如实提示）。配方里设 `selection.policy: unattended-v1` 后，同一份证据不经复核门就变成*保留*、*降权保留*或*排除*，经反事实复核并写入 `qc/selection.json`。
-3. **本地处理。** 校准、配准、归一化、稳健拒绝的积分、可选的 drizzle 与 LocalNormalization，以及逐通道天文解算，作为一个任务带实时进度、用满所有核心运行。
+2. **Blink 筛片。** 桌面端处理前必须人工看完每一张 Light，并逐通道确认。算法标记只作提示，不自动丢片。每个通道根据透明度、噪声、原生 PSF 和配准质量选择参考帧，预览共享配准、光度归一化和同一套拉伸。支持逐帧、连播、参考帧对比、保留/丢弃、整晚选择和撤销。只有主视图成功显示的图像才计入已看；不可显示的帧需重试或明确丢弃。控制器在启动前校验审阅记录与测量会话一致，再采用人工选择。命令行默认仍为 `selection.policy: legacy-gate`，也可显式选择 `unattended-v1`。
+3. **本地处理。** 校准、配准、归一化、稳健拒绝的积分、可选的 drizzle，以及逐通道天文解算，作为一个任务带实时进度、用满所有核心运行。
 4. **得到已校验的产品。** 线性单色与 RGB/LRGB FITS、drizzle 的科学/权重/覆盖产品、检查预览、筛片报告与回执。只有回执、产品哈希与最终 WCS 全部校验通过，应用才显示*完成*。
 
 ## 下载
@@ -138,8 +138,8 @@ make desktop-dev
 ## 状态与要求
 
 - **积极开发中的 alpha。** 真实素材流程在一台 M3 Pro（macOS）与一台 Ryzen 7 5800H 笔记本（Windows 11）上验证；其他机器运行未测量的通用配置。本地构建为 ad-hoc 签名，未公证；Windows 安装包未签名。已验证与未验证事项的清单见 [validation-matrix.md](validation-matrix.md)。
-- **单色已在真实数据上验证；彩色相机仅在合成数据上验证。** Bayer（RGGB/BGGR/GRBG/GBRG）Light 按马赛克校准、去马赛克为 R/G/B 通道主图并合成 RGB（[配方](recipes/osc-cfa.md)），但尚未处理过真实的 OSC 数据集。马赛克与 LocalNormalization 需要真实数据验证；LocalNormalization 不保证无梯度输出。
-- **筛片。** 桌面端的主路径是 blink 筛片：标记规则与参考帧规则在一个六晚的数据集上定下，只做预先标记，由你决定，运行记录这份选择。不 blink 直接开始的运行使用传统门禁（PASS 帧入栈，REVIEW 帧除非批准否则排除），它看不出整晚一致地差的夜晚。带反事实与区域权重的无人值守策略目前是命令行的配方选项；在更多数据集上验证之前默认仍为 `legacy-gate`。
+- **单色已在真实数据上验证；彩色相机仅在合成数据上验证。** Bayer（RGGB/BGGR/GRBG/GBRG）Light 按马赛克校准、去马赛克为 R/G/B 通道主图并合成 RGB（[配方](recipes/osc-cfa.md)），但尚未处理过真实的 OSC 数据集。马赛克需要真实数据验证。默认归一化包含空间背景校正，原 LocalNormalization 选项已下线。
+- **筛片。** 桌面端强制 Blink 人工审片，采用哪些帧由用户决定。标记规则和参考帧规则来自一个六晚数据集，不能保证识别所有缺陷。命令行默认仍为 `legacy-gate`；带反事实与区域权重的无人值守策略仍是命令行配方选项。
 - **天文解算**需要另行安装求解器：macOS 上是 Astrometry.net 的 `solve-field` 与本地索引（[求解器设置](recipes/offline-solver-catalogs.md)），Windows 上是 ASTAP 加星表数据库以及应用托管的索引集（[Windows](windows.md)）；然后在应用中**重新检测配置**。不会向任何地方上传数据。
 - 需要保存全分辨率中间帧的磁盘空间（输出卷上约每张 Light 每像素 12 字节）。
 
@@ -151,7 +151,7 @@ make desktop-dev
 | PixInsight WBPP 3.0.1，同一批 Light，同一台 Mac | 24 分 11 秒 | [features §1](features.md#1-speed-76-seconds-for-61--26-mp-lights) |
 | 同一项目在 Ryzen 7 5800H 笔记本（Windows 11） | 267–289 秒 | [Windows](windows.md) |
 | 同一台机器上同一项目跑两次（macOS 与 Windows 均已验证） | 逐位一致 | [验证矩阵](validation-matrix.md) |
-| 亮度主图 vs PixInsight WBPP | EQUIVALENT（G₈ ≈ 1.01–1.02）；四个滤镜 G₈ 均为 1.01–1.03 | [评估标准](master-evaluation-standard.md)、[features §5](features.md#5-master-quality-against-pixinsight-wbpp) |
+| 亮度主图 vs PixInsight WBPP | 历史 G₈ ≈ 1.01–1.02；当前不认证完整等价性 | [评估标准](master-evaluation-standard.md)、[features §5](features.md#5-master-quality-against-pixinsight-wbpp) |
 | 2× drizzle vs Lanczos-3 主图 | 半光半径小 2.5–4.4%，有效噪声低 6–7%，通量比 0.993–0.994 | [drizzle 配方](recipes/drizzle.md) |
 | 原生内核 vs NumPy 参考实现 | 重采样 17.6×、积分 4.5×、整条流水线 5.4×，像素一致 | [benchmarks](../benchmarks/README.md) |
 | 真实帧上注入的合成缺陷（薄云、局部云、结露、失焦、遮挡、拖线） | 每种缺陷都被处理，干净帧与良性对照无一被误伤 | [筛片实现记录](frame-selection-implementation.md) |

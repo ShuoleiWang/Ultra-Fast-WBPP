@@ -21,7 +21,7 @@ produces verified correspondence/index evidence.
 ```text
 inventory
    -> raw-Light quality gate
-   -> calibration (raw Flat + Bias required by this executor; Dark recipe-controlled)
+   -> calibration (raw or supplied masters, validated by the selected calibration workflow)
    -> registration + transform provenance
    -> integration + rejection evidence
    -> optional drizzle
@@ -42,3 +42,5 @@ A Windows executor implements `Backend`, advertises `DeviceKind.CPU`, `DIRECTML`
 ## Solver success
 
 Solver success is conjunctive: backend status `SOLVED`, `SolutionKind.SOLVED`, positive backend confirmation, and a valid celestial WCS. Seeds and inherited coordinates do not meet this contract. The validator checks celestial axes, reference pixels/coordinates, a finite non-singular linear transform, projected pixel scale, and pixel/world round-trip stability.
+
+Drizzle discovery returns a capability provider. Actual execution uses `drizzle_native.integrate_drizzle_group` with calibrated source frames and the ordinary integration's transforms, weights, normalization and rejection evidence.
