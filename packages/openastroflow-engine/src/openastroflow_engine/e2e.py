@@ -55,6 +55,7 @@ from astropy.wcs import WCS
 import numpy as np
 
 from lightframeqc.analysis import analyze_measurements
+from lightframeqc.blink_flags import BlinkFlagPolicy
 from lightframeqc.config import DEFAULT_CONFIG, QcConfig
 from lightframeqc.measure import measure_paths
 from lightframeqc.parallel import FrameRunner
@@ -64,6 +65,7 @@ from lightframeqc.quality_gate import GatePolicy, evaluate_quality_gate
 from lightframeqc.readers import probe_frame_metadata
 
 from .astap_backend import verify_solver_execution_result
+from .blink_session import BlinkEvidence, blink_evidence
 from .calibration import (
     cfa_metadata,
     CalibrationError,
@@ -204,6 +206,142 @@ class ReviewApproval:
             "gatePolicyDigest": self.gate_policy_digest,
             "requestDigest": self.request_digest,
         }
+
+
+SELECTION_KIND = "ultra-fast-wbpp-selection"
+SELECTION_POLICY = "explicit-v1"
+MAX_SELECTION_DECISIONS = 10_000
+_SELECTION_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SELECTION_ORIGIN_KEYS = ("sessionId", "blinkManifestSha256", "flagsPolicyDigest", "createdAt")
+
+
+@dataclass(frozen=True, slots=True)
+class ExplicitDecision:
+    """One Light's KEEP/DROP as the reviewer decided it in the blink view."""
+
+    source_sha256: str
+    decision: str
+    default_decision: str | None = None
+    flags: tuple[str, ...] = ()
+    note: str | None = None
+
+    def serializable(self) -> dict[str, Any]:
+        value: dict[str, Any] = {"sourceSha256": self.source_sha256, "decision": self.decision}
+        if self.default_decision is not None:
+            value["defaultDecision"] = self.default_decision
+        if self.flags:
+            value["flags"] = list(self.flags)
+        if self.note is not None:
+            value["note"] = self.note
+        return value
+
+
+@dataclass(frozen=True, slots=True)
+class ExplicitSelection:
+    """The ``selection-v1`` file: every Light's decision and where it came from.
+
+    ``digest`` is the SHA-256 of the canonical JSON of the validated file and
+    is recorded as ``selectionDigest`` in the receipts.  ``origin`` is kept
+    for the audit trail and never enforced: a hand-written file is valid.
+    """
+
+    decisions: tuple[ExplicitDecision, ...]
+    undecided: str = "ERROR"
+    origin: Mapping[str, str] | None = None
+    digest: str = ""
+
+    @property
+    def by_source(self) -> dict[str, ExplicitDecision]:
+        return {item.source_sha256: item for item in self.decisions}
+
+    def serializable(self) -> dict[str, Any]:
+        value: dict[str, Any] = {
+            "schemaVersion": 1,
+            "kind": SELECTION_KIND,
+            "policy": SELECTION_POLICY,
+            "undecided": self.undecided,
+            "decisions": [item.serializable() for item in self.decisions],
+        }
+        if self.origin is not None:
+            value["origin"] = dict(self.origin)
+        return value
+
+
+def parse_explicit_selection(raw: Any) -> ExplicitSelection:
+    """Validate a ``selection-v1`` object; every problem is ``SELECTION_INVALID``."""
+
+    def invalid(message: str) -> E2EError:
+        return E2EError("SELECTION_INVALID", message)
+
+    if not isinstance(raw, Mapping):
+        raise invalid("selection must be a JSON object")
+    allowed = {"schemaVersion", "kind", "policy", "origin", "undecided", "decisions"}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise invalid("selection has unsupported fields: " + ", ".join(str(item) for item in unknown))
+    if raw.get("schemaVersion") != 1:
+        raise invalid("selection schemaVersion must be 1")
+    if raw.get("kind") != SELECTION_KIND:
+        raise invalid(f"selection kind must be {SELECTION_KIND}")
+    if raw.get("policy") != SELECTION_POLICY:
+        raise invalid(f"selection policy must be {SELECTION_POLICY}")
+    undecided = raw.get("undecided", "ERROR")
+    if undecided not in {"ERROR", "DROP", "KEEP"}:
+        raise invalid("selection undecided must be ERROR, DROP or KEEP")
+    origin_raw = raw.get("origin")
+    origin: dict[str, str] | None = None
+    if origin_raw is not None:
+        if not isinstance(origin_raw, Mapping) or set(origin_raw) - set(_SELECTION_ORIGIN_KEYS):
+            raise invalid("selection origin may hold only " + ", ".join(_SELECTION_ORIGIN_KEYS))
+        origin = {}
+        for key in _SELECTION_ORIGIN_KEYS:
+            if key in origin_raw:
+                value = origin_raw[key]
+                if not isinstance(value, str) or len(value) > 512:
+                    raise invalid(f"selection origin.{key} must be a short string")
+                origin[key] = value
+    decisions_raw = raw.get("decisions")
+    if not isinstance(decisions_raw, list):
+        raise invalid("selection decisions must be an array")
+    if len(decisions_raw) > MAX_SELECTION_DECISIONS:
+        raise invalid(f"selection holds more than {MAX_SELECTION_DECISIONS} decisions")
+    decisions: list[ExplicitDecision] = []
+    seen: set[str] = set()
+    for index, item in enumerate(decisions_raw):
+        if not isinstance(item, Mapping) or set(item) - {"sourceSha256", "decision", "defaultDecision", "flags", "note"}:
+            raise invalid(f"selection decision {index} has unsupported fields")
+        digest = item.get("sourceSha256")
+        if not isinstance(digest, str) or _SELECTION_DIGEST.fullmatch(digest) is None:
+            raise invalid(f"selection decision {index} needs a lowercase sha256: digest")
+        if digest in seen:
+            raise invalid(f"selection decision {index} repeats {digest}")
+        seen.add(digest)
+        decision = item.get("decision")
+        if decision not in {"KEEP", "DROP"}:
+            raise invalid(f"selection decision {index} must be KEEP or DROP")
+        default = item.get("defaultDecision")
+        if default is not None and default not in {"KEEP", "DROP"}:
+            raise invalid(f"selection decision {index} defaultDecision must be KEEP or DROP")
+        flags_raw = item.get("flags", [])
+        if not isinstance(flags_raw, list) or any(
+            not isinstance(flag, str) or not flag.strip() or len(flag) > 64 for flag in flags_raw
+        ):
+            raise invalid(f"selection decision {index} flags must be short strings")
+        note = item.get("note")
+        if note is not None and (not isinstance(note, str) or len(note) > 2_000):
+            raise invalid(f"selection decision {index} note must be a string of at most 2000 characters")
+        decisions.append(
+            ExplicitDecision(
+                source_sha256=digest,
+                decision=decision,
+                default_decision=default,
+                flags=tuple(flags_raw),
+                note=note,
+            )
+        )
+    selection = ExplicitSelection(decisions=tuple(decisions), undecided=undecided, origin=origin)
+    digest = "sha256:" + hashlib.sha256(_canonical_json(selection.serializable())).hexdigest()
+    return replace(selection, digest=digest)
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,6 +499,10 @@ class E2ERequest:
     gate_policy: GatePolicy = field(default_factory=GatePolicy)
     pipeline_parameters: PipelineParameters = field(default_factory=PipelineParameters)
     selection: SelectionParameters = field(default_factory=SelectionParameters)
+    # The blink review's decisions; present exactly when ``selection.policy``
+    # is ``explicit-v1``.  The flags policy is recorded with them.
+    explicit_selection: ExplicitSelection | None = None
+    blink_flags_policy: BlinkFlagPolicy = field(default_factory=BlinkFlagPolicy)
     drizzle: DrizzleOptions = field(default_factory=DrizzleOptions)
     ra_hint_degrees: float | None = None
     dec_hint_degrees: float | None = None
@@ -1088,6 +1230,121 @@ def _apply_review_approvals(
     return admitted, request_digest, evidence
 
 
+def _apply_explicit_selection(
+    *,
+    request: E2ERequest,
+    identities: Sequence[_SourceIdentity],
+    results: Sequence[FrameResult],
+    evidence: BlinkEvidence,
+) -> tuple[set[str], dict[str, Any]]:
+    """Admit exactly the Lights the selection keeps; record every override.
+
+    The gate and the blink flags have run; they inform the record but never
+    decide.  A KEEP on a frame without a registration transform fails closed
+    (the run's registration would fail on it); a KEEP on a HARD_FAIL or on
+    an EXCLUDE-flagged frame is honoured and counted as an override.
+    """
+
+    selection = request.explicit_selection
+    assert selection is not None
+    light_identities = {
+        identity.path: identity for identity in identities if identity.role == "LIGHT"
+    }
+    paths_by_sha: dict[str, list[str]] = {}
+    for identity in light_identities.values():
+        paths_by_sha.setdefault(identity.sha256, []).append(identity.path)
+    # Source identities carry the same ``sha256:`` form as the selection.
+    decisions = dict(selection.by_source)
+    ambiguous = sorted(digest for digest in decisions if len(paths_by_sha.get(digest, ())) > 1)
+    if ambiguous:
+        raise E2EError(
+            "SELECTION_SOURCE_AMBIGUOUS",
+            "a selection digest names more than one current Light: " + ", ".join(ambiguous),
+        )
+    unknown = sorted(digest for digest in decisions if digest not in paths_by_sha)
+    if unknown:
+        raise E2EError(
+            "SELECTION_SOURCE_UNKNOWN",
+            "a selection digest names no current Light: " + ", ".join(unknown),
+        )
+    flags_by_path = evidence.flags_by_path
+    admitted: set[str] = set()
+    frames: list[dict[str, Any]] = []
+    counts = {
+        "keep": 0,
+        "drop": 0,
+        "overriddenExcludeFlags": 0,
+        "overriddenGateHardFail": 0,
+        "undecided": 0,
+    }
+    undecided_paths: list[str] = []
+    for result in sorted(results, key=lambda item: item.path):
+        canonical = str(Path(result.path).resolve(strict=True))
+        identity = light_identities.get(canonical)
+        if identity is None:
+            continue
+        decision = decisions.get(identity.sha256)
+        undecided = decision is None
+        verdict = selection.undecided if undecided else decision.decision
+        if undecided:
+            if verdict == "ERROR":
+                undecided_paths.append(canonical)
+                continue
+            counts["undecided"] += 1
+        record = flags_by_path.get(result.path)
+        flag_codes = list(record.codes) if record is not None else []
+        default_decision = record.default_decision if record is not None else None
+        gate = result.quality_gate
+        gate_disposition = gate.disposition.value if gate is not None else None
+        overrode: list[str] = []
+        if verdict == "KEEP":
+            if not result.registration.ok:
+                raise E2EError(
+                    "SELECTION_UNREGISTRABLE",
+                    "a kept Light could not be registered in the quality pass",
+                    path=canonical,
+                )
+            if record is not None and record.exclude:
+                counts["overriddenExcludeFlags"] += 1
+                overrode.append("EXCLUDE_FLAGS")
+            if gate is not None and gate.disposition is GateDisposition.HARD_FAIL:
+                counts["overriddenGateHardFail"] += 1
+                overrode.append("GATE_HARD_FAIL")
+            counts["keep"] += 1
+            admitted.add(canonical)
+        else:
+            counts["drop"] += 1
+        frames.append(
+            {
+                "sourceSha256": identity.sha256,
+                "path": canonical,
+                "decision": verdict,
+                "undecided": undecided,
+                "defaultDecision": default_decision,
+                "flags": flag_codes,
+                "gateDisposition": gate_disposition,
+                "overrode": overrode,
+                **({"note": decision.note} if decision is not None and decision.note else {}),
+            }
+        )
+    if undecided_paths:
+        raise E2EError(
+            "SELECTION_INCOMPLETE",
+            f"{len(undecided_paths)} Light(s) have no decision and the selection says undecided=ERROR",
+            path=undecided_paths[0],
+        )
+    block = {
+        "policy": SELECTION_POLICY,
+        "selectionDigest": selection.digest,
+        "origin": dict(selection.origin) if selection.origin is not None else None,
+        "undecided": selection.undecided,
+        "flagsPolicyDigest": evidence.flags_policy.canonical_digest(),
+        "counts": counts,
+        "frames": frames,
+    }
+    return admitted, block
+
+
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = _canonical_json(payload)
@@ -1300,6 +1557,22 @@ def _validate_request(request: E2ERequest) -> None:
                 )
     if not isinstance(request.integration_mode, IntegrationMode):
         raise E2EError("INTEGRATION_MODE_INVALID", "unknown integration mode")
+    request.selection.validate()
+    request.blink_flags_policy.validate()
+    if request.explicit_selection is not None and not isinstance(
+        request.explicit_selection, ExplicitSelection
+    ):
+        raise E2EError("SELECTION_INVALID", "explicit selection has the wrong type")
+    if request.selection.explicit != (request.explicit_selection is not None):
+        raise E2EError(
+            "SELECTION_POLICY_CONFLICT",
+            "selection policy explicit-v1 and a supplied selection go together",
+        )
+    if request.explicit_selection is not None and request.review_approvals:
+        raise E2EError(
+            "SELECTION_POLICY_CONFLICT",
+            "an explicit selection cannot be combined with REVIEW approvals",
+        )
     numeric_hints = {
         "ra_hint_degrees": request.ra_hint_degrees,
         "dec_hint_degrees": request.dec_hint_degrees,
@@ -1387,19 +1660,36 @@ def _screening_summary(
     passed: Sequence[Path],
     approved_review_paths: Sequence[str],
     review_previews: Mapping[str, str],
+    explicit: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Counts plus the frames that needed a decision, for receipts and the desktop."""
+    """Counts plus the frames that needed a decision, for receipts and the desktop.
+
+    With an explicit selection every user drop is listed (``reason``
+    ``USER_DROP`` plus its blink flag codes) and so is every keep that
+    overrode an EXCLUDE flag (``USER_KEEP_OVERRIDE``), next to the gate's own
+    non-PASS frames, so the result page shows both kinds of decision.
+    """
 
     counts = {disposition.value: 0 for disposition in GateDisposition}
     frames: list[dict[str, Any]] = []
     passed_set = {str(path) for path in passed}
+    explicit_by_path = {
+        item["path"]: item for item in (explicit or {}).get("frames", []) if isinstance(item, Mapping)
+    }
     for result in sorted(results, key=lambda item: item.path):
         gate = result.quality_gate
         disposition = gate.disposition.value if gate is not None else "HARD_FAIL"
         counts[disposition] += 1
-        if gate is not None and gate.disposition is GateDisposition.PASS:
-            continue
         resolved = str(Path(result.path).resolve(strict=True))
+        decision = explicit_by_path.get(resolved)
+        reason: str | None = None
+        if decision is not None:
+            if decision["decision"] == "DROP":
+                reason = "USER_DROP"
+            elif "EXCLUDE_FLAGS" in decision.get("overrode", ()):
+                reason = "USER_KEEP_OVERRIDE"
+        if gate is not None and gate.disposition is GateDisposition.PASS and reason is None:
+            continue
         frames.append(
             {
                 "path": resolved,
@@ -1409,6 +1699,7 @@ def _screening_summary(
                 "evidence": [item.message for item in gate.evidence][:8] if gate is not None else list(result.reasons)[:8],
                 "starCount": result.star_count,
                 "reviewPreview": review_previews.get(result.path),
+                **({"reason": reason, "flags": list(decision["flags"])} if reason is not None and decision is not None else {}),
             }
         )
     return {
@@ -2487,11 +2778,22 @@ def _register_lights(
     # integration multiplies it by its own inverse-variance noise weight
     # measured on the normalized frames, so noise must not be weighted here.
     weights = normalize_quality_weights(run.analyses)
+    candidate_indices: list[int] | None = None
+    if reference_candidates:
+        allowed = {str(Path(path).expanduser().resolve(strict=True)) for path in reference_candidates}
+        candidate_indices = [
+            index
+            for index, analysis in enumerate(run.analyses)
+            if str(Path(analysis.path).resolve(strict=True)) in allowed
+        ]
     scale_estimates = estimate_stellar_scale_hints(
         run.analyses,
         run.transforms,
         weights,
         workers=workers,
+        # The normalization reference obeys the same candidate set as the
+        # geometric one: the master inherits its background.
+        reference_candidates=candidate_indices,
     )
     quality_weights = {
         str(
@@ -3750,6 +4052,8 @@ def _failure_result(
     sources: Sequence[_SourceIdentity],
     callback: ProgressCallback | None,
     screening: Mapping[str, Any] | None = None,
+    selection_policy: str | None = None,
+    selection: Mapping[str, Any] | None = None,
 ) -> E2EResult:
     private_work = staging / WORK_DIRECTORY
     remove_tree(private_work)
@@ -3782,6 +4086,8 @@ def _failure_result(
             "passedLights": len(passed),
             "excludedLights": len(excluded),
             **({"screening": dict(screening)} if screening is not None else {}),
+            **({"selectionPolicy": selection_policy} if selection_policy is not None else {}),
+            **({"selection": dict(selection)} if selection is not None else {}),
         },
         "astrometry": {"status": "UNSOLVED", **dict(solver)},
         "artifacts": evidence_artifacts,
@@ -4010,12 +4316,43 @@ def run_e2e(
         )
         qc_manifest["manualReviewApprovals"] = {
             "defaultDisposition": (
-                "DECIDED_BY_SELECTION_POLICY" if request.selection.unattended else "EXCLUDED"
+                "DECIDED_BY_EXPLICIT_SELECTION"
+                if request.selection.explicit
+                else "DECIDED_BY_SELECTION_POLICY"
+                if request.selection.unattended
+                else "EXCLUDED"
             ),
             "requestDigest": approval_request_digest,
             "gatePolicyDigest": request.gate_policy.canonical_digest(),
             "accepted": approval_evidence,
         }
+        # The blink evidence (flags, reference, scores) is recomputed from
+        # this run's own quality pass, so a run with an explicit selection
+        # is self-describing without the blink session that produced it.
+        blink: BlinkEvidence | None = None
+        explicit_block: dict[str, Any] | None = None
+        explicit_admitted: set[str] = set()
+        if request.selection.explicit:
+            qc_started = perf_counter()
+            blink = blink_evidence(
+                frame_results,
+                measurements,
+                flags_policy=request.blink_flags_policy,
+                gate_policy=request.gate_policy,
+                qc_config=request.qc_config,
+            )
+            explicit_admitted, explicit_block = _apply_explicit_selection(
+                request=request,
+                identities=identities,
+                results=frame_results,
+                evidence=blink,
+            )
+            qc_timings["blinkSeconds"] = perf_counter() - qc_started
+            qc_manifest["explicitSelection"] = {
+                "selectionDigest": explicit_block["selectionDigest"],
+                "flagsPolicyDigest": explicit_block["flagsPolicyDigest"],
+                "counts": dict(explicit_block["counts"]),
+            }
         selection_features: list[FrameSelectionFeatures] = []
         selection_decisions: list[SelectionDecision] = []
         selection_confidence: dict[str, float] = {}
@@ -4047,11 +4384,15 @@ def run_e2e(
                 region_maps=selection_region_maps,
             )
         _write_json(qc_dir / "manifest.json", qc_manifest)
+        if blink is not None:
+            _write_json(qc_dir / "blink.json", blink.serializable())
         gate_by_path = {
             str(Path(result.path).resolve(strict=True)): result.quality_gate
             for result in frame_results
         }
-        if request.selection.unattended:
+        if request.selection.explicit:
+            passed = tuple(path for path in lights if str(path) in explicit_admitted)
+        elif request.selection.unattended:
             decision_by_path = {item.path: item for item in selection_decisions}
             passed = tuple(
                 path
@@ -4070,8 +4411,11 @@ def run_e2e(
                 )
             )
         passed_set = set(passed)
+        passed_set_text = {str(path) for path in passed}
         excluded = tuple(path for path in lights if path not in passed_set)
-        screening = _screening_summary(frame_results, passed, approved_review_paths, review_previews)
+        screening = _screening_summary(
+            frame_results, passed, approved_review_paths, review_previews, explicit_block
+        )
         passed_results = [
             result
             for result in frame_results
@@ -4088,7 +4432,11 @@ def run_e2e(
             ProgressStage.QUALITY_CONTROL,
             "completed",
             (
-                f"{len(passed)} admitted by selection policy {request.selection.policy} "
+                f"{len(passed)} kept by the explicit selection "
+                f"({explicit_block['counts']['overriddenExcludeFlags']} kept against an EXCLUDE flag); "
+                f"{len(excluded)} dropped"
+                if request.selection.explicit and explicit_block is not None
+                else f"{len(passed)} admitted by selection policy {request.selection.policy} "
                 f"({sum(1 for item in selection_decisions if item.admitted and item.confidence < 1.0)} "
                 f"with reduced weight); {len(excluded)} excluded"
                 if request.selection.unattended
@@ -4120,6 +4468,8 @@ def run_e2e(
                 sources=identities,
                 callback=progress,
                 screening=screening,
+                selection_policy=request.selection.policy,
+                selection=explicit_block,
             )
             published = True
             return result
@@ -4202,10 +4552,38 @@ def run_e2e(
         # sharp noise blobs and would leave every real frame unregistered.
         # The reference comes from the frames that passed the gate on their
         # own; only when nothing did do the approved frames compete.
+        # The same holds for a Light the blink reviewer kept against the
+        # gate: it is integrated, but the reference comes from gate-PASS
+        # frames while any exist.
+        anchor_excluded = set(approved_review_paths)
+        # A frame with a blink flag (moonlit or hazy sky, low star retention,
+        # extinction, atypical background shape, ...) is integrated when the
+        # reviewer keeps it, but it never anchors the group: the master
+        # inherits the reference's background, and the previous rule's
+        # preference for the lowest sky picked exactly such cloud-dimmed
+        # frames (NGC 6822, 2026-09-22).
+        if blink is None:
+            blink = blink_evidence(
+                frame_results,
+                measurements,
+                flags_policy=request.blink_flags_policy,
+                gate_policy=request.gate_policy,
+                qc_config=request.qc_config,
+            )
+        anchor_excluded.update(
+            str(Path(frame.path).resolve(strict=True)) for frame in blink.flags if frame.flags
+        )
+        if request.selection.explicit:
+            anchor_excluded.update(
+                path
+                for path, gate in gate_by_path.items()
+                if path in passed_set_text
+                and (gate is None or gate.disposition is not GateDisposition.PASS)
+            )
         gate_passed_lights = [
             path for path in staged_inputs["LIGHT"]
-            if str(registration_source_aliases.get(str(path), path)) not in approved_review_paths
-            and str(path) not in approved_review_paths
+            if str(registration_source_aliases.get(str(path), path)) not in anchor_excluded
+            and str(path) not in anchor_excluded
         ]
         registration = _register_lights(
             staged_inputs["LIGHT"],
@@ -4895,7 +5273,38 @@ def run_e2e(
                 "excludedLights": len(excluded),
                 "screening": screening,
                 "selectionPolicy": request.selection.policy,
-                "selection": selection_receipt_path,
+                "selection": explicit_block if explicit_block is not None else selection_receipt_path,
+                **(
+                    {
+                        "blink": {
+                            "manifest": "qc/blink.json",
+                            "flagsPolicyDigest": blink.flags_policy.canonical_digest(),
+                            "referenceRule": next(iter(blink.references.values())).rule if blink.references else None,
+                            "referenceBySource": {
+                                channel_id: {
+                                    "sourceSha256": reference.source_sha256,
+                                    "path": reference.path,
+                                    "candidacy": reference.candidacy,
+                                }
+                                for channel_id, reference in blink.references.items()
+                            },
+                            "pipelineReferences": {
+                                "registration": registration.receipt.get("referencePath"),
+                                "normalization": {
+                                    filter_name: (
+                                        (group.get("globalNormalization") or {}).get("referenceInput")
+                                        or (group.get("localNormalization") or {}).get("referenceInput")
+                                    )
+                                    for filter_name, group in pixel_pipeline_receipt.get("statistics", {})
+                                    .get("integrationGroups", {})
+                                    .items()
+                                },
+                            },
+                        }
+                    }
+                    if blink is not None
+                    else {}
+                ),
             },
             "registration": {
                 "receipt": "receipts/registration.json",
@@ -4970,11 +5379,14 @@ __all__ = [
     "E2EResult",
     "E2EState",
     "E2E_VERSION",
+    "ExplicitDecision",
+    "ExplicitSelection",
     "IntegrationMode",
     "ProgressCallback",
     "ProgressEvent",
     "ProgressStage",
     "ReviewApproval",
     "bind_review_approval_selections",
+    "parse_explicit_selection",
     "run_e2e",
 ]

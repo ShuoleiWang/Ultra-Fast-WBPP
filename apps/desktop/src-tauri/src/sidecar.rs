@@ -281,6 +281,133 @@ pub(crate) struct QualityInspection {
     pub frames: Vec<InspectedLightQuality>,
 }
 
+/// A master flat the blink measurement may use for the flat-corrected
+/// gradient flag; optional, one per filter.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct BlinkMasterFlat {
+    pub filter: String,
+    pub path: String,
+}
+
+/// The webview's "Blink & select" request: the Lights to measure, and
+/// optionally the master flats and a worker count for the engine.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct BlinkMeasureRequest {
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub master_flats: Vec<BlinkMasterFlat>,
+    #[serde(default)]
+    pub workers: Option<usize>,
+}
+
+/// Frame counts of a blink manifest: `exclude` are the frames pre-marked DROP,
+/// `attention` the kept frames with a flag, `clean` the rest.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BlinkCounts {
+    pub frames: usize,
+    pub exclude: usize,
+    pub attention: usize,
+    pub clean: usize,
+}
+
+/// The frame every other frame of a channel is registered and normalised
+/// to for blinking.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BlinkChannelReference {
+    pub index: usize,
+    pub source_sha256: String,
+    pub rule: String,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// One QC channel (target, filter, camera geometry, exposure bucket) of the
+/// manifest.  Statistics, stretch, geometry and nights pass through `extra`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BlinkChannel {
+    pub channel_id: String,
+    pub target: String,
+    pub filter: String,
+    pub frame_count: usize,
+    pub reference: BlinkChannelReference,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// One flag the engine raised on a frame; `EXCLUDE` pre-marks the frame
+/// DROP, `ATTENTION` only highlights it.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BlinkFlag {
+    pub code: String,
+    pub severity: String,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// The rendered previews of a frame, relative to the session directory.
+/// `filmstrip_data_url` is added by the desktop for the frames within the
+/// transport budget; the rest are fetched with `load_blink_preview`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BlinkPreviews {
+    #[serde(default)]
+    pub filmstrip: Option<String>,
+    #[serde(default)]
+    pub zoom: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filmstrip_data_url: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// One Light of the manifest.  The fields the desktop validates are typed;
+/// metrics, score, gate, notes, transform and normalisation pass through
+/// `extra` unchanged.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BlinkFrame {
+    pub index: usize,
+    pub channel_id: String,
+    pub path: String,
+    pub source_sha256: String,
+    pub reference: bool,
+    pub default_decision: String,
+    pub flags: Vec<BlinkFlag>,
+    #[serde(default)]
+    pub previews: BlinkPreviews,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// The `blink-manifest-v1` document `blink-measure` prints and writes as
+/// `manifest.json` in the session directory.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BlinkManifest {
+    pub schema_version: u32,
+    pub kind: String,
+    pub session_id: String,
+    pub session_directory: String,
+    pub inventory_sha256: String,
+    pub gate_policy_digest: String,
+    pub flags_policy_digest: String,
+    pub counts: BlinkCounts,
+    pub channels: Vec<BlinkChannel>,
+    pub frames: Vec<BlinkFrame>,
+    /// `sha256:` digest of the session's `manifest.json`, added by the
+    /// desktop: the `origin.blinkManifestSha256` of the selection file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_sha256: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct HashSourcesRequest {
@@ -1262,18 +1389,7 @@ pub(crate) fn hash_sources(request: HashSourcesRequest) -> Result<HashSourcesRes
 fn create_private_quality_request(
     paths: &[String],
 ) -> Result<(PathBuf, BTreeSet<PathBuf>), String> {
-    if paths.is_empty() || paths.len() > 10_000 {
-        return Err("quality inspection requires between 1 and 10000 Light files".to_owned());
-    }
-    let mut canonical = BTreeSet::new();
-    for value in paths {
-        let path = Path::new(value)
-            .canonicalize()
-            .map_err(|error| format!("cannot resolve Light for quality inspection: {error}"))?;
-        if !path.is_file() || !canonical.insert(path) {
-            return Err("quality inspection accepts unique regular Light files only".to_owned());
-        }
-    }
+    let canonical = canonical_light_paths(paths, "quality inspection")?;
     let request_path = std::env::temp_dir().join(format!(
         "{}.json",
         new_identifier("ultra-fast-wbpp-quality-request")?
@@ -1465,6 +1581,442 @@ fn inspect_quality_with(
         return Err("sidecar quality inspection counts do not match its frames".to_owned());
     }
     Ok(inspection)
+}
+
+const BLINK_MANIFEST_KIND: &str = "blink-manifest-v1";
+/// The filmstrip preview is the 1/8-scale grayscale JPEG (60–120 KB,
+/// noise-limited): 100 frames are about 12 MB as data URLs.  A preview over
+/// either bound is left to the on-demand `load_blink_preview` path.
+const MAX_BLINK_FILMSTRIP_BYTES: u64 = 200 * 1024;
+const MAX_BLINK_TRANSPORT_BYTES: usize = 32 * 1024 * 1024;
+/// Sessions kept under the blink-sessions root, the new one included; the
+/// previews of a 100-frame session take about 150 MB.
+const MAX_BLINK_SESSIONS: usize = 3;
+const MAX_BLINK_MASTER_FLATS: usize = 16;
+const MAX_BLINK_WORKERS: usize = 64;
+/// A 10 000-frame manifest with every metric is about 20 MB.
+const MAX_BLINK_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
+
+/// `<user cache>/Ultra-Fast-WBPP/blink-sessions`: `~/Library/Caches` on
+/// macOS, `%LOCALAPPDATA%` on Windows, the XDG cache on Linux — the same
+/// product cache folder the engine keeps its QC analysis cache in, and
+/// never inside a source folder.
+pub(crate) fn blink_sessions_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    let cache = app
+        .path()
+        .cache_dir()
+        .map_err(|error| format!("cannot resolve the user cache directory: {error}"))?;
+    Ok(cache.join("Ultra-Fast-WBPP").join("blink-sessions"))
+}
+
+/// Canonical, unique regular files for a request that names Lights.
+fn canonical_light_paths(paths: &[String], operation: &str) -> Result<BTreeSet<PathBuf>, String> {
+    if paths.is_empty() || paths.len() > 10_000 {
+        return Err(format!(
+            "{operation} requires between 1 and 10000 Light files"
+        ));
+    }
+    let mut canonical = BTreeSet::new();
+    for value in paths {
+        let path = Path::new(value)
+            .canonicalize()
+            .map_err(|error| format!("cannot resolve Light for {operation}: {error}"))?;
+        if !path.is_file() || !canonical.insert(path) {
+            return Err(format!(
+                "{operation} accepts unique regular Light files only"
+            ));
+        }
+    }
+    Ok(canonical)
+}
+
+/// Writes the private `blink-measure` request (mode 0600, create-only) and
+/// returns its path.  `workers` and the master flats travel only when the
+/// webview supplied them; the engine's hardware default applies otherwise.
+fn create_private_blink_request(
+    lights: &BTreeSet<PathBuf>,
+    session_directory: &Path,
+    master_flats: &[(String, PathBuf)],
+    workers: Option<usize>,
+) -> Result<PathBuf, String> {
+    let request_path = std::env::temp_dir().join(format!(
+        "{}.json",
+        new_identifier("ultra-fast-wbpp-blink-request")?
+    ));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&request_path)
+        .map_err(|error| format!("cannot create private blink request: {error}"))?;
+    let mut payload = serde_json::json!({
+        "schemaVersion": 1,
+        "lightPaths": lights.iter().map(|path| path.to_string_lossy()).collect::<Vec<_>>(),
+        "sessionDirectory": session_directory.to_string_lossy(),
+        "previews": {
+            "filmstripScale": 8, "zoomScale": 4, "filmstripFormat": "jpeg", "jpegQuality": 85,
+        },
+    });
+    if let Some(workers) = workers {
+        payload["workers"] = serde_json::json!(workers);
+    }
+    if !master_flats.is_empty() {
+        payload["masterFlats"] = master_flats
+            .iter()
+            .map(|(filter, path)| {
+                serde_json::json!({"filter": filter, "path": path.to_string_lossy()})
+            })
+            .collect();
+    }
+    let mut encoded = serde_json::to_vec(&payload).map_err(|error| error.to_string())?;
+    encoded.push(b'\n');
+    file.write_all(&encoded)
+        .map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())?;
+    Ok(request_path)
+}
+
+/// Removes the oldest of the desktop's own blink sessions under `root` so
+/// that at most `keep` remain.  Only directories the desktop named itself
+/// are candidates; a failed removal is not an error (the next launch tries
+/// again).
+fn prune_blink_sessions(root: &Path, keep: usize) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    let mut sessions = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str()?.to_owned();
+            let parts = crate::project::blink_session_name_parts(&name)?;
+            let file_type = entry.file_type().ok()?;
+            (file_type.is_dir() && !file_type.is_symlink()).then_some((parts, entry.path()))
+        })
+        .collect::<Vec<_>>();
+    sessions.sort_by_key(|session| session.0);
+    let excess = sessions.len().saturating_sub(keep);
+    for (_, path) in sessions.into_iter().take(excess) {
+        let _ = fs::remove_dir_all(path);
+    }
+}
+
+/// A fresh session directory name under `root`: the path-list digest, the
+/// local time and, when that name exists already, a counter.  The directory
+/// itself is created by the engine (create-only).
+fn new_blink_session_directory(root: &Path, lights: &BTreeSet<PathBuf>) -> Result<PathBuf, String> {
+    let mut digest = Sha256::new();
+    for path in lights {
+        digest.update(path.to_string_lossy().as_bytes());
+        digest.update(b"\n");
+    }
+    let stem = format!(
+        "{:.16}-{}",
+        format!("{:x}", digest.finalize()),
+        chrono::Local::now().format("%Y%m%d-%H%M%S")
+    );
+    // Counters never go backwards within a second: a name freed by the
+    // pruning just before is not reused, so a caller holding the old path
+    // cannot mistake the new session for it.
+    let next_attempt = fs::read_dir(root)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|entry| {
+                    let name = entry.file_name().to_str()?.to_owned();
+                    let counter = if name == stem {
+                        1
+                    } else {
+                        name.strip_prefix(&format!("{stem}-"))?
+                            .parse::<u32>()
+                            .ok()?
+                    };
+                    Some(counter + 1)
+                })
+                .max()
+                .unwrap_or(1)
+        })
+        .unwrap_or(1);
+    for attempt in next_attempt..=99_u32 {
+        let name = if attempt == 1 {
+            stem.clone()
+        } else {
+            format!("{stem}-{attempt}")
+        };
+        let candidate = root.join(&name);
+        if fs::symlink_metadata(&candidate).is_err() {
+            return Ok(candidate);
+        }
+    }
+    Err("cannot name a new blink session directory".to_owned())
+}
+
+pub(crate) fn blink_measure<R: Runtime>(
+    app: &AppHandle<R>,
+    request: BlinkMeasureRequest,
+) -> Result<BlinkManifest, String> {
+    let root = blink_sessions_root(app)?;
+    blink_measure_with(discover_engine(app)?, request, &root)
+}
+
+/// Runs `blink-measure` on the requested Lights into a new session under
+/// `sessions_root`, validates the manifest against the request and the
+/// session directory, and attaches the filmstrip previews within the
+/// transport budget.  A failed launch or an invalid manifest removes the
+/// session it created.
+fn blink_measure_with(
+    executable: EngineExecutable,
+    request: BlinkMeasureRequest,
+    sessions_root: &Path,
+) -> Result<BlinkManifest, String> {
+    let lights = canonical_light_paths(&request.paths, "blink measurement")?;
+    if request.master_flats.len() > MAX_BLINK_MASTER_FLATS {
+        return Err("blink measurement accepts at most 16 master flats".to_owned());
+    }
+    let mut flats_by_filter: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+    for item in &request.master_flats {
+        let filter = item.filter.trim();
+        let path = Path::new(&item.path).canonicalize().map_err(|error| {
+            format!("cannot resolve master flat for blink measurement: {error}")
+        })?;
+        if filter.is_empty() || filter.len() > 64 || !path.is_file() {
+            return Err(
+                "blink measurement master flats must be regular files with a filter".to_owned(),
+            );
+        }
+        // The engine compares filters case-insensitively.
+        flats_by_filter
+            .entry(filter.to_ascii_uppercase())
+            .or_default()
+            .push(path);
+    }
+    // The flats only feed the optional gradient flag.  The webview sends every
+    // imported master flat; a filter with more than one is ambiguous and is
+    // left out rather than guessed, and never fails the measurement.
+    let master_flats = flats_by_filter
+        .into_iter()
+        .filter_map(|(filter, mut paths)| (paths.len() == 1).then(|| (filter, paths.remove(0))))
+        .collect::<Vec<_>>();
+    if request
+        .workers
+        .is_some_and(|workers| workers == 0 || workers > MAX_BLINK_WORKERS)
+    {
+        return Err("blink measurement workers must be between 1 and 64".to_owned());
+    }
+    fs::create_dir_all(sessions_root)
+        .map_err(|error| format!("cannot create the blink sessions directory: {error}"))?;
+    let sessions_root = sessions_root
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve the blink sessions directory: {error}"))?;
+    prune_blink_sessions(&sessions_root, MAX_BLINK_SESSIONS - 1);
+    let session_directory = new_blink_session_directory(&sessions_root, &lights)?;
+    let request_path =
+        create_private_blink_request(&lights, &session_directory, &master_flats, request.workers)?;
+    let mut command = executable.command("blink-measure");
+    command
+        .arg("--request-json")
+        .arg(&request_path)
+        .arg("--compact");
+    let output = command_output(command, "blink measurement");
+    let _ = fs::remove_file(&request_path);
+    let result = output.and_then(|stdout| {
+        let mut manifest: BlinkManifest = serde_json::from_slice(&stdout)
+            .map_err(|error| format!("sidecar blink measurement returned invalid JSON: {error}"))?;
+        let session = session_directory.canonicalize().map_err(|error| {
+            format!("sidecar blink measurement left no session directory: {error}")
+        })?;
+        validate_blink_manifest(&manifest, &lights, &session).map_err(|detail| {
+            format!("sidecar blink measurement returned an invalid contract: {detail}")
+        })?;
+        manifest.manifest_sha256 = Some(blink_manifest_file_digest(&session, &manifest)?);
+        attach_blink_previews(&mut manifest, &session, MAX_BLINK_TRANSPORT_BYTES);
+        Ok(manifest)
+    });
+    if result.is_err() {
+        // The directory was named for this launch and is unusable without a
+        // valid manifest; the sessions root only ever holds our own output.
+        let _ = fs::remove_dir_all(&session_directory);
+    }
+    result
+}
+
+/// The `blink-manifest-v1` contract as the desktop relies on it: identity
+/// of the session and of every requested Light, well-formed digests and
+/// enums, counts and channel references consistent with the frames, and
+/// preview paths that stay inside the session directory.
+fn validate_blink_manifest(
+    manifest: &BlinkManifest,
+    expected_paths: &BTreeSet<PathBuf>,
+    session_directory: &Path,
+) -> Result<(), String> {
+    if manifest.schema_version != 1 || manifest.kind != BLINK_MANIFEST_KIND {
+        return Err("unsupported manifest kind or schema version".to_owned());
+    }
+    if manifest.session_id.trim().is_empty() || manifest.session_id.len() > 128 {
+        return Err("session id is missing".to_owned());
+    }
+    let reported = Path::new(&manifest.session_directory)
+        .canonicalize()
+        .map_err(|error| format!("session directory cannot be resolved: {error}"))?;
+    if reported != session_directory {
+        return Err("session directory differs from the requested one".to_owned());
+    }
+    if !checked_source_digest(&manifest.inventory_sha256)
+        || !checked_source_digest(&manifest.gate_policy_digest)
+        || !checked_source_digest(&manifest.flags_policy_digest)
+    {
+        return Err("inventory or policy digest is malformed".to_owned());
+    }
+    let frame_count = manifest.frames.len();
+    if frame_count != expected_paths.len() || manifest.counts.frames != frame_count {
+        return Err("frame count differs from the requested Lights".to_owned());
+    }
+    let channel_ids = manifest
+        .channels
+        .iter()
+        .map(|channel| channel.channel_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if channel_ids.len() != manifest.channels.len() || manifest.channels.is_empty() {
+        return Err("channels are missing or not unique".to_owned());
+    }
+    let mut observed_paths = BTreeSet::new();
+    let mut observed_indices = BTreeSet::new();
+    let mut counts = BlinkCounts {
+        frames: frame_count,
+        exclude: 0,
+        attention: 0,
+        clean: 0,
+    };
+    let mut frames_per_channel: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    for frame in &manifest.frames {
+        let path = Path::new(&frame.path)
+            .canonicalize()
+            .map_err(|error| format!("frame path cannot be resolved: {error}"))?;
+        if !expected_paths.contains(&path) || !observed_paths.insert(path) {
+            return Err("frames do not name every requested Light exactly once".to_owned());
+        }
+        if frame.index >= frame_count || !observed_indices.insert(frame.index) {
+            return Err("frame indices are not unique within the manifest".to_owned());
+        }
+        if !checked_source_digest(&frame.source_sha256) {
+            return Err("frame content digest is malformed".to_owned());
+        }
+        if !channel_ids.contains(frame.channel_id.as_str()) {
+            return Err("frame names an unknown channel".to_owned());
+        }
+        let mut excluded = false;
+        for flag in &frame.flags {
+            if !crate::project::checked_flag_code(&flag.code) {
+                return Err("flag code is malformed".to_owned());
+            }
+            match flag.severity.as_str() {
+                "EXCLUDE" => excluded = true,
+                "ATTENTION" => {}
+                _ => return Err("flag severity must be EXCLUDE or ATTENTION".to_owned()),
+            }
+        }
+        match (frame.default_decision.as_str(), excluded) {
+            ("DROP", true) => counts.exclude += 1,
+            ("KEEP", false) if frame.flags.is_empty() => counts.clean += 1,
+            ("KEEP", false) => counts.attention += 1,
+            ("KEEP" | "DROP", _) => {
+                return Err("default decision does not follow the EXCLUDE flags".to_owned())
+            }
+            _ => return Err("default decision must be KEEP or DROP".to_owned()),
+        }
+        for relative in [&frame.previews.filmstrip, &frame.previews.zoom]
+            .into_iter()
+            .flatten()
+        {
+            crate::project::resolve_blink_preview(session_directory, relative)?;
+        }
+        let entry = frames_per_channel
+            .entry(frame.channel_id.as_str())
+            .or_default();
+        entry.0 += 1;
+        entry.1 += usize::from(frame.reference);
+    }
+    if manifest.counts != counts {
+        return Err("counts do not match the frames".to_owned());
+    }
+    for channel in &manifest.channels {
+        let (frames, references) = frames_per_channel
+            .get(channel.channel_id.as_str())
+            .copied()
+            .unwrap_or_default();
+        if frames != channel.frame_count || references != 1 || channel.reference.rule.is_empty() {
+            return Err("channel frame count or reference is inconsistent".to_owned());
+        }
+        let reference = manifest
+            .frames
+            .iter()
+            .find(|frame| frame.index == channel.reference.index)
+            .ok_or("channel reference names no frame")?;
+        if !reference.reference
+            || reference.channel_id != channel.channel_id
+            || reference.source_sha256 != channel.reference.source_sha256
+        {
+            return Err("channel reference does not match its frame".to_owned());
+        }
+    }
+    Ok(())
+}
+
+/// Digest of the `manifest.json` the engine wrote into the session, after
+/// checking that it describes this session: a run's selection names it in
+/// `origin`, and `qc/blink.json` is compared with it.
+fn blink_manifest_file_digest(
+    session_directory: &Path,
+    manifest: &BlinkManifest,
+) -> Result<String, String> {
+    let path = session_directory.join("manifest.json");
+    let mut bytes = Vec::new();
+    File::open(&path)
+        .map_err(|error| format!("blink session has no manifest.json: {error}"))?
+        .take((MAX_BLINK_MANIFEST_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > MAX_BLINK_MANIFEST_BYTES {
+        return Err("blink session manifest.json is too large".to_owned());
+    }
+    let written: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("blink session manifest.json is not JSON: {error}"))?;
+    if written.get("kind").and_then(serde_json::Value::as_str) != Some(BLINK_MANIFEST_KIND)
+        || written.get("sessionId").and_then(serde_json::Value::as_str)
+            != Some(manifest.session_id.as_str())
+        || written
+            .get("inventorySha256")
+            .and_then(serde_json::Value::as_str)
+            != Some(manifest.inventory_sha256.as_str())
+    {
+        return Err("blink session manifest.json describes another session".to_owned());
+    }
+    Ok(format!("sha256:{}", sha256_file(&path)?))
+}
+
+/// Loads the filmstrip previews as data URLs, in manifest order, until the
+/// per-preview bound or the transport `budget` leaves a frame out.
+fn attach_blink_previews(manifest: &mut BlinkManifest, session_directory: &Path, budget: usize) {
+    let mut budget = budget;
+    for frame in &mut manifest.frames {
+        let Some(relative) = frame.previews.filmstrip.as_deref() else {
+            continue;
+        };
+        let Ok((resolved, format)) =
+            crate::project::resolve_blink_preview(session_directory, relative)
+        else {
+            continue;
+        };
+        frame.previews.filmstrip_data_url = crate::project::image_data_url(
+            &resolved,
+            format,
+            MAX_BLINK_FILMSTRIP_BYTES,
+            &mut budget,
+        );
+    }
 }
 
 fn recipe_cli_id(recipe_id: &str) -> Result<&'static str, String> {
@@ -2369,7 +2921,7 @@ mod tests {
         std::fs::create_dir(&root).expect("create fake sidecar directory");
         let script = root.join("fake-openastroflow-engine");
         let source = r###"#!/usr/bin/env python3
-import argparse, hashlib, json, os, pathlib, platform, sys
+import argparse, base64, hashlib, json, os, pathlib, platform, re, sys
 
 CPU_PROFILE = "generic-arm64-cpu" if platform.machine().lower() in {"arm64", "aarch64"} else "portable-cpu"
 
@@ -2441,6 +2993,91 @@ def quality_check(argv):
   print(json.dumps({"schemaVersion":1,"gatePolicyDigest":"sha256:"+"7"*64,"workers":1,
                     "counts":{"PASS":0,"REVIEW":len(frames),"HARD_FAIL":0},"frames":frames},separators=(",",":")),flush=True)
 
+FILMSTRIP_JPEG = base64.b64decode(
+  "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/wAALCAAIAAwBAREA"
+  "/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRol"
+  "JicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi"
+  "4+Tl5ufo6erx8vP09fb3+Pn6/9oACAEBAAA/AMPzGdVym53+Z2ZGCgjpknGTkAeg5/FqXMsMakKhL5Y7sDGCR0yOwFf/2Q==")
+ZOOM_PNG = base64.b64decode(
+  "iVBORw0KGgoAAAANSUhEUgAAAAwAAAAICAAAAADoj0EtAAAAd0lEQVR4AQKMMVqB6R3nD/5/r39KvmBh+f7+l+Cr9wI/+Z8Ks/zj/8P0ipGX+x87/2cW3mc/uCQ+sD5nFeV7z8Im"
+  "cP834/v//1j+32FnYbyj8PcZv+i7f3/4vzH9EWd+KsZ6W+jrf24ups/vGOWeMDC+kPz+/z0A4Qsw9hBiytcAAAAASUVORK5CYII=")
+
+def blink_fail(code, message):
+  print(json.dumps({"ok":False,"error":{"code":code,"message":message}}), file=sys.stderr, flush=True)
+  raise SystemExit(2)
+
+def blink_measure(argv):
+  # A schema-exact blink-manifest-v1 fixture: two channels (L, R) with nights,
+  # the combined EXCLUDE rule, an ATTENTION flag, one reference per channel and
+  # real JPEG/PNG previews written create-only into the session directory.
+  parser = argparse.ArgumentParser()
+  parser.add_argument("--request-json", required=True)
+  parser.add_argument("--compact", action="store_true")
+  args = parser.parse_args(argv)
+  request = json.loads(pathlib.Path(args.request_json).read_text(encoding="utf-8"))
+  if request.get("schemaVersion") != 1 or set(request) - {"schemaVersion","lightPaths","sessionDirectory","workers","previews","masterFlats"}:
+    blink_fail("BLINK_REQUEST_INVALID", "unsupported request fields")
+  session = pathlib.Path(request["sessionDirectory"])
+  try:
+    session.mkdir(parents=False, exist_ok=False)
+  except FileExistsError:
+    blink_fail("BLINK_SESSION_EXISTS", "session directory exists")
+  (session / "filmstrip").mkdir(); (session / "zoom").mkdir()
+  frames = []; channels = {}
+  ordered = sorted(request["lightPaths"], key=lambda p: (("_R_" in pathlib.Path(p).name), p))
+  for index, path in enumerate(ordered):
+    name = pathlib.Path(path).name
+    filt = "R" if "_R_" in name else "L"
+    night = re.search(r"(\d{4}-\d{2}-\d{2})", name); night = night.group(1) if night else "2026-08-17"
+    flags = []
+    if "moon" in name:
+      flags = [{"code":"BLINK_SKY_BRIGHT","severity":"EXCLUDE","value":2.43,"threshold":1.6,"combined":True,"message":"Sky 2.43x the clean-sky level and 55 % of its stars"},
+               {"code":"BLINK_SOURCES_LOW","severity":"ATTENTION","value":0.55,"threshold":0.6,"combined":True,"message":"55 % of the channel's best star count"}]
+    elif "haze" in name:
+      flags = [{"code":"BLINK_EXTINCTION","severity":"ATTENTION","value":0.67,"threshold":0.5,"combined":False,"message":"0.67 mag extra extinction"}]
+    safe = re.sub(r"[^A-Za-z0-9]+", "-", pathlib.Path(name).stem)[:40]
+    filmstrip = f"filmstrip/{index:04d}-{filt}-{safe}.jpg"; zoom = f"zoom/{index:04d}-{filt}-{safe}.png"
+    (session / filmstrip).write_bytes(FILMSTRIP_JPEG + (b"\0" * 210 * 1024 if "oversize" in name else b""))
+    (session / zoom).write_bytes(ZOOM_PNG)
+    digest = "sha256:" + hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+    channel = channels.setdefault(filt, {"channelId":f"group-{filt.lower()}0000000000","target":"NGC 6822","filter":filt,"frameCount":0,
+      "reference":None,"statistics":{"skyClean":1090.0,"cleanCount":3,"sourcesBest":5680,"fwhmBest":4.07},
+      "stretch":{"black":872.0,"white":1420.0,"softness":4.0,"skyReference":986.0,"sigmaReference":43.3},
+      "previewGeometry":{"filmstrip":[12,8],"zoom":[12,8],"sourceShape":[4176,6252]},"nights":{}})
+    channel["frameCount"] += 1
+    excluded = any(f["severity"] == "EXCLUDE" for f in flags)
+    reference = channel["reference"] is None and not flags
+    if reference:
+      channel["reference"] = {"index":index,"sourceSha256":digest,"rule":"psf-signal-weight-proxy-v1"}
+    summary = channel["nights"].setdefault(night, {"night":night,"frameCount":0,"medianSky":2360 if excluded else 1000,"skyRatio":2.17 if excluded else 1.0,
+      "medianSourceRatio":0.53 if excluded else 0.95,"medianExtinction":0.28,"exclude":0,"attention":0,"defaultDropNight":excluded})
+    summary["frameCount"] += 1; summary["exclude"] += int(excluded); summary["attention"] += int(bool(flags) and not excluded)
+    frames.append({"index":index,"channelId":channel["channelId"],"filter":filt,"target":"NGC 6822","night":night,"path":path,"name":name,
+      "sourceSha256":digest,"observedAt":night+"T22:57:01","airmass":1.31,"reference":reference,"defaultDecision":"DROP" if excluded else "KEEP",
+      "flags":flags,"notes":[] if flags else ["GATE_INSUFFICIENT_COHORT"],"gate":{"disposition":"PASS","codes":[]},
+      "metrics":{"sky":2647.3 if excluded else 986.0,"skyRatio":2.43 if excluded else 1.0,"starCount":2947,"sourceRatio":0.55,"extinctionMag":0.23,
+        "transparency":0.84,"fwhmNative":4.47,"fwhmRatio":1.1,"ellipticity":0.09,"eccentricity":0.38,"registrationRms":0.21,"matchedStars":1900,
+        "overlap":1.0,"backgroundShape":0.13,"gradientRatio":None},
+      "score":{"log10":-5.0,"z":-3.1,"rank":index+1},
+      "previews":{"filmstrip":filmstrip,"zoom":zoom,"coverage":0.99},
+      "transformToReference":[[1.0,0.0,1.27],[0.0,1.0,-0.81]],"normalization":{"skyOffset":2647.3,"fluxScale":1.19,"registered":True}})
+  for channel in channels.values():
+    if channel["reference"] is None:
+      first = next(f for f in frames if f["channelId"] == channel["channelId"]); first["reference"] = True
+      channel["reference"] = {"index":first["index"],"sourceSha256":first["sourceSha256"],"rule":"psf-signal-weight-proxy-v1"}
+    channel["nights"] = list(channel["nights"].values())
+  exclude = sum(f["defaultDecision"] == "DROP" for f in frames); attention = sum(f["defaultDecision"] == "KEEP" and bool(f["flags"]) for f in frames)
+  manifest = {"schemaVersion":1,"kind":"blink-manifest-v1","sessionId":session.name,"sessionDirectory":str(session.resolve()),
+    "createdAt":"2026-09-22T00:00:00","engineVersion":"fake","gatePolicyDigest":"sha256:"+"7"*64,"flagsPolicyDigest":"sha256:"+"8"*64,
+    "flagsPolicy":{"version":"blink-flags-v1","skyBrightAttention":1.6},
+    "inventorySha256":"sha256:"+hashlib.sha256("".join(f["sourceSha256"] for f in frames).encode()).hexdigest(),
+    "timings":{"measurementSeconds":0.1,"analysisSeconds":0.1,"gateSeconds":0.1,"flagsSeconds":0.01,"previewSeconds":0.1},
+    "counts":{"frames":len(frames),"exclude":exclude,"attention":attention,"clean":len(frames)-exclude-attention},
+    "channels":list(channels.values()),"frames":frames,
+    "requestEcho":{"workers":request.get("workers"),"masterFlats":request.get("masterFlats"),"previews":request["previews"]}}
+  (session / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+  print(json.dumps(manifest, ensure_ascii=False, separators=(",",":") if args.compact else None), flush=True)
+
 def artifact_payload(request_id, run_id, stage_id, stage_kind, artifact):
   stage={"schemaVersion":1,"stageId":stage_id,"kind":stage_kind,"status":"succeeded","startedAtUnixMs":1,
          "finishedAtUnixMs":2,"artifactIds":[artifact["artifactId"]],"metrics":{}}
@@ -2478,6 +3115,7 @@ def worker():
 if sys.argv[1] == "controller-plan": controller_plan(sys.argv[2:])
 elif sys.argv[1] == "inventory": inventory()
 elif sys.argv[1] == "quality-check": quality_check(sys.argv[2:])
+elif sys.argv[1] == "blink-measure": blink_measure(sys.argv[2:])
 elif sys.argv[1] == "worker": worker()
 else: raise SystemExit(2)
 "###;
@@ -2765,6 +3403,555 @@ print((pathlib.Path(__file__).parent / 'inventory.json').read_text())
             .as_deref()
             .is_some_and(|value| value.starts_with("sha256:")));
         assert_eq!(std::fs::read(&light).unwrap(), b"quality-light-bytes");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Four Lights for the fake `blink-measure`: an L reference night, a
+    /// moonlit L frame (combined EXCLUDE rule), a hazy R frame (ATTENTION)
+    /// and a clean R frame whose filmstrip exceeds the inline bound.
+    #[cfg(unix)]
+    fn blink_lights(root: &Path) -> Vec<String> {
+        let lights = root.join("Lights 盾牌座");
+        std::fs::create_dir_all(&lights).expect("lights directory");
+        [
+            "NGC 6822_300.00s_L_2026-08-17_22-57-01_+8.00°C.fits",
+            "NGC 6822_300.00s_L_2026-08-20_21-15-27_moon.fits",
+            "NGC 6822_300.00s_R_2026-09-06_haze.fits",
+            "NGC 6822_300.00s_R_2026-09-08_oversize 盾牌座.fits",
+        ]
+        .iter()
+        .map(|name| {
+            let path = lights.join(name);
+            std::fs::write(&path, format!("light bytes of {name}")).expect("write light");
+            path.to_string_lossy().into_owned()
+        })
+        .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_sidecar_blink_measure_is_validated_and_previews_are_bounded() {
+        let (root, script) = fake_sidecar();
+        let paths = blink_lights(&root);
+        let flat = root.join("masterFlat_L.xisf");
+        std::fs::write(&flat, b"flat bytes").expect("write flat");
+        let second_r_flat = root.join("masterFlat_R_2.xisf");
+        std::fs::write(&second_r_flat, b"flat bytes").expect("write flat");
+        let sessions = root.join("blink-sessions");
+        let master_flat = |filter: &str, path: &Path| BlinkMasterFlat {
+            filter: filter.to_owned(),
+            path: path.to_string_lossy().into_owned(),
+        };
+        let manifest = blink_measure_with(
+            EngineExecutable { path: script },
+            BlinkMeasureRequest {
+                paths: paths.clone(),
+                // Two flats for R: that filter is left out, L travels.
+                master_flats: vec![
+                    master_flat("L", &flat),
+                    master_flat("R", &flat),
+                    master_flat("R", &second_r_flat),
+                ],
+                workers: Some(3),
+            },
+            &sessions,
+        )
+        .expect("blink measurement");
+        assert_eq!(manifest.kind, BLINK_MANIFEST_KIND);
+        assert_eq!(
+            manifest.counts,
+            BlinkCounts {
+                frames: 4,
+                exclude: 1,
+                attention: 1,
+                clean: 2
+            }
+        );
+        assert_eq!(manifest.channels.len(), 2);
+        // The request transported the optional fields and the preview policy.
+        assert_eq!(manifest.extra["requestEcho"]["workers"], 3);
+        assert_eq!(
+            manifest.extra["requestEcho"]["masterFlats"],
+            serde_json::json!([{"filter": "L", "path": flat.canonicalize().unwrap()}])
+        );
+        assert_eq!(
+            manifest.extra["requestEcho"]["previews"]["filmstripFormat"],
+            "jpeg"
+        );
+        assert!(manifest.extra.contains_key("timings"));
+        // The session lives under the sessions root with the desktop's name.
+        let session = Path::new(&manifest.session_directory);
+        assert_eq!(
+            session.parent(),
+            Some(sessions.canonicalize().unwrap().as_path())
+        );
+        assert!(crate::project::blink_session_name_parts(
+            session.file_name().unwrap().to_str().unwrap()
+        )
+        .is_some());
+        let manifest_file = session.join("manifest.json");
+        assert!(manifest_file.is_file());
+        assert_eq!(
+            manifest.manifest_sha256.as_deref().unwrap(),
+            format!("sha256:{}", sha256_file(&manifest_file).unwrap())
+        );
+        let frame = |needle: &str| {
+            manifest
+                .frames
+                .iter()
+                .find(|frame| frame.path.contains(needle))
+                .expect("frame")
+        };
+        let reference = frame("22-57-01");
+        assert!(reference.reference && reference.flags.is_empty());
+        let l_channel = manifest
+            .channels
+            .iter()
+            .find(|channel| channel.filter == "L")
+            .unwrap();
+        assert_eq!(l_channel.reference.index, reference.index);
+        assert_eq!(l_channel.frame_count, 2);
+        let moon = frame("moon");
+        assert_eq!(moon.default_decision, "DROP");
+        assert_eq!(moon.flags[0].code, "BLINK_SKY_BRIGHT");
+        assert_eq!(moon.flags[0].extra["combined"], true);
+        let haze = frame("haze");
+        assert_eq!(haze.default_decision, "KEEP");
+        assert_eq!(haze.flags[0].severity, "ATTENTION");
+        for item in [reference, moon, haze] {
+            let url = item.previews.filmstrip_data_url.as_deref().unwrap();
+            assert!(url.starts_with("data:image/jpeg;base64,/9j/"));
+            assert_eq!(item.extra["metrics"]["matchedStars"], 1900);
+        }
+        // The oversize filmstrip stays on disk for the on-demand path.
+        let oversize = frame("oversize");
+        assert!(oversize.previews.filmstrip_data_url.is_none());
+        let zoom = oversize.previews.zoom.as_deref().unwrap();
+        let loaded =
+            crate::project::load_blink_preview_with(&sessions, &manifest.session_directory, zoom)
+                .expect("zoom preview");
+        assert!(loaded.starts_with("data:image/png;base64,iVBOR"));
+        let filmstrip = oversize.previews.filmstrip.as_deref().unwrap();
+        assert!(crate::project::load_blink_preview_with(
+            &sessions,
+            &manifest.session_directory,
+            filmstrip
+        )
+        .is_ok());
+        // Every source file is untouched and the serialised manifest keeps
+        // the pass-through fields next to the typed ones.
+        for path in &paths {
+            assert!(std::fs::read_to_string(path)
+                .unwrap()
+                .starts_with("light bytes"));
+        }
+        let encoded = serde_json::to_value(&manifest).unwrap();
+        assert_eq!(encoded["frames"][0]["score"]["rank"], 1);
+        assert_eq!(encoded["channels"][0]["nights"][0]["night"], "2026-08-17");
+        assert!(encoded["frames"][0]["previews"]["filmstripDataUrl"].is_string());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_sidecar_blink_sessions_are_pruned_to_the_newest_three() {
+        let (root, script) = fake_sidecar();
+        let paths = blink_lights(&root);
+        let sessions = root.join("blink-sessions");
+        std::fs::create_dir_all(sessions.join("not-ours")).unwrap();
+        std::fs::write(sessions.join("not-ours/keep.txt"), b"foreign").unwrap();
+        let mut directories = Vec::new();
+        for _ in 0..4 {
+            let manifest = blink_measure_with(
+                EngineExecutable {
+                    path: script.clone(),
+                },
+                BlinkMeasureRequest {
+                    paths: paths.clone(),
+                    master_flats: vec![],
+                    workers: None,
+                },
+                &sessions,
+            )
+            .expect("blink measurement");
+            directories.push(PathBuf::from(manifest.session_directory));
+        }
+        assert!(!directories[0].exists(), "oldest session removed");
+        for directory in &directories[1..] {
+            assert!(directory.join("manifest.json").is_file());
+        }
+        assert!(sessions.join("not-ours/keep.txt").is_file());
+        // A refused request leaves no session behind: it names a Light twice,
+        // which the request check rejects before spawning.
+        let mut duplicated = paths.clone();
+        duplicated.push(paths[0].clone());
+        let error = blink_measure_with(
+            EngineExecutable { path: script },
+            BlinkMeasureRequest {
+                paths: duplicated,
+                master_flats: vec![],
+                workers: Some(0),
+            },
+            &sessions,
+        )
+        .unwrap_err();
+        assert!(error.contains("unique regular Light files"));
+        assert_eq!(std::fs::read_dir(&sessions).unwrap().count(), 4);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_sidecar_blink_failure_removes_its_session() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (root, script) = fake_sidecar();
+        let paths = blink_lights(&root);
+        let sessions = root.join("blink-sessions");
+        // A sidecar whose manifest rebinds an input: the fake script is
+        // wrapped so that its stdout names a different Light.
+        let wrapper = root.join("rebinding-sidecar");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\n\"{}\" \"$@\" | sed 's/22-57-01/22-57-02/'\n",
+                script.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&wrapper).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&wrapper, permissions).unwrap();
+        let error = blink_measure_with(
+            EngineExecutable { path: wrapper },
+            BlinkMeasureRequest {
+                paths,
+                master_flats: vec![],
+                workers: None,
+            },
+            &sessions,
+        )
+        .unwrap_err();
+        assert!(error.contains("invalid contract"), "{error}");
+        assert_eq!(std::fs::read_dir(&sessions).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The real engine on real Lights: `OAF_TEST_ENGINE` names an
+    /// `ultra-fast-wbpp` executable, `OAF_TEST_BLINK_LIGHTS` a text file with
+    /// one Light path per line.  Run with `--ignored --nocapture` to see the
+    /// session summary.
+    #[test]
+    #[ignore = "requires OAF_TEST_ENGINE and OAF_TEST_BLINK_LIGHTS pointing to a real engine and Lights"]
+    fn real_engine_blink_measure_session_is_accepted() {
+        let engine = PathBuf::from(std::env::var("OAF_TEST_ENGINE").expect("engine path"));
+        let paths = std::fs::read_to_string(
+            std::env::var("OAF_TEST_BLINK_LIGHTS").expect("light list path"),
+        )
+        .expect("light list")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        let sessions = std::env::temp_dir()
+            .join(new_identifier("real-blink-sessions").expect("temporary identifier"));
+        let started = std::time::Instant::now();
+        let manifest = blink_measure_with(
+            EngineExecutable { path: engine },
+            BlinkMeasureRequest {
+                paths: paths.clone(),
+                master_flats: vec![],
+                workers: None,
+            },
+            &sessions,
+        )
+        .expect("real blink-measure session");
+        let elapsed = started.elapsed();
+        assert_eq!(manifest.frames.len(), paths.len());
+        let inline = manifest
+            .frames
+            .iter()
+            .filter(|frame| frame.previews.filmstrip_data_url.is_some())
+            .count();
+        for frame in &manifest.frames {
+            for relative in [&frame.previews.filmstrip, &frame.previews.zoom]
+                .into_iter()
+                .flatten()
+            {
+                crate::project::load_blink_preview_with(
+                    &sessions,
+                    &manifest.session_directory,
+                    relative,
+                )
+                .expect("preview loads on demand");
+            }
+        }
+        eprintln!(
+            "blink-measure: {} frames in {:.1?}, {} channels, counts {:?}, {inline} inline filmstrip previews, manifest {}",
+            manifest.frames.len(),
+            elapsed,
+            manifest.channels.len(),
+            manifest.counts,
+            manifest.manifest_sha256.as_deref().unwrap_or("-"),
+        );
+        for channel in &manifest.channels {
+            let reference = manifest
+                .frames
+                .iter()
+                .find(|frame| frame.index == channel.reference.index)
+                .expect("validated reference");
+            eprintln!(
+                "  {} {}: {} frames, reference {}",
+                channel.target,
+                channel.filter,
+                channel.frame_count,
+                reference
+                    .extra
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(&reference.path)
+            );
+        }
+        for frame in &manifest.frames {
+            eprintln!(
+                "  {:>4} {:<5} {} {:?}",
+                frame.index,
+                frame.default_decision,
+                frame
+                    .extra
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(&frame.path),
+                frame
+                    .flags
+                    .iter()
+                    .map(|flag| format!("{}:{}", flag.code, flag.severity))
+                    .collect::<Vec<_>>()
+            );
+        }
+        let _ = std::fs::remove_dir_all(sessions);
+    }
+
+    /// A schema-exact manifest over `lights` with real preview files, for the
+    /// validation cases below.
+    fn sample_blink_manifest(session: &Path, lights: &[PathBuf]) -> serde_json::Value {
+        std::fs::create_dir_all(session.join("filmstrip")).unwrap();
+        std::fs::create_dir_all(session.join("zoom")).unwrap();
+        let jpeg: Vec<u8> = [0xff, 0xd8, 0xff, 0xe0]
+            .into_iter()
+            .chain([7_u8; 64])
+            .collect();
+        let png: Vec<u8> = crate::project::PNG_SIGNATURE
+            .iter()
+            .copied()
+            .chain([1_u8; 32])
+            .collect();
+        let frames = lights
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                let filmstrip = format!("filmstrip/{index:04}-L.jpg");
+                let zoom = format!("zoom/{index:04}-L.png");
+                std::fs::write(session.join(&filmstrip), &jpeg).unwrap();
+                std::fs::write(session.join(&zoom), &png).unwrap();
+                let excluded = index == 1;
+                serde_json::json!({
+                    "index": index, "channelId": "group-l", "filter": "L", "night": "2026-08-17",
+                    "path": path, "name": path.file_name().unwrap().to_str().unwrap(),
+                    "sourceSha256": format!("sha256:{}", format!("{index}").repeat(64)),
+                    "reference": index == 0, "defaultDecision": if excluded { "DROP" } else { "KEEP" },
+                    "flags": if excluded {
+                        serde_json::json!([{"code": "BLINK_SKY_BRIGHT", "severity": "EXCLUDE", "value": 2.4, "threshold": 1.6}])
+                    } else if index == 2 {
+                        serde_json::json!([{"code": "BLINK_EXTINCTION", "severity": "ATTENTION", "value": 0.6, "threshold": 0.5}])
+                    } else {
+                        serde_json::json!([])
+                    },
+                    "previews": {"filmstrip": filmstrip, "zoom": zoom, "coverage": 1.0},
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "schemaVersion": 1, "kind": "blink-manifest-v1", "sessionId": "session-1",
+            "sessionDirectory": session, "inventorySha256": format!("sha256:{}", "a".repeat(64)),
+            "gatePolicyDigest": format!("sha256:{}", "b".repeat(64)),
+            "flagsPolicyDigest": format!("sha256:{}", "c".repeat(64)),
+            "counts": {"frames": lights.len(), "exclude": 1, "attention": 1, "clean": lights.len() - 2},
+            "channels": [{"channelId": "group-l", "target": "NGC 6822", "filter": "L", "frameCount": lights.len(),
+                "reference": {"index": 0, "sourceSha256": format!("sha256:{}", "0".repeat(64)), "rule": "psf-signal-weight-proxy-v1"},
+                "nights": []}],
+            "frames": frames,
+        })
+    }
+
+    #[test]
+    fn blink_manifest_validation_rejects_rebound_inputs_and_inconsistent_records() {
+        let root = std::env::temp_dir()
+            .join(new_identifier("blink-manifest-validation").expect("temporary identifier"));
+        let session = root.join("session");
+        std::fs::create_dir_all(&session).unwrap();
+        let session = session.canonicalize().unwrap();
+        let lights = (0..3)
+            .map(|index| {
+                let path = root.join(format!("light {index} 盾牌座.fits"));
+                std::fs::write(&path, format!("light {index}")).unwrap();
+                path.canonicalize().unwrap()
+            })
+            .collect::<Vec<_>>();
+        let expected = lights.iter().cloned().collect::<BTreeSet<_>>();
+        let valid = sample_blink_manifest(&session, &lights);
+        let check = |value: serde_json::Value| -> Result<(), String> {
+            let manifest: BlinkManifest =
+                serde_json::from_value(value).map_err(|e| e.to_string())?;
+            validate_blink_manifest(&manifest, &expected, &session)
+        };
+        check(valid.clone()).expect("valid manifest");
+        let mutated = |edit: &dyn Fn(&mut serde_json::Value)| {
+            let mut value = valid.clone();
+            edit(&mut value);
+            check(value)
+        };
+        type Edit = fn(&mut serde_json::Value);
+        let cases: &[(&str, Edit)] = &[
+            ("kind", |v| v["kind"] = "quality-manifest".into()),
+            ("schema", |v| v["schemaVersion"] = 2.into()),
+            ("session", |v| {
+                v["sessionDirectory"] = v["sessionDirectory"]
+                    .as_str()
+                    .unwrap()
+                    .trim_end_matches("session")
+                    .into()
+            }),
+            ("digest case", |v| {
+                v["flagsPolicyDigest"] = format!("sha256:{}", "C".repeat(64)).into()
+            }),
+            ("rebound path", |v| {
+                v["frames"][2]["path"] = v["frames"][0]["path"].clone()
+            }),
+            ("dropped frame", |v| {
+                v["frames"].as_array_mut().unwrap().pop();
+                v["counts"]["frames"] = 2.into();
+                v["counts"]["clean"] = 0.into();
+                v["channels"][0]["frameCount"] = 2.into();
+            }),
+            ("duplicate index", |v| v["frames"][2]["index"] = 0.into()),
+            ("frame digest", |v| {
+                v["frames"][1]["sourceSha256"] = "sha256:short".into()
+            }),
+            ("unknown channel", |v| {
+                v["frames"][1]["channelId"] = "group-r".into()
+            }),
+            ("severity", |v| {
+                v["frames"][1]["flags"][0]["severity"] = "WARN".into()
+            }),
+            ("flag code", |v| {
+                v["frames"][1]["flags"][0]["code"] = "sky bright".into()
+            }),
+            ("drop without exclude", |v| {
+                v["frames"][0]["defaultDecision"] = "DROP".into()
+            }),
+            ("keep with exclude", |v| {
+                v["frames"][1]["defaultDecision"] = "KEEP".into()
+            }),
+            ("decision enum", |v| {
+                v["frames"][0]["defaultDecision"] = "MAYBE".into()
+            }),
+            ("counts", |v| {
+                v["counts"]["exclude"] = 2.into();
+                v["counts"]["clean"] = 0.into();
+            }),
+            ("escaping preview", |v| {
+                v["frames"][0]["previews"]["zoom"] = "../session/zoom/0000-L.png".into()
+            }),
+            ("absolute preview", |v| {
+                v["frames"][0]["previews"]["filmstrip"] =
+                    v["sessionDirectory"].as_str().unwrap().to_owned().into()
+            }),
+            ("missing preview", |v| {
+                v["frames"][0]["previews"]["filmstrip"] = "filmstrip/9999-L.jpg".into()
+            }),
+            ("preview extension", |v| {
+                v["frames"][0]["previews"]["filmstrip"] = "filmstrip/0000-L.txt".into()
+            }),
+            ("reference index", |v| {
+                v["channels"][0]["reference"]["index"] = 2.into()
+            }),
+            ("reference digest", |v| {
+                v["channels"][0]["reference"]["sourceSha256"] =
+                    format!("sha256:{}", "9".repeat(64)).into()
+            }),
+            ("two references", |v| {
+                v["frames"][2]["reference"] = true.into()
+            }),
+            ("channel count", |v| {
+                v["channels"][0]["frameCount"] = 2.into()
+            }),
+            ("duplicate channel", |v| {
+                let channel = v["channels"][0].clone();
+                v["channels"].as_array_mut().unwrap().push(channel);
+            }),
+        ];
+        for &(name, edit) in cases {
+            assert!(mutated(&edit).is_err(), "{name} must be rejected");
+        }
+        // Null previews are allowed (a frame the renderer skipped is shown
+        // without an image); unknown fields pass through.
+        mutated(&|v| {
+            v["frames"][0]["previews"]["filmstrip"] = serde_json::Value::Null;
+            v["frames"][0]["previews"]["zoom"] = serde_json::Value::Null;
+            v["frames"][0]["metrics"] = serde_json::json!({"sky": 986.0});
+        })
+        .expect("null previews and extra fields");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn blink_filmstrip_previews_respect_the_transport_budget() {
+        let root = std::env::temp_dir()
+            .join(new_identifier("blink-preview-budget").expect("temporary identifier"));
+        let session = root.join("session");
+        std::fs::create_dir_all(&session).unwrap();
+        let session = session.canonicalize().unwrap();
+        let lights = (0..3)
+            .map(|index| {
+                let path = root.join(format!("light{index}.fits"));
+                std::fs::write(&path, b"light").unwrap();
+                path.canonicalize().unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut manifest: BlinkManifest =
+            serde_json::from_value(sample_blink_manifest(&session, &lights)).unwrap();
+        // The second filmstrip is a PNG under a .jpg name: not carried.
+        std::fs::write(
+            session.join("filmstrip/0001-L.jpg"),
+            crate::project::PNG_SIGNATURE,
+        )
+        .unwrap();
+        let one_preview = "data:image/jpeg;base64,".len() + 68_usize.div_ceil(3) * 4;
+        attach_blink_previews(&mut manifest, &session, one_preview * 2 - 1);
+        let urls = manifest
+            .frames
+            .iter()
+            .map(|frame| frame.previews.filmstrip_data_url.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(urls, vec![true, false, false]);
+        assert_eq!(
+            manifest.frames[0]
+                .previews
+                .filmstrip_data_url
+                .as_deref()
+                .unwrap()
+                .len(),
+            one_preview
+        );
+        let mut generous: BlinkManifest =
+            serde_json::from_value(sample_blink_manifest(&session, &lights)).unwrap();
+        attach_blink_previews(&mut generous, &session, MAX_BLINK_TRANSPORT_BYTES);
+        assert!(generous
+            .frames
+            .iter()
+            .all(|frame| frame.previews.filmstrip_data_url.is_some()));
         let _ = std::fs::remove_dir_all(root);
     }
 

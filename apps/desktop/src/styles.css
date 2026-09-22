@@ -565,6 +565,83 @@ progress::-webkit-progress-value { background: var(--accent); }
 .cards { padding-top: 16px; }
 .card .shot-sky { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0.7; }
 
+/* ── Blink screening ─────────────────────────────────────────────── */
+/* One channel at a time: stage (shared zoom/pan), optional metrics strip,
+   the filmstrip grouped by night, the keyboard legend and the launch bar.
+   Decisions are colour-coded with --ok / --stop, flags with --stop / --warn. */
+.blink-view { outline: none; }
+.blink-view:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--focus); }
+.blink-view .chead h1 .muted { font-weight: 400; margin-left: 6px; }
+.blink-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.blink-controls .btn.small[aria-pressed="true"] { background: var(--accent-fill); color: var(--accent); border-color: transparent; }
+.blink-fps { height: 22px; font-size: 12px; border-radius: var(--radius-control); border: 0.5px solid var(--control-line); background: var(--control); padding: 0 4px; }
+.blink-check { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--secondary); white-space: nowrap; }
+.blink-zoom button { padding: 0 8px; }
+.blink-policy { font-variant-numeric: tabular-nums; }
+.blink-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.blink-stage { position: relative; flex: 1; min-height: 160px; display: flex; overflow: hidden; background: var(--sky-1); cursor: grab; touch-action: none; }
+.blink-stage:active { cursor: grabbing; }
+.blink-pane { position: relative; flex: 1; min-width: 0; overflow: hidden; }
+.blink-stage.split .blink-pane + .blink-pane { border-left: 1px solid var(--separator); }
+.blink-canvas { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+.blink-image { display: block; width: 100%; height: 100%; object-fit: fill; image-rendering: auto; user-select: none; -webkit-user-select: none; -webkit-user-drag: none; }
+.blink-missing { display: flex; align-items: center; justify-content: center; color: rgba(245, 245, 247, 0.55); font-size: 40px; background: radial-gradient(120% 140% at 35% 25%, var(--sky-0), var(--sky-1) 72%); }
+.blink-overlay { position: absolute; left: 12px; top: 10px; right: 12px; display: flex; flex-direction: column; gap: 4px; pointer-events: none; color: #f5f5f7; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8); }
+.blink-overlay .blink-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: auto; }
+.blink-overlay .blink-sub { font-size: 11px; color: rgba(245, 245, 247, 0.75); font-variant-numeric: tabular-nums; }
+.blink-overlay .blink-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+.blink-overlay .badge { text-shadow: none; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.blink-overlay .badge.ok { background: rgba(52, 199, 89, 0.28); color: #8ee6a4; }
+.blink-overlay .badge.stop { background: rgba(255, 59, 48, 0.32); color: #ffb3ad; }
+.blink-overlay .badge.warn { background: rgba(255, 159, 10, 0.3); color: #ffd28a; }
+.blink-overlay .badge.neutral { background: rgba(255, 255, 255, 0.16); color: #f5f5f7; }
+.blink-overlay .badge.check { background: rgba(0, 0, 0, 0.35); color: #ffd28a; box-shadow: inset 0 0 0 1px rgba(255, 210, 138, 0.7); }
+.blink-metrics { flex: 0 0 auto; padding: 6px 16px; border-top: 0.5px solid var(--separator); background: var(--window); font-size: 11px; }
+.blink-details { display: flex; flex-direction: column; gap: 8px; }
+.blink-frm > div { display: contents; }
+.blink-details.compact .blink-frm { display: flex; flex-wrap: wrap; gap: 2px 14px; }
+.blink-details.compact .blink-frm > div { display: inline-flex; gap: 4px; align-items: baseline; }
+.blink-details.compact .blink-frm dt { text-align: left; padding: 0; font-size: 11px; }
+.blink-details.compact .blink-frm dd { padding: 0; font-size: 11px; }
+.blink-flag-list { display: flex; flex-direction: column; gap: 4px; }
+.blink-flag-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: 11px; }
+.blink-flag-why { color: var(--secondary); }
+.blink-flag-hint { flex: 1 1 100%; color: var(--secondary); }
+.blink-details.compact .blink-flag-list { flex-direction: row; flex-wrap: wrap; gap: 4px 12px; margin-top: 2px; }
+.blink-filmstrip { flex: 0 0 auto; display: flex; gap: 10px; align-items: flex-start; overflow-x: auto; overflow-y: hidden; padding: 6px 12px 8px; border-top: 0.5px solid var(--separator); background: var(--titlebar); scrollbar-width: thin; }
+.blink-night { display: flex; flex-direction: column; gap: 4px; flex: 0 0 auto; }
+.blink-night-head { display: flex; align-items: center; gap: 6px; height: 22px; font-size: 11px; color: var(--secondary); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.blink-night-head .blink-night-title { font-weight: 600; color: var(--label); }
+.blink-night.default-drop .blink-night-head .blink-night-title { color: var(--stop); }
+.blink-night-head .btn.small { height: 18px; padding: 0 6px; font-size: 11px; }
+.blink-tiles { display: flex; gap: 4px; }
+.blink-tile { position: relative; width: 96px; height: 64px; padding: 0; border: 0; border-radius: 5px; overflow: hidden; background: radial-gradient(120% 140% at 30% 20%, var(--sky-0), var(--sky-1) 70%); box-shadow: inset 0 0 0 0.5px var(--hairline); flex: 0 0 96px; }
+.blink-tile img, .blink-tile-empty { display: block; width: 100%; height: 100%; object-fit: cover; }
+.blink-tile .blink-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: var(--ok); }
+.blink-tile.drop .blink-bar { background: var(--stop); }
+.blink-tile.drop img { opacity: 0.55; }
+.blink-tile.exclude { box-shadow: inset 0 0 0 1px var(--stop); }
+.blink-tile.attention { box-shadow: inset 0 0 0 1px var(--warn); }
+.blink-tile[aria-current="true"] { outline: 2px solid var(--accent); outline-offset: 1px; box-shadow: 0 0 0 2px var(--accent-fill); }
+.blink-tile:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.blink-tile .blink-dots { position: absolute; left: 4px; top: 4px; display: flex; gap: 3px; padding: 2px 3px; border-radius: 6px; background: rgba(0, 0, 0, 0.45); }
+.blink-tile .blink-dots .dot { width: 6px; height: 6px; flex-basis: 6px; }
+.blink-tile .blink-star { position: absolute; right: 4px; top: 2px; font-size: 12px; color: #ffd60a; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8); }
+.blink-keys { flex: 0 0 auto; padding: 0 16px; border-top: 0.5px solid var(--hairline); background: var(--window); font-size: 11px; color: var(--secondary); }
+.blink-keys summary { height: 24px; display: flex; align-items: center; font-weight: 500; }
+.blink-keys p { padding: 0 0 4px 12px; font-variant-numeric: tabular-nums; }
+.blink-kept-summary { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.blink-notes li code { color: var(--secondary); }
+.screening-notice.blinked { background: var(--ok-bg); border-color: var(--ok); }
+.screening-notice.blinked .symbol { background: var(--ok); }
+.activity .bar.indeterminate > span { width: 40%; animation: indeterminate 1.2s var(--ease) infinite; }
+@keyframes indeterminate { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+.sb-step { display: contents; }
+@media (prefers-reduced-motion: reduce) {
+  /* Playback is off by default under reduced motion (see BlinkView); the tile emphasis stays static. */
+  .activity .bar.indeterminate > span { animation: none; width: 100%; }
+}
+
 /* ── Motion ──────────────────────────────────────────────────────── */
 .view { animation: view-in 220ms var(--ease); }
 @keyframes view-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }

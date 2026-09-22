@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import math
 import threading
-from typing import Any, Literal, Sequence
+from typing import Any, Collection, Literal, Sequence
 
 import numpy as np
 import sep
@@ -254,6 +254,7 @@ def select_normalization_reference(
     quality_weights: Sequence[float],
     *,
     workers: int = 1,
+    allowed: Collection[int] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Pick the normalization reference of one filter group.
 
@@ -266,7 +267,11 @@ def select_normalization_reference(
     anchors the group.
     """
 
-    ordered = sorted(indices, key=lambda index: (-float(quality_weights[index]), index))
+    # ``allowed`` (the frames without a blink flag) keeps a cloud-dimmed or
+    # moonlit frame from anchoring the group: its low sky wins the score
+    # below although the master would inherit its atypical background.
+    eligible = [index for index in indices if allowed is None or index in allowed] or list(indices)
+    ordered = sorted(eligible, key=lambda index: (-float(quality_weights[index]), index))
     keep = max(1, math.ceil(NORMALIZATION_REFERENCE_QUALITY_FRACTION * len(ordered)))
     candidates = ordered[:keep]
     # Each candidate's flatness depends on its own preview only.
@@ -293,6 +298,8 @@ def select_normalization_reference(
         "qualityFractionConsidered": NORMALIZATION_REFERENCE_QUALITY_FRACTION,
         "skyWeight": NORMALIZATION_REFERENCE_SKY_WEIGHT,
         "candidateCount": len(candidates),
+        "eligibleCount": len(eligible),
+        "restricted": allowed is not None and len(eligible) < len(indices),
         "referenceSky": flatness[reference_index]["sky"],
         "referenceGradientSpan": flatness[reference_index]["gradientSpan"],
         "referenceScore": score(reference_index),
@@ -315,6 +322,7 @@ def estimate_stellar_scale_hints(
     match_radius_preview_pixels: float = 2.5,
     minimum_scale_stars: int = 16,
     workers: int = 1,
+    reference_candidates: Collection[int] | None = None,
 ) -> tuple[StellarScaleEstimate, ...]:
     """Estimate same-filter reference/source throughput from matched stars.
 
@@ -334,7 +342,7 @@ def estimate_stellar_scale_hints(
     pending: list[tuple[int, int, str | None, np.ndarray]] = []
     for filter_name, indices in groups.items():
         reference_index, reference_selection = select_normalization_reference(
-            indices, analyses, quality_weights, workers=workers
+            indices, analyses, quality_weights, workers=workers, allowed=reference_candidates
         )
         reference = analyses[reference_index]
         reference_transform = transforms[reference_index].preview_matrix

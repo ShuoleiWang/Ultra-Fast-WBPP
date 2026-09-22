@@ -69,7 +69,7 @@ WBPP 的耗时是对相同输入、其默认流程的一次测量；两者的阶
 - **积分科学。** 跨夜、跨子午线翻转的射影配准；按每帧自身噪声判定的拒绝尺度模型 v2；用快速 Radon 变换按整条长度找出卫星拖线并按走廊剔除；在传感器坐标系分离残余平场结构的归一化；所有通道共用一个网格并互相校验解算结果。→ [features §4](features.md#4-integration-science)
 - **Drizzle 与彩色。** 原生 1×–4× drizzle，输入与普通积分完全相同（2×：半光半径小 2.5–4.4%，有效噪声低 6–7%，通量比 0.993–0.994）；Bayer Light 作为彩色通道组处理，逐通道平场缩放，Bayer drizzle。→ [drizzle](recipes/drizzle.md)、[OSC](recipes/osc-cfa.md)
 - **校验后发布。** `SEED` 与 `SOLVED` WCS 的区分；每张主图独立解算并对星表校验（Windows 上 ASTAP 的解由引擎对管理索引星表校验）；每个产品都有回执；桌面端在显示成功前再校验一次。→ [天文解算](recipes/astrometry.md)、[Windows](windows.md)
-- **不碍事的桌面端。** 一次导入所有夜晚，筛片并入运行，可选的复核页，诚实的失败状态，浅色/深色，中英双语，可复现的图标与截图。→ [桌面端指南](../apps/desktop/README.md)、[设计记录](gui-redesign-plan.md)
+- **不碍事的桌面端。** 一次导入所有夜晚，逐通道 blink 筛片、废片预先标记（传统复核页仍可选用），诚实的失败状态，浅色/深色，中英双语，可复现的图标与截图。→ [blink 筛片](recipes/blink-screening.md)、[桌面端指南](../apps/desktop/README.md)、[设计记录](gui-redesign-plan.md)
 - **两个平台，一个平台层。** 在 M3 Pro 与 Ryzen 7 5800H Windows 笔记本上验证（同一项目 267–289 秒）；Windows 静态 CRT 包逐个 DLL 导入做了验证。→ [硬件](hardware.md)、[Windows](windows.md)
 - **给贡献者的工具。** 真实运行追踪器（Perfetto）、主图评估器、容差门、缺陷注入 harness、原生 vs NumPy 基准、内核的一条构建-测试-安装链、安装包验证、公开树与链接检查。→ [features §10](features.md#10-tools-contributors-actually-get)
 
@@ -97,7 +97,7 @@ flowchart LR
 ```
 
 1. **一起导入。** 把所有夜晚一次拖入：Light、原始校准帧和已有 Master。类型、目标、滤镜和采集配置来自头信息；冲突会被显示，绝不猜测。Bayer Light 会被识别并按彩色通道组处理。
-2. **自动筛片。** 质量门禁测量每张 Light，决定放行、待复核或排除，理由与预览随结果给出。想先看再跑也可以；启动栏会提前告诉你这次运行会排除什么。配方里设 `selection.policy: unattended-v1` 后，同一份证据不经复核门就变成*保留*、*降权保留*或*排除*，经反事实复核并写入 `qc/selection.json`。
+2. **Blink 筛片。** 每张 Light 只测量一次（透明度、消光、原生分辨率 PSF、拖线、遮挡、视场一致性），可计算出的废片——整晚月光或薄雾、星点数量坍缩、厚云、拖线、无法配准的帧——会带着理由预先标记出来。每个通道选出一张参考帧，其余帧都配准并归一化到它，你用同一套拉伸逐通道 blink、逐帧决定：键盘、连播、整晚丢弃、应用标记、撤销。你的决定作为显式选择进入运行，回执记录每一次改判。不 blink 直接开始，则由传统门禁自动筛片（它看不出整晚一致地差的夜晚，并会如实提示）。配方里设 `selection.policy: unattended-v1` 后，同一份证据不经复核门就变成*保留*、*降权保留*或*排除*，经反事实复核并写入 `qc/selection.json`。
 3. **本地处理。** 校准、配准、归一化、稳健拒绝的积分、可选的 drizzle 与 LocalNormalization，以及逐通道天文解算，作为一个任务带实时进度、用满所有核心运行。
 4. **得到已校验的产品。** 线性单色与 RGB/LRGB FITS、drizzle 的科学/权重/覆盖产品、检查预览、筛片报告与回执。只有回执、产品哈希与最终 WCS 全部校验通过，应用才显示*完成*。
 
@@ -139,7 +139,7 @@ make desktop-dev
 
 - **积极开发中的 alpha。** 真实素材流程在一台 M3 Pro（macOS）与一台 Ryzen 7 5800H 笔记本（Windows 11）上验证；其他机器运行未测量的通用配置。本地构建为 ad-hoc 签名，未公证；Windows 安装包未签名。已验证与未验证事项的清单见 [validation-matrix.md](validation-matrix.md)。
 - **单色已在真实数据上验证；彩色相机仅在合成数据上验证。** Bayer（RGGB/BGGR/GRBG/GBRG）Light 按马赛克校准、去马赛克为 R/G/B 通道主图并合成 RGB（[配方](recipes/osc-cfa.md)），但尚未处理过真实的 OSC 数据集。马赛克与 LocalNormalization 需要真实数据验证；LocalNormalization 不保证无梯度输出。
-- **筛片。** 桌面端目前运行传统门禁（PASS 帧入栈，REVIEW 帧除非批准否则排除）。带反事实与区域权重的无人值守策略目前是命令行的配方选项；在更多数据集上验证之前默认仍为 `legacy-gate`。
+- **筛片。** 桌面端的主路径是 blink 筛片：标记规则与参考帧规则在一个六晚的数据集上定下，只做预先标记，由你决定，运行记录这份选择。不 blink 直接开始的运行使用传统门禁（PASS 帧入栈，REVIEW 帧除非批准否则排除），它看不出整晚一致地差的夜晚。带反事实与区域权重的无人值守策略目前是命令行的配方选项；在更多数据集上验证之前默认仍为 `legacy-gate`。
 - **天文解算**需要另行安装求解器：macOS 上是 Astrometry.net 的 `solve-field` 与本地索引（[求解器设置](recipes/offline-solver-catalogs.md)），Windows 上是 ASTAP 加星表数据库以及应用托管的索引集（[Windows](windows.md)）；然后在应用中**重新检测配置**。不会向任何地方上传数据。
 - 需要保存全分辨率中间帧的磁盘空间（输出卷上约每张 Light 每像素 12 字节）。
 

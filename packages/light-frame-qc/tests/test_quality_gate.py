@@ -489,7 +489,7 @@ def test_policy_digest_is_canonical_and_changes_with_thresholds() -> None:
 def test_evidence_revision_is_fixed_and_invalidates_previous_policy_digest() -> None:
     policy = GatePolicy()
     legacy = policy.serializable()
-    assert legacy.pop("evidence_revision") == 3
+    assert legacy.pop("evidence_revision") == 4
     previous_digest = "sha256:" + hashlib.sha256(
         json.dumps(legacy, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -497,3 +497,44 @@ def test_evidence_revision_is_fixed_and_invalidates_previous_policy_digest() -> 
     assert policy.canonical_digest() != previous_digest
     with pytest.raises(TypeError):
         GatePolicy(evidence_revision=1)
+
+
+def test_tiny_night_z_scores_are_bounded_by_the_cohort_spread() -> None:
+    """A three-frame night whose peers happen to agree to the ADU used to
+    give z-scores of 25 and -47 (evidence revision 3); the scale is now at
+    least the cohort's own spread, so a normal frame stays unremarkable and
+    a genuinely bright one is still an outlier."""
+
+    results, measurements = _cohort(12)
+    # Nine frames on the main night with a realistic spread, three on a
+    # second night two days later.
+    for index, measurement in enumerate(measurements):
+        measurement.image_median = 1_000.0 + 25.0 * ((index * 7) % 9 - 4)
+        measurement.image_mad = 5.0 + 0.1 * ((index * 5) % 7)
+    for index in (9, 10, 11):
+        results[index].metadata.observed_at = results[index].metadata.observed_at + timedelta(days=2)
+    measurements[9].image_median = 1_000.0
+    measurements[10].image_median = 1_000.4
+    measurements[11].image_median = 1_012.0  # 12 ADU above peers that agree to 0.4 ADU
+
+    evaluate_quality_gate(results, measurements)
+
+    z_small = results[11].features.background_z
+    assert z_small is not None and abs(z_small) < 1.0
+    assert "GATE_BACKGROUND_REVIEW" not in _codes(results[11])
+    assert "GATE_BACKGROUND_STRONG" not in _codes(results[11])
+    noise_z = results[11].features.noise_z
+    assert noise_z is not None and abs(noise_z) < 3.0
+    # A large night keeps its own statistics: the 2 % floor applies when the
+    # peers agree exactly, exactly as before.
+    for index in range(9):
+        measurements[index].image_median = 1_000.0
+    measurements[4].image_median = 1_700.0
+    evaluate_quality_gate(results, measurements)
+    assert results[4].features.background_z == pytest.approx(700.0 / 20.0)
+    assert "GATE_BACKGROUND_STRONG" in _codes(results[4])
+    # A genuinely bright frame on the tiny night is still seen.
+    measurements[11].image_median = 1_700.0
+    evaluate_quality_gate(results, measurements)
+    assert results[11].features.background_z is not None and results[11].features.background_z > 6.0
+    assert "GATE_BACKGROUND_STRONG" in _codes(results[11])

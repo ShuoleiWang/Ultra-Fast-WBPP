@@ -7,7 +7,7 @@ Start with the [project README](../README.md) (also in [简体中文](README.zh-
 | Page | What it is |
 |---|---|
 | [features.md](features.md) | Why Ultra-Fast WBPP: the advantages over PixInsight WBPP, the noteworthy features and the evidence behind each claim, plus what the project does not do |
-| [architecture.md](architecture.md) | How a run executes: desktop → Rust → Python engine → native kernels; data and correctness boundaries; the scientific stages; unattended selection; performance; platform layer |
+| [architecture.md](architecture.md) | How a run executes: desktop → Rust → Python engine → native kernels; data and correctness boundaries; the scientific stages (legacy gate, explicit blink selection, unattended selection); performance; platform layer |
 | [recipes/README.md](recipes/README.md) | Which recipe to start from for your data, and the built-in contracts |
 | [validation-matrix.md](validation-matrix.md) | The register of what is validated, on which hardware, and what is explicitly not |
 | [../CONTRIBUTING.md](../CONTRIBUTING.md), [../AGENTS.md](../AGENTS.md), [../CLAUDE.md](../CLAUDE.md) | How to develop here: setup, rules, checks. `AGENTS.md` is the full guide (read by Codex), `CLAUDE.md` the Claude Code session guide |
@@ -18,7 +18,8 @@ Start with the [project README](../README.md) (also in [简体中文](README.zh-
 |---|---|
 | [recipes/nina-mono.md](recipes/nina-mono.md) | N.I.N.A. mono folders through the standard workflow; approving REVIEW frames |
 | [recipes/calibration.md](recipes/calibration.md) | Raw Flat/Dark/Bias versus supplied masters, Dark bias semantics, overrides |
-| [recipes/automatic-screening.md](recipes/automatic-screening.md) | Mixed-night import, what the quality gate measures and how it decides |
+| [recipes/blink-screening.md](recipes/blink-screening.md) | Blink-style screening: the flags and their thresholds, the reference frame per channel, the normalised previews, the selection file, `blink-measure` and `--selection`, what a run records, the limits |
+| [recipes/automatic-screening.md](recipes/automatic-screening.md) | Mixed-night import, the legacy gate (what it measures, how it decides, why it cannot see a uniformly bad night) and the optional review |
 | [recipes/drizzle.md](recipes/drizzle.md) | 1×–4× native drizzle: options, products, measured quality |
 | [recipes/osc-cfa.md](recipes/osc-cfa.md) | One-shot-colour (Bayer) Lights: pipeline and the synthetic validation |
 | [recipes/astrometry.md](recipes/astrometry.md), [recipes/offline-solver-catalogs.md](recipes/offline-solver-catalogs.md) | `SEED` versus `SOLVED`, installing the solver and index set |

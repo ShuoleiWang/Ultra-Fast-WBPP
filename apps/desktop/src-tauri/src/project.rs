@@ -233,6 +233,57 @@ pub(crate) struct UiReviewSelection {
     gate_policy_digest: String,
 }
 
+/// Where a selection file came from; recorded by the engine, never enforced
+/// (a hand-written selection has none).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct UiSelectionOrigin {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blink_manifest_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    flags_policy_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
+}
+
+/// One Light's decision from the blink view, bound to the file's content.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct UiSelectionDecision {
+    source_sha256: String,
+    decision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_decision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    flags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+}
+
+/// The `selection-v1` file the blink view produces: the user's KEEP/DROP per
+/// Light, sent to `run-project` as the top-level `selection` and applied by
+/// the engine under the `explicit-v1` policy.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct UiSelection {
+    schema_version: u32,
+    kind: String,
+    policy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin: Option<UiSelectionOrigin>,
+    undecided: String,
+    decisions: Vec<UiSelectionDecision>,
+}
+
+const SELECTION_KIND: &str = "ultra-fast-wbpp-selection";
+const SELECTION_POLICY: &str = "explicit-v1";
+const MAX_SELECTION_DECISIONS: usize = 10_000;
+const MAX_SELECTION_FLAGS: usize = 32;
+const MAX_SELECTION_NOTE_CHARS: usize = 1000;
+const MAX_SELECTION_ORIGIN_CHARS: usize = 256;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ProjectRunRequest {
@@ -247,6 +298,10 @@ pub(crate) struct ProjectRunRequest {
     master_metadata_overrides: Vec<UiMasterOverride>,
     raw_frame_metadata_overrides: Vec<UiRawFrameOverride>,
     review_selections: Vec<UiReviewSelection>,
+    /// The blink decisions; `None` keeps the legacy gate (with the optional
+    /// REVIEW approvals in `review_selections`).
+    #[serde(default)]
+    selection: Option<UiSelection>,
     output_parent_directory: String,
 }
 
@@ -357,6 +412,13 @@ struct UiScreeningFrame {
     star_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     preview_data_url: Option<String>,
+    /// With an explicit selection: `USER_DROP` for a Light the user dropped,
+    /// `USER_KEEP_OVERRIDE` for a kept Light that carried an EXCLUDE flag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    /// The blink flag codes of the frame, when the run recorded them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    flags: Vec<String>,
 }
 
 /// The run's Light screening: counts plus every frame that needed a decision.
@@ -397,7 +459,9 @@ const MAX_SCREENING_PREVIEW_TOTAL_BYTES: usize = 24 * 1024 * 1024;
 const MAX_MONO_PREVIEW_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_RGB_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ARTIFACT_PREVIEW_TOTAL_BYTES: usize = 32 * 1024 * 1024;
-const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+pub(crate) const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+/// SOI marker plus the first marker byte, common to every JPEG variant.
+const JPEG_SIGNATURE: [u8; 3] = [0xff, 0xd8, 0xff];
 
 /// Standard base64 with padding; the previews are small, so no crate.
 fn base64_encode(bytes: &[u8]) -> String {
@@ -419,10 +483,55 @@ fn base64_encode(bytes: &[u8]) -> String {
     encoded
 }
 
-/// Loads one PNG the worker published at `resolved` (already checked to lie
-/// under the output root) as a data URL, or `None` when it is not a PNG, is
-/// larger than `max_bytes`, or would exceed the remaining transport `budget`.
-fn png_data_url(resolved: &Path, max_bytes: u64, budget: &mut usize) -> Option<String> {
+/// The two image encodings the worker publishes for the webview: the PNG
+/// product and review previews, and the JPEG blink filmstrip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreviewFormat {
+    Png,
+    Jpeg,
+}
+
+impl PreviewFormat {
+    /// The format a preview's file extension declares (`jpg`, `jpeg`, `png`,
+    /// case-insensitive); anything else is not a preview.
+    pub(crate) fn from_extension(path: &Path) -> Option<Self> {
+        match path
+            .extension()
+            .and_then(|value| value.to_str())?
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "png" => Some(Self::Png),
+            "jpg" | "jpeg" => Some(Self::Jpeg),
+            _ => None,
+        }
+    }
+
+    fn media_type(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+        }
+    }
+
+    fn signature(self) -> &'static [u8] {
+        match self {
+            Self::Png => &PNG_SIGNATURE,
+            Self::Jpeg => &JPEG_SIGNATURE,
+        }
+    }
+}
+
+/// Loads one image the worker published at `resolved` (already checked to lie
+/// under its root) as a data URL, or `None` when its bytes do not start with
+/// the `format` signature, it is larger than `max_bytes`, or it would exceed
+/// the remaining transport `budget`.
+pub(crate) fn image_data_url(
+    resolved: &Path,
+    format: PreviewFormat,
+    max_bytes: u64,
+    budget: &mut usize,
+) -> Option<String> {
     let size = resolved.metadata().ok()?.len();
     if size == 0 || size > max_bytes {
         return None;
@@ -433,15 +542,149 @@ fn png_data_url(resolved: &Path, max_bytes: u64, budget: &mut usize) -> Option<S
         .take(max_bytes + 1)
         .read_to_end(&mut bytes)
         .ok()?;
-    if bytes.len() as u64 != size || !bytes.starts_with(&PNG_SIGNATURE) {
+    if bytes.len() as u64 != size || !bytes.starts_with(format.signature()) {
         return None;
     }
-    let encoded = format!("data:image/png;base64,{}", base64_encode(&bytes));
+    let encoded = format!(
+        "data:{};base64,{}",
+        format.media_type(),
+        base64_encode(&bytes)
+    );
     if *budget < encoded.len() {
         return None;
     }
     *budget -= encoded.len();
     Some(encoded)
+}
+
+/// Loads one PNG the worker published at `resolved` (already checked to lie
+/// under the output root) as a data URL, or `None` when it is not a PNG, is
+/// larger than `max_bytes`, or would exceed the remaining transport `budget`.
+fn png_data_url(resolved: &Path, max_bytes: u64, budget: &mut usize) -> Option<String> {
+    image_data_url(resolved, PreviewFormat::Png, max_bytes, budget)
+}
+
+/// A blink zoom preview is the 1/4-scale 8-bit PNG (1.0 to 1.5 MB for a
+/// 26 MP channel); it is loaded on demand, one at a time.
+const MAX_BLINK_PREVIEW_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Resolves a preview path from a blink manifest against its session
+/// directory (already canonical): relative, plain components only, no
+/// symlink anywhere below the session directory, a regular `.jpg`/`.jpeg`/
+/// `.png` file.  Returns the resolved path and the format its extension
+/// declares.
+pub(crate) fn resolve_blink_preview(
+    session_directory: &Path,
+    relative: &str,
+) -> Result<(PathBuf, PreviewFormat), String> {
+    let relative = Path::new(relative);
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|item| !matches!(item, Component::Normal(_)))
+    {
+        return Err("blink preview has an unsafe relative path".to_owned());
+    }
+    let format = PreviewFormat::from_extension(relative)
+        .ok_or("blink preview must be a .jpg, .jpeg or .png file")?;
+    let mut current = session_directory.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        let metadata = std::fs::symlink_metadata(&current)
+            .map_err(|error| format!("cannot resolve blink preview: {error}"))?;
+        if metadata.file_type().is_symlink() {
+            return Err("blink preview path crosses a symbolic link".to_owned());
+        }
+    }
+    let resolved = current
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve blink preview: {error}"))?;
+    if !resolved.starts_with(session_directory) || !resolved.is_file() {
+        return Err("blink preview escaped its session directory".to_owned());
+    }
+    Ok((resolved, format))
+}
+
+/// A blink session directory is a direct child of the desktop's sessions
+/// root that the desktop named itself (`<16 hex>-<yyyymmdd>-<hhmmss>`, with an
+/// optional `-N` counter); anything else is not ours to read or remove.
+pub(crate) fn blink_session_name_parts(name: &str) -> Option<(u64, u64)> {
+    let mut parts = name.split('-');
+    let digest = parts.next()?;
+    let date = parts.next()?;
+    let time = parts.next()?;
+    let counter = match parts.next() {
+        None => 1,
+        Some(value) => {
+            if value.is_empty()
+                || value.len() > 6
+                || !value.bytes().all(|byte| byte.is_ascii_digit())
+                || parts.next().is_some()
+            {
+                return None;
+            }
+            value.parse::<u64>().ok()?
+        }
+    };
+    let hex = digest.len() == 16
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase());
+    let digits =
+        |value: &str, len: usize| value.len() == len && value.bytes().all(|b| b.is_ascii_digit());
+    if !hex || !digits(date, 8) || !digits(time, 6) {
+        return None;
+    }
+    let stamp = format!("{date}{time}").parse::<u64>().ok()?;
+    Some((stamp, counter))
+}
+
+/// Canonicalises `session_directory` and checks that it is one of the
+/// desktop's own blink sessions under `root`.
+pub(crate) fn checked_blink_session_directory(
+    root: &Path,
+    session_directory: &str,
+) -> Result<PathBuf, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("blink sessions root is unavailable: {error}"))?;
+    let session = Path::new(session_directory)
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve blink session directory: {error}"))?;
+    let owned = session.parent() == Some(root.as_path())
+        && session
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| blink_session_name_parts(name).is_some());
+    if !owned || !session.is_dir() {
+        return Err("blink session directory is not one of this application's sessions".to_owned());
+    }
+    Ok(session)
+}
+
+/// One blink preview (`filmstrip/…` or `zoom/…`) of a session as a data URL,
+/// for the previews the manifest transport left out and for the zoom images.
+pub(crate) fn load_blink_preview<R: Runtime>(
+    app: &AppHandle<R>,
+    session_directory: &str,
+    relative_path: &str,
+) -> Result<String, String> {
+    let root = crate::sidecar::blink_sessions_root(app)?;
+    load_blink_preview_with(&root, session_directory, relative_path)
+}
+
+pub(crate) fn load_blink_preview_with(
+    root: &Path,
+    session_directory: &str,
+    relative_path: &str,
+) -> Result<String, String> {
+    let session = checked_blink_session_directory(root, session_directory)?;
+    let (resolved, format) = resolve_blink_preview(&session, relative_path)?;
+    let mut budget = usize::MAX;
+    image_data_url(&resolved, format, MAX_BLINK_PREVIEW_BYTES, &mut budget).ok_or_else(|| {
+        "blink preview is empty, over 2 MB or not the image its name declares".to_owned()
+    })
 }
 
 /// Load one review preview the worker published under `root` as a data URL.
@@ -527,6 +770,28 @@ fn screening_summary(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let reason = match item.get("reason") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(value))
+                if matches!(value.as_str(), "USER_DROP" | "USER_KEEP_OVERRIDE") =>
+            {
+                Some(value.clone())
+            }
+            Some(_) => return Err("screening frame has an unknown reason".to_owned()),
+        };
+        let flags = item
+            .get("flags")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter(|code| checked_flag_code(code))
+                    .take(16)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let preview_data_url = item
             .get("reviewPreview")
             .and_then(serde_json::Value::as_str)
@@ -559,6 +824,8 @@ fn screening_summary(
             evidence,
             star_count: item.get("starCount").and_then(serde_json::Value::as_u64),
             preview_data_url,
+            reason,
+            flags,
         });
     }
     Ok(Some(UiScreening {
@@ -681,6 +948,85 @@ fn validate_master_override(value: &UiMasterOverride) -> Result<(), String> {
     Ok(())
 }
 
+/// A flag code as the engine writes it: `BLINK_SKY_BRIGHT`, `GATE_…`.
+pub(crate) fn checked_flag_code(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.as_bytes()[0].is_ascii_uppercase()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+/// The `selection-v1` rules (§B.4.3): schema and policy names, the enums,
+/// unique lowercase content digests, bounded size.  The engine repeats the
+/// check; this keeps a malformed selection an error next to the Start
+/// button instead of a failed run.
+fn validate_selection(selection: &UiSelection) -> Result<(), String> {
+    let invalid = |detail: &str| Err(format!("SELECTION_INVALID: {detail}"));
+    if selection.schema_version != 1 || selection.kind != SELECTION_KIND {
+        return invalid("selection must be schemaVersion 1 of kind ultra-fast-wbpp-selection");
+    }
+    if selection.policy != SELECTION_POLICY {
+        return invalid("selection policy must be explicit-v1");
+    }
+    if !matches!(selection.undecided.as_str(), "ERROR" | "DROP" | "KEEP") {
+        return invalid("selection undecided must be ERROR, DROP or KEEP");
+    }
+    if selection.decisions.is_empty() || selection.decisions.len() > MAX_SELECTION_DECISIONS {
+        return invalid("selection must contain between 1 and 10000 decisions");
+    }
+    let mut digests = HashSet::new();
+    for item in &selection.decisions {
+        if !checked_source_sha256(&item.source_sha256)
+            || !digests.insert(item.source_sha256.as_str())
+        {
+            return invalid("selection decisions must carry unique lowercase sha256: digests");
+        }
+        if !matches!(item.decision.as_str(), "KEEP" | "DROP")
+            || item
+                .default_decision
+                .as_deref()
+                .is_some_and(|value| !matches!(value, "KEEP" | "DROP"))
+        {
+            return invalid("selection decisions must be KEEP or DROP");
+        }
+        if item.flags.as_ref().is_some_and(|flags| {
+            flags.len() > MAX_SELECTION_FLAGS || flags.iter().any(|code| !checked_flag_code(code))
+        }) {
+            return invalid("selection decision flags must be engine flag codes");
+        }
+        if item
+            .note
+            .as_deref()
+            .is_some_and(|note| note.chars().count() > MAX_SELECTION_NOTE_CHARS)
+        {
+            return invalid("selection decision note is too long");
+        }
+    }
+    if let Some(origin) = &selection.origin {
+        if origin
+            .blink_manifest_sha256
+            .as_deref()
+            .is_some_and(|value| !checked_source_sha256(value))
+            || origin
+                .flags_policy_digest
+                .as_deref()
+                .is_some_and(|value| !checked_source_sha256(value))
+        {
+            return invalid("selection origin digests must be lowercase sha256: digests");
+        }
+        if [origin.session_id.as_deref(), origin.created_at.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(|value| value.is_empty() || value.chars().count() > MAX_SELECTION_ORIGIN_CHARS)
+        {
+            return invalid("selection origin fields must be short non-empty strings");
+        }
+    }
+    Ok(())
+}
+
 fn project_request_json(
     request: &ProjectRunRequest,
     output: &Path,
@@ -726,6 +1072,17 @@ fn project_request_json(
         {
             return Err(
                 "reviewSelections must contain unique content and policy SHA-256 bindings"
+                    .to_owned(),
+            );
+        }
+    }
+    if let Some(selection) = &request.selection {
+        validate_selection(selection)?;
+        // The explicit selection replaces the legacy gate's admission; REVIEW
+        // approvals belong to that gate and cannot be combined with it.
+        if !request.review_selections.is_empty() {
+            return Err(
+                "SELECTION_POLICY_CONFLICT: a blink selection and legacy REVIEW approvals cannot be sent together"
                     .to_owned(),
             );
         }
@@ -777,7 +1134,7 @@ fn project_request_json(
             }
         }
     }
-    Ok(serde_json::json!({
+    let mut payload = serde_json::json!({
         "schemaVersion": 1,
         "sources": sources,
         "outputDirectory": output,
@@ -807,7 +1164,14 @@ fn project_request_json(
         "solverHints": {},
         "execution": {},
         "reviewSelections": request.review_selections,
-    }))
+    });
+    // Top-level, and only when the blink view produced one: the engine's
+    // request loader treats the key itself as the switch to `explicit-v1`.
+    if let Some(selection) = &request.selection {
+        payload["selection"] =
+            serde_json::to_value(selection).map_err(|error| error.to_string())?;
+    }
+    Ok(payload)
 }
 
 fn create_private_request(value: &serde_json::Value) -> Result<PathBuf, String> {
@@ -1533,6 +1897,262 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    fn selection_request(
+        root: &Path,
+        light: &Path,
+        selection: serde_json::Value,
+    ) -> ProjectRunRequest {
+        serde_json::from_value(serde_json::json!({
+            "sources": [{"sourceId": "light-1", "role": "LIGHT", "paths": [light], "recursive": false}],
+            "projectName": "NGC 6822", "runLabel": "NGC 6822",
+            "recipe": {"balanced": true, "drizzleEnabled": false, "localNormalizationEnabled": false,
+                       "solverRequired": true, "calibrationWorkflow": "mono-standard-v1"},
+            "masterMetadataOverrides": [], "rawFrameMetadataOverrides": [], "reviewSelections": [],
+            "selection": selection,
+            "outputParentDirectory": root,
+        }))
+        .expect("request JSON")
+    }
+
+    fn sample_selection() -> serde_json::Value {
+        serde_json::json!({
+            "schemaVersion": 1, "kind": "ultra-fast-wbpp-selection", "policy": "explicit-v1",
+            "origin": {"sessionId": "abc-20260922-101010", "blinkManifestSha256": format!("sha256:{}", "d".repeat(64)),
+                       "flagsPolicyDigest": format!("sha256:{}", "e".repeat(64)), "createdAt": "2026-09-22T10:10:10"},
+            "undecided": "ERROR",
+            "decisions": [
+                {"sourceSha256": format!("sha256:{}", "1".repeat(64)), "decision": "KEEP", "defaultDecision": "DROP",
+                 "flags": ["BLINK_SKY_BRIGHT", "BLINK_SOURCES_LOW"], "note": "user: kept, faint gradient acceptable"},
+                {"sourceSha256": format!("sha256:{}", "2".repeat(64)), "decision": "DROP"},
+                {"sourceSha256": format!("sha256:{}", "3".repeat(64)), "decision": "KEEP", "flags": []}
+            ]
+        })
+    }
+
+    #[test]
+    fn blink_selection_travels_top_level_and_is_validated() {
+        let root = std::env::temp_dir().join(new_public_identifier("selection-wire").unwrap());
+        std::fs::create_dir_all(&root).unwrap();
+        let light = root.join("light 盾牌座.fits");
+        std::fs::write(&light, b"light input").unwrap();
+        let output = root.join("new-output");
+        let request = selection_request(&root, &light, sample_selection());
+        let value = project_request_json(&request, &output).unwrap();
+        assert_eq!(value["selection"], sample_selection());
+        assert_eq!(value["reviewSelections"], serde_json::json!([]));
+        assert_eq!(value["recipe"]["reviewApprovals"], serde_json::json!([]));
+        // Without a blink session the key is absent, not null: the engine's
+        // request loader treats the key as the switch to explicit-v1.
+        let mut legacy = selection_request(&root, &light, serde_json::Value::Null);
+        legacy.selection = None;
+        assert!(project_request_json(&legacy, &output)
+            .unwrap()
+            .get("selection")
+            .is_none());
+        // Legacy REVIEW approvals and a blink selection are two policies.
+        let mut conflict = selection_request(&root, &light, sample_selection());
+        conflict.review_selections.push(UiReviewSelection {
+            source_sha256: format!("sha256:{}", "1".repeat(64)),
+            gate_policy_digest: format!("sha256:{}", "f".repeat(64)),
+        });
+        assert!(project_request_json(&conflict, &output)
+            .unwrap_err()
+            .starts_with("SELECTION_POLICY_CONFLICT"));
+        let rejected = |edit: &dyn Fn(&mut serde_json::Value)| {
+            let mut selection = sample_selection();
+            edit(&mut selection);
+            let request = selection_request(&root, &light, selection);
+            project_request_json(&request, &output).unwrap_err()
+        };
+        type Edit = fn(&mut serde_json::Value);
+        let cases: &[(&str, Edit)] = &[
+            ("kind", |v| v["kind"] = "selection".into()),
+            ("schema", |v| v["schemaVersion"] = 2.into()),
+            ("policy", |v| v["policy"] = "unattended-v1".into()),
+            ("undecided", |v| v["undecided"] = "SKIP".into()),
+            ("decision", |v| {
+                v["decisions"][1]["decision"] = "MAYBE".into()
+            }),
+            ("default decision", |v| {
+                v["decisions"][1]["defaultDecision"] = "REVIEW".into()
+            }),
+            ("duplicate digest", |v| {
+                v["decisions"][1]["sourceSha256"] = v["decisions"][0]["sourceSha256"].clone()
+            }),
+            ("uppercase digest", |v| {
+                v["decisions"][1]["sourceSha256"] = format!("sha256:{}", "A".repeat(64)).into()
+            }),
+            ("bare digest", |v| {
+                v["decisions"][1]["sourceSha256"] = "2".repeat(64).into()
+            }),
+            ("flag code", |v| {
+                v["decisions"][0]["flags"][0] = "sky bright".into()
+            }),
+            ("note length", |v| {
+                v["decisions"][0]["note"] = "x".repeat(1001).into()
+            }),
+            ("origin digest", |v| {
+                v["origin"]["blinkManifestSha256"] = "sha256:nope".into()
+            }),
+            ("empty", |v| v["decisions"] = serde_json::json!([])),
+            ("too many", |v| {
+                v["decisions"] = (0..10_001)
+                    .map(|index| serde_json::json!({"sourceSha256": format!("sha256:{index:064x}"), "decision": "KEEP"}))
+                    .collect();
+            }),
+        ];
+        for &(name, edit) in cases {
+            let error = rejected(&edit);
+            assert!(error.starts_with("SELECTION_INVALID"), "{name}: {error}");
+        }
+        // Unknown fields are refused at the boundary, before validation.
+        let mut unknown = sample_selection();
+        unknown["decisions"][0]["reason"] = "why".into();
+        assert!(serde_json::from_value::<UiSelection>(unknown).is_err());
+        let mut unknown_origin = sample_selection();
+        unknown_origin["origin"]["user"] = "me".into();
+        assert!(serde_json::from_value::<UiSelection>(unknown_origin).is_err());
+        // A hand-written file without origin, notes or flags is valid.
+        let minimal = serde_json::json!({
+            "schemaVersion": 1, "kind": "ultra-fast-wbpp-selection", "policy": "explicit-v1", "undecided": "DROP",
+            "decisions": [{"sourceSha256": format!("sha256:{}", "1".repeat(64)), "decision": "KEEP"}]
+        });
+        let request = selection_request(&root, &light, minimal.clone());
+        assert_eq!(
+            project_request_json(&request, &output).unwrap()["selection"],
+            minimal
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn screening_summary_carries_user_selection_reasons_and_flags() {
+        let root = std::env::temp_dir().join(new_public_identifier("screening-reasons").unwrap());
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let receipt = serde_json::json!({"execution": {"screening": {
+            "admitted": 62, "excluded": 35, "counts": {"PASS": 83, "REVIEW": 13, "HARD_FAIL": 1},
+            "frames": [
+                {"path": "source/src-1/NGC 6822_300.00s_L_moon.fits", "disposition": "PASS", "admitted": false,
+                 "summary": "dropped by you", "evidence": [], "starCount": 2947,
+                 "reason": "USER_DROP", "flags": ["BLINK_SKY_BRIGHT", "BLINK_SOURCES_LOW", "not a code"]},
+                {"path": "source/src-2/NGC 6822_300.00s_G_cloud.fits", "disposition": "REVIEW", "admitted": true,
+                 "summary": "restored by you", "evidence": ["cloud"], "reason": "USER_KEEP_OVERRIDE", "flags": ["BLINK_SOURCES_LOW"]},
+                {"path": "source/src-3/legacy.fits", "disposition": "HARD_FAIL", "admitted": false, "summary": "trail",
+                 "reason": null}
+            ]
+        }}});
+        let screening = screening_summary(&root, &receipt).unwrap().unwrap();
+        assert_eq!(screening.frames[0].reason.as_deref(), Some("USER_DROP"));
+        assert_eq!(
+            screening.frames[0].flags,
+            vec!["BLINK_SKY_BRIGHT", "BLINK_SOURCES_LOW"]
+        );
+        assert!(!screening.frames[0].admitted);
+        assert_eq!(
+            screening.frames[1].reason.as_deref(),
+            Some("USER_KEEP_OVERRIDE")
+        );
+        assert!(screening.frames[2].reason.is_none() && screening.frames[2].flags.is_empty());
+        let encoded = serde_json::to_value(&screening).unwrap();
+        assert_eq!(encoded["frames"][0]["reason"], "USER_DROP");
+        assert!(encoded["frames"][2].get("reason").is_none());
+        assert!(encoded["frames"][2].get("flags").is_none());
+        let unknown = serde_json::json!({"execution": {"screening": {"admitted": 1, "excluded": 0, "counts": {},
+            "frames": [{"path": "x", "disposition": "PASS", "reason": "GATE"}]}}});
+        assert!(screening_summary(&root, &unknown).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn blink_preview_loader_stays_inside_its_own_session() {
+        let root =
+            std::env::temp_dir().join(new_public_identifier("blink-preview-loader").unwrap());
+        let sessions = root.join("blink-sessions");
+        let session = sessions.join(format!("{}-20260922-101010", "a".repeat(16)));
+        std::fs::create_dir_all(session.join("zoom")).unwrap();
+        std::fs::create_dir_all(session.join("filmstrip")).unwrap();
+        let png: Vec<u8> = PNG_SIGNATURE.iter().copied().chain([1_u8; 32]).collect();
+        let jpeg: Vec<u8> = JPEG_SIGNATURE.iter().copied().chain([2_u8; 32]).collect();
+        std::fs::write(session.join("zoom/0001-L.png"), &png).unwrap();
+        std::fs::write(session.join("filmstrip/0001-L.jpg"), &jpeg).unwrap();
+        std::fs::write(session.join("zoom/0002-L.png"), &jpeg).unwrap();
+        std::fs::write(session.join("zoom/0003-L.jpg"), &jpeg).unwrap();
+        std::fs::write(session.join("zoom/notes.txt"), b"text").unwrap();
+        let mut large = png.clone();
+        large.resize(2 * 1024 * 1024 + 1, 0);
+        std::fs::write(session.join("zoom/large.png"), &large).unwrap();
+        std::fs::write(root.join("outside.png"), &png).unwrap();
+        let session_text = session.to_string_lossy().into_owned();
+        let load = |directory: &str, relative: &str| {
+            load_blink_preview_with(&sessions, directory, relative)
+        };
+        assert_eq!(
+            load(&session_text, "zoom/0001-L.png").unwrap(),
+            format!("data:image/png;base64,{}", base64_encode(&png))
+        );
+        assert_eq!(
+            load(&session_text, "filmstrip/0001-L.jpg").unwrap(),
+            format!("data:image/jpeg;base64,{}", base64_encode(&jpeg))
+        );
+        // The extension declares the media type; the bytes must agree.
+        assert!(load(&session_text, "zoom/0002-L.png").is_err());
+        assert!(load(&session_text, "zoom/0003-L.jpg").is_ok());
+        for relative in [
+            "zoom/notes.txt",
+            "zoom/large.png",
+            "../outside.png",
+            "zoom/../../outside.png",
+            "zoom/../zoom/0001-L.png",
+            "",
+            "zoom",
+            "zoom/missing.png",
+        ] {
+            assert!(load(&session_text, relative).is_err(), "{relative}");
+        }
+        assert!(load(root.join("outside.png").to_str().unwrap(), "").is_err());
+        assert!(load(
+            &session_text,
+            session.join("zoom/0001-L.png").to_str().unwrap()
+        )
+        .is_err());
+        // Only the desktop's own session directories, directly under the root.
+        assert!(load(root.to_str().unwrap(), "outside.png").is_err());
+        assert!(load(sessions.to_str().unwrap(), "outside.png").is_err());
+        let foreign = sessions.join("not-a-session");
+        std::fs::create_dir_all(foreign.join("zoom")).unwrap();
+        std::fs::write(foreign.join("zoom/0001-L.png"), &png).unwrap();
+        assert!(load(foreign.to_str().unwrap(), "zoom/0001-L.png").is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("outside.png"), session.join("zoom/link.png"))
+                .unwrap();
+            assert!(load(&session_text, "zoom/link.png").is_err());
+            std::os::unix::fs::symlink(session.join("zoom"), session.join("linked")).unwrap();
+            assert!(load(&session_text, "linked/0001-L.png").is_err());
+        }
+        for (name, valid) in [
+            ("0123456789abcdef-20260922-101010", true),
+            ("0123456789abcdef-20260922-101010-2", true),
+            ("0123456789ABCDEF-20260922-101010", false),
+            ("0123456789abcdef-20260922", false),
+            ("0123456789abcdef-20260922-101010-", false),
+            ("0123456789abcdef-20260922-101010-2-3", false),
+            ("not-a-session", false),
+        ] {
+            assert_eq!(blink_session_name_parts(name).is_some(), valid, "{name}");
+        }
+        assert!(
+            blink_session_name_parts("0123456789abcdef-20260922-101010")
+                < blink_session_name_parts("0123456789abcdef-20260922-101010-2")
+        );
+        assert!(
+            blink_session_name_parts("0123456789abcdef-20260922-101010-2")
+                < blink_session_name_parts("0123456789abcdef-20260922-101011")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn base64_encodes_the_reference_vectors() {
         for (input, expected) in [
@@ -2013,6 +2633,7 @@ sys.exit(1)
                 master_metadata_overrides: vec![],
                 raw_frame_metadata_overrides: vec![],
                 review_selections: vec![],
+                selection: None,
                 output_parent_directory: root.to_string_lossy().into_owned(),
             },
             crate::sidecar::EngineExecutable { path: script },
@@ -2110,6 +2731,7 @@ sys.exit(1)
             master_metadata_overrides: vec![],
             raw_frame_metadata_overrides: vec![],
             review_selections: vec![],
+            selection: None,
             output_parent_directory: root.to_string_lossy().into_owned(),
         };
         let output = root.join("new-output");
@@ -2174,6 +2796,7 @@ sys.exit(1)
             master_metadata_overrides: vec![],
             raw_frame_metadata_overrides: vec![],
             review_selections: vec![],
+            selection: None,
             output_parent_directory: root.to_string_lossy().into_owned(),
         };
         let output = root.join("new-output");
@@ -2394,6 +3017,7 @@ print(json.dumps({"success":True,"code":"PROJECT_MONO_SUCCEEDED","state":"SOLVED
                     cfa_pattern: "NONE".to_owned(),
                 }],
                 review_selections: vec![],
+                selection: None,
                 output_parent_directory: output_parent.to_string_lossy().into_owned(),
             },
             crate::sidecar::EngineExecutable { path: script },

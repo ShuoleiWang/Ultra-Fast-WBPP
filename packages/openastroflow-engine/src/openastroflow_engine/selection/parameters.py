@@ -7,7 +7,9 @@ from typing import Any, Mapping
 
 SELECTION_ALGORITHM = "unattended-selection-v1"
 
-POLICIES = ("legacy-gate", "unattended-v1", "include-all")
+POLICIES = ("legacy-gate", "unattended-v1", "include-all", "explicit-v1")
+UNATTENDED_POLICIES = ("unattended-v1", "include-all")
+EXPLICIT_POLICY = "explicit-v1"
 PRIORITIES = ("depth", "balanced", "resolution")
 AGGRESSIVENESS = ("conservative", "standard", "aggressive")
 COUNTERFACTUAL_MODES = ("off", "analytic")
@@ -49,6 +51,8 @@ class SelectionParameters:
     gray-zone rules and confidence weights of the selection plan.
     ``include-all`` is a diagnostic policy that admits every frame the guards
     allow at full weight so the counterfactual can measure each one.
+    ``explicit-v1`` admits exactly the Lights a supplied selection file keeps
+    (the blink review's decisions); no rule of this module runs for it.
     """
 
     policy: str = "legacy-gate"
@@ -134,7 +138,11 @@ class SelectionParameters:
 
     @property
     def unattended(self) -> bool:
-        return self.policy != "legacy-gate"
+        return self.policy in UNATTENDED_POLICIES
+
+    @property
+    def explicit(self) -> bool:
+        return self.policy == EXPLICIT_POLICY
 
     def serializable(self) -> dict[str, Any]:
         """The recipe form: exactly the keys ``from_mapping`` accepts."""

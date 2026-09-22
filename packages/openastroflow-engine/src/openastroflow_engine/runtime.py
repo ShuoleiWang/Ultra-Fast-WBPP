@@ -23,6 +23,7 @@ from .calibration import IntegrationParameters
 from .e2e import (
     DrizzleOptions,
     E2ERequest,
+    ExplicitSelection,
     IntegrationMode,
     ReviewApproval,
 )
@@ -273,10 +274,34 @@ def build_e2e_request(
     field_of_view_degrees: float | None = None,
     search_radius_degrees: float | None = None,
     requested_hardware_profile: str | None = None,
+    explicit_selection: ExplicitSelection | None = None,
 ) -> E2ERequest:
-    """Build one explicit, role-separated E2E request from an inventory."""
+    """Build one explicit, role-separated E2E request from an inventory.
+
+    ``explicit_selection`` (the blink review's decisions) sets the effective
+    selection policy to ``explicit-v1``; a recipe that asks for an unattended
+    policy, or for ``explicit-v1`` without a selection, is refused.
+    """
 
     validate_e2e_inventory(inventory, recipe)
+    selection = recipe.selection.parameters
+    if explicit_selection is not None:
+        if recipe.selection.present and selection.unattended:
+            raise RuntimeConfigurationError(
+                "SELECTION_POLICY_CONFLICT",
+                f"recipe selection.policy {selection.policy} cannot be combined with an explicit selection",
+            )
+        if recipe.review_approvals:
+            raise RuntimeConfigurationError(
+                "SELECTION_POLICY_CONFLICT",
+                "an explicit selection cannot be combined with recipe reviewApprovals",
+            )
+        selection = replace(selection, policy="explicit-v1")
+    elif selection.explicit:
+        raise RuntimeConfigurationError(
+            "SELECTION_POLICY_CONFLICT",
+            "recipe selection.policy explicit-v1 requires a selection file",
+        )
     hardware = hardware or detect_hardware()
     tuning = select_execution_tuning(hardware)
     selected_workers = tuning.qc_workers if workers is None else workers
@@ -377,7 +402,8 @@ def build_e2e_request(
             for item in recipe.review_approvals
         ),
         recipe_digest=_recipe_sha256(recipe),
-        selection=recipe.selection.parameters,
+        selection=selection,
+        explicit_selection=explicit_selection,
     )
 
 
@@ -509,6 +535,7 @@ def prepare_execution(
     search_radius_degrees: float | None = None,
     requested_hardware_profile: str | None = None,
     layout: Layout = "run",
+    explicit_selection: ExplicitSelection | None = None,
 ) -> tuple[ExecutionPlan, E2ERequest, tuple[SolverBackend, ...]]:
     """Validate a plan and return every object needed by ``run_e2e``.
 
@@ -549,6 +576,7 @@ def prepare_execution(
         field_of_view_degrees=field_of_view_degrees,
         search_radius_degrees=search_radius_degrees,
         requested_hardware_profile=requested_hardware_profile,
+        explicit_selection=explicit_selection,
     )
     return plan, request, solvers
 
@@ -567,6 +595,7 @@ def prepare_project_execution(
     field_of_view_degrees: float | None = None,
     search_radius_degrees: float | None = None,
     requested_hardware_profile: str | None = None,
+    explicit_selection: ExplicitSelection | None = None,
 ) -> tuple[ExecutionPlan, ProjectE2ERequest, tuple[SolverBackend, ...]]:
     """Prepare a multi-target project using the same validated base E2E plan."""
 
@@ -584,6 +613,7 @@ def prepare_project_execution(
         search_radius_degrees=search_radius_degrees,
         requested_hardware_profile=requested_hardware_profile,
         layout="project",
+        explicit_selection=explicit_selection,
     )
     return (
         plan,

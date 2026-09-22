@@ -61,7 +61,29 @@ contracts; it is not the transport used for every desktop operation. See
 ## Scientific work
 
 1. Inventory frames and interpret calibration metadata.
-2. Measure Light quality and exclude `HARD_FAIL` and unapproved `REVIEW` frames (or, under an unattended `selection.policy`, decide and weight every frame from the same evidence).
+2. Measure Light quality (1/4-scale previews, SEP detection, native-resolution
+   PSF stamps, the QC reference and registration, spatial features) and run the
+   quality gate; then admit frames by one of three routes. The *legacy gate*
+   (default of the command line and of a desktop run started without a blink
+   session) excludes `HARD_FAIL` and unapproved `REVIEW` frames. An unattended
+   `selection.policy` decides and weights every frame from the same evidence.
+   An explicit selection (`selection-v1`, policy `explicit-v1`, made in the
+   desktop's blink view or written by hand and passed as `--selection` or the
+   request's `selection` block) names the kept Lights by content digest: the
+   worker's `blink-measure` command (`blink_session.py`) had computed
+   per-channel flags with absolute cross-night criteria
+   (`lightframeqc.blink_flags`, policy `blink-flags-v1`), a reference frame
+   per channel (`lightframeqc.blink_reference`, a PSF-signal-weight proxy)
+   and registered, normalised, shared-stretch previews at 1/8 and 1/4 scale
+   (`blink_previews.py`) into a create-only session directory under the
+   platform cache root. The run recomputes the gate, the flags and the
+   reference from the same functions, replaces the gate's admitted set with
+   the selection (a KEEP on an unregistrable frame fails closed), writes
+   `qc/blink.json` and records every drop and override in the receipt. The
+   blink reference is not the pipeline's registration or normalization
+   reference: those rules are part of the validated numerics, so an identical
+   admitted set gives bit-identical products whichever route admitted it
+   ([blink recipe](recipes/blink-screening.md), [legacy gate](recipes/automatic-screening.md)).
 3. Build raw calibration masters or validate supplied masters; calibrate Lights.
 4. Estimate transforms and register accepted frames. Every filter of a
    target registers onto one reference frame with a projective model fitted

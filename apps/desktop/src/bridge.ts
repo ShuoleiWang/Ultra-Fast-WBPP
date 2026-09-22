@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { translateCurrent } from "./i18n";
 import type {
+  BlinkMeasureRequest,
+  BlinkMeasureResponse,
   CalibrationInspection,
   CalibrationInspectionRequest,
   CatalogDoctorResponse,
@@ -30,6 +32,10 @@ export interface DesktopBridge {
   inspectPaths(request: InspectRequest): Promise<InspectResponse>;
   inspectCalibration(request: CalibrationInspectionRequest): Promise<CalibrationInspection>;
   inspectQuality(paths: string[]): Promise<QualityInspection>;
+  /** Measures the Lights, renders the normalised previews and returns the `blink-manifest-v1` of the new session. */
+  blinkMeasure(request: BlinkMeasureRequest): Promise<BlinkMeasureResponse>;
+  /** One preview of a blink session (`filmstrip/…` or `zoom/…`) as a data URL, bounded by the controller. */
+  loadBlinkPreview(sessionDirectory: string, relativePath: string): Promise<string>;
   hashSources(paths: string[]): Promise<HashSourcesResponse>;
   startRun(request: RunRequest): Promise<RunReceipt>;
   cancelRun(jobId: string): Promise<void>;
@@ -67,6 +73,8 @@ const mockBridge: DesktopBridge = {
   async inspectPaths() { throw browserOnlyError(); },
   async inspectCalibration() { throw browserOnlyError(); },
   async inspectQuality() { throw browserOnlyError(); },
+  async blinkMeasure() { throw browserOnlyError(); },
+  async loadBlinkPreview() { throw browserOnlyError(); },
   async hashSources() { throw browserOnlyError(); },
   async startRun() { throw browserOnlyError(); },
   async cancelRun() {},
@@ -93,6 +101,14 @@ const tauriBridge: DesktopBridge = {
   inspectPaths: (request) => invoke("inspect_paths", { request }),
   inspectCalibration: (request) => invoke("inspect_calibration", { request }),
   inspectQuality: (paths) => invoke("inspect_quality", { request: { paths } }),
+  blinkMeasure: (request) => invoke("blink_measure", { request }),
+  async loadBlinkPreview(sessionDirectory, relativePath) {
+    // The controller answers with the data URL itself or wrapped as `{ dataUrl }`.
+    const result = await invoke<string | { dataUrl?: unknown }>("load_blink_preview", { sessionDirectory, relativePath });
+    const dataUrl = typeof result === "string" ? result : result && typeof result === "object" ? result.dataUrl : undefined;
+    if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:image/")) throw new Error(translateCurrent("blinkPreviewInvalid"));
+    return dataUrl;
+  },
   hashSources: (paths) => invoke("hash_sources", { request: { paths } }),
   startRun: (request) => invoke("start_project", { request }),
   cancelRun: (jobId) => invoke("cancel_project", { jobId }),

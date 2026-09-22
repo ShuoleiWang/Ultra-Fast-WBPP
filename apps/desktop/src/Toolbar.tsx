@@ -12,6 +12,7 @@ export function Toolbar({ workflow, language, setLanguage, t, inspectorOpen, onT
 }) {
   const importDisabled = !workflow.nativeRuntime || workflow.inputBusy || workflow.runNavigationLocked;
   const showActivity = workflow.step === "run";
+  const lightCount = workflow.sources.find((source) => source.role === "LIGHT")?.fileCount ?? 0;
   const runningStage = workflow.stages.find((stage) => stage.status === "RUNNING");
   const activityText = workflow.runStatus === "CANCELLED" ? t("cancelledTitle") : workflow.runStatus === "FAILED" ? t("failedTitle")
     : workflow.runStatus === "COMPLETED" ? t("resultTitle") : runningStage ? stageLabel(runningStage.stageId, t) : t("runningTitle");
@@ -29,6 +30,11 @@ export function Toolbar({ workflow, language, setLanguage, t, inspectorOpen, onT
         ? <div className={`activity ${workflow.runStatus === "COMPLETED" ? "done" : ""}`} role="progressbar" aria-label={`${workflow.overallProgress}%`} aria-valuenow={workflow.overallProgress} aria-valuemin={0} aria-valuemax={100}>
             <div className="bar"><span style={{ width: `${workflow.overallProgress}%` }} /></div>
             <span className="txt tnum">{workflow.overallProgress}% · {activityText}</span>
+          </div>
+        : workflow.blinkBusy
+        ? <div className="activity" aria-live="polite">
+            <div className="bar indeterminate"><span /></div>
+            <span className="txt tnum">{t("blinkMeasuring", { count: lightCount, seconds: workflow.blinkElapsedSeconds })}</span>
           </div>
         : <>
             <div className="doc-title">{workflow.importedTotal > 0 ? workflow.projectName : "Ultra-Fast WBPP"}</div>

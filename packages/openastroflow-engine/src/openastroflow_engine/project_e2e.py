@@ -556,6 +556,7 @@ def _screening_record(receipt_path: Path, staging: Path, target: str) -> dict[st
         "admitted": screening.get("admitted"),
         "excluded": screening.get("excluded"),
         "frames": frames,
+        "selectionPolicy": receipt.get("qualityControl", {}).get("selectionPolicy"),
     }
 
 
@@ -566,6 +567,7 @@ def _project_screening(subruns: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     frames: list[dict[str, Any]] = []
     admitted = 0
     excluded = 0
+    policies: list[str] = []
     for record in subruns:
         screening = record.get("screening")
         if not isinstance(screening, Mapping):
@@ -575,7 +577,18 @@ def _project_screening(subruns: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         admitted += int(screening.get("admitted") or 0)
         excluded += int(screening.get("excluded") or 0)
         frames.extend(screening.get("frames", []))
-    return {"counts": counts, "admitted": admitted, "excluded": excluded, "frames": frames}
+        policy = screening.get("selectionPolicy")
+        if isinstance(policy, str) and policy not in policies:
+            policies.append(policy)
+    return {
+        "counts": counts,
+        "admitted": admitted,
+        "excluded": excluded,
+        "frames": frames,
+        # Every run of a project shares the request's policy; None until a
+        # run has reported one.
+        "selectionPolicy": policies[0] if len(policies) == 1 else None,
+    }
 
 
 def _accepted_quality(receipt_path: Path, filter_name: str) -> dict[str, Any]:
@@ -692,6 +705,11 @@ def _validate_request(request: ProjectE2ERequest) -> tuple[Path, Path, ProjectLa
         raise ProjectE2EError(
             "PROJECT_REVIEW_APPROVAL_SCOPE_UNSUPPORTED",
             "a project request carries either pre-bound approvals or review selections, not both",
+        )
+    if request.e2e_request.explicit_selection is not None and request.review_selections:
+        raise ProjectE2EError(
+            "SELECTION_POLICY_CONFLICT",
+            "a project request carries either an explicit selection or review selections, not both",
         )
     digest_pattern = re.compile(r"^sha256:[0-9a-f]{64}$")
     seen_selection_digests: set[str] = set()
@@ -1516,6 +1534,26 @@ def run_project_e2e(
             "REVIEW_APPROVAL_SOURCE_AMBIGUOUS",
             "review selections must identify exactly one current Light: " + ", ".join(unmatched),
         )
+    # Every explicit decision must name a Light of exactly one target run;
+    # each run then receives the decisions of its own Lights.
+    explicit_selection = request.e2e_request.explicit_selection
+    if explicit_selection is not None:
+        occurrences = {
+            digest: sum(digest in digests for digests in run_digests.values())
+            for digest in explicit_selection.by_source
+        }
+        unknown = sorted(digest for digest, count in occurrences.items() if count == 0)
+        if unknown:
+            raise ProjectE2EError(
+                "SELECTION_SOURCE_UNKNOWN",
+                "selection digests name no current Light: " + ", ".join(unknown),
+            )
+        ambiguous = sorted(digest for digest, count in occurrences.items() if count > 1)
+        if ambiguous:
+            raise ProjectE2EError(
+                "SELECTION_SOURCE_AMBIGUOUS",
+                "selection digests name more than one current Light: " + ", ".join(ambiguous),
+            )
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", suffix=PROJECT_STAGING_SUFFIX, dir=output.parent))
     # The published directory holds only the final channels, ``previews`` and
     # ``receipt.json`` at its top level; every intermediate stage lives under
@@ -1584,6 +1622,18 @@ def run_project_e2e(
                                          message=f"target {group.target} ({group.filter_name})"))
             sub_output = runs_root / _safe_token(group.target_key)
             panel_digests = run_digests[group.target_key]
+            run_explicit_selection = (
+                replace(
+                    explicit_selection,
+                    decisions=tuple(
+                        decision
+                        for decision in explicit_selection.decisions
+                        if decision.source_sha256 in panel_digests
+                    ),
+                )
+                if explicit_selection is not None
+                else None
+            )
             if direct_approved_panel:
                 sub_request = replace(
                     request.e2e_request,
@@ -1615,6 +1665,7 @@ def run_project_e2e(
                     output_directory=str(sub_output),
                     review_approvals=(),
                     pipeline_parameters=panel_pipeline_parameters,
+                    explicit_selection=run_explicit_selection,
                 )
                 run_selections = [
                     selection for selection in request.review_selections

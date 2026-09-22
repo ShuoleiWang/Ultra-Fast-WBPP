@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { desktopBridge, hasTauriRuntime, listenForCatalogEvents, listenForDesktopDrops, listenForPipelineEvents } from "./bridge";
 import { emptySources } from "./data";
+import { demoBlinkManifest } from "./demoAutopilot";
 import type { Translator } from "./i18n";
 import type {
+  BlinkChannel,
+  BlinkDecision,
+  BlinkFrame,
+  BlinkMeasureResponse,
   CalibrationInspection,
   CatalogCompleteEvent,
   DrizzleKernel,
@@ -28,6 +33,7 @@ import type {
   RuntimeCapabilities,
   QualityInspection,
   ScreeningSummary,
+  SelectionFile,
   SolverBackendStatus,
   SolverDoctorResponse,
   SourceSet,
@@ -190,6 +196,33 @@ function reviewCanBeApproved(frame: InspectedLightQuality, inspection: QualityIn
     && inspection.frames.filter((item) => item.sourceSha256 === frame.sourceSha256).length === 1);
 }
 
+const CONTENT_DIGEST = /^sha256:[0-9a-f]{64}$/;
+/** Undo depth of the blink decisions. */
+const DECISION_HISTORY_LIMIT = 100;
+/** The minimum kept Lights per blink channel (the engine's `QC_INSUFFICIENT_LIGHTS` bound). */
+const MINIMUM_KEPT_PER_CHANNEL = 2;
+
+/** A measured blink session: the manifest, where its previews live and the Lights it was measured for. */
+export interface BlinkSession { manifest: BlinkMeasureResponse; sessionDirectory: string; inventoryKey: string; demo: boolean; }
+/** One blink channel with the decision counts the launch bar and chips show. */
+export interface BlinkChannelSummary extends BlinkChannel { frames: BlinkFrame[]; total: number; kept: number; flagged: number; exclude: number; attention: number; }
+
+const inventoryKeyOf = (paths: string[]) => [...paths].sort().join("\n");
+const defaultDecisions = (manifest: BlinkMeasureResponse): Record<string, BlinkDecision> => Object.fromEntries(manifest.frames.map((frame) => [frame.sourceSha256, frame.defaultDecision]));
+
+/**
+ * Whether a session still describes the current Lights: every imported Light
+ * is in the manifest with a usable, unique content digest (the selection is
+ * keyed by digest, so a duplicate or malformed one could not be sent).
+ */
+function blinkSessionCovers(session: BlinkSession, lightPaths: string[]): boolean {
+  if (inventoryKeyOf(lightPaths) !== session.inventoryKey || !lightPaths.length) return false;
+  const frames = session.manifest.frames;
+  const byPath = new Set(frames.map((frame) => frame.path));
+  const digests = frames.map((frame) => frame.sourceSha256);
+  return lightPaths.every((path) => byPath.has(path)) && digests.every((digest) => CONTENT_DIGEST.test(digest)) && new Set(digests).size === digests.length;
+}
+
 export function useWorkflow(t: Translator) {
   const nativeRuntime = hasTauriRuntime();
   const [step, setStep] = useState<WorkflowStep>("import");
@@ -206,6 +239,22 @@ export function useWorkflow(t: Translator) {
   const [qualityBusy, setQualityBusy] = useState(false);
   const [qualityElapsedSeconds, setQualityElapsedSeconds] = useState(0);
   const [approvedReviewDigests, setApprovedReviewDigests] = useState<string[]>([]);
+  // Blink screening: the measured session, the per-frame decisions keyed by
+  // content digest, and their undo stack.  Refs mirror the two so a burst of
+  // keyboard actions in one event commits in order.
+  const [blinkSession, setBlinkSession] = useState<BlinkSession>();
+  const blinkSessionRef = useRef<BlinkSession | undefined>(undefined);
+  blinkSessionRef.current = blinkSession;
+  const [blinkBusy, setBlinkBusy] = useState(false);
+  const [blinkElapsedSeconds, setBlinkElapsedSeconds] = useState(0);
+  const [decisions, setDecisions] = useState<Record<string, BlinkDecision>>({});
+  const decisionsRef = useRef(decisions);
+  decisionsRef.current = decisions;
+  const [decisionHistory, setDecisionHistory] = useState<Record<string, BlinkDecision>[]>([]);
+  const decisionHistoryRef = useRef(decisionHistory);
+  decisionHistoryRef.current = decisionHistory;
+  const [blinkChannel, setBlinkChannel] = useState<string>();
+  const blinkInFlightRef = useRef(false);
   const [capabilities, setCapabilities] = useState<RuntimeCapabilities | null>(null);
   const [runStatus, setRunStatus] = useState<RunStatus>("IDLE");
   const [runLaunchBusy, setRunLaunchBusy] = useState(false);
@@ -296,6 +345,21 @@ export function useWorkflow(t: Translator) {
     return () => window.clearInterval(timer);
   }, [qualityBusy]);
 
+  useEffect(() => {
+    if (!blinkBusy) return;
+    const started = performance.now();
+    setBlinkElapsedSeconds(0);
+    const timer = window.setInterval(() => setBlinkElapsedSeconds(Math.floor((performance.now() - started) / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, [blinkBusy]);
+
+  const clearBlinkSession = useCallback(() => {
+    setBlinkSession(undefined); blinkSessionRef.current = undefined;
+    decisionsRef.current = {}; setDecisions({});
+    decisionHistoryRef.current = []; setDecisionHistory([]);
+    setBlinkChannel(undefined);
+  }, []);
+
   const refreshSolverSetup = useCallback(async () => {
     if (!nativeRuntime) return;
     setSolverSetupBusy(true);
@@ -315,7 +379,7 @@ export function useWorkflow(t: Translator) {
   }, [nativeRuntime]);
 
   const importPaths = useCallback(async (paths: string[], roleHint?: FrameRole) => {
-    if (!paths.length || !nativeRuntime || stepRef.current !== "import" || inventoryInFlightRef.current || qualityInFlightRef.current || runLaunchInFlightRef.current) return;
+    if (!paths.length || !nativeRuntime || stepRef.current !== "import" || inventoryInFlightRef.current || qualityInFlightRef.current || blinkInFlightRef.current || runLaunchInFlightRef.current) return;
     inventoryInFlightRef.current = true;
     setInventoryBusy(true);
     setErrorMessage(undefined);
@@ -327,8 +391,9 @@ export function useWorkflow(t: Translator) {
       const priorLights = new Set(assetsRef.current.filter((asset) => asset.role === "LIGHT").map((asset) => asset.path));
       const touchesLights = inspected.sources.some((source) => source.role === "LIGHT" || source.paths.some((path) => priorLights.has(path)));
       // A calibration-only addition does not change raw Light pixel evidence.
-      // Reimporting any Light still invalidates it, even at the same path.
-      if (touchesLights) { setQualityInspection(undefined); setGate({ pass: 0, review: 0, hardFail: 0 }); }
+      // Reimporting any Light still invalidates it, even at the same path; the
+      // blink session and its decisions go with it.
+      if (touchesLights) { setQualityInspection(undefined); setGate({ pass: 0, review: 0, hardFail: 0 }); clearBlinkSession(); }
       setApprovedReviewDigests([]);
       setSources((current) => {
         const next = current.map((source) => ({ ...source }));
@@ -354,7 +419,7 @@ export function useWorkflow(t: Translator) {
       inventoryInFlightRef.current = false;
       setInventoryBusy(false);
     }
-  }, [nativeRuntime]);
+  }, [clearBlinkSession, nativeRuntime]);
 
   useEffect(() => {
     const masters = assets.filter((asset) => MASTER_ROLES.has(asset.role));
@@ -530,7 +595,7 @@ export function useWorkflow(t: Translator) {
   const pickDirectories = async (role?: FrameRole) => { try { await importPaths(await desktopBridge.pickInputDirectories(role), role); } catch (error) { setErrorMessage(String(error)); } };
   const chooseOutputParent = async () => { try { const selected = await desktopBridge.pickOutputParent(); if (selected) setOutputParent(selected); } catch (error) { setErrorMessage(String(error)); } };
   const useOutputParentPath = (path: string) => {
-    if (!nativeRuntime || !["import", "inspect"].includes(stepRef.current) || runLaunchInFlightRef.current || runStatus === "RUNNING" || runStatus === "CANCELLING") return;
+    if (!nativeRuntime || !["import", "inspect", "blink"].includes(stepRef.current) || runLaunchInFlightRef.current || runStatus === "RUNNING" || runStatus === "CANCELLING") return;
     // The native start command resolves the path and requires an existing directory.
     setOutputParent(path.trim() || undefined);
   };
@@ -567,15 +632,15 @@ export function useWorkflow(t: Translator) {
   };
 
   const clearSources = () => {
-    if (inventoryInFlightRef.current || qualityInFlightRef.current || runLaunchInFlightRef.current || runStatus === "RUNNING" || runStatus === "CANCELLING") return;
+    if (inventoryInFlightRef.current || qualityInFlightRef.current || blinkInFlightRef.current || runLaunchInFlightRef.current || runStatus === "RUNNING" || runStatus === "CANCELLING") return;
     stopRunClock(); setRunElapsedSeconds(0);
     jobIdRef.current = undefined; pendingProgressRef.current = []; pendingTerminalRef.current = undefined;
-    setSources(emptySources()); setAssets([]); setMasterOverrides([]); setGate({ pass: 0, review: 0, hardFail: 0 }); setQualityInspection(undefined); setApprovedReviewDigests([]); setSelectedRole(undefined); setStep("import"); setDemoMode(false); setArtifacts([]); setScreening(undefined); setOutputDirectory(undefined); setRunStatus("IDLE"); setRunLaunchBusy(false); setErrorMessage(undefined);
+    setSources(emptySources()); setAssets([]); setMasterOverrides([]); setGate({ pass: 0, review: 0, hardFail: 0 }); setQualityInspection(undefined); setApprovedReviewDigests([]); clearBlinkSession(); setSelectedRole(undefined); setStep("import"); setDemoMode(false); setArtifacts([]); setScreening(undefined); setOutputDirectory(undefined); setRunStatus("IDLE"); setRunLaunchBusy(false); setErrorMessage(undefined);
   };
   const runInspection = async (force = false) => {
     if (demoMode && !nativeRuntime) { setStep("inspect"); return; }
     const lightPaths = sources.find((source) => source.role === "LIGHT")?.paths ?? [];
-    if (!nativeRuntime || !lightPaths.length || inventoryInFlightRef.current || qualityInFlightRef.current) return;
+    if (!nativeRuntime || !lightPaths.length || inventoryInFlightRef.current || qualityInFlightRef.current || blinkInFlightRef.current) return;
     if (!force && qualityReady) { setStep("inspect"); return; }
     qualityInFlightRef.current = true;
     setQualityBusy(true); setErrorMessage(undefined); setApprovedReviewDigests([]);
@@ -601,6 +666,78 @@ export function useWorkflow(t: Translator) {
       : []);
   };
 
+  const installBlinkSession = (manifest: BlinkMeasureResponse, lightPaths: string[], demo: boolean) => {
+    const session: BlinkSession = { manifest, sessionDirectory: manifest.sessionDirectory, inventoryKey: inventoryKeyOf(lightPaths), demo };
+    blinkSessionRef.current = session; setBlinkSession(session);
+    const defaults = defaultDecisions(manifest);
+    decisionsRef.current = defaults; setDecisions(defaults);
+    decisionHistoryRef.current = []; setDecisionHistory([]);
+    setBlinkChannel(manifest.channels[0]?.channelId);
+  };
+  // Measures the Lights for blinking (previews, flags, reference) and opens
+  // the view; a session that still matches the Lights is reopened instead.
+  const runBlink = async (force = false) => {
+    if (demoMode && !nativeRuntime) { if (!blinkSession) installBlinkSession(demoBlinkManifest(), [], true); setStep("blink"); return; }
+    const lightPaths = sources.find((source) => source.role === "LIGHT")?.paths ?? [];
+    if (!nativeRuntime || !lightPaths.length || inventoryInFlightRef.current || qualityInFlightRef.current || blinkInFlightRef.current) return;
+    if (!force && blinkReady) { setStep("blink"); return; }
+    blinkInFlightRef.current = true;
+    setBlinkBusy(true); setErrorMessage(undefined);
+    try {
+      const masterFlats = assets.filter((asset) => asset.role === "MASTER_FLAT" && known(asset.filter)).map((asset) => ({ filter: asset.filter, path: asset.path }));
+      const manifest = await desktopBridge.blinkMeasure({ paths: lightPaths, masterFlats });
+      installBlinkSession(manifest, lightPaths, false);
+      setStep("blink");
+    } catch (error) { setErrorMessage(t("blinkFailed", { error: String(error) })); }
+    finally { blinkInFlightRef.current = false; setBlinkBusy(false); }
+  };
+  // Every decision change goes through here so it can be undone (bounded stack).
+  const commitDecisions = (update: (current: Record<string, BlinkDecision>) => Record<string, BlinkDecision> | undefined) => {
+    const current = decisionsRef.current;
+    const next = update(current);
+    if (!next || next === current) return;
+    decisionsRef.current = next; setDecisions(next);
+    const history = [...decisionHistoryRef.current, current].slice(-DECISION_HISTORY_LIMIT);
+    decisionHistoryRef.current = history; setDecisionHistory(history);
+  };
+  const setDecision = (sourceSha256: string, decision: BlinkDecision) => commitDecisions((current) => !(sourceSha256 in current) || current[sourceSha256] === decision ? undefined : { ...current, [sourceSha256]: decision });
+  const toggleDecision = (sourceSha256: string) => commitDecisions((current) => sourceSha256 in current ? { ...current, [sourceSha256]: current[sourceSha256] === "KEEP" ? "DROP" : "KEEP" } : undefined);
+  // A filmstrip range (shift-click): one undo step for the whole range.
+  const setDecisionsBulk = (sourceSha256s: string[], decision: BlinkDecision) => commitDecisions((current) => {
+    const changed = sourceSha256s.filter((digest) => digest in current && current[digest] !== decision);
+    return changed.length ? { ...current, ...Object.fromEntries(changed.map((digest) => [digest, decision])) } : undefined;
+  });
+  const setNightDecision = (channelId: string, night: string, decision: BlinkDecision) => commitDecisions((current) => {
+    const frames = (blinkSessionRef.current?.manifest.frames ?? []).filter((frame) => frame.channelId === channelId && frame.night === night && current[frame.sourceSha256] !== decision);
+    return frames.length ? { ...current, ...Object.fromEntries(frames.map((frame) => [frame.sourceSha256, decision])) } : undefined;
+  });
+  const applyFlags = () => commitDecisions((current) => {
+    const manifest = blinkSessionRef.current?.manifest;
+    if (!manifest) return undefined;
+    const defaults = defaultDecisions(manifest);
+    return manifest.frames.some((frame) => current[frame.sourceSha256] !== defaults[frame.sourceSha256]) ? defaults : undefined;
+  });
+  const undo = () => {
+    const history = decisionHistoryRef.current;
+    if (!history.length) return;
+    const previous = history[history.length - 1];
+    decisionHistoryRef.current = history.slice(0, -1); setDecisionHistory(decisionHistoryRef.current);
+    decisionsRef.current = previous; setDecisions(previous);
+  };
+  const selectBlinkChannel = (channelId: string) => { if (blinkSessionRef.current?.manifest.channels.some((channel) => channel.channelId === channelId)) setBlinkChannel(channelId); };
+  // One preview of the current session as a data URL; the demo answers from its bundled manifest.
+  const loadBlinkPreview = useCallback(async (relativePath: string): Promise<string> => {
+    const session = blinkSessionRef.current;
+    if (!session) throw new Error("no blink session");
+    if (session.demo) {
+      const frame = session.manifest.frames.find((item) => item.previews.zoom === relativePath || item.previews.filmstrip === relativePath);
+      const dataUrl = frame?.previews.zoomDataUrl ?? frame?.previews.filmstripDataUrl;
+      if (!dataUrl) throw new Error(`no demo preview for ${relativePath}`);
+      return dataUrl;
+    }
+    return desktopBridge.loadBlinkPreview(session.sessionDirectory, relativePath);
+  }, []);
+
   const startDemo = () => {
     startRunClock(); terminalJobIdRef.current = undefined; cancellingRef.current = false;
     setJobId("explicit-browser-demo"); jobIdRef.current = "explicit-browser-demo"; setExecutionMode("demo"); setRunStatus("RUNNING"); setOverallProgress(1); setStep("run");
@@ -625,6 +762,9 @@ export function useWorkflow(t: Translator) {
     setJobId(undefined); setRunProgress(undefined); setExecutionMode("native"); setArtifacts([]); setScreening(undefined); setOutputDirectory(undefined); setRunStatus("RUNNING"); setRunFailureCode(undefined); setOverallProgress(0); setStages(initialStages()); setStep("run");
     // Include launch-command work, but exclude the earlier review and screening.
     startRunClock();
+    // A blink session decides every Light explicitly; the legacy REVIEW
+    // approvals are the alternative, never both (the engine rejects the pair).
+    const selection = selectionForRun();
     try {
       let sourceIndex = 0;
       const receipt = await desktopBridge.startRun({
@@ -634,7 +774,8 @@ export function useWorkflow(t: Translator) {
         recipe: { balanced: true, drizzleEnabled, drizzleScale, drizzleDropShrink, drizzleKernel, localNormalizationEnabled, solverRequired: true, calibrationWorkflow: "mono-standard-v1" },
         masterMetadataOverrides: masterOverrideRequests(masterOverrides),
         rawFrameMetadataOverrides: [],
-        reviewSelections: validApprovedReviewDigests.map((sourceSha256) => ({ sourceSha256, gatePolicyDigest: qualityInspection!.gatePolicyDigest })),
+        reviewSelections: selection ? [] : validApprovedReviewDigests.map((sourceSha256) => ({ sourceSha256, gatePolicyDigest: qualityInspection!.gatePolicyDigest })),
+        ...(selection ? { selection } : {}),
         outputParentDirectory: outputParent,
       });
       if (!receipt.accepted) throw new Error(t("runNotAccepted"));
@@ -690,7 +831,7 @@ export function useWorkflow(t: Translator) {
     catch (error) { setCatalogError(String(error)); }
   };
 
-  const inputBusy = inventoryBusy || qualityBusy;
+  const inputBusy = inventoryBusy || qualityBusy || blinkBusy;
   const canInspect = !inputBusy && (sources.find((source) => source.role === "LIGHT")?.fileCount ?? 0) > 0;
   const allRequiredConfirmed = sources.filter((source) => source.paths.length).every((source) => source.confirmed);
   const calibrationReady = Boolean(calibrationInspection?.calibrationReady && calibrationInspection.status === "READY");
@@ -718,14 +859,47 @@ export function useWorkflow(t: Translator) {
   const approvableReviewCount = useMemo(() => qualityReady ? (qualityInspection?.frames ?? []).filter((frame) => reviewCanBeApproved(frame, qualityInspection)).length : 0, [qualityInspection, qualityReady]);
   // Approvable frames the reviewer has not approved yet (frames without a transform are never approvable).
   const unapprovedApprovableCount = Math.max(0, approvableReviewCount - validApprovedReviewDigests.length);
-  const admittedPaths = useMemo(() => new Set(qualityInspection?.frames.filter((frame) => frame.disposition === "PASS" || (frame.disposition === "REVIEW" && frame.sourceSha256 && validApprovedReviewDigests.includes(frame.sourceSha256))).map((frame) => frame.path) ?? []), [qualityInspection, validApprovedReviewDigests]);
+  const lightSourcePaths = sources.find((source) => source.role === "LIGHT")?.paths ?? [];
+  // A session is usable while it describes exactly the current Lights (the
+  // browser demo's bundled session stands in for its labelled demo files).
+  const blinkReady = Boolean(blinkSession && (blinkSession.demo ? demoMode && !nativeRuntime : blinkSessionCovers(blinkSession, lightSourcePaths)));
+  const blinkChannels = useMemo<BlinkChannelSummary[]>(() => (blinkSession?.manifest.channels ?? []).map((channel) => {
+    const frames = blinkSession!.manifest.frames.filter((frame) => frame.channelId === channel.channelId);
+    return {
+      ...channel, frames, total: frames.length,
+      kept: frames.filter((frame) => decisions[frame.sourceSha256] === "KEEP").length,
+      flagged: frames.filter((frame) => frame.flags.length > 0).length,
+      exclude: frames.filter((frame) => frame.defaultDecision === "DROP").length,
+      attention: frames.filter((frame) => frame.defaultDecision === "KEEP" && frame.flags.length > 0).length,
+    };
+  }), [blinkSession, decisions]);
+  const selectionForRun = (): SelectionFile | undefined => {
+    if (!blinkSession || !blinkReady || !nativeRuntime) return undefined;
+    const { manifest } = blinkSession;
+    const digest = manifest.manifestSha256 ?? "";
+    // `origin` is recorded, not enforced: it is sent only when the controller
+    // gave the manifest's digest, so a hand-checkable file never carries a blank.
+    const origin = CONTENT_DIGEST.test(digest) ? { sessionId: manifest.sessionId, blinkManifestSha256: digest, flagsPolicyDigest: manifest.flagsPolicyDigest, createdAt: new Date().toISOString() } : undefined;
+    return {
+      schemaVersion: 1, kind: "ultra-fast-wbpp-selection", policy: "explicit-v1", ...(origin ? { origin } : {}), undecided: "ERROR",
+      decisions: manifest.frames.map((frame) => ({ sourceSha256: frame.sourceSha256, decision: decisions[frame.sourceSha256] ?? frame.defaultDecision, defaultDecision: frame.defaultDecision, flags: frame.flags.map((item) => item.code) })),
+    };
+  };
+  const blinkAdmittedPaths = useMemo(() => blinkReady && nativeRuntime ? new Set(blinkSession!.manifest.frames.filter((frame) => decisions[frame.sourceSha256] === "KEEP").map((frame) => frame.path)) : undefined, [blinkReady, blinkSession, decisions, nativeRuntime]);
+  const qualityAdmittedPaths = useMemo(() => new Set(qualityInspection?.frames.filter((frame) => frame.disposition === "PASS" || (frame.disposition === "REVIEW" && frame.sourceSha256 && validApprovedReviewDigests.includes(frame.sourceSha256))).map((frame) => frame.path) ?? []), [qualityInspection, validApprovedReviewDigests]);
+  const admittedPaths = blinkAdmittedPaths ?? qualityAdmittedPaths;
   const matrix = useMemo(() => panelMatrix(assets, admittedPaths), [assets, admittedPaths]);
   const minimumAdmittedLights = 2;
   const insufficientQualityPanels = qualityReady ? matrix.filter((cell) => cell.admittedCount < minimumAdmittedLights) : [];
+  // Blink channels with fewer kept Lights than a stack needs (the launch bar's blocker).
+  const insufficientBlinkPanels = blinkReady ? blinkChannels.filter((channel) => channel.kept < MINIMUM_KEPT_PER_CHANNEL) : [];
+  // Whether the admitted counts are known: blink decisions or the legacy screening.
+  const admissionKnown = Boolean(blinkAdmittedPaths) || qualityReady;
   // Screening before the run is optional: the run screens every Light itself
   // and lists the excluded frames with its result.  Before a screening, a
   // panel only needs enough Lights to register; after one, enough admitted.
-  const insufficientPanels = qualityReady ? insufficientQualityPanels : matrix.filter((cell) => cell.lightCount < minimumAdmittedLights);
+  const insufficientPanels = blinkAdmittedPaths ? matrix.filter((cell) => cell.admittedCount < minimumAdmittedLights || insufficientBlinkPanels.some((channel) => channel.target === cell.target && channel.filter === cell.filter))
+    : qualityReady ? insufficientQualityPanels : matrix.filter((cell) => cell.lightCount < minimumAdmittedLights);
   const panelsReady = matrix.length > 0 && insufficientPanels.length === 0;
   const runNavigationLocked = runLaunchBusy || runStatus === "RUNNING" || runStatus === "CANCELLING";
   const canStart = demoMode && !nativeRuntime ? !runNavigationLocked : Boolean(!runNavigationLocked && !inputBusy && nativeRuntime && capabilities?.available && outputParent && calibrationReady && allRequiredConfirmed && masterOverridesReady && cfaBlockedAssets.length === 0 && solverSetupReady && panelsReady);
@@ -739,7 +913,9 @@ export function useWorkflow(t: Translator) {
     firstSolved, demoMode, projectName, matrix, masterOverrides, updateMasterOverride, resetMasterOverride, confirmMasterOverride, masterOverridesReady, runNavigationLocked,
     cfaBlockedAssets, cfaAssets, cfaPattern,
     qualityInspection, qualityBusy, qualityElapsedSeconds, qualityReady, approvedReviewDigests: validApprovedReviewDigests, toggleReviewApproval, canApproveReview, setAllReviewApprovals, pendingReviewCount, approvableReviewCount, unapprovedApprovableCount,
-    insufficientQualityPanels, insufficientPanels, minimumAdmittedLights,
+    insufficientQualityPanels, insufficientPanels, minimumAdmittedLights, admissionKnown,
+    blinkSession, blinkBusy, blinkElapsedSeconds, blinkReady, blinkChannels, blinkChannel, selectBlinkChannel, decisions, canUndo: decisionHistory.length > 0,
+    runBlink, setDecision, toggleDecision, setDecisionsBulk, setNightDecision, applyFlags, undo, selectionForRun, insufficientBlinkPanels, minimumKeptPerChannel: MINIMUM_KEPT_PER_CHANNEL, loadBlinkPreview,
     calibrationInspection, calibrationBusy, calibrationError, recheckCalibration,
     drizzleEnabled, setDrizzleEnabled, drizzleScale, setDrizzleScale, drizzleDropShrink, setDrizzleDropShrink, drizzleKernel, setDrizzleKernel, localNormalizationEnabled, setLocalNormalizationEnabled,
     catalogList, catalogDoctor, solverDoctor, recommendedCatalog, solveField, astap, solveFieldReady, astapReady, primarySolver, solverSetupReady, catalogTermsAccepted, setCatalogTermsAccepted,
