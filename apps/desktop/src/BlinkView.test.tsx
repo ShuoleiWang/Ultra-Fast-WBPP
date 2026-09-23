@@ -263,6 +263,36 @@ describe("human Blink screening", () => {
     expect(native.blinkMeasure).toHaveBeenLastCalledWith({ paths: lightPaths(), masterFlats: [{ filter: "L", path: extra[0].path }], masterDarks: [{ path: extra[1].path, exposureSeconds: 300 }], masterBias: extra[2].path });
   });
 
+  it("requires both complementary displays, handles background failures and offers native shape comparison", async () => {
+    const measured = manifest();
+    for (const frame of measured.frames) {
+      frame.previews.diagnostic = { field: `diagnostic/${frame.index}-field.png`, background: `diagnostic/${frame.index}-background.png`, nativeShape: `diagnostic/${frame.index}-shape.png`, nativeSignal: `diagnostic/${frame.index}-signal.png` };
+      frame.diagnostics = { algorithm: "blink-complementary-display-v2", calibration: "calibrated", relativeSignal: 0.5, relativeNoise: 1.2, matchedSignalNoise: 2.4, backgroundStatus: "ready", backgroundSpan: 2, nativeStatus: "ready", shapeRegions: 6 };
+    }
+    native.blinkMeasure.mockResolvedValueOnce(measured);
+    render(<App />); await reachBlink();
+    await paintStage();
+    expect(chip("L")).toHaveTextContent("0/14 viewed");
+    const background = await screen.findByTestId("blink-background-decoder");
+    fireEvent.error(background);
+    expect(screen.getByRole("button", { name: /Keep and next/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Retry preview" }));
+    const restored = await screen.findByTestId("blink-background-decoder");
+    Object.defineProperties(restored, { complete: { value: true }, naturalWidth: { value: 33 }, naturalHeight: { value: 22 } });
+    fireEvent.load(restored);
+    await waitFor(() => expect(chip("L")).toHaveTextContent("1/14 viewed"));
+    expect(screen.getByRole("button", { name: /Keep and next/ })).toBeEnabled();
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Blink display" }), "field");
+    await waitFor(() => expect(native.loadBlinkPreview).toHaveBeenCalledWith(measured.sessionDirectory, measured.frames[0].previews.diagnostic!.field));
+    await userEvent.click(screen.getByRole("button", { name: "Enlarge star comparison" }));
+    const dialog = screen.getByRole("dialog", { name: "Original-pixel star regions" });
+    expect(dialog).toHaveTextContent("6/9 measurable regions");
+    fireEvent.keyDown(dialog, { key: "d" });
+    expect(tiles()[0]).toHaveAttribute("aria-pressed", "true");
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
   it("reports a failed measurement without leaving the import page", async () => {
     native.blinkMeasure.mockRejectedValueOnce(new Error("BLINK_NO_LIGHTS: no Light frames")); render(<App />); await importLights();
     await userEvent.click(screen.getByRole("button", { name: "Blink & select (22 Lights)" }));

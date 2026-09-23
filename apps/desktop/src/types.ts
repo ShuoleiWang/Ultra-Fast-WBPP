@@ -262,8 +262,17 @@ export interface BlinkFrameScore { log10: number | null; z: number | null; rank:
  * is filled by the desktop loader for the frames inside its transport budget;
  * the others are fetched on demand through `loadBlinkPreview`.
  */
-export interface BlinkFramePreviews { filmstrip: string | null; zoom: string | null; coverage: number; filmstripDataUrl?: string | null; error?: string | null; zoomDataUrl?: string | null; }
+export interface BlinkDiagnosticPreviews { field: string | null; background: string | null; nativeSignal: string | null; nativeShape: string | null; }
+export interface BlinkDiagnostics {
+  algorithm: "blink-complementary-display-v2";
+  calibration: "calibrated" | "uncalibrated"; calibrationNote?: string | null;
+  relativeSignal: number | null; relativeNoise: number | null; matchedSignalNoise: number | null;
+  backgroundStatus: "ready" | "unavailable"; backgroundSpan: number | null;
+  nativeStatus: "ready" | "unregistered" | "unsupported" | "unavailable"; shapeRegions: number;
+}
+export interface BlinkFramePreviews { diagnostic?: BlinkDiagnosticPreviews; filmstrip: string | null; zoom: string | null; coverage: number; filmstripDataUrl?: string | null; error?: string | null; zoomDataUrl?: string | null; }
 export interface BlinkFrame {
+  diagnostics?: BlinkDiagnostics;
   index: number; channelId: string; filter: string; target: string; night: string;
   path: string; name: string; sourceSha256: string; observedAt: string | null; airmass: number | null;
   reference: boolean; defaultDecision: BlinkDecision;
@@ -282,7 +291,7 @@ export interface BlinkChannel {
   reference: { index: number; sourceSha256: string; rule: string } | null;
   statistics: { skyClean: number | null; cleanCount: number; sourcesBest: number | null; fwhmBest: number | null };
   stretch: { black: number; white: number; softness: number; skyReference: number; sigmaReference: number } | null;
-  previewGeometry: { filmstrip: [number, number]; zoom: [number, number]; sourceShape: [number, number] };
+  previewGeometry: { display?: { algorithm: string; noiseReference: number | null; referenceCalibration: string }; filmstrip: [number, number]; zoom: [number, number]; sourceShape: [number, number] };
   nights: BlinkNightSummary[];
 }
 export interface BlinkManifest {

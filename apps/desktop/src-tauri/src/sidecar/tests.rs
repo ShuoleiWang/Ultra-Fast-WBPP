@@ -822,6 +822,25 @@ fn fake_sidecar_blink_measure_is_validated_and_previews_are_bounded() {
         manifest.extra["requestEcho"]["masterBias"],
         serde_json::json!(second_r_flat)
     );
+    assert_eq!(
+        manifest.extra["requestEcho"]["previews"]["displayAlgorithm"],
+        "blink-complementary-display-v2"
+    );
+    let mut diagnostic_manifest = manifest.clone();
+    diagnostic_manifest.frames[0].previews.diagnostic = Some(BlinkDiagnosticPreviews {
+        field: diagnostic_manifest.frames[0].previews.zoom.clone(),
+        ..Default::default()
+    });
+    let expected = canonical_light_paths(&paths, "test").unwrap();
+    let session_path = Path::new(&manifest.session_directory);
+    validate_blink_manifest(&diagnostic_manifest, &expected, session_path).unwrap();
+    diagnostic_manifest.frames[0]
+        .previews
+        .diagnostic
+        .as_mut()
+        .unwrap()
+        .field = Some("../outside.png".into());
+    assert!(validate_blink_manifest(&diagnostic_manifest, &expected, session_path).is_err());
     assert_eq!(manifest.kind, BLINK_MANIFEST_KIND);
     assert_eq!(
         manifest.counts,
@@ -1047,9 +1066,17 @@ fn real_engine_blink_measure_session_is_accepted() {
         .filter(|frame| frame.previews.filmstrip_data_url.is_some())
         .count();
     for frame in &manifest.frames {
-        for relative in [&frame.previews.filmstrip, &frame.previews.zoom]
-            .into_iter()
-            .flatten()
+        let extra = frame.previews.diagnostic.as_ref();
+        for relative in [
+            frame.previews.filmstrip.as_ref(),
+            frame.previews.zoom.as_ref(),
+            extra.and_then(|p| p.field.as_ref()),
+            extra.and_then(|p| p.background.as_ref()),
+            extra.and_then(|p| p.native_signal.as_ref()),
+            extra.and_then(|p| p.native_shape.as_ref()),
+        ]
+        .into_iter()
+        .flatten()
         {
             crate::project::load_blink_preview_with(
                 &sessions,

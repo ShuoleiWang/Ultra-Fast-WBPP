@@ -264,3 +264,35 @@ def test_preview_primitives() -> None:
     assert pixels.dtype == np.uint8
     assert pixels[0, 0] == 0 and pixels[0, 1] == 0 and pixels[0, 3] == 255 and pixels[0, 4] == 0
     assert 128 < pixels[0, 2] < 255
+
+
+def test_diagnostic_session_exports_complementary_views_without_changing_admission(synthetic_project: dict, tmp_path: Path) -> None:
+    request = _request(
+        synthetic_project["lights"][:8], tmp_path / "diagnostic-session",
+        previews={"displayAlgorithm": "blink-complementary-display-v2", "filmstripFormat": "png"},
+        masterFlats=[{"filter": "R", "path": str(synthetic_project["flats"][0])}],
+        masterDarks=[{"path": str(synthetic_project["darks"][0]), "exposureSeconds": 60}],
+    )
+    manifest = run_blink_session(BlinkRequest.from_mapping(request))
+    _check_manifest_contract(manifest, tmp_path / "diagnostic-session", 8)
+    assert manifest["previewOptions"]["displayAlgorithm"] == "blink-complementary-display-v2"
+    assert manifest["referenceRule"] == "calibrated-local-noise-psf-v2"
+    assert not (tmp_path / "diagnostic-session" / "linear").exists()
+    for frame in manifest["frames"]:
+        assert frame["defaultDecision"] == "KEEP"
+        assert frame["diagnostics"]["calibration"] == "calibrated"
+        assert frame["diagnostics"]["backgroundStatus"] == "ready"
+        for relative in frame["previews"]["diagnostic"].values():
+            if relative:
+                assert (tmp_path / "diagnostic-session" / relative).is_file()
+        assert frame["diagnostics"]["nativeStatus"] == "ready"
+    reference = next(f for f in manifest["frames"] if f["reference"])
+    assert reference["diagnostics"]["relativeSignal"] == pytest.approx(1)
+    assert reference["diagnostics"]["matchedSignalNoise"] == pytest.approx(1)
+    assert reference["diagnostics"]["backgroundSpan"] == pytest.approx(0)
+    # A Flat alone must not masquerade as complete preview calibration.
+    request.pop("masterDarks")
+    request["sessionDirectory"] = str(tmp_path / "flat-only-diagnostic")
+    uncalibrated = run_blink_session(BlinkRequest.from_mapping(request))
+    assert all(f["diagnostics"]["calibration"] == "uncalibrated" for f in uncalibrated["frames"])
+    assert all(f["normalization"]["calibrated"] is False for f in uncalibrated["frames"])

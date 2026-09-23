@@ -32,7 +32,7 @@ function App() {
   const selectedFrame = workflow.qualityInspection?.frames.find((frame) => frame.path === selectedPath);
   const showInspector = inspectorOpen && (workflow.step === "import" || workflow.step === "inspect" || workflow.step === "blink");
 
-  return <div className={`app ${macos ? "platform-macos" : ""} ${workflow.nativeRuntime ? "" : "browser"}`} onContextMenu={(event) => { if (!(event.target instanceof Element) || !event.target.closest("input, textarea, [contenteditable=true]")) event.preventDefault(); }}>
+  return <div className={`app ${workflow.step === "blink" ? "blink-focused" : ""} ${macos ? "platform-macos" : ""} ${workflow.nativeRuntime ? "" : "browser"}`} onContextMenu={(event) => { if (!(event.target instanceof Element) || !event.target.closest("input, textarea, [contenteditable=true]")) event.preventDefault(); }}>
     <a className="skip-link" href="#workspace">{t("skipWorkspace")}</a>
     <Toolbar workflow={workflow} language={language} setLanguage={setLanguage} t={t} inspectorOpen={inspectorOpen} onToggleInspector={() => setInspectorOpen((open) => !open)} />
     <div className="body">

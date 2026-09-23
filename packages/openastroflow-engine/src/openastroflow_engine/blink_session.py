@@ -315,8 +315,11 @@ class BlinkPreviewOptions:
     zoom_scale: int = 4
     filmstrip_format: str = "jpeg"
     jpeg_quality: int = 85
+    display_algorithm: str = "shared-stretch-v1"
 
     def validate(self) -> None:
+        if self.display_algorithm not in {"shared-stretch-v1", "blink-complementary-display-v2"}:
+            raise BlinkSessionError("BLINK_REQUEST_INVALID", "unsupported preview display algorithm")
         for name in ("filmstrip_scale", "zoom_scale"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 64:
@@ -334,6 +337,7 @@ class BlinkPreviewOptions:
             "zoomScale": self.zoom_scale,
             "filmstripFormat": self.filmstrip_format,
             "jpegQuality": self.jpeg_quality,
+            "displayAlgorithm": self.display_algorithm,
         }
 
 
@@ -385,7 +389,7 @@ class BlinkRequest:
         previews_raw = raw.get("previews", {})
         if not isinstance(previews_raw, Mapping):
             raise invalid("previews must be an object")
-        preview_keys = {"filmstripScale": "filmstrip_scale", "zoomScale": "zoom_scale", "filmstripFormat": "filmstrip_format", "jpegQuality": "jpeg_quality"}
+        preview_keys = {"filmstripScale": "filmstrip_scale", "zoomScale": "zoom_scale", "filmstripFormat": "filmstrip_format", "jpegQuality": "jpeg_quality", "displayAlgorithm": "display_algorithm"}
         if set(previews_raw) - set(preview_keys):
             raise invalid("previews has unsupported fields")
         previews = BlinkPreviewOptions(**{preview_keys[key]: value for key, value in previews_raw.items()})
@@ -807,10 +811,17 @@ def run_blink_session(
         results_by_path = {result.path: result for result in results}
         measurements_by_path = {measurement.metadata.path: measurement for measurement in measurements}
         linear_by_path = {str(light): linear_root / linear_preview_name(index) for index, light in enumerate(lights)}
-        specs, stretches, geometry = _preview_specs(
-            evidence, results_by_path, measurements_by_path, linear_by_path, session,
-            request.previews, request, config.preview_long_edge,
-        )
+        if request.previews.display_algorithm == "blink-complementary-display-v2":
+            from .blink_diagnostic_render import prepare_diagnostic_specs
+            evidence, specs, stretches, geometry = prepare_diagnostic_specs(
+                evidence, results_by_path, measurements_by_path, linear_by_path,
+                session, request, config.preview_long_edge,
+            )
+        else:
+            specs, stretches, geometry = _preview_specs(
+                evidence, results_by_path, measurements_by_path, linear_by_path, session,
+                request.previews, request, config.preview_long_edge,
+            )
         rendered = {item.index: item for item in render_previews(specs, workers=workers, runner=frame_runner)}
         timings["previewSeconds"] = perf_counter() - started
     finally:
@@ -890,7 +901,9 @@ def _manifest(
                     "filmstripBytes": preview.filmstrip_bytes if preview is not None else 0,
                     "zoomBytes": preview.zoom_bytes if preview is not None else 0,
                     "error": preview.error if preview is not None else "not rendered",
+                    **({"diagnostic": preview.diagnostic_previews} if preview is not None and preview.diagnostic_previews is not None else {}),
                 },
+                **({"diagnostics": preview.diagnostics} if preview is not None and preview.diagnostics is not None else {}),
                 "transformToReference": (
                     [[round(value, 6) for value in row] for row in transform] if transform is not None else None
                 ),
@@ -928,7 +941,7 @@ def _manifest(
         "gatePolicyDigest": gate_policy.canonical_digest(),
         "flagsPolicyDigest": evidence.flags_policy.canonical_digest(),
         "flagsPolicy": evidence.flags_policy.serializable(),
-        "referenceRule": BLINK_REFERENCE_RULE,
+        "referenceRule": "calibrated-local-noise-psf-v2" if request.previews.display_algorithm == "blink-complementary-display-v2" else BLINK_REFERENCE_RULE,
         "inventorySha256": _inventory_sha256(results),
         "workers": workers,
         "previewOptions": request.previews.serializable(),

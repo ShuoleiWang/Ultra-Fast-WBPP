@@ -4,6 +4,13 @@ All notable changes are documented here. The format follows Keep a Changelog and
 
 ## [Unreleased]
 
+### Complementary Blink diagnostics
+
+- Fix the inspector layout for long frame names, calibration warnings and affected-file lists. Wrapped headings size to their content, frame metadata has explicit spacing, and narrow sidebars scroll vertically without text overlap or horizontal overflow.
+- Integrate common-scale star detail, full-field display, signed background differences and corresponding original-pixel signal/morphology crops into desktop Blink. Noise is estimated locally; the main view never boosts a dimmed frame to reference stellar brightness. Complete supplied Flat + Dark/Bias calibrate previews, and unavailable calibration/comparisons are explicit. Review waits for both main and available background images to paint. The CLI retains the previous display by default; science pixels and admission rules are unchanged.
+- Add a read-only comparison tool using the same display/crop implementations and document the design and remaining validation limits.
+
+
 ### Blink review correction
 
 - Require manual desktop review of every Light and explicit confirmation of each channel. Flags remain advisory and no longer pre-drop frames in the GUI; remove Apply Flags and legacy REVIEW approval controls. The headless default is unchanged. The native controller rejects incomplete or stale review and binds the manual selection to the session manifest and imported Lights.

@@ -377,12 +377,23 @@ pub(crate) struct BlinkFlag {
     pub extra: BTreeMap<String, serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BlinkDiagnosticPreviews {
+    pub field: Option<String>,
+    pub background: Option<String>,
+    pub native_signal: Option<String>,
+    pub native_shape: Option<String>,
+}
+
 /// The rendered previews of a frame, relative to the session directory.
 /// `filmstrip_data_url` is added by the desktop for the frames within the
 /// transport budget; the rest are fetched with `load_blink_preview`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BlinkPreviews {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<BlinkDiagnosticPreviews>,
     #[serde(default)]
     pub filmstrip: Option<String>,
     #[serde(default)]
