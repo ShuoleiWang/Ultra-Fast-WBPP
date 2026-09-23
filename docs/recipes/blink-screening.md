@@ -42,6 +42,10 @@ The blink view:
 
 Playback starts only on request. *Kept only* is available after all frames in the current channel have been viewed; it cannot skip unseen frames during the initial review. Playback pauses when you step by hand.
 
+## Complementary review displays
+
+Desktop sessions use `previews.displayAlgorithm: "blink-complementary-display-v2"`; standalone `blink-measure` retains `shared-stretch-v1` unless explicitly requested. The new main star-detail view preserves attenuation and noise at a common reference scale, accompanied by a background-difference panel that does not fit away frame-to-frame gradients. Full field remains available for checking extended structure. Original-pixel crops have separate signal and amplitude-matched shape modes, with low-signal regions left unavailable. See [the mathematical contract and validation limits](../blink-display-redesign.md). Display algorithm and reference rule are recorded in the session manifest, whose digest binds the GUI selection. The later run still reports its independent QC/science reference; display-reference selection does not replace it.
+
 ## Flags
 
 Flags are computed per channel from values that already exist per frame after measurement, analysis and the gate. Two severities:

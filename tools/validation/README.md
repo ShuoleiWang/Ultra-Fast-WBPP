@@ -14,3 +14,5 @@ itself. Old `benchmarks/` command paths remain compatibility launchers.
 
 Reports and private images stay outside Git. Regression tests live in the
 repository `tests/test_master_evaluation.py` and `test_master_tolerance_gate.py`.
+
+`blink_display_study.py` creates a read-only, create-only HTML comparison of the existing Blink display and the `blink-complementary-display-v2` algorithm. It requires a content-bound Blink manifest and explicit matching calibration masters. It renders all four channels, records relative signal/noise and background differences, and can read corresponding original-pixel crops from mono FITS files. Human labels are optional, hidden by default, and never used by the algorithm. The desktop uses the same implementation for v2 previews; see [the design and acceptance boundary](../../docs/blink-display-redesign.md). Generated galleries and reports stay outside Git.

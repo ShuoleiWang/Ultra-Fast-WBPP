@@ -366,34 +366,44 @@ progress::-webkit-progress-value { background: var(--accent); }
 
 /* ── Inspector ────────────────────────────────────────────────────── */
 .inspector { flex: 0 0 var(--inspector-width); width: var(--inspector-width); background: var(--surface); border-left: 0.5px solid var(--separator); display: flex; flex-direction: column; overflow: hidden; }
-.ins-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
-.ins-title { font-size: 15px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
-.ins-sub { font-size: 11px; color: var(--secondary); margin-top: -6px; }
+.ins-scroll { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 14px; overflow-wrap: anywhere; }
+/* Long frame names and expanded diagnostics must grow inside the scroll area. */
+.ins-scroll > * { flex: 0 0 auto; min-width: 0; }
+.ins-frame-heading { display: grid; gap: 4px; min-width: 0; }
+.ins-title { font-size: 13px; font-weight: 600; line-height: 1.45; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+.ins-sub { font-size: 11px; line-height: 1.45; color: var(--secondary); }
 .ins-empty { color: var(--tertiary); font-size: 12px; text-align: center; padding: 40px 12px; }
 .preview { width: 100%; aspect-ratio: 268 / 150; border-radius: var(--radius-card); object-fit: cover; background: radial-gradient(120% 140% at 35% 25%, var(--sky-0), var(--sky-1) 72%); box-shadow: inset 0 0 0 0.5px var(--hairline); display: block; }
 .reason { padding: 7px 10px; border-radius: var(--radius-control); background: var(--warn-bg); font-size: 12px; }
 .reason.ok { background: var(--ok-bg); }
 .reason.stop { background: var(--stop-bg); }
 .ev { display: flex; flex-direction: column; gap: 6px; font-size: 11px; }
-.ev li { display: grid; grid-template-columns: auto 1fr; gap: 8px; align-items: baseline; }
+.ev li { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; line-height: 1.45; }
 .ev li code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; color: var(--tertiary); }
-.ins-section h3 { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--secondary); margin-bottom: 6px; }
+.ins-section { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
+.ins-section > * { min-width: 0; }
+.ins-section h3 { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--secondary); }
 .ins-section + .ins-section { border-top: 0.5px solid var(--hairline); padding-top: 10px; }
+.input-checks { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; line-height: 1.45; }
+.inspector .frm { grid-template-columns: minmax(0, 96px) minmax(0, 1fr); }
 .ins-foot { flex: 0 0 auto; padding: 12px 16px; border-top: 0.5px solid var(--separator); display: flex; gap: 8px; }
 .ins-foot .btn { flex: 1; justify-content: center; }
-.quality-counts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.quality-counts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .quality-counts div { padding: 8px 10px; border-radius: var(--radius-control); background: var(--field); }
 .quality-counts dt { font-size: 11px; color: var(--secondary); }
 .quality-counts dd { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .calibration-presence { display: flex; flex-direction: column; gap: 4px; }
-.calibration-presence div { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }
+.calibration-presence div { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; font-size: 12px; }
 .calibration-presence dt { color: var(--secondary); }
+.calibration-presence dd { text-align: right; }
 .check-present { color: var(--ok); }
 .check-missing { color: var(--warn); }
-.calibration-issue { border-top: 0; }
-.calibration-issue > summary { height: 28px; padding: 0; font-weight: 500; font-size: 12px; }
+.calibration-issues { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.calibration-issue { border-top: 0; min-width: 0; }
+.calibration-issue > summary { display: grid; grid-template-columns: 4px minmax(0, 1fr); align-items: start; height: auto; min-height: 28px; padding: 4px 0; font-weight: 500; font-size: 12px; line-height: 1.45; }
+.calibration-issue > summary::before { margin-top: 5px; }
 .calibration-issue.issue-error > summary { color: var(--stop); }
-.calibration-issue p, .calibration-issue small { font-size: 11px; color: var(--secondary); display: block; padding: 0 0 6px 12px; }
+.calibration-issue p, .calibration-issue small { font-size: 11px; line-height: 1.45; color: var(--secondary); display: block; padding: 2px 0 6px 12px; }
 
 /* ── Screening table (inspect) ────────────────────────────────────── */
 .quality-frame .dec .badge { flex: 0 0 auto; }
@@ -580,7 +590,7 @@ progress::-webkit-progress-value { background: var(--accent); }
 .blink-check { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--secondary); white-space: nowrap; }
 .blink-zoom button { padding: 0 8px; }
 .blink-policy { font-variant-numeric: tabular-nums; }
-.blink-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.blink-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow:auto; }
 .blink-stage { position: relative; flex: 1; min-height: 160px; display: flex; overflow: hidden; background: var(--sky-1); cursor: grab; touch-action: none; }
 .blink-stage:active { cursor: grabbing; }
 .blink-pane { position: relative; flex: 1; min-width: 0; overflow: hidden; }
@@ -647,7 +657,7 @@ progress::-webkit-progress-value { background: var(--accent); }
 @keyframes view-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 
 /* Blink review keeps loading/error states outside the transformed image box. */
-.blink-review-progress { display:flex; align-items:center; gap:10px; padding:9px 16px; background:var(--surface); border-bottom:1px solid var(--separator); }
+.blink-review-progress { display:flex; align-items:center; gap:10px; padding:6px 12px; background:var(--surface); border-bottom:1px solid var(--separator); }
 .blink-review-progress > div { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
 .blink-review-progress span, .blink-review-progress small { color:var(--secondary); font-size:11px; }
 .blink-review-progress small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -663,3 +673,43 @@ progress::-webkit-progress-value { background: var(--accent); }
 
 .blink-decide-bar { display:flex; align-items:center; justify-content:center; gap:8px; padding:7px 12px; background:var(--surface); border-top:1px solid var(--separator); }
 .blink-decide-bar .muted { margin-left:8px; font-variant-numeric:tabular-nums; }
+
+/* Complementary Blink displays: the sky difference stays beside star detail. */
+.blink-display-explanation { flex:0 0 auto; margin:0; padding:5px 16px; color:var(--secondary); font-size:11px; background:var(--surface); border-bottom:.5px solid var(--separator); }
+.blink-diagnostics { display:flex; flex-direction:column; gap:12px; padding:10px 0; }
+.blink-diagnostics h3 { margin:0 0 6px; font-size:12px; font-weight:600; }
+.blink-diagnostics small { display:block; font-size:11px; line-height:1.45; color:var(--secondary); margin-top:5px; }
+.blink-diag-facts { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; margin:0; }
+.blink-diag-facts dt { font-size:10px; color:var(--secondary); }
+.blink-diag-facts dd { margin:4px 0 0; font-size:15px; font-variant-numeric:tabular-nums; }
+.blink-diag-image { width:100%; position:relative; background:#05080e; overflow:hidden; }
+.blink-diag-canvas { display:block; width:100%; height:100%; position:absolute; inset:0; }
+.blink-diag-unavailable { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; width:100%; height:100%; min-height:52px; padding:8px; font-size:11px; color:#bdc9df; background:#111924; }
+.blink-diag-warning { font-size:11px; line-height:1.45; color:var(--secondary); padding:7px 9px; background:var(--warn-fill); border-radius:5px; }
+.blink-native-check select { width:100%; font-size:12px; padding:4px; margin-bottom:6px; }
+.blink-native-pair { display:grid; grid-template-columns:1fr 1fr; gap:5px; }
+.blink-native-pair figure { margin:0; min-width:0; }
+.blink-native-pair figcaption { font-size:11px; color:var(--secondary); margin-bottom:4px; }
+.blink-native-check > .btn { margin-top:7px; }
+.blink-native-modal { position:fixed; inset:0; z-index:100; background:rgba(0,0,0,.65); display:flex; align-items:center; justify-content:center; padding:24px; }
+.blink-native-dialog { padding:20px; border-radius:12px; background:var(--surface); width:min(720px,100%); box-shadow:0 16px 64px #0008; }
+.blink-native-dialog header { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+.blink-native-dialog p { font-size:12px; color:var(--secondary); margin:12px 0; }
+.blink-native-pair.large { gap:16px; }
+.blink-native-pair .blink-diag-canvas { image-rendering:pixelated; }
+/* Give review images the workspace; Back restores the import navigation. */
+.app.blink-focused > .body > .sidebar { display:none; }
+.blink-launchbar { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:6px 12px; padding:6px 12px; }
+.blink-launchbar .output { min-width:0; grid-column:1; }
+.blink-launchbar .actions { grid-column:2; margin-left:0; flex-wrap:nowrap; }
+.blink-launchbar .blink-kept-summary { display:none; }
+.blink-launch-details { grid-column:1 / -1; padding:4px 8px; }
+.blink-launch-details summary { cursor:pointer; font-size:11px; }
+.blink-launch-details[open] ul { margin-top:6px; }
+.blink-visual-area { display:flex; flex:1 1 auto; min-height:200px; overflow:hidden; }
+.blink-main-column { display:flex; flex-direction:column; flex:1; min-width:0; min-height:0; }
+.blink-diagnostics.compact { display:flex; flex:0 0 280px; width:280px; max-height:none; padding:10px; overflow:auto; border-top:0; border-left:.5px solid var(--separator); }
+.blink-diagnostics.compact .blink-diag-facts { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); }
+/* Native WebKit can retain the entering view's transparent compositing layer
+   when navigation width changes. Review images must paint without animation. */
+.app.blink-focused .blink-view { animation:none; transform:none; opacity:1; }

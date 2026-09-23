@@ -19,6 +19,7 @@ Start with the [project README](../README.md) (also in [简体中文](README.zh-
 | [recipes/nina-mono.md](recipes/nina-mono.md) | N.I.N.A. mono folders through the standard workflow; approving REVIEW frames |
 | [recipes/calibration.md](recipes/calibration.md) | Raw Flat/Dark/Bias versus supplied masters, Dark bias semantics, overrides |
 | [recipes/blink-screening.md](recipes/blink-screening.md) | Blink-style screening: the flags and their thresholds, the reference frame per channel, the normalised previews, the selection file, `blink-measure` and `--selection`, what a run records, the limits |
+| [blink-display-redesign.md](blink-display-redesign.md) | Experimental display-only redesign: complementary star/background views, native-pixel crops, real-image comparison and remaining human validation |
 | [recipes/automatic-screening.md](recipes/automatic-screening.md) | Mixed-night import, the legacy gate (what it measures, how it decides, why it cannot see a uniformly bad night) and the optional review |
 | [recipes/drizzle.md](recipes/drizzle.md) | 1×–4× native drizzle: options, products, measured quality |
 | [recipes/osc-cfa.md](recipes/osc-cfa.md) | One-shot-colour (Bayer) Lights: pipeline and the synthetic validation |

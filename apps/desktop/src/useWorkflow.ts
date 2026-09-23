@@ -70,14 +70,18 @@ export function useWorkflow(t: Translator) {
   const [blinkChannel, setBlinkChannel] = useState<string>();
   const [viewedFrames, setViewedFrames] = useState<Record<string, true>>({});
   const viewedFramesRef = useRef<Record<string, true>>({});
+  const paintedLayersRef = useRef<Record<string, { field?: boolean; background?: boolean }>>({});
   const [confirmedChannels, setConfirmedChannels] = useState<Record<string, true>>({});
   const confirmedChannelsRef = useRef<Record<string, true>>({});
   const [previewFailures, setPreviewFailures] = useState<Record<string, string>>({});
   const previewFailuresRef = useRef<Record<string, string>>({});
+  const previewLayerFailures = useRef<Record<string, Record<string, string>>>({});
   const resetBlinkReview = () => {
     viewedFramesRef.current = {}; setViewedFrames({});
+    paintedLayersRef.current = {};
     confirmedChannelsRef.current = {}; setConfirmedChannels({});
     previewFailuresRef.current = {}; setPreviewFailures({});
+    previewLayerFailures.current = {};
   };
   const blinkInFlightRef = useRef(false);
   const [capabilities, setCapabilities] = useState<RuntimeCapabilities | null>(null);
@@ -510,12 +514,20 @@ export function useWorkflow(t: Translator) {
     const next = Object.fromEntries(Object.entries(confirmedChannelsRef.current).filter(([id]) => !ids.has(id))) as Record<string, true>;
     confirmedChannelsRef.current = next; setConfirmedChannels(next);
   };
-  const markFrameViewed = useCallback((digest: string) => {
-    if (viewedFramesRef.current[digest] || !blinkSessionRef.current?.manifest.frames.some((f) => f.sourceSha256 === digest)) return;
+  const markFrameViewed = useCallback((digest: string, layer: "field" | "background" = "field") => {
+    const frame = blinkSessionRef.current?.manifest.frames.find((f) => f.sourceSha256 === digest);
+    if (!frame || viewedFramesRef.current[digest]) return;
+    const layers = paintedLayersRef.current[digest] ?? {};
+    layers[layer] = true; paintedLayersRef.current[digest] = layers;
+    if (!layers.field || (frame.previews.diagnostic?.background && !layers.background)) return;
     const next = { ...viewedFramesRef.current, [digest]: true as const };
     viewedFramesRef.current = next; setViewedFrames(next);
   }, []);
-  const reportPreviewFailure = useCallback((digest: string, error: string | undefined) => {
+  const reportPreviewFailure = useCallback((digest: string, error: string | undefined, layer = "field") => {
+    const layers = previewLayerFailures.current[digest] ?? {};
+    if (error) layers[layer] = error; else delete layers[layer];
+    previewLayerFailures.current[digest] = layers;
+    error = Object.values(layers)[0];
     if (previewFailuresRef.current[digest] === error) return;
     const next = { ...previewFailuresRef.current };
     if (error) next[digest] = error; else delete next[digest];
@@ -543,7 +555,10 @@ export function useWorkflow(t: Translator) {
   const setDecision = (sourceSha256: string, decision: BlinkDecision) => {
     commitDecisions((current) => !(sourceSha256 in current) || current[sourceSha256] === decision ? undefined : { ...current, [sourceSha256]: decision });
     // An unreadable preview can only leave the review through an explicit drop.
-    if (decision === "DROP" && previewFailuresRef.current[sourceSha256]) markFrameViewed(sourceSha256);
+    if (decision === "DROP" && previewFailuresRef.current[sourceSha256]) {
+      // Explicitly dropping a failed image acknowledges the unavailable view.
+      markFrameViewed(sourceSha256, "field"); markFrameViewed(sourceSha256, "background");
+    }
   };
   const toggleDecision = (sourceSha256: string) => { if (sourceSha256 in decisionsRef.current) setDecision(sourceSha256, decisionsRef.current[sourceSha256] === "KEEP" ? "DROP" : "KEEP"); };
   // A filmstrip range (shift-click): one undo step for the whole range.

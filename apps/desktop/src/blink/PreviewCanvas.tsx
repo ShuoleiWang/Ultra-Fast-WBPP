@@ -3,11 +3,11 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 /** Paint decoded pixels into the viewport instead of promoting a transformed
  * IMG layer. Native WebKit can leave that layer blank despite successful decode.
  * The hidden image is only a decoder; review readiness follows a canvas paint. */
-export function PreviewCanvas({ src, label, width, height, imageWidth, imageHeight, view, onPaint, onError, className = "", decoderId }: {
+export function PreviewCanvas({ src, label, width, height, imageWidth, imageHeight, view, onPaint, onError, className = "", decoderId, pixelated = false }: {
   src: string; label: string; width: number; height: number;
   imageWidth?: number; imageHeight?: number;
   view?: { scale: number; x: number; y: number };
-  onPaint?: () => void; onError: () => void; className?: string; decoderId?: string;
+  onPaint?: () => void; onError: () => void; className?: string; decoderId?: string; pixelated?: boolean;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const decoder = useRef<HTMLImageElement>(null);
@@ -30,6 +30,7 @@ export function PreviewCanvas({ src, label, width, height, imageWidth, imageHeig
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     surface.width = Math.max(1, Math.round(width * dpr));
     surface.height = Math.max(1, Math.round(height * dpr));
+    context.imageSmoothingEnabled = !pixelated;
     context.setTransform(dpr, 0, 0, dpr, 0, 0);
     context.fillStyle = "#05060a";
     context.fillRect(0, 0, width, height);
@@ -42,7 +43,7 @@ export function PreviewCanvas({ src, label, width, height, imageWidth, imageHeig
     catch { callbacks.current.onError(); return; }
     const token = window.requestAnimationFrame(() => { if (!document.hidden) callbacks.current.onPaint?.(); });
     return () => window.cancelAnimationFrame(token);
-  }, [src, decoded, width, height, imageWidth, imageHeight, view?.scale, view?.x, view?.y]);
+  }, [src, decoded, width, height, imageWidth, imageHeight, view?.scale, view?.x, view?.y, pixelated]);
   return <>
     <canvas ref={canvas} role="img" aria-label={label || undefined} aria-hidden={label ? undefined : true} className={className} />
     <img ref={decoder} src={src} alt="" hidden data-testid={decoderId} onLoad={() => setDecoded((value) => value + 1)} onError={() => callbacks.current.onError()} />

@@ -69,6 +69,7 @@ pub(super) fn create_private_blink_request(
         "sessionDirectory": session_directory.to_string_lossy(),
         "previews": {
             "filmstripScale": 8, "zoomScale": 4, "filmstripFormat": "jpeg", "jpegQuality": 85,
+            "displayAlgorithm": "blink-complementary-display-v2",
         },
     });
     if let Some(workers) = workers {
@@ -377,6 +378,19 @@ pub(super) fn validate_blink_manifest(
             .flatten()
         {
             crate::project::resolve_blink_preview(session_directory, relative)?;
+        }
+        if let Some(diagnostic) = &frame.previews.diagnostic {
+            for relative in [
+                &diagnostic.field,
+                &diagnostic.background,
+                &diagnostic.native_signal,
+                &diagnostic.native_shape,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                crate::project::resolve_blink_preview(session_directory, relative)?;
+            }
         }
         let entry = frames_per_channel
             .entry(frame.channel_id.as_str())

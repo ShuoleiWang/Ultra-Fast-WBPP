@@ -23,7 +23,10 @@ import math
 import os
 from pathlib import Path
 import re
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
+
+if TYPE_CHECKING:
+    from .blink_diagnostic_render import DiagnosticFrameSpec
 import warnings
 
 import numpy as np
@@ -100,6 +103,7 @@ class FramePreviewSpec:
     jpeg_quality: int = 85
     filmstrip_divisor: int = 2
     calibration: PreviewCalibration | None = None
+    diagnostic: DiagnosticFrameSpec | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +122,8 @@ class FramePreviewResult:
     sky: float | None = None
     calibrated: bool = False
     error: str | None = None
+    diagnostic_previews: dict[str, str | None] | None = None
+    diagnostics: dict[str, Any] | None = None
 
     def serializable(self) -> dict[str, Any]:
         return {
@@ -307,6 +313,9 @@ def render_frame(spec: FramePreviewSpec) -> FramePreviewResult:
     """Render one frame's filmstrip and zoom previews; importable for a pool."""
 
     try:
+        if spec.diagnostic is not None:
+            from .blink_diagnostic_render import render_diagnostic_frame
+            return render_diagnostic_frame(spec)
         linear = np.load(spec.linear_path, allow_pickle=False).astype(np.float32)
         if linear.ndim != 2:
             raise ValueError("linear preview is not two-dimensional")
