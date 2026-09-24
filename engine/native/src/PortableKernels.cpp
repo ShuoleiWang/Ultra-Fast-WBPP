@@ -1,4 +1,4 @@
-#include "openastroflow/PortableKernels.h"
+#include "ufwbpp/PortableKernels.h"
 #include "Lanczos3Table.h"
 #include "ParallelRange.h"
 
@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-namespace openastroflow::native
+namespace ufwbpp::native
 {
 
 using detail::ParallelRange;
@@ -1198,4 +1198,4 @@ std::uint32_t DefaultKernelThreads() noexcept
    return static_cast<std::uint32_t>( std::min( 64U, concurrency ) );
 }
 
-} // namespace openastroflow::native
+} // namespace ufwbpp::native

@@ -3,7 +3,7 @@
 #include <cmath>
 #include <vector>
 
-namespace openastroflow::native::detail
+namespace ufwbpp::native::detail
 {
 
 namespace
@@ -106,4 +106,4 @@ void Lanczos3TableWeights( double fraction, float weights[6] )
       weights[tap] = static_cast<float>( values[tap]/total );
 }
 
-} // namespace openastroflow::native::detail
+} // namespace ufwbpp::native::detail

@@ -18,12 +18,12 @@ steps, samples the process's CPU time and resident memory, and writes
         run-project ~/Astro/Target ~/Astro/Masters/masterDark.xisf \\
         --recipe recipe.json --output ~/Astro/Results/target-trace --workers 8
 
-Everything after ``--`` is passed to ``openastroflow_engine.cli.main``;
+Everything after ``--`` is passed to ``ufwbpp.cli.main``;
 ``--progress-json`` is added when absent because the stage rows come from the
 progress events.  The run's own result JSON still goes to stdout.  Timers add
 a few microseconds per call and never change pixels; the worker processes
 find this file again through the ``spawn`` start method and install the same
-timers when ``OAF_TRACE_DIR`` is set.  Traces are local evidence and are not
+timers when ``UFWBPP_TRACE_DIR`` is set.  Traces are local evidence and are not
 checked in.
 """
 
@@ -47,16 +47,16 @@ from typing import Any, Callable
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 for relative in (
-    "packages/openastroflow-engine/src",
+    "packages/engine/src",
     "packages/light-frame-qc/src",
-    "packages/openastroflow-registration",
+    "packages/registration",
 ):
     candidate = str(REPOSITORY / relative)
     if candidate not in sys.path:
         sys.path.insert(0, candidate)
 
-TRACE_DIR_VARIABLE = "OAF_TRACE_DIR"
-TRACE_EPOCH_VARIABLE = "OAF_TRACE_EPOCH_NS"
+TRACE_DIR_VARIABLE = "UFWBPP_TRACE_DIR"
+TRACE_EPOCH_VARIABLE = "UFWBPP_TRACE_EPOCH_NS"
 
 # (module, attribute or Class.method, label, category).  Missing attributes
 # are reported and skipped, so the list may name symbols of newer code.
@@ -67,81 +67,81 @@ TARGETS: tuple[tuple[str, str, str, str], ...] = (
     ("lightframeqc.native_psf", "measure_native_psf", "qc.native_psf", "qc"),
     ("lightframeqc.content_hash", "file_sha256", "io.file_sha256", "io"),
     # registration
-    ("openastroflow_registration.pipeline", "analyze_frames", "registration.analyze_frames", "registration"),
-    ("openastroflow_registration.pipeline", "analyze_frame", "registration.analyze_frame", "registration"),
-    ("openastroflow_registration.pipeline", "detect_stars", "registration.detect_stars", "registration"),
-    ("openastroflow_registration.pipeline", "_read_calibrated_preview", "registration.read_calibrated_preview", "registration"),
-    ("openastroflow_registration.pipeline", "register_analyses", "registration.register_analyses", "registration"),
-    ("openastroflow_registration.pipeline", "_refine_full_resolution", "registration.refine_full_resolution", "registration"),
-    ("openastroflow_registration.pipeline", "_estimate_one", "registration.estimate_one", "registration"),
-    ("openastroflow_registration.pipeline", "_estimate_via_bridge", "registration.estimate_via_bridge", "registration"),
-    ("openastroflow_registration.pipeline", "_local_centroids", "registration.local_centroids", "registration"),
-    ("openastroflow_registration.pipeline", "warp_image", "registration.validate_warp", "registration"),
-    ("openastroflow_registration.pipeline", "_robust_warp_similarity", "registration.warp_similarity", "registration"),
-    ("openastroflow_registration.pipeline", "read_full_image", "io.read_full_image", "io"),
+    ("ufwbpp_registration.pipeline", "analyze_frames", "registration.analyze_frames", "registration"),
+    ("ufwbpp_registration.pipeline", "analyze_frame", "registration.analyze_frame", "registration"),
+    ("ufwbpp_registration.pipeline", "detect_stars", "registration.detect_stars", "registration"),
+    ("ufwbpp_registration.pipeline", "_read_calibrated_preview", "registration.read_calibrated_preview", "registration"),
+    ("ufwbpp_registration.pipeline", "register_analyses", "registration.register_analyses", "registration"),
+    ("ufwbpp_registration.pipeline", "_refine_full_resolution", "registration.refine_full_resolution", "registration"),
+    ("ufwbpp_registration.pipeline", "_estimate_one", "registration.estimate_one", "registration"),
+    ("ufwbpp_registration.pipeline", "_estimate_via_bridge", "registration.estimate_via_bridge", "registration"),
+    ("ufwbpp_registration.pipeline", "_local_centroids", "registration.local_centroids", "registration"),
+    ("ufwbpp_registration.pipeline", "warp_image", "registration.validate_warp", "registration"),
+    ("ufwbpp_registration.pipeline", "_robust_warp_similarity", "registration.warp_similarity", "registration"),
+    ("ufwbpp_registration.pipeline", "read_full_image", "io.read_full_image", "io"),
     # fused calibrate + warp
-    ("openastroflow_engine.pixel_pipeline", "_calibrate_and_register_frames", "fused.all_lights", "fused"),
-    ("openastroflow_engine.pixel_pipeline", "_process_light_job", "fused.light_job", "fused"),
-    ("openastroflow_engine.pixel_pipeline", "_expression_rows", "fused.calibrate_rows", "fused"),
-    ("openastroflow_engine.pixel_pipeline", "bilinear_debayer", "fused.debayer", "fused"),
-    ("openastroflow_engine.pixel_pipeline", "_register_frame", "fused.register_frame", "fused"),
-    ("openastroflow_engine.pixel_pipeline", "_write_float_fits", "io.write_calibrated", "io"),
-    ("openastroflow_engine.pixel_pipeline", "_shared_auto_crop", "crop.shared_auto_crop", "crop"),
-    ("openastroflow_engine.pixel_pipeline", "_crop_fits", "crop.crop_fits", "crop"),
-    ("openastroflow_engine.native_kernels", "NativeKernels.warp_lanczos3", "native.warp_lanczos3", "native"),
+    ("ufwbpp.pixel_pipeline", "_calibrate_and_register_frames", "fused.all_lights", "fused"),
+    ("ufwbpp.pixel_pipeline", "_process_light_job", "fused.light_job", "fused"),
+    ("ufwbpp.pixel_pipeline", "_expression_rows", "fused.calibrate_rows", "fused"),
+    ("ufwbpp.pixel_pipeline", "bilinear_debayer", "fused.debayer", "fused"),
+    ("ufwbpp.pixel_pipeline", "_register_frame", "fused.register_frame", "fused"),
+    ("ufwbpp.pixel_pipeline", "_write_float_fits", "io.write_calibrated", "io"),
+    ("ufwbpp.pixel_pipeline", "_shared_auto_crop", "crop.shared_auto_crop", "crop"),
+    ("ufwbpp.pixel_pipeline", "_crop_fits", "crop.crop_fits", "crop"),
+    ("ufwbpp.native_kernels", "NativeKernels.warp_lanczos3", "native.warp_lanczos3", "native"),
     # normalization
-    ("openastroflow_engine.global_normalization", "fit_registered_group_global_normalization", "normalization.fit_group", "normalization"),
-    ("openastroflow_engine.global_normalization", "_group_tile_levels", "normalization.group_tile_levels", "normalization"),
-    ("openastroflow_engine.global_normalization", "_fit_sky_response", "normalization.fit_sky_response", "normalization"),
-    ("openastroflow_engine.global_normalization", "_fit_coefficient", "normalization.fit_coefficient", "normalization"),
-    ("openastroflow_engine.global_normalization", "_paired_samples", "normalization.paired_samples", "normalization"),
-    ("openastroflow_engine.global_normalization", "_fit_additive_offset_grid", "normalization.fit_additive_offset_grid", "normalization"),
-    ("openastroflow_engine.global_normalization", "_tile_backgrounds", "normalization.tile_backgrounds", "normalization"),
-    ("openastroflow_engine.global_normalization", "_smooth_offset_grid", "normalization.smooth_offset_grid", "normalization"),
-    ("openastroflow_engine.global_normalization", "_ReferenceSampleCache.sample", "normalization.reference_sample", "normalization"),
-    ("openastroflow_engine.global_normalization", "_ReferenceSampleCache.rows", "normalization.reference_rows", "normalization"),
-    ("openastroflow_engine.calibration", "_add_offset_grid_rows", "integration.add_offset_grid_rows", "integration"),
-    ("openastroflow_engine.transient_rejection", "fast_radon_levels", "transients.fast_radon_levels", "integration"),
-    ("openastroflow_engine.transient_rejection", "_measure_line", "transients.measure_line", "integration"),
-    ("openastroflow_engine.native_kernels", "NativeKernels.tile_offsets", "native.tile_offsets", "native"),
+    ("ufwbpp.global_normalization", "fit_registered_group_global_normalization", "normalization.fit_group", "normalization"),
+    ("ufwbpp.global_normalization", "_group_tile_levels", "normalization.group_tile_levels", "normalization"),
+    ("ufwbpp.global_normalization", "_fit_sky_response", "normalization.fit_sky_response", "normalization"),
+    ("ufwbpp.global_normalization", "_fit_coefficient", "normalization.fit_coefficient", "normalization"),
+    ("ufwbpp.global_normalization", "_paired_samples", "normalization.paired_samples", "normalization"),
+    ("ufwbpp.global_normalization", "_fit_additive_offset_grid", "normalization.fit_additive_offset_grid", "normalization"),
+    ("ufwbpp.global_normalization", "_tile_backgrounds", "normalization.tile_backgrounds", "normalization"),
+    ("ufwbpp.global_normalization", "_smooth_offset_grid", "normalization.smooth_offset_grid", "normalization"),
+    ("ufwbpp.global_normalization", "_ReferenceSampleCache.sample", "normalization.reference_sample", "normalization"),
+    ("ufwbpp.global_normalization", "_ReferenceSampleCache.rows", "normalization.reference_rows", "normalization"),
+    ("ufwbpp.calibration", "_add_offset_grid_rows", "integration.add_offset_grid_rows", "integration"),
+    ("ufwbpp.transient_rejection", "fast_radon_levels", "transients.fast_radon_levels", "integration"),
+    ("ufwbpp.transient_rejection", "_measure_line", "transients.measure_line", "integration"),
+    ("ufwbpp.native_kernels", "NativeKernels.tile_offsets", "native.tile_offsets", "native"),
     # integration
-    ("openastroflow_engine.metal_integration", "integrate_registered_group", "integration.group", "integration"),
-    ("openastroflow_engine.calibration", "integrate_expressions", "integration.integrate_expressions", "integration"),
-    ("openastroflow_engine.calibration", "_expression_rows", "integration.expression_rows", "integration"),
-    ("openastroflow_engine.calibration", "_expression_sampled_rows", "integration.expression_sampled_rows", "integration"),
-    ("openastroflow_engine.calibration", "_ordinary_integration_tile", "integration.rejection_tile", "integration"),
-    ("openastroflow_engine.calibration", "_prepare_transient_rejection", "integration.prepare_transients", "integration"),
-    ("openastroflow_engine.calibration", "_combined_integration_weights", "integration.weights", "integration"),
-    ("openastroflow_engine.calibration", "_estimate_rejection_sigma_floor", "integration.sigma_floor", "integration"),
-    ("openastroflow_engine.calibration", "robust_location", "integration.robust_location", "integration"),
-    ("openastroflow_engine.calibration", "fit_residual_background", "transients.fit_residual_background", "integration"),
-    ("openastroflow_engine.transient_rejection", "detect_transient_trails", "transients.detect", "integration"),
-    ("openastroflow_engine.native_kernels", "NativeKernels.mad_rejection", "native.mad_rejection", "native"),
-    ("openastroflow_engine.native_kernels", "NativeKernels.masked_weighted_mean", "native.masked_weighted_mean", "native"),
-    ("openastroflow_engine.native_kernels", "NativeKernels.radon_line_peaks", "native.radon_line_peaks", "native"),
+    ("ufwbpp.metal_integration", "integrate_registered_group", "integration.group", "integration"),
+    ("ufwbpp.calibration", "integrate_expressions", "integration.integrate_expressions", "integration"),
+    ("ufwbpp.calibration", "_expression_rows", "integration.expression_rows", "integration"),
+    ("ufwbpp.calibration", "_expression_sampled_rows", "integration.expression_sampled_rows", "integration"),
+    ("ufwbpp.calibration", "_ordinary_integration_tile", "integration.rejection_tile", "integration"),
+    ("ufwbpp.calibration", "_prepare_transient_rejection", "integration.prepare_transients", "integration"),
+    ("ufwbpp.calibration", "_combined_integration_weights", "integration.weights", "integration"),
+    ("ufwbpp.calibration", "_estimate_rejection_sigma_floor", "integration.sigma_floor", "integration"),
+    ("ufwbpp.calibration", "robust_location", "integration.robust_location", "integration"),
+    ("ufwbpp.calibration", "fit_residual_background", "transients.fit_residual_background", "integration"),
+    ("ufwbpp.transient_rejection", "detect_transient_trails", "transients.detect", "integration"),
+    ("ufwbpp.native_kernels", "NativeKernels.mad_rejection", "native.mad_rejection", "native"),
+    ("ufwbpp.native_kernels", "NativeKernels.masked_weighted_mean", "native.masked_weighted_mean", "native"),
+    ("ufwbpp.native_kernels", "NativeKernels.radon_line_peaks", "native.radon_line_peaks", "native"),
     # FITS I/O of the integration
-    ("openastroflow_engine.calibration", "FitsFrame.read_rows", "io.fits_read_rows", "io"),
-    ("openastroflow_engine.calibration", "FitsFrame.read_sampled_rows", "io.fits_read_sampled_rows", "io"),
-    ("openastroflow_engine.calibration", "FitsFrame.full_values", "io.fits_full_values", "io"),
-    ("openastroflow_engine.calibration", "FitsFloatWriter.write_rows", "io.fits_write_rows", "io"),
-    ("openastroflow_engine.calibration", "FitsFloatWriter.__exit__", "io.fits_writer_close", "io"),
+    ("ufwbpp.calibration", "FitsFrame.read_rows", "io.fits_read_rows", "io"),
+    ("ufwbpp.calibration", "FitsFrame.read_sampled_rows", "io.fits_read_sampled_rows", "io"),
+    ("ufwbpp.calibration", "FitsFrame.full_values", "io.fits_full_values", "io"),
+    ("ufwbpp.calibration", "FitsFloatWriter.write_rows", "io.fits_write_rows", "io"),
+    ("ufwbpp.calibration", "FitsFloatWriter.__exit__", "io.fits_writer_close", "io"),
     # drizzle
-    ("openastroflow_engine.drizzle_native", "drizzle_group", "drizzle.group", "drizzle"),
-    ("openastroflow_engine.drizzle_native", "_sha256_of", "drizzle.sha256", "drizzle"),
-    ("openastroflow_engine.native_kernels", "NativeKernels.drizzle_band", "native.drizzle_band", "native"),
+    ("ufwbpp.drizzle_native", "drizzle_group", "drizzle.group", "drizzle"),
+    ("ufwbpp.drizzle_native", "_sha256_of", "drizzle.sha256", "drizzle"),
+    ("ufwbpp.native_kernels", "NativeKernels.drizzle_band", "native.drizzle_band", "native"),
     # astrometry, products, publication
-    ("openastroflow_engine.astrometry_net_backend", "AstrometryNetBackend.solve", "astrometry.solve_field", "astrometry"),
-    ("openastroflow_engine.e2e", "_unify_same_grid_solutions", "astrometry.unify_same_grid", "astrometry"),
-    ("openastroflow_engine.e2e", "_validate_cross_filter_wcs", "astrometry.validate_cross_filter", "astrometry"),
-    ("openastroflow_engine.e2e", "_promote_solved_state", "astrometry.promote_solved_state", "astrometry"),
-    ("openastroflow_engine.e2e", "_ordinary_candidates", "products.ordinary_candidates", "products"),
-    ("openastroflow_engine.e2e", "_drizzle_candidates", "products.drizzle_candidates", "products"),
-    ("openastroflow_engine.e2e", "_verify_sources", "verify.sources", "verify"),
-    ("openastroflow_engine.e2e", "_sha256", "verify.sha256", "verify"),
-    ("openastroflow_engine.preview", "render_auto_stretch_preview", "products.preview", "products"),
-    ("openastroflow_engine.color_product", "build_color_product", "products.color_product", "products"),
-    ("openastroflow_engine.project_e2e", "_align_channel", "products.align_channel", "products"),
-    ("openastroflow_engine.project_e2e", "_build_shared_calibration", "calibration.shared_library", "calibration"),
+    ("ufwbpp.astrometry_net_backend", "AstrometryNetBackend.solve", "astrometry.solve_field", "astrometry"),
+    ("ufwbpp.workflows.single_target", "_unify_same_grid_solutions", "astrometry.unify_same_grid", "astrometry"),
+    ("ufwbpp.workflows.single_target", "_validate_cross_filter_wcs", "astrometry.validate_cross_filter", "astrometry"),
+    ("ufwbpp.workflows.single_target", "_promote_solved_state", "astrometry.promote_solved_state", "astrometry"),
+    ("ufwbpp.workflows.single_target", "_ordinary_candidates", "products.ordinary_candidates", "products"),
+    ("ufwbpp.workflows.single_target", "_drizzle_candidates", "products.drizzle_candidates", "products"),
+    ("ufwbpp.workflows.single_target", "_verify_sources", "verify.sources", "verify"),
+    ("ufwbpp.workflows.single_target", "sha256_digest", "verify.sha256", "verify"),
+    ("ufwbpp.preview", "render_auto_stretch_preview", "products.preview", "products"),
+    ("ufwbpp.color_product", "build_color_product", "products.color_product", "products"),
+    ("ufwbpp.workflows.project", "_align_channel", "products.align_channel", "products"),
+    ("ufwbpp.workflows.project", "_build_shared_calibration", "calibration.shared_library", "calibration"),
 )
 
 
@@ -227,7 +227,7 @@ class Tracer:
                         }
                     )
 
-        traced.__oaf_traced__ = True  # type: ignore[attr-defined]
+        traced.__ufwbpp_traced__ = True  # type: ignore[attr-defined]
         return traced
 
     def add_profile(self, label: str, profiler: Any) -> None:
@@ -270,7 +270,7 @@ class Tracer:
                 self.missing.append(f"{module_name}.{attribute}")
                 continue
             original = getattr(owner, parts[-1])
-            if getattr(original, "__oaf_traced__", False):
+            if getattr(original, "__ufwbpp_traced__", False):
                 continue
             setattr(owner, parts[-1], self.wrap(original, label, category))
             self.installed.append(label)
@@ -278,7 +278,7 @@ class Tracer:
     # ---- stages
     def install_stage_hook(self) -> None:
         try:
-            from openastroflow_engine import e2e
+            from ufwbpp.workflows import single_target as e2e
         except Exception as error:  # pragma: no cover
             self.missing.append(f"stage hook: {error}")
             return
@@ -296,7 +296,7 @@ class Tracer:
 
         e2e.ProgressEvent.serializable = serializable  # type: ignore[method-assign]
         try:
-            from openastroflow_engine import project_e2e
+            from ufwbpp.workflows import project as project_e2e
 
             project_original = project_e2e.ProjectProgressEvent.serializable
 
@@ -398,7 +398,7 @@ class Tracer:
                             }
                         )
 
-        threading.Thread(target=sample, name="oaf-trace-sampler", daemon=True).start()
+        threading.Thread(target=sample, name="ufwbpp-trace-sampler", daemon=True).start()
         return stop
 
     # ---- output
@@ -589,9 +589,9 @@ def main(argv: list[str] | None = None) -> int:
     tracer.install_stage_hook()
     stop_sampler = tracer.start_sampler(args.sample_interval)
 
-    from openastroflow_engine import cli
-    from openastroflow_engine.native_kernels import describe_native_kernels
-    from openastroflow_engine.hardware import detect_hardware
+    from ufwbpp import cli
+    from ufwbpp.native_kernels import describe_native_kernels
+    from ufwbpp.hardware import detect_hardware
 
     started = time.perf_counter()
     code = 1

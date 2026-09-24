@@ -37,20 +37,20 @@ from scipy import ndimage
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 for relative in (
-    "packages/openastroflow-engine/src",
+    "packages/engine/src",
     "packages/light-frame-qc/src",
-    "packages/openastroflow-registration",
-    "packages/openastroflow-engine/tests",
+    "packages/registration",
+    "packages/engine/tests",
 ):
     candidate = REPOSITORY / relative
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
-from openastroflow_engine.calibration_policy import MONO_STANDARD  # noqa: E402
-from openastroflow_engine.e2e import E2ERequest, IntegrationMode, run_e2e  # noqa: E402
-from openastroflow_engine.pixel_pipeline import PipelineParameters  # noqa: E402
-from openastroflow_engine.selection import SelectionParameters  # noqa: E402
-from openastroflow_engine.solver import (  # noqa: E402
+from ufwbpp.calibration_policy import MONO_STANDARD  # noqa: E402
+from ufwbpp.workflows.single_target import E2ERequest, IntegrationMode, run_e2e  # noqa: E402
+from ufwbpp.pixel_pipeline import PipelineParameters  # noqa: E402
+from ufwbpp.selection import SelectionParameters  # noqa: E402
+from ufwbpp.solver import (  # noqa: E402
     AstrometricQuality,
     SolutionKind,
     SolverIndexArtifact,

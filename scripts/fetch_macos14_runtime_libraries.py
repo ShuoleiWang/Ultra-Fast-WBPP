@@ -28,7 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.build_worker_sidecar import (  # noqa: E402
+from scripts.build_engine_sidecar import (  # noqa: E402
     MACOS14_RUNTIME_POLICY,
     SidecarBuildError,
     _verify_oci_package,

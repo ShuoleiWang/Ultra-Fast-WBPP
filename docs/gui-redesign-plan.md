@@ -112,7 +112,7 @@
 ## 8. 实现记录（2026-09-19）
 
 - 结构：`App.tsx` 拆为 `Toolbar`（导入动作、文档标题/运行活动区、语言、检视器开关）、`Sidebar`（项目三态、来源分组、结果）、内容视图 `views.tsx`（导入空态与素材表、筛片表格与目标×滤镜矩阵、处理阶段、结果主图卡片与产品）、`Inspector`（选中帧证据 + 校准/筛片检查）、底部 `LaunchBar`（输出位置与开始）。状态机 `useWorkflow.ts` 与引擎桥接协议未改。
-- 视觉：`styles.css` 重写为令牌 + 组件层（约 480 行替换 1862 行），浅色/深色随系统；hairline 分层、系统强调色只用于控件与选中；`icons.tsx` 按 SF Symbols 风格重绘；品牌标志 `BrandMark` 与应用图标由 `apps/desktop/scripts/brand_icon.py` 生成（Pillow，可复现），`assets/branding/openastroflow-icon-1024.png` 与 `src-tauri/icons/` 同步更新。
+- 视觉：`styles.css` 重写为令牌 + 组件层（约 480 行替换 1862 行），浅色/深色随系统；hairline 分层、系统强调色只用于控件与选中；`icons.tsx` 按 SF Symbols 风格重绘；品牌标志 `BrandMark` 与应用图标由 `apps/desktop/scripts/brand_icon.py` 生成（Pillow，可复现），`assets/branding/ultra-fast-wbpp-icon-1024.png` 与 `src-tauri/icons/` 同步更新。
 - 契约：`App.test.tsx` / `NativeApp.test.tsx` 全部保留且不改断言（57 项通过）；向导条被侧栏取代但 `nav[aria-label=处理流程]` 与 导入/处理/结果 语义仍在；审批按钮文案暂未改为"仍然包含"（待筛片策略在桌面端接入时一并调整）。
 - 文档截图：`apps/desktop/scripts/screenshots.py` 用无头 Chrome 对浏览器演示的 `?demo=frames|review|run|result` 四个阶段（`demoAutopilot.ts`，仅浏览器构建生效）截图并加 macOS 窗口边框，写入 `assets/branding/`。
 - 未做：Tauri `window-vibrancy` 侧栏材质（保持纯色降级）、⌘, 设置窗口与应用菜单、结果页的 PI 对照指标（需要引擎在回执中输出评估数字）。

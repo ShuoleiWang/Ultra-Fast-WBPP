@@ -5,7 +5,7 @@ fn release_discovery_contract_never_accepts_environment_or_adjacent_overrides() 
     let candidates = development_candidate_paths(
         false,
         Some(PathBuf::from("/tmp/injected-worker")),
-        Some(PathBuf::from("/tmp/OpenAstroFlow")),
+        Some(PathBuf::from("/tmp/Ultra-Fast-WBPP")),
     );
     assert!(candidates.is_empty());
 }
@@ -43,33 +43,13 @@ fn sidecar_launch_waits_for_a_text_busy_executable() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-#[test]
-fn application_shutdown_terminates_every_pipeline_process_tree() {
-    let registry = PipelineRegistry::default();
-    let mut command = platform::test_support::sleeping_command();
-    let child = Arc::new(Mutex::new(
-        ManagedChild::spawn(&mut command).expect("pipeline child"),
-    ));
-    registry
-        .jobs
-        .lock()
-        .unwrap()
-        .insert("pipeline-shutdown-test".to_owned(), child.clone());
-
-    terminate_all(&registry).expect("terminate pipeline children");
-    let status = child.lock().unwrap().wait().expect("reap pipeline child");
-    assert!(!status.success());
-    assert!(registry.shutting_down.load(Ordering::Acquire));
-    terminate_all(&registry).expect("shutdown is idempotent");
-}
-
 #[cfg(unix)]
 #[test]
 fn bundled_runtime_manifest_binds_every_file_and_executable_mode() {
     use std::os::unix::fs::PermissionsExt;
 
     let resource_root = std::env::temp_dir()
-        .join(new_identifier("openastroflow-runtime-manifest").expect("temporary identifier"));
+        .join(new_identifier("ultra-fast-wbpp-runtime-manifest").expect("temporary identifier"));
     let runtime_root = resource_root.join(target_suffixed_name().trim_end_matches(".exe"));
     let internal = runtime_root.join("_internal");
     fs::create_dir_all(&internal).expect("runtime fixture directories");
@@ -89,8 +69,8 @@ fn bundled_runtime_manifest_binds_every_file_and_executable_mode() {
     let mut tree = Sha256::new();
     tree.update(canonical);
     let manifest = serde_json::json!({
-        "schemaVersion": 2,
-        "kind": "openastroflow-worker-sidecar",
+        "schemaVersion": 3,
+        "kind": "ufwbpp-engine-sidecar",
         "targetTriple": target_triple_name(),
         "runtime": {
             "directoryName": target_suffixed_name().trim_end_matches(".exe"),
@@ -101,7 +81,7 @@ fn bundled_runtime_manifest_binds_every_file_and_executable_mode() {
             "entryCount": 3,
             "entries": entries
         },
-        "protocol": {},
+        "engine": {},
         "versions": {},
         "collections": []
     });
@@ -118,32 +98,20 @@ fn bundled_runtime_manifest_binds_every_file_and_executable_mode() {
     let _ = fs::remove_dir_all(resource_root);
 }
 
-fn profile_capabilities(profiles: &[HardwareProfile]) -> BackendCapabilities {
-    let hardware_profiles = profiles.iter().copied().collect();
-    let mut features = std::collections::BTreeSet::from([BackendFeature::CpuExecution]);
-    if profiles.iter().any(|profile| {
-        matches!(
-            profile,
-            HardwareProfile::GenericAppleMetal | HardwareProfile::M3ProTuned
-        )
-    }) {
-        features.insert(BackendFeature::MetalExecution);
-    }
-    if profiles.contains(&HardwareProfile::M3ProTuned) {
-        features.insert(BackendFeature::M3ProTuning);
-    }
-    BackendCapabilities {
-        schema_version: 1,
-        backend_id: "profile-test".to_owned(),
-        backend_version: "1".to_owned(),
-        worker_build: "test".to_owned(),
-        hardware_profiles,
-        stages: std::collections::BTreeSet::from([StageKind::Integration]),
-        features,
-        maximum_parallel_stages: 1,
-        input_extensions: std::collections::BTreeSet::new(),
-        output_extensions: std::collections::BTreeSet::new(),
-    }
+fn doctor_report(metal_ready: bool, profile_id: &str, solver_ready: bool) -> DoctorReport {
+    serde_json::from_value(serde_json::json!({
+        "schemaVersion": 1,
+        "engineVersion": "0.1.0",
+        "tuning": {"profileId": profile_id},
+        "status": {
+            "pixelExecutionReady": true,
+            "solverReady": solver_ready,
+            "drizzleReady": true,
+            "metalReady": metal_ready,
+            "endToEndExecutableReady": solver_ready
+        }
+    }))
+    .expect("doctor report fixture")
 }
 
 fn simulated_host(
@@ -162,52 +130,56 @@ fn simulated_host(
 }
 
 #[test]
-fn profile_selection_never_maps_linux_x86_to_arm64() {
-    let capabilities = profile_capabilities(&[
-        HardwareProfile::PortableCpu,
-        HardwareProfile::GenericArm64Cpu,
-    ]);
-    let host = simulated_host("linux", "x86_64", "x86_64");
-    assert_eq!(
-        select_profile_for_host(&capabilities, &host),
-        Ok(HardwareProfile::PortableCpu)
+fn capabilities_follow_the_engine_self_report() {
+    let m3 = simulated_host("macos", "aarch64", "Apple M3 Pro");
+    let tuned = capabilities_from_report(&doctor_report(true, "apple-m3-pro-tuned-v1", true), &m3);
+    assert!(tuned.available);
+    assert_eq!(tuned.optimization_tier, "M3_PRO_TUNED");
+    assert_eq!(tuned.gpu_backend, "Metal execution");
+    assert_eq!(tuned.runtime_version.as_deref(), Some("0.1.0"));
+
+    // Metal is claimed only when the engine created a real executor.
+    let cpu_only =
+        capabilities_from_report(&doctor_report(false, "apple-m3-pro-tuned-v1", true), &m3);
+    assert_eq!(cpu_only.optimization_tier, "APPLE_SILICON");
+    assert_eq!(cpu_only.gpu_backend, "Portable CPU only");
+
+    let linux = simulated_host("linux", "x86_64", "x86_64");
+    let portable =
+        capabilities_from_report(&doctor_report(false, "linux-x86-64-cpu-v1", true), &linux);
+    assert_eq!(portable.optimization_tier, "PORTABLE");
+
+    let windows = simulated_host("windows", "x86_64", "AMD Ryzen 7 5800H");
+    let windows_caps = capabilities_from_report(
+        &doctor_report(false, "windows-x86-64-cpu-v1", true),
+        &windows,
     );
+    assert!(windows_caps.available);
+    assert_eq!(windows_caps.optimization_tier, "WINDOWS_X64");
+    assert_eq!(windows_caps.gpu_backend, "test-gpu");
 }
 
 #[test]
-fn profile_selection_keeps_windows_on_its_explicit_cpu_contract() {
-    let host = simulated_host("windows", "x86_64", "x86_64");
-    let capabilities =
-        profile_capabilities(&[HardwareProfile::PortableCpu, HardwareProfile::WindowsCpu]);
-    assert_eq!(
-        select_profile_for_host(&capabilities, &host),
-        Ok(HardwareProfile::WindowsCpu)
-    );
-    let portable_only = profile_capabilities(&[HardwareProfile::PortableCpu]);
-    assert!(select_profile_for_host(&portable_only, &host).is_err());
-}
+fn a_missing_solver_or_platform_keeps_the_runtime_unavailable() {
+    let m3 = simulated_host("macos", "aarch64", "Apple M3 Pro");
+    let no_solver =
+        capabilities_from_report(&doctor_report(true, "apple-m3-pro-tuned-v1", false), &m3);
+    assert!(!no_solver.available);
+    assert!(!no_solver.solver_available);
+    assert!(no_solver
+        .unavailable_reason
+        .unwrap()
+        .contains("plate solver"));
 
-#[test]
-fn profile_selection_uses_only_worker_advertised_metal() {
-    let host = simulated_host("macos", "aarch64", "Apple M3 Pro");
-    let cpu_only = profile_capabilities(&[
-        HardwareProfile::PortableCpu,
-        HardwareProfile::GenericArm64Cpu,
-    ]);
-    assert_eq!(
-        select_profile_for_host(&cpu_only, &host),
-        Ok(HardwareProfile::GenericArm64Cpu)
-    );
-    let probed = profile_capabilities(&[
-        HardwareProfile::PortableCpu,
-        HardwareProfile::GenericArm64Cpu,
-        HardwareProfile::GenericAppleMetal,
-        HardwareProfile::M3ProTuned,
-    ]);
-    assert_eq!(
-        select_profile_for_host(&probed, &host),
-        Ok(HardwareProfile::M3ProTuned)
-    );
+    let arm = simulated_host("windows", "aarch64", "Snapdragon X Elite");
+    let unsupported =
+        capabilities_from_report(&doctor_report(false, "windows-x86-64-cpu-v1", true), &arm);
+    assert!(!unsupported.available);
+    assert_eq!(unsupported.optimization_tier, "PORTABLE");
+    assert!(unsupported
+        .unavailable_reason
+        .unwrap()
+        .contains("x86-64 only"));
 }
 
 #[test]
@@ -230,11 +202,11 @@ fn windows_release_validation_is_x86_64_only() {
 }
 
 #[test]
-fn worker_environment_forces_utf8_stdio() {
+fn engine_environment_forces_utf8_stdio() {
     let command = EngineExecutable {
-        path: PathBuf::from("openastroflow-worker"),
+        path: PathBuf::from("ufwbpp-engine"),
     }
-    .command("worker");
+    .command("doctor");
     let environment = command
         .get_envs()
         .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
@@ -243,7 +215,7 @@ fn worker_environment_forces_utf8_stdio() {
     assert_eq!(environment.get("PYTHONIOENCODING"), Some(&"utf-8"));
     assert_eq!(
         command.get_args().collect::<Vec<_>>(),
-        vec![std::ffi::OsStr::new("worker")]
+        vec![std::ffi::OsStr::new("doctor")]
     );
 }
 
@@ -270,63 +242,15 @@ fn fake_sidecar() -> (PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
 
     let root = std::env::temp_dir()
-        .join(new_identifier("openastroflow-fake-sidecar").expect("temporary identifier"));
+        .join(new_identifier("ultra-fast-wbpp-fake-sidecar").expect("temporary identifier"));
     std::fs::create_dir(&root).expect("create fake sidecar directory");
-    let script = root.join("fake-openastroflow-engine");
+    let script = root.join("fake-ufwbpp");
     let source = r###"#!/usr/bin/env python3
 import argparse, base64, hashlib, json, os, pathlib, platform, re, sys
 
-CPU_PROFILE = "generic-arm64-cpu" if platform.machine().lower() in {"arm64", "aarch64"} else "portable-cpu"
-
-CAPS = {
-  "schemaVersion": 1, "backendId": "fake-sidecar", "backendVersion": "0.1.0",
-  "workerBuild": "test", "hardwareProfiles": [CPU_PROFILE],
-  "stages": ["quality-control", "calibration", "registration", "integration", "drizzle", "astrometric-solve"],
-  "features": ["cpu-execution", "deterministic-receipts", "offline-astrometric-solver", "drizzle", "fits"],
-  "maximumParallelStages": 1, "inputExtensions": ["fits"], "outputExtensions": ["fits"]
-}
-
-def envelope(session, sequence, kind, payload):
-  return {"protocolVersion": 1, "sessionId": session, "sequence": sequence,
-          "sentAtUnixMs": 10 + sequence, "type": kind, "payload": payload}
-
-def recipe(mode):
-  stages = [
-    {"stageId":"quality-control","kind":"quality-control","enabled":True,"dependsOn":[],"parameters":{}},
-    {"stageId":"calibrate","kind":"calibration","enabled":True,"dependsOn":["quality-control"],"parameters":{}},
-    {"stageId":"register","kind":"registration","enabled":True,"dependsOn":["calibrate"],"parameters":{}},
-    {"stageId":"integrate","kind":"integration","enabled":True,"dependsOn":["register"],"parameters":{}},
-  ]
-  dependency = "integrate"
-  if mode == "drizzle":
-    stages.append({"stageId":"drizzle","kind":"drizzle","enabled":True,"dependsOn":["integrate"],"parameters":{}})
-    dependency = "drizzle"
-  stages.append({"stageId":"solve","kind":"astrometric-solve","enabled":True,"dependsOn":[dependency],"parameters":{}})
-  return {"schemaVersion":1,"recipeId":"fake-e2e","displayName":"Fake E2E","stages":stages,
-          "solver":{"result":"required","catalog":"astrometry-net-offline","projection":"TAN","minimumMatches":12,"maximumRmsArcsec":2.0},
-          "drizzle":{"result":"required" if mode == "drizzle" else "disabled","scale":2.0,"dropShrink":0.9,"kernel":"square"},
-          "parameters":{}}
-
-def controller_plan(argv):
-  parser = argparse.ArgumentParser()
-  parser.add_argument("inputs", nargs="+")
-  parser.add_argument("--mode", default="ordinary")
-  parser.add_argument("--session-id", required=True)
-  parser.add_argument("--sequence", type=int, required=True)
-  parser.add_argument("--request-id", required=True)
-  parser.add_argument("--plan-id", required=True)
-  parser.add_argument("--hardware-profile", required=True)
-  parser.add_argument("--compact", action="store_true")
-  args = parser.parse_args(argv)
-  sources = []
-  for index, path in enumerate(args.inputs):
-    name = pathlib.Path(path).name.lower()
-    role = "flat" if "flat" in name else "bias" if "bias" in name else "dark" if "dark" in name else "light"
-    sources.append({"sourceId":f"source-{index}","role":role,"hostPath":path,"recursive":False})
-  payload = {"requestId":args.request_id,"planId":args.plan_id,
-    "project":{"schemaVersion":1,"projectId":"fake-project","displayName":"Unicode 盾牌座","createdAtUnixMs":1,"sources":sources,"labels":{}},
-    "recipe":recipe(args.mode),"requestedHardwareProfile":args.hardware_profile,"inputManifestSha256":"0"*64}
-  print(json.dumps(envelope(args.session_id,args.sequence,"plan",payload),ensure_ascii=False,separators=(",",":")),flush=True)
+def doctor():
+  print(json.dumps({"schemaVersion":1,"engineVersion":"0.1.0","tuning":{"profileId":"fake-profile"},
+    "status":{"pixelExecutionReady":True,"solverReady":True,"drizzleReady":True,"metalReady":False}}),flush=True)
 
 def inventory():
   print(json.dumps({"name":"Unicode 盾牌座","assets":[
@@ -431,45 +355,10 @@ def blink_measure(argv):
   (session / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
   print(json.dumps(manifest, ensure_ascii=False, separators=(",",":") if args.compact else None), flush=True)
 
-def artifact_payload(request_id, run_id, stage_id, stage_kind, artifact):
-  stage={"schemaVersion":1,"stageId":stage_id,"kind":stage_kind,"status":"succeeded","startedAtUnixMs":1,
-         "finishedAtUnixMs":2,"artifactIds":[artifact["artifactId"]],"metrics":{}}
-  return {"requestId":request_id,"runId":run_id,"stage":stage,"artifact":artifact}
-
-def worker():
-  hello=json.loads(sys.stdin.readline())
-  session=hello["sessionId"]
-  print(json.dumps(envelope(session,0,"handshake",{"role":"worker","implementation":"fake-sidecar","implementationVersion":"0.1.0","supportedProtocolVersions":[1],"capabilities":CAPS}),separators=(",",":")),flush=True)
-  plan_line=sys.stdin.readline()
-  if not plan_line: return
-  plan=json.loads(plan_line)
-  execute=json.loads(sys.stdin.readline())
-  request_id=execute["payload"]["requestId"]; run_id=execute["payload"]["runId"]
-  sequence=1
-  for stage_id,kind in [("quality-control","quality-control"),("calibrate","calibration"),("register","registration"),("integrate","integration")]:
-    artifact={"schemaVersion":1,"artifactId":"evidence-"+stage_id,"producedByStageId":stage_id,"kind":"run-log","designation":"diagnostic",
-              "relativePath":"evidence/"+stage_id+".json","mediaType":"application/json","sha256":"1"*64,"sizeBytes":1,"createdAtUnixMs":2,"attributes":{}}
-    print(json.dumps(envelope(session,sequence,"artifact",artifact_payload(request_id,run_id,stage_id,kind,artifact)),separators=(",",":")),flush=True); sequence+=1
-  output=pathlib.Path(execute["payload"]["outputParentHostPath"])/execute["payload"]["outputDirectoryName"]
-  master=output/"master"/"Unicode 盾牌座_master.fits"; master.parent.mkdir(parents=True)
-  master.write_bytes(b"FAKE-FITS-FOR-CONTROLLER-TEST")
-  digest=hashlib.sha256(master.read_bytes()).hexdigest()
-  final={"schemaVersion":1,"artifactId":"final-master","producedByStageId":"solve","kind":"final-master","designation":"final-master",
-         "relativePath":"master/Unicode 盾牌座_master.fits","mediaType":"image/fits","sha256":digest,"sizeBytes":master.stat().st_size,"createdAtUnixMs":3,
-         "astrometry":{"referenceFrame":"ICRS","projection":"TAN","centerRaDegrees":281.0,"centerDecDegrees":-6.0,"pixelScaleArcsec":1.4,
-           "rotationDegrees":0.0,"rmsPixels":0.3,"rmsArcsec":0.42,"matchedStars":73,"parity":"POSITIVE","catalogIdentity":"2"*64,
-           "indexIdentities":["astrometry.net:index:4108:healpix:123:hpnside:4"],"correspondenceSha256":"3"*64,
-           "catalogManaged":True,"installedSetIdentity":"5"*64,"catalogManifestSha256":"6"*64,
-           "indexArtifacts":[{"indexId":"4108","relativeName":"index-4108.fits","sizeBytes":94550400,"sha256":"7"*64,"manifestSha256":"6"*64,"installedSetIdentity":"5"*64}],
-           "wcsSha256":"4"*64},"attributes":{}}
-  print(json.dumps(envelope(session,sequence,"artifact",artifact_payload(request_id,run_id,"solve","astrometric-solve",final)),ensure_ascii=False,separators=(",",":")),flush=True)
-  print("fake diagnostic stays on stderr",file=sys.stderr,flush=True)
-
-if sys.argv[1] == "controller-plan": controller_plan(sys.argv[2:])
+if sys.argv[1] == "doctor": doctor()
 elif sys.argv[1] == "inventory": inventory()
 elif sys.argv[1] == "quality-check": quality_check(sys.argv[2:])
 elif sys.argv[1] == "blink-measure": blink_measure(sys.argv[2:])
-elif sys.argv[1] == "worker": worker()
 else: raise SystemExit(2)
 "###;
     std::fs::write(&script, source).expect("write fake sidecar");
@@ -552,40 +441,9 @@ print(json.dumps({'schemaVersion':1, 'status':'BLOCKED', 'calibrationReady':Fals
 }
 
 #[test]
-fn rejects_missing_calibration_roles_before_spawning() {
-    let error = unique_input_paths(&[RunSource {
-        role: "LIGHT".to_owned(),
-        paths: vec!["/tmp/light.fit".to_owned()],
-    }])
-    .expect_err("missing flats and bias must fail");
-    assert!(error.contains("FLAT"));
-}
-
-#[test]
-fn unicode_paths_are_preserved_and_deduplicated() {
-    let path = "/tmp/盾牌座/亮场 01.fit".to_owned();
-    let sources = [
-        RunSource {
-            role: "LIGHT".to_owned(),
-            paths: vec![path.clone(), path.clone()],
-        },
-        RunSource {
-            role: "FLAT".to_owned(),
-            paths: vec!["/tmp/平场.fit".to_owned()],
-        },
-        RunSource {
-            role: "BIAS".to_owned(),
-            paths: vec!["/tmp/偏置.fit".to_owned()],
-        },
-    ];
-    let result = unique_input_paths(&sources).expect("valid sources");
-    assert_eq!(result.iter().filter(|item| *item == &path).count(), 1);
-}
-
-#[test]
 fn deferred_cfa_confirmation_hashes_unicode_files_without_mutating_them() {
     let root = std::env::temp_dir()
-        .join(new_identifier("openastroflow-hash-source").expect("temporary identifier"));
+        .join(new_identifier("ultra-fast-wbpp-hash-source").expect("temporary identifier"));
     std::fs::create_dir(&root).expect("temporary directory");
     let path = root.join("盾牌座 亮场.fit");
     std::fs::write(&path, b"read-only-source-fixture").expect("source fixture");
@@ -604,13 +462,6 @@ fn deferred_cfa_confirmation_hashes_unicode_files_without_mutating_them() {
     })
     .is_err());
     let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
-fn recipe_mapping_is_explicit() {
-    assert_eq!(recipe_cli_id("balanced"), Ok("balanced"));
-    assert_eq!(recipe_cli_id("drizzle-2x"), Ok("drizzle-2x"));
-    assert!(recipe_cli_id("future-recipe").is_err());
 }
 
 #[cfg(unix)]
@@ -715,11 +566,12 @@ print((pathlib.Path(__file__).parent / 'inventory.json').read_text())
 
 #[cfg(unix)]
 #[test]
-fn fake_sidecar_handshake_and_inventory_preserve_unicode_roles() {
+fn fake_engine_doctor_and_inventory_preserve_unicode_roles() {
     let (root, script) = fake_sidecar();
     let executable = EngineExecutable { path: script };
-    let probe = probe_runtime_with(executable.clone()).expect("canonical handshake");
-    assert_eq!(probe.capabilities.backend_id, "fake-sidecar");
+    let report = read_doctor_report(&executable).expect("doctor self-report");
+    assert_eq!(report.engine_version, "0.1.0");
+    assert!(report.status.solver_ready);
     let inventory = inspect_paths_with(
         executable,
         InspectRequest {
@@ -1027,22 +879,23 @@ fn fake_sidecar_blink_failure_removes_its_session() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-/// The real engine on real Lights: `OAF_TEST_ENGINE` names an
-/// `ultra-fast-wbpp` executable, `OAF_TEST_BLINK_LIGHTS` a text file with
+/// The real engine on real Lights: `UFWBPP_TEST_ENGINE` names an
+/// `ultra-fast-wbpp` executable, `UFWBPP_TEST_BLINK_LIGHTS` a text file with
 /// one Light path per line.  Run with `--ignored --nocapture` to see the
 /// session summary.
 #[test]
-#[ignore = "requires OAF_TEST_ENGINE and OAF_TEST_BLINK_LIGHTS pointing to a real engine and Lights"]
+#[ignore = "requires UFWBPP_TEST_ENGINE and UFWBPP_TEST_BLINK_LIGHTS pointing to a real engine and Lights"]
 fn real_engine_blink_measure_session_is_accepted() {
-    let engine = PathBuf::from(std::env::var("OAF_TEST_ENGINE").expect("engine path"));
-    let paths =
-        std::fs::read_to_string(std::env::var("OAF_TEST_BLINK_LIGHTS").expect("light list path"))
-            .expect("light list")
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
+    let engine = PathBuf::from(std::env::var("UFWBPP_TEST_ENGINE").expect("engine path"));
+    let paths = std::fs::read_to_string(
+        std::env::var("UFWBPP_TEST_BLINK_LIGHTS").expect("light list path"),
+    )
+    .expect("light list")
+    .lines()
+    .map(str::trim)
+    .filter(|line| !line.is_empty())
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
     let sessions = std::env::temp_dir()
         .join(new_identifier("real-blink-sessions").expect("temporary identifier"));
     let started = std::time::Instant::now();
@@ -1355,16 +1208,16 @@ fn blink_filmstrip_previews_respect_the_transport_budget() {
 
 #[cfg(unix)]
 #[test]
-fn fake_sidecar_error_is_reported_without_parsing_stderr_as_protocol() {
+fn fake_sidecar_error_is_reported_with_its_diagnostic() {
     use std::os::unix::fs::PermissionsExt;
 
     let root = std::env::temp_dir()
-        .join(new_identifier("openastroflow-error-sidecar").expect("temporary identifier"));
+        .join(new_identifier("ultra-fast-wbpp-error-sidecar").expect("temporary identifier"));
     std::fs::create_dir(&root).expect("create fake sidecar directory");
     let script = root.join("error-sidecar");
     std::fs::write(
         &script,
-        "#!/bin/sh\necho 'diagnostic only, not NDJSON' >&2\nexit 7\n",
+        "#!/bin/sh\necho 'diagnostic from the engine' >&2\nexit 7\n",
     )
     .expect("write error sidecar");
     let mut permissions = std::fs::metadata(&script).unwrap().permissions();
@@ -1378,82 +1231,6 @@ fn fake_sidecar_error_is_reported_without_parsing_stderr_as_protocol() {
         },
     )
     .expect_err("failing sidecar must fail inventory");
-    assert!(error.contains("diagnostic only, not NDJSON"));
+    assert!(error.contains("diagnostic from the engine"));
     let _ = std::fs::remove_dir_all(root);
-}
-
-#[cfg(unix)]
-#[test]
-fn fake_sidecar_plan_execute_reaches_ready_gate_and_verified_artifact() {
-    use std::sync::mpsc;
-    use tauri::Listener;
-
-    let (root, script) = fake_sidecar();
-    let output_parent = root.join("Unicode 输出父目录");
-    std::fs::create_dir(&output_parent).expect("output parent");
-    let executable = EngineExecutable { path: script };
-    let probe = probe_runtime_with(executable).expect("canonical handshake");
-    let app = tauri::test::mock_app();
-    let handle = app.handle().clone();
-    let (sender, receiver) = mpsc::channel();
-    handle.listen(COMPLETE_EVENT, move |event| {
-        let _ = sender.send(event.payload().to_owned());
-    });
-    let registry = Arc::new(PipelineRegistry::default());
-    let receipt = start_pipeline_with_probe(
-        handle,
-        registry,
-        RunRequest {
-            sources: vec![
-                RunSource {
-                    role: "LIGHT".to_owned(),
-                    paths: vec!["/输入/盾牌座_light.fit".to_owned()],
-                },
-                RunSource {
-                    role: "FLAT".to_owned(),
-                    paths: vec!["/输入/校准_flat.fit".to_owned()],
-                },
-                RunSource {
-                    role: "BIAS".to_owned(),
-                    paths: vec!["/输入/校准_bias.fit".to_owned()],
-                },
-            ],
-            recipe_id: "balanced".to_owned(),
-            output_parent_directory: output_parent.to_string_lossy().into_owned(),
-        },
-        probe,
-    )
-    .expect("start fake canonical worker");
-    assert_eq!(receipt.execution_mode, "native");
-    let payload = receiver
-        .recv_timeout(std::time::Duration::from_secs(10))
-        .expect("ready completion event");
-    let value: serde_json::Value = serde_json::from_str(&payload).expect("completion JSON");
-    assert_eq!(value["gate"]["decision"], "ready");
-    assert_eq!(
-        value["artifacts"][0]["receipt"]["astrometry"]["matchedStars"],
-        73
-    );
-    assert!(Path::new(value["artifacts"][0]["path"].as_str().unwrap()).is_file());
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
-fn cancellation_terminates_the_worker_process_tree() {
-    let mut command = platform::test_support::sleeping_command();
-    let child = ManagedChild::spawn(&mut command).expect("spawn cancellable process");
-    let id = "cancel-test".to_owned();
-    let registry = PipelineRegistry::default();
-    registry
-        .jobs
-        .lock()
-        .unwrap()
-        .insert(id.clone(), Arc::new(Mutex::new(child)));
-    cancel_pipeline(&registry, &id).expect("kill worker process group");
-    let status = registry.jobs.lock().unwrap()[&id]
-        .lock()
-        .unwrap()
-        .wait()
-        .expect("wait cancelled process");
-    assert!(!status.success());
 }

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from scripts.stage_tauri_sidecar import SidecarStageError, stage_sidecar
-from scripts.build_worker_sidecar import (
+from scripts.build_engine_sidecar import (
     build_manifest,
     detect_host_target_triple,
     runtime_directory_name,
@@ -29,39 +29,12 @@ VERSIONS = {
     "packages": {
         "astropy": "8.0.1",
         "light-frame-qc": "0.3.0",
-        "openastroflow-engine": "0.1.0",
-        "openastroflow-registration": "0.1.0a1",
+        "ufwbpp": "0.1.0",
+        "ufwbpp-registration": "0.1.0a1",
         "reproject": "0.21.0",
         "shapely": "2.1.0",
     },
 }
-HANDSHAKE = {
-    "protocolVersion": 1,
-    "sessionId": "packaging-smoke",
-    "sequence": 0,
-    "sentAtUnixMs": 1,
-    "type": "handshake",
-    "payload": {
-        "role": "worker",
-        "implementation": "openastroflow-python-worker",
-        "implementationVersion": "0.1.0",
-        "supportedProtocolVersions": [1],
-        "capabilities": {
-            "schemaVersion": 1,
-            "backendId": "openastroflow-python-worker",
-            "backendVersion": "0.1.0",
-            "workerBuild": "test",
-            "hardwareProfiles": ["generic-arm64-cpu"],
-            "stages": ["quality-control", "calibration", "registration", "integration", "astrometric-solve"],
-            "features": ["cpu-execution", "deterministic-receipts", "offline-astrometric-solver", "fits"],
-            "maximumParallelStages": 1,
-            "inputExtensions": ["fit", "fits", "fts"],
-            "outputExtensions": ["fits"],
-        },
-    },
-}
-
-
 def _pair(root: Path, payload: bytes = b"frozen-worker") -> Path:
     name = runtime_directory_name(TEST_TARGET)
     runtime = root / name
@@ -79,7 +52,7 @@ def _pair(root: Path, payload: bytes = b"frozen-worker") -> Path:
                 runtime,
                 TEST_TARGET,
                 versions=VERSIONS,
-                handshake=HANDSHAKE,
+                engine_version="0.1.0",
             )
         ),
         encoding="utf-8",

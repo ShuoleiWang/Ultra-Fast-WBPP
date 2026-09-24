@@ -10,7 +10,7 @@ Benchmarks are performance evidence with an explicit scientific and I/O boundary
 
 [`m3-pro-real-raw-b-optimized-e2e-20260902.json`](../validation/m3-pro-real-raw-b-optimized-e2e-20260902.json) is a historical 8-Light optimization fixture. A 106.895-second corrected baseline rebuilt calibration masters twice; two content-verified snapshot+master-reuse runs took 85.391 and 84.070 seconds with exact candidate parity. It predates the numeric-domain and Lanczos-3 accuracy fixes and is retained only to document that optimization, not as the current product baseline.
 
-The two checked-in `openastroflow-metal-integration-benchmark-v1` kernel reports below are historical one-shot observations. They do not record build configuration, compiler/source provenance, warmup, or repeated samples, and their 40-frame versus 96-frame throughput differs by almost 10×. Do not compare or cite them as a current release baseline.
+The two checked-in `ultra-fast-wbpp-metal-integration-benchmark-v1` kernel reports below are historical one-shot observations. They do not record build configuration, compiler/source provenance, warmup, or repeated samples, and their 40-frame versus 96-frame throughput differs by almost 10×. Do not compare or cite them as a current release baseline.
 
 ## Master evaluation against PixInsight WBPP
 
@@ -24,7 +24,7 @@ The two checked-in `openastroflow-metal-integration-benchmark-v1` kernel reports
 
 The two scripts below write JSON reports that are local evidence and are not checked in; the figures here were measured on the 36 GiB, 12-core M3 Pro from an uncommitted worktree and are reproduced by rerunning the scripts on the same machine.
 
-[`native_kernels_pipeline.py`](native_kernels_pipeline.py) measures three boundaries on synthetic 6252×4176 mono data with the native CPU kernels enabled and with `OPENASTROFLOW_DISABLE_NATIVE_KERNELS=1` (the NumPy reference path), and verifies that both paths publish identical pixels. Medians of three warp/integration repetitions and two pipeline repetitions:
+[`native_kernels_pipeline.py`](native_kernels_pipeline.py) measures three boundaries on synthetic 6252×4176 mono data with the native CPU kernels enabled and with `UFWBPP_DISABLE_NATIVE_KERNELS=1` (the NumPy reference path), and verifies that both paths publish identical pixels. Medians of three warp/integration repetitions and two pipeline repetitions:
 
     .venv/bin/python benchmarks/native_kernels_pipeline.py --output build/native-kernels.json
 

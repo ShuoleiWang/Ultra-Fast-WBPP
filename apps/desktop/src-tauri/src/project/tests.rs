@@ -42,7 +42,7 @@ fn selection_request(root: &Path, light: &Path, selection: serde_json::Value) ->
     serde_json::from_value(serde_json::json!({
         "sources": [{"sourceId": "light-1", "role": "LIGHT", "paths": [light], "recursive": false}],
         "projectName": "NGC 6822", "runLabel": "NGC 6822",
-        "recipe": {"balanced": true, "drizzleEnabled": false, "localNormalizationEnabled": false,
+        "recipe": {"balanced": true, "drizzleEnabled": false,
                    "solverRequired": true, "calibrationWorkflow": "mono-standard-v1"},
         "masterMetadataOverrides": [], "rawFrameMetadataOverrides": [], "reviewSelections": [],
         "selection": selection,
@@ -357,10 +357,10 @@ fn screening_summary_loads_bounded_previews_and_rejects_malformed_records() {
 }
 
 #[test]
-#[ignore = "requires OAF_TEST_PROJECT_RECEIPT pointing to retained real project output"]
+#[ignore = "requires UFWBPP_TEST_PROJECT_RECEIPT pointing to retained real project output"]
 fn retained_real_project_passes_native_final_gate_read_only() {
     let receipt_path =
-        PathBuf::from(std::env::var("OAF_TEST_PROJECT_RECEIPT").expect("retained receipt path"));
+        PathBuf::from(std::env::var("UFWBPP_TEST_PROJECT_RECEIPT").expect("retained receipt path"));
     let root = receipt_path.parent().unwrap();
     let result = serde_json::json!({"success":true, "state":"SOLVED", "outputDirectory":root, "receiptPath":receipt_path});
     let completion = validate_completion(root, &result)
@@ -758,7 +758,6 @@ sys.exit(1)
                 drizzle_scale: default_drizzle_scale(),
                 drizzle_drop_shrink: default_drizzle_drop_shrink(),
                 drizzle_kernel: default_drizzle_kernel(),
-                local_normalization_enabled: false,
                 solver_required: true,
                 calibration_workflow: default_calibration_workflow(),
             },
@@ -857,7 +856,6 @@ fn standard_master_workflow_reaches_worker_without_fabricated_metadata() {
             drizzle_scale: default_drizzle_scale(),
             drizzle_drop_shrink: default_drizzle_drop_shrink(),
             drizzle_kernel: default_drizzle_kernel(),
-            local_normalization_enabled: false,
             solver_required: true,
             calibration_workflow: "mono-standard-v1".into(),
         },
@@ -913,7 +911,7 @@ fn drizzle_options_travel_with_the_recipe_and_are_range_checked() {
     let recipe: UiRecipeOptions = serde_json::from_value(serde_json::json!({
         "balanced": true, "drizzleEnabled": true, "drizzleScale": 3,
         "drizzleDropShrink": 0.7, "drizzleKernel": "gaussian",
-        "localNormalizationEnabled": false, "solverRequired": true,
+        "solverRequired": true,
         "calibrationWorkflow": "strict-v1"
     }))
     .unwrap();
@@ -942,7 +940,7 @@ fn drizzle_options_travel_with_the_recipe_and_are_range_checked() {
     assert_eq!(value["recipe"]["drizzle"]["kernel"], "gaussian");
     // Older front ends that omit the geometry keep the 2x square defaults.
     let legacy: UiRecipeOptions = serde_json::from_value(serde_json::json!({
-        "balanced": true, "drizzleEnabled": true, "localNormalizationEnabled": false,
+        "balanced": true, "drizzleEnabled": true,
         "solverRequired": true
     }))
     .unwrap();
@@ -966,10 +964,6 @@ fn drizzle_options_travel_with_the_recipe_and_are_range_checked() {
     // Disabled drizzle never blocks a run on stale geometry values.
     request.recipe.drizzle_enabled = false;
     assert!(project_request_json(&request, &output).is_ok());
-    request.recipe.local_normalization_enabled = true;
-    assert!(project_request_json(&request, &output)
-        .unwrap_err()
-        .contains("LOCAL_NORMALIZATION_REMOVED"));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1144,7 +1138,6 @@ print(json.dumps({"success":True,"code":"PROJECT_MONO_SUCCEEDED","state":"SOLVED
                 drizzle_scale: default_drizzle_scale(),
                 drizzle_drop_shrink: default_drizzle_drop_shrink(),
                 drizzle_kernel: default_drizzle_kernel(),
-                local_normalization_enabled: false,
                 solver_required: true,
                 calibration_workflow: default_calibration_workflow(),
             },

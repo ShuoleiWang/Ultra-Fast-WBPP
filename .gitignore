@@ -8,7 +8,7 @@
 **/.vite/
 **/coverage/
 apps/desktop/src-tauri/binaries/
-apps/desktop/src-tauri/resources/openastroflow-worker/
+apps/desktop/src-tauri/resources/ufwbpp-engine/
 *.dSYM/
 *.app/
 *.dmg
@@ -18,9 +18,9 @@ apps/desktop/src-tauri/resources/openastroflow-worker/
 
 # Native runtime binaries are built and installed into the Python package only
 # inside release staging. Source control retains the C++/Metal implementation.
-/packages/openastroflow-engine/src/openastroflow_engine/native/*.dylib
-/packages/openastroflow-engine/src/openastroflow_engine/native/*.so
-/packages/openastroflow-engine/src/openastroflow_engine/native/*.dll
+/packages/engine/src/ufwbpp/native/*.dylib
+/packages/engine/src/ufwbpp/native/*.so
+/packages/engine/src/ufwbpp/native/*.dll
 
 # Python environments and caches
 .venv/
@@ -34,6 +34,7 @@ __pycache__/
 *.egg-info/
 
 # Local application state and catalogs
+.ultra-fast-wbpp/
 .openastroflow/
 /catalogs/
 /cache/

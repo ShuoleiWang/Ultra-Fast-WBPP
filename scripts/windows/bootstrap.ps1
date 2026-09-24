@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Install the Windows x86-64 developer toolchain for Ultra-Fast WBPP (OpenAstroFlow).
+    Install the Windows x86-64 developer toolchain for Ultra-Fast WBPP.
 
 .DESCRIPTION
     Idempotent winget bootstrap for a Windows 10/11 x86-64 build or test machine:

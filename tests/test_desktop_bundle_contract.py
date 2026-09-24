@@ -33,8 +33,8 @@ def test_legal_resources_are_mapped_from_canonical_root_files() -> None:
 
     assert bundle["licenseFile"] == "../../../LICENSE"
     assert (TAURI_ROOT / bundle["licenseFile"]).resolve(strict=True) == REPOSITORY / "LICENSE"
-    assert bundle["resources"]["resources/openastroflow-worker"] == (
-        "resources/openastroflow-worker"
+    assert bundle["resources"]["resources/ufwbpp-engine"] == (
+        "resources/ufwbpp-engine"
     )
 
 
@@ -77,9 +77,9 @@ def test_desktop_sidecar_uses_one_fresh_release_native_chain_locally_and_in_ci()
     installation = install_body.index("$(CMAKE) --install")
     assert removal < installation
     for library_name in (
-        "libopenastroflow_native.dylib",
-        "libopenastroflow_native.so",
-        "openastroflow_native.dll",
+        "libufwbpp_native.dylib",
+        "libufwbpp_native.so",
+        "ufwbpp_native.dll",
     ):
         assert f"$(NATIVE_RUNTIME_DIR)/{library_name}" in install_body
 
@@ -94,9 +94,9 @@ def test_desktop_sidecar_uses_one_fresh_release_native_chain_locally_and_in_ci()
     assert '"-C", "Release", "--output-on-failure"' in script
     assert "remove_stale_libraries(RUNTIME_DIR)" in script
     for library_name in (
-        "libopenastroflow_native.dylib",
-        "libopenastroflow_native.so",
-        "openastroflow_native.dll",
+        "libufwbpp_native.dylib",
+        "libufwbpp_native.so",
+        "ufwbpp_native.dll",
     ):
         assert f'"{library_name}"' in script
     ci_workflow = (REPOSITORY / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")

@@ -1,4 +1,4 @@
-import type { FrameRole,SourceSet } from "./types";
+import type { FrameRole, SourceSet } from "./types";
 
 const SOURCE_META: Record<FrameRole, Pick<SourceSet, "label" | "hint" | "reuseAllowed">> = {
   LIGHT: { label: "Light", hint: "N.I.N.A. target exposures", reuseAllowed: false },
@@ -19,4 +19,3 @@ export const emptySources = (): SourceSet[] =>
     detected: false,
     confirmed: false,
   }));
-

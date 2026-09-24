@@ -21,7 +21,7 @@ def _source_tree(root: Path) -> None:
     (bundle / "Ultra-Fast-WBPP_0.1.0_aarch64.dmg").write_bytes(b"dmg")
     sidecars = root / "build" / "sidecars"
     sidecars.mkdir(parents=True)
-    artifact = sidecars / "openastroflow-worker-aarch64-apple-darwin"
+    artifact = sidecars / "ufwbpp-engine-aarch64-apple-darwin"
     artifact.mkdir()
     (sidecars / f"{artifact.name}.manifest.json").write_text(
         json.dumps(
@@ -48,7 +48,7 @@ def test_collects_bundle_manifest_and_deterministic_sums(tmp_path: Path) -> None
     names = {path.name for path in files}
     assert names == {
         "Ultra-Fast-WBPP_0.1.0_aarch64.dmg",
-        "openastroflow-worker-aarch64-apple-darwin.manifest.json",
+        "ufwbpp-engine-aarch64-apple-darwin.manifest.json",
         "SHA256SUMS-aarch64-apple-darwin",
         "release-metadata-aarch64-apple-darwin.json",
     }
@@ -120,7 +120,7 @@ def test_collects_one_windows_msi_and_one_nsis_without_guessing_names(
     msi.write_bytes(b"msi")
     nsis.write_bytes(b"nsis")
     sidecars = tmp_path / "build" / "sidecars"
-    runtime = sidecars / "openastroflow-worker-x86_64-pc-windows-msvc"
+    runtime = sidecars / "ufwbpp-engine-x86_64-pc-windows-msvc"
     runtime.mkdir()
     (sidecars / f"{runtime.name}.manifest.json").write_text(
         json.dumps({"runtime": {"directoryName": runtime.name}}), encoding="utf-8"
@@ -161,7 +161,7 @@ def test_collects_post_sign_runtime_attestation_into_release_metadata(tmp_path: 
     _source_tree(tmp_path)
     attestations = tmp_path / "build" / "bundle-attestations"
     attestations.mkdir()
-    attestation = attestations / "openastroflow-worker-aarch64-apple-darwin.bundled.manifest.json"
+    attestation = attestations / "ufwbpp-engine-aarch64-apple-darwin.bundled.manifest.json"
     attestation.write_text(
         json.dumps(
             {
@@ -201,7 +201,7 @@ def test_collects_windows_installed_runtime_attestation_as_unsigned_prerelease(t
     (bundle / "nsis" / "Ultra-Fast WBPP_0.1.0_x64-setup.exe").write_bytes(b"nsis")
     target = "x86_64-pc-windows-msvc"
     sidecars = tmp_path / "build" / "sidecars"
-    runtime = sidecars / f"openastroflow-worker-{target}"
+    runtime = sidecars / f"ufwbpp-engine-{target}"
     runtime.mkdir()
     (sidecars / f"{runtime.name}.manifest.json").write_text(
         json.dumps({"runtime": {"directoryName": runtime.name}}), encoding="utf-8"
@@ -209,7 +209,7 @@ def test_collects_windows_installed_runtime_attestation_as_unsigned_prerelease(t
     attestations = tmp_path / "build" / "bundle-attestations"
     attestations.mkdir()
     # The name scripts/windows/attest-installed-msi.ps1 writes for the MSI gate.
-    attestation = attestations / f"openastroflow-worker-{target}.bundled.manifest.json"
+    attestation = attestations / f"ufwbpp-engine-{target}.bundled.manifest.json"
     attestation.write_text(
         json.dumps(
             {

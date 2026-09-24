@@ -21,7 +21,7 @@ appreciated, not an additional condition of the MIT license.
 
 The local continuation review found one author and committer across the eight visible commits and no additional co-author trailers. The identified Astroalign adaptation retains its upstream MIT notice. This supports the recorded provenance but does not independently prove ownership of initial imports or every uncommitted change. Before publishing the relicensed candidate, the copyright holder must confirm authority to relicense all project-owned portions; third-party code and documents retain their original terms.
 
-## No GPL library in the bundled worker
+## No GPL library in the bundled engine
 
 Earlier versions imported the GPL-3.0 [`xisf`](https://github.com/sergio-dr/xisf)
 package to read XISF containers, which made the combined worker a GPLv3
@@ -31,10 +31,10 @@ previous reader on PixInsight-written masters, calibrated and registered
 frames and on every codec/shuffle/sample-format combination), so the Python
 runtime imports no GPL-licensed code.
 
-SEP carries LGPL-3.0-or-later requirements, which the frozen worker satisfies as
+SEP carries LGPL-3.0-or-later requirements, which the frozen engine satisfies as
 a separately replaceable shared library with its notices preserved; the LGPLv3
 refers to the GPLv3 text, which the repository keeps for that reason. Windows
-bundles ship a modified SEP (`1.4.1+oaf.1`): the modification is the patch in
+bundles ship a modified SEP (`1.4.1+ufwbpp.1`): the modification is the patch in
 [`packaging/patches`](../packaging/patches) applied to the unmodified 1.4.1
 source distribution by `scripts/build_sep_wheel.py`, which is how the
 corresponding source of that build is provided. Separately

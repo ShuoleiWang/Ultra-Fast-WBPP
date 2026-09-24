@@ -7,37 +7,46 @@ are tracked separately in the [release review](release-readiness.md).
 ## The desktop execution path
 
 ```text
-React App → useWorkflow → typed bridge commands
+React App → useWorkflow (state) + workflow/model (pure decisions) → typed bridge commands
                        ↓
 Tauri Rust: import, settings, process lifecycle, progress, result validation
-                       ↓  run-project --request-json … --progress-json
-Python CLI → project_e2e → e2e → pixel_pipeline
+                       ↓  one engine command per operation:
+                       ↓  doctor --json · inventory · calibration-check · quality-check
+                       ↓  blink-measure · run-project --request-json … --progress-json · catalog
+Python CLI → workflows.project → workflows.single_target → pixel_pipeline
                        ↓
 FITS/XISF calibration · registration · normalization · rejection/integration
                        ↓
-external solve-field → channel alignment/crop → RGB/LRGB → result receipts
+external solve-field/ASTAP → channel alignment/crop → RGB/LRGB → result receipts
                        ↓
 Rust validates returned files and sky-coordinate evidence → GUI completion
 ```
 
 - [`apps/desktop/src/useWorkflow.ts`](../apps/desktop/src/useWorkflow.ts) owns UI
-  state, run timing, option selection and cancellation state. The browser demo
-  is explicitly separate from native execution.
-- [`apps/desktop/src-tauri/src/project.rs`](../apps/desktop/src-tauri/src/project.rs)
-  validates the request, starts and tracks the Python child process, forwards
-  progress, and validates completion. Native filesystem access is in Rust; the
-  web view does not read astronomical files itself.
-- [`project_e2e.py`](../packages/openastroflow-engine/src/openastroflow_engine/project_e2e.py)
-  groups channels, shares calibration masters, runs one multi-filter E2E run
-  per target, aligns final channels, crops their common support, and creates
-  color products.
-- [`e2e.py`](../packages/openastroflow-engine/src/openastroflow_engine/e2e.py) and
-  [`pixel_pipeline.py`](../packages/openastroflow-engine/src/openastroflow_engine/pixel_pipeline.py)
-  orchestrate the scientific work. Python owns most scheduling, image I/O and
-  registration; the pipeline is not a fully native C++ or GPU implementation.
-- [`crates/app-core`](../crates/app-core/README.md) supplies typed project,
-  validation and execution contracts. Its abstractions are not a claim that
-  every desktop operation already runs through a durable task scheduler.
+  state, run timing, option selection and cancellation state;
+  [`workflow/model.ts`](../apps/desktop/src/workflow/model.ts) holds the pure
+  decisions (for example `startBlockers`, the one list behind both the start
+  button and the launch bar's reasons). The browser demo is explicitly
+  separate from native execution.
+- [`apps/desktop/src-tauri/src/project/`](../apps/desktop/src-tauri/src/project)
+  validates the request, starts and tracks the engine process, forwards
+  progress, and validates completion;
+  [`sidecar/`](../apps/desktop/src-tauri/src/sidecar) discovers the bundled
+  engine, reads its `doctor --json` self-report for the capability panel and
+  runs the inspection and Blink commands. Native filesystem access is in Rust;
+  the web view does not read astronomical files itself.
+- [`workflows/project.py`](../packages/engine/src/ufwbpp/workflows/project.py)
+  groups channels, shares calibration masters, runs one multi-filter run per
+  target, aligns final channels, crops their common support, and creates
+  colour products.
+- [`workflows/single_target.py`](../packages/engine/src/ufwbpp/workflows/single_target.py)
+  runs one field as named phases (source validation, screening, registration
+  calibration, registration, integration passes, solving, publication);
+  [`pixel_pipeline.py`](../packages/engine/src/ufwbpp/pixel_pipeline.py)
+  plans a run, builds the calibration masters, calibrates and warps every
+  Light and integrates each output group. Python owns most scheduling, image
+  I/O and registration; the pipeline is not a fully native C++ or GPU
+  implementation.
 
 ## Data and correctness boundaries
 
@@ -53,10 +62,12 @@ result directory on disk without a successful GUI result. File existence alone
 is never a completion signal. Do not describe this as a Rust-owned atomic
 transaction over the entire scientific run.
 
-The project CLI writes a bounded result JSON to stdout and progress events to
-stderr. A separate versioned NDJSON worker interface supports controller/worker
-contracts; it is not the transport used for every desktop operation. See
-[protocol](../protocol/README.md) and [backend contracts](../packages/openastroflow-engine/docs/backend-contracts.md).
+Every command writes a bounded result JSON to stdout, progress events to stderr
+(`--progress-json`) and, on failure, a structured error with a stable `code`.
+Digests of receipts, selections and installed catalog sets are computed over
+the byte forms in [`integrity.py`](../packages/engine/src/ufwbpp/integrity.py);
+backend truth flags are described in
+[backend contracts](../packages/engine/docs/backend-contracts.md).
 
 ## Scientific work
 
@@ -69,7 +80,7 @@ contracts; it is not the transport used for every desktop operation. See
    An explicit selection (`selection-v1`, policy `explicit-v1`, made in the
    desktop's blink view or written by hand and passed as `--selection` or the
    request's `selection` block) names the kept Lights by content digest: the
-   worker's `blink-measure` command (`blink_session.py`) had computed
+   engine's `blink-measure` command (`blink_session.py`) had computed
    per-channel flags with absolute cross-night criteria
    (`lightframeqc.blink_flags`, policy `blink-flags-v1`), a reference frame
    per channel (`lightframeqc.blink_reference`, a PSF-signal-weight proxy)
@@ -123,7 +134,7 @@ an acceptance test pass.
 
 ### Unattended Light selection
 
-[`openastroflow_engine.selection`](../packages/openastroflow-engine/src/openastroflow_engine/selection/)
+[`ufwbpp.selection`](../packages/engine/src/ufwbpp/selection/)
 turns the Light Frame QC evidence into per-frame decisions without a human
 review gate when a recipe sets `selection.policy` to `unattended-v1` (the
 default `legacy-gate` keeps the historical PASS-only admission). Guards
@@ -163,7 +174,7 @@ cap process RSS or the OS file cache.
 
 The three hot loops of the ordinary pipeline run in multithreaded native CPU
 kernels (`engine/native/src/PortableKernels.cpp`, bound through
-[`native_kernels.py`](../packages/openastroflow-engine/src/openastroflow_engine/native_kernels.py)):
+[`native_kernels.py`](../packages/engine/src/ufwbpp/native_kernels.py)):
 the Lanczos-3 registration warp, the full-stack median/MAD rejection decision
 (v2: the noise part of each pixel's scale is the pooled MAD of its row window
 and every frame is judged against its own noise, so small stacks no longer clip
@@ -209,16 +220,16 @@ targets (see [windows.md](windows.md)). The native CPU kernels build with MSVC
 (`/W4 /WX /fp:strict`, static C runtime) and the Python CI job builds and
 installs them on Ubuntu, macOS and Windows before the tests, so the
 value-identical differential tests run against the real library on every
-runner; the sidecar builder refuses a frozen worker that cannot load them and
+runner; the sidecar builder refuses a frozen engine that cannot load them and
 the Windows bundle attestation refuses a DLL import the installed tree does not
-provide. Operating-system differences live in `openastroflow_engine.platform`
+provide. Operating-system differences live in `ufwbpp.platform`
 (memory, topology, path limits, environment-name resolution, file-lifecycle
 retries, process trees); on Windows the final solve is ASTAP verified by the
 engine against the managed Astrometry.net index stars, with the same evidence
 and gates as `solve-field`.
 
 Operating-system differences live in the platform service layer
-`openastroflow_engine.platform` (`current()` selects the `darwin`, `windows` or
+`ufwbpp.platform` (`current()` selects the `darwin`, `windows` or
 `linux` services behind one `PlatformServices` protocol). It reports the facts
 that tuning and receipts consume: physical/available memory (`sysconf`,
 `GlobalMemoryStatusEx`), the CPU topology (physical/performance/efficiency
@@ -231,7 +242,7 @@ injected host reports memory as `unavailable`; a failed probe reports
 `fallback`). `HardwareProfile` and `ExecutionTuning` carry these facts, and the
 tuning itself is a table keyed by platform, CPU family (`APPLE_M`, `X86_64`,
 `GENERIC`), memory band and core count; the native library adds the
-instruction-set facts of the machine (`oaf_native_cpu_features_v1`) and its own
+instruction-set facts of the machine (`ufwbpp_native_cpu_features_v1`) and its own
 SHA-256, all of which the `doctor` command, execution plans and the pipeline
 receipt's `platform` block record. None of these facts changes a pixel: tile
 sizes, memory budgets and thread counts are held result-invariant by the
@@ -245,38 +256,38 @@ satisfies the final solve contract, and so does ASTAP (`astap_cli` with its own
 star database) when the engine verifies its solution against the managed index
 stars, which is the Windows route ([windows.md](windows.md)); `backend: auto`
 prefers `solve-field` where both are installed. Without the managed index set
-ASTAP stays diagnostic-only, and the Siril adapter is diagnostic-only. No online
+ASTAP stays diagnostic-only. No online
 image-upload solver fallback is implemented. Executable licenses and catalog
 redistribution permissions are separate; see [licensing](licensing.md).
 
-## Module ownership after the review cleanup
+## Module ownership
 
 - `workflows/contracts.py` owns run requests, explicit selections and progress.
-  `workflows/single_target.py` and `workflows/project.py` coordinate runs;
-  `workflows/solve.py` owns final solve/geometry verification. `e2e.py` and
-  `project_e2e.py` are compatibility module aliases, not parallel executors.
+  `workflows/project.py` and `workflows/single_target.py` coordinate runs;
+  `workflows/solve.py` owns final solve/geometry verification.
+- `pixel_pipeline.py` is a sequence of stages: `_plan_run` (validate and group
+  every input into a `_RunPlan`), `_build_calibration_masters`,
+  `_plan_light_jobs`, `_calibrate_and_register_lights`, `_integrate_group` per
+  output group, then the receipt and one no-replace publication.
 - `calibration_inputs.py` owns content-bound metadata and generated-master reuse.
   `image_io/fits.py` owns FITS reading/writing and sampling; `calibration.py`
   retains expression evaluation and ordinary integration. `PixelTransform`
-  accepts affine and projective matrices; `AffineTransform` remains an alias.
-- `solvers/process.py` owns shared external-process and publication evidence.
-  Adapters no longer obtain these services from the ASTAP implementation.
-  `publication.py` shares color/mosaic create-only primitives.
+  accepts affine and projective matrices.
+- `integrity.py` owns canonical JSON and SHA-256 forms; `solvers/process.py`
+  owns shared external-process and publication evidence; `publication.py`
+  shares colour/mosaic create-only primitives.
 - `drizzle.py` describes capabilities; `drizzle_native.integrate_drizzle_group`
-  executes the native group contract. A capability provider has no dummy
-  `drizzle()` operation accepting obsolete registered-only inputs.
-- The registration library lives under `packages/openastroflow-registration/src`.
+  executes the native group contract.
+- The registration library lives under `packages/registration/src`.
   `engine/native` contains only native kernels, their ABI, tests and benchmarks.
-- Desktop Rust `sidecar/` separates bundle discovery, inspection, blink and
-  the versioned worker transport; `project/` separates requests, previews,
-  completion checks and execution. Parent modules preserve command boundaries.
-  `workflow/model.ts` holds UI-independent decisions; `useWorkflow.ts` owns
-  React lifecycle and state. `sourceDefaults.ts` replaces the obsolete demo recipe table.
-- Scientific acceptance commands live under `tools/validation`; the old
-  benchmark command paths forward to them. Performance tools stay in `benchmarks`.
+- Desktop Rust `sidecar/` separates bundle discovery, inspection and blink;
+  `project/` separates requests, previews, completion checks, execution and the
+  astrometric receipt it re-validates. `workflow/model.ts` holds UI-independent
+  decisions; `useWorkflow.ts` owns React lifecycle and state.
+- Scientific acceptance commands live under `tools/validation`; performance
+  tools stay in `benchmarks`.
 
 The main desktop command remains `start_project` → `run-project` (result JSON
-on stdout, progress on stderr). The separate NDJSON worker v1 interface remains
-available for existing clients and its contracts; it is not the desktop project
-transport. Package names, CLI aliases, environment variables, bundle identifiers,
-wire IDs and on-disk staging names are deliberately unchanged.
+on stdout, progress on stderr). The persisted identifiers users' files depend on
+are unchanged: the `OAF*` FITS keywords, the catalog manifests and an existing
+data root under the project's former name.

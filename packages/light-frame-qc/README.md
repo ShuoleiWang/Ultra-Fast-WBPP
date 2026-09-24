@@ -78,7 +78,7 @@ light-frame-qc analyze /path/to/lights \
 
 每个 worker 都可能解码一张完整的压缩图像，不建议盲目设成 CPU 核心数。
 
-性能边界：一次新的分析会为每张 Light 完整读取两遍文件内容，一遍计算 SHA-256 并绑定源身份，一遍生成像素预览并完成检星；`prepare-wbpp` 生成计划时复用这份身份，不会再做第三遍 Light 哈希。`apply-wbpp-plan` 对每个实际复制的文件只做一次来源流式读取，并在同一循环中校验来源 SHA-256；私有 staging 中的每个目标只完整哈希一次。原子目录改名后以 plan 绑定的 digest、inode、size、mtime 和 ctime 快照确认仍是同一批文件，不再第三次读取整套目标。被排除或折叠为重复项的来源只检查 stat 坐标，manifest 明确写为 `stat-only-no-current-content-hash`，不声称 apply 时重新验证了其内容。旧 schema-1 计划如果没有这项显式策略，仍保留原来的所有来源完整 SHA-256 预检。
+性能边界：一次新的分析会为每张 Light 完整读取两遍文件内容，一遍计算 SHA-256 并绑定源身份，一遍生成像素预览并完成检星。
 
 输出目录包括：
 
@@ -88,97 +88,6 @@ light-frame-qc analyze /path/to/lights \
 - `thumbnails/`：只用于人工审阅的拉伸 PNG，不参与测量。
 
 同一输出目录可以安全重跑。报告文件会原子更新；每次运行的缩略图使用新的运行标识，不覆盖旧文件。
-
-## 自动准备 WBPP 输入目录
-
-`prepare-wbpp` 会先识别 FITS/XISF 的真实角色，只把 header/XISF 元数据明确标记为 `LIGHT` 的帧送入质检。`MasterFlat`、raw flat、dark、bias 和 master light 不会再被当成低星数灯帧。
-
-默认只生成计划和质检报告，不创建最终目录：
-
-```bash
-light-frame-qc prepare-wbpp \
-  "/path/to/download-night-1" \
-  "/path/to/download-night-2" \
-  --output "/path/to/shield-wbpp-ready" \
-  --report-output "/path/to/shield-wbpp-qc" \
-  --workers 2
-```
-
-检查 `report.html` 和 `prepare-plan.json` 后，直接应用已有计划即可发布，不会重新测量、检星或配准；来源 SHA-256 与复制流合并计算，目标在原子发布前独立完整哈希：
-
-```bash
-light-frame-qc apply-wbpp-plan "/path/to/shield-wbpp-qc/prepare-plan.json"
-```
-
-计划会绑定同目录 `results.json` 的 SHA-256，并逐帧复核 source identity、Quality Gate、人工裁决和匹配 master flat。应用前不要编辑或移动 `results.json`；`planId` 是完整性校验和而非外部数字签名。
-
-也可以不先审阅，在第一次命令上直接增加 `--apply` 一次完成：
-
-```bash
-light-frame-qc prepare-wbpp \
-  "/path/to/download-night-1" \
-  "/path/to/download-night-2" \
-  --output "/path/to/shield-wbpp-ready" \
-  --report-output "/path/to/shield-wbpp-qc" \
-  --workers 2 \
-  --apply
-```
-
-程序会在输入目录及向上两级的目录顶层自动寻找带权威 `MasterFlat` 元数据的 `masterFlat*.fits/xisf`。也可以显式提供：
-
-```bash
-light-frame-qc prepare-wbpp /path/to/downloads \
-  -o /path/to/wbpp-ready \
-  --flat-library /path/to/calibration-library \
-  --master-flat /path/to/specific/masterFlat-R.xisf
-```
-
-Master flat 必须与灯帧的画幅、通道数、binning、滤镜和 CFA 状态精确匹配；相机、gain、offset 或 readout mode 在双方都有记录时也不得冲突。相同 SHA-256 的历史 flat 副本会折叠；兼容但内容不同的多个 flat 会以 `AMBIGUOUS_MASTER_FLAT` 失败，不按日期擅自猜选。当前版本只复用已经积分好的 master flat，不尝试自动校准 raw flat。
-
-缺失 binning 或无法确定 CFA/mono 状态会 fail-closed。对 `QHY...M`、`ASI...MM` 等明确的单色相机型号可推断为 mono；无法从 header 或明确相机型号证明时，不把两个 `UNKNOWN` 当成精确匹配。
-
-`--flat-library` 向自动发现集合追加候选；`--master-flat` 则对相同画幅/binning/滤镜/CFA profile 明确覆盖自动候选。若同一 profile 显式给出两个内容不同的 master flat，仍会按歧义失败。
-
-生成布局如下：
-
-```text
-target-wbpp-ready/
-  target-panel-1--<稳定ID>/
-    LIGHT/R/*.fits
-    LIGHT/G/*.fits
-    LIGHT/B/*.fits
-    FLAT/R/masterFlat*.xisf
-    FLAT/G/masterFlat*.xisf
-    FLAT/B/masterFlat*.xisf
-  target-panel-2--<稳定ID>/
-    ...
-  prepare-manifest.json
-```
-
-在 WBPP 中每次只对一个目标子目录执行 **Add Directory**。不要直接把包含四块马赛克的最外层目录作为一次默认 WBPP 输入，否则相同画幅和滤镜的不同天区可能被错误地注册或积分到同一组。
-
-只有 Quality Gate `PASS` 才会进入 `LIGHT`；Gate `REVIEW/HARD_FAIL` 只写入 manifest 并继续留在下载目录。人工 `APPROVE` 只能提升 Gate `REVIEW`，不能提升 `HARD_FAIL`；也可用 `REJECT` 否决 PASS。裁决必须通过 `--adjudication` 绑定绝对路径和 SHA-256：
-
-```json
-{
-  "schemaVersion": 1,
-  "records": [
-    {
-      "path": "/absolute/path/frame.fits",
-      "sha256": "<64 hexadecimal characters>",
-      "action": "APPROVE",
-      "reason": "manual preview review",
-      "reviewer": "operator"
-    }
-  ]
-}
-```
-
-发布过程先在同一父目录的私有 staging 中以 create-only 临时文件复制；来源的 SHA-256 在复制流中核对，目标再独立核对 SHA-256、大小和 mtime，完整 manifest 写入后才一次性 no-replace 改名为最终目录。相同 master flat 供多个目标复用时，已与 device/inode/size/mtime/SHA-256 绑定的来源验证结果可复用，但每个目标文件仍单独 create-only、fsync 并独立哈希。失败不会留下半套成品；同一计划重跑会对现有成品完整重新哈希并返回 `ALREADY_COMPLETE`，不同计划或目录漂移绝不覆盖。原始文件不会被移动、重命名、删除或改写。
-
-可复现的小型 I/O 计数基准见 [`benchmarks/README.md`](benchmarks/README.md)。它只生成临时 FITS，不包含用户素材或本机路径。
-
-当前 WBPP-ready 目录只包含 light 和 master flat。Master dark 仍应在 WBPP 中从受控的共享校准库单独指定。
 
 ## PixInsight 辅助测量
 
@@ -208,7 +117,7 @@ light-frame-qc analyze /path/to/lights \
 
 wheel 安装后也可用 `light-frame-qc show-config` 输出同一份内置配置，再保存为自己的 JSON。
 
-独立门禁的完整默认阈值及其不可变 policy digest 可用 `light-frame-qc show-gate-policy` 查看；每帧报告和 prepare manifest 都记录实际使用的 digest。
+独立门禁的完整默认阈值及其不可变 policy digest 可用 `light-frame-qc show-gate-policy` 查看；每帧报告 都记录实际使用的 digest。
 
 - Quality Gate 组内少于 8 帧不得自动 PASS；同一观测夜少于 3 帧也只能 REVIEW；
 - Quality Gate 配准默认要求至少 30 个匹配星、匹配比例至少 25%、RMS 不超过 1.5 preview pixel；

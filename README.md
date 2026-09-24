@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/branding/openastroflow-icon-1024.png" width="128" alt="Ultra-Fast WBPP icon">
+  <img src="assets/branding/ultra-fast-wbpp-icon-1024.png" width="128" alt="Ultra-Fast WBPP icon">
 </p>
 
 <h1 align="center">Ultra-Fast WBPP</h1>
@@ -164,13 +164,13 @@ This independent implementation does not claim algorithmic or pixel equivalence 
 
 | Directory | Responsibility |
 |---|---|
-| `apps/desktop` | React interface and Tauri desktop bridge ([guide](apps/desktop/README.md)) |
-| `crates/app-core` | Project state and execution contracts shared by GUI and workers |
-| `packages/openastroflow-engine` | Calibration, registration, normalization, integration, drizzle, selection, solvers, CLI |
-| `packages/light-frame-qc` | Light measurements, native PSF, quality gate |
+| `apps/desktop` | React interface and Tauri desktop bridge; it runs the engine's command line ([guide](apps/desktop/README.md)) |
+| `packages/engine` | The `ultra-fast-wbpp` engine (Python package `ufwbpp`): calibration, normalization, integration, drizzle, selection, solvers, CLI |
+| `packages/light-frame-qc` | Light measurements, native PSF, quality gate, Blink flags |
+| `packages/registration` | Star detection, transform estimation, warping and common-footprint geometry |
 | `engine/native` | C++ kernels (warp, rejection, reduction, drizzle, debayer, Lanczos table) and Metal |
-| `benchmarks` | Master evaluation, tolerance gate, run tracer, kernel benchmarks, selection harnesses |
-| `scripts`, `packaging` | Native build chain, sidecar packaging, bundle attestation, public-tree and link checks |
+| `tools/validation`, `benchmarks` | Master evaluation and tolerance gate; run tracer, kernel benchmarks, selection harnesses |
+| `scripts`, `packaging` | Native build chain, engine sidecar packaging, bundle attestation, public-tree and link checks |
 | `docs` | [Index](docs/README.md) · [features](docs/features.md) · [architecture](docs/architecture.md) · [recipes](docs/recipes/README.md) · [validation](docs/validation-matrix.md) · [Windows](docs/windows.md) |
 
 Contributing: [CONTRIBUTING.md](CONTRIBUTING.md) for setup and rules, [AGENTS.md](AGENTS.md) for the full working guide (read automatically by Codex), [CLAUDE.md](CLAUDE.md) for Claude Code sessions. `make test` runs the Python, Rust, frontend and native tests; `make check` adds formatting, lint and the public-tree checks.

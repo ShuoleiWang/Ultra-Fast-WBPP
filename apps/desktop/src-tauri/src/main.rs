@@ -4,5 +4,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    openastroflow_desktop_lib::run();
+    ufwbpp_desktop::run();
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify and create-only stage a frozen worker tree for a Tauri bundle.
+"""Verify and create-only stage a frozen engine tree for a Tauri bundle.
 
 The PyInstaller builder emits an attested onedir tree. Tauri embeds that tree
 as an application resource, so Python and native libraries are memory-mapped
@@ -19,13 +19,13 @@ import stat
 from typing import Any, Mapping, Sequence
 
 try:
-    from scripts.build_worker_sidecar import (
+    from scripts.build_engine_sidecar import (
         build_runtime_record,
         validate_manifest,
         verify_runtime_tree,
     )
 except ModuleNotFoundError:  # direct ``python scripts/...`` execution
-    from build_worker_sidecar import build_runtime_record, validate_manifest, verify_runtime_tree
+    from build_engine_sidecar import build_runtime_record, validate_manifest, verify_runtime_tree
 
 
 class SidecarStageError(RuntimeError):
@@ -63,7 +63,7 @@ def _artifact_name(value: object) -> str:
         raise SidecarStageError("MANIFEST_INVALID", "runtime.directoryName is missing")
     if PurePath(value).name != value or value in {".", ".."} or "\x00" in value:
         raise SidecarStageError("MANIFEST_INVALID", "runtime.directoryName must be one basename")
-    if not value.startswith("openastroflow-worker-"):
+    if not value.startswith("ufwbpp-engine-"):
         raise SidecarStageError("MANIFEST_INVALID", "runtime.directoryName has the wrong prefix")
     return value
 
@@ -160,7 +160,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--destination",
         type=Path,
-        default=Path("apps/desktop/src-tauri/resources/openastroflow-worker"),
+        default=Path("apps/desktop/src-tauri/resources/ufwbpp-engine"),
     )
     parser.add_argument("--target", help="require this exact target triple")
     return parser

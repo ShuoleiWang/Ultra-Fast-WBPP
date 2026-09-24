@@ -1,4 +1,4 @@
-#include "openastroflow/PortableKernels.h"
+#include "ufwbpp/PortableKernels.h"
 #include "ParallelRange.h"
 
 #include <algorithm>
@@ -6,7 +6,7 @@
 #include <limits>
 #include <stdexcept>
 
-namespace openastroflow::native
+namespace ufwbpp::native
 {
 
 using detail::ParallelRange;
@@ -119,4 +119,4 @@ void DebayerBilinear( const DebayerRequest& request )
       } );
 }
 
-} // namespace openastroflow::native
+} // namespace ufwbpp::native

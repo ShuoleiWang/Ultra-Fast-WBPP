@@ -3,6 +3,7 @@ progress events, worker event collection and the summary table."""
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import json
 from pathlib import Path
@@ -93,11 +94,23 @@ def test_install_reports_missing_targets_and_wraps_once() -> None:
     assert tracer.missing == ["json.no_such_function"]
     try:
         assert json.dumps({"a": 1}) == '{"a": 1}'
-        assert getattr(json.dumps, "__oaf_traced__", False) is True
+        assert getattr(json.dumps, "__ufwbpp_traced__", False) is True
         tracer.install((("json", "dumps", "json.dumps", "test"),))
         assert tracer.installed.count("json.dumps") == 1
         assert trace_run.summarize(tracer.events)["json.dumps"]["calls"] == 1
     finally:
         json.dumps = json.dumps.__wrapped__  # type: ignore[attr-defined]
-    assert not hasattr(json.dumps, "__oaf_traced__")
+    assert not hasattr(json.dumps, "__ufwbpp_traced__")
     assert sys.modules["json"].dumps is json.dumps
+
+
+def test_every_timer_target_still_exists() -> None:
+    """A renamed or moved function must not silently drop out of the trace."""
+
+    trace_run = _load_module()
+    missing = []
+    for module_name, attribute, *_rest in trace_run.TARGETS:
+        module = importlib.import_module(module_name)
+        if not hasattr(module, attribute.split(".")[0]):
+            missing.append(f"{module_name}.{attribute}")
+    assert missing == []

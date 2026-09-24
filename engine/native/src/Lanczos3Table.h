@@ -1,10 +1,10 @@
-#ifndef OPENASTROFLOW_NATIVE_LANCZOS3TABLE_H
-#define OPENASTROFLOW_NATIVE_LANCZOS3TABLE_H
+#ifndef UFWBPP_NATIVE_LANCZOS3TABLE_H
+#define UFWBPP_NATIVE_LANCZOS3TABLE_H
 
 #include <cstddef>
 #include <cstdint>
 
-namespace openastroflow::native::detail
+namespace ufwbpp::native::detail
 {
 
 // Deterministic Lanczos-3 tap weights (see calibration.py / lanczos_table.py).
@@ -30,6 +30,6 @@ double DeterministicSinPi( double v );
 // table, Float32 of the Float64 quotient by the Float64 total.
 void Lanczos3TableWeights( double fraction, float weights[6] );
 
-} // namespace openastroflow::native::detail
+} // namespace ufwbpp::native::detail
 
 #endif

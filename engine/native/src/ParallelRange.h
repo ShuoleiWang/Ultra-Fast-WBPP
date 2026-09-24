@@ -1,5 +1,5 @@
-#ifndef OPENASTROFLOW_NATIVE_PARALLELRANGE_H
-#define OPENASTROFLOW_NATIVE_PARALLELRANGE_H
+#ifndef UFWBPP_NATIVE_PARALLELRANGE_H
+#define UFWBPP_NATIVE_PARALLELRANGE_H
 
 #include <algorithm>
 #include <atomic>
@@ -10,7 +10,7 @@
 #include <utility>
 #include <vector>
 
-namespace openastroflow::native::detail
+namespace ufwbpp::native::detail
 {
 
 // Runs function(begin, end) over [0, count) on up to `threads` threads that
@@ -71,6 +71,6 @@ void ParallelRange( std::size_t count,
          std::rethrow_exception( error );
 }
 
-} // namespace openastroflow::native::detail
+} // namespace ufwbpp::native::detail
 
-#endif // OPENASTROFLOW_NATIVE_PARALLELRANGE_H
+#endif // UFWBPP_NATIVE_PARALLELRANGE_H

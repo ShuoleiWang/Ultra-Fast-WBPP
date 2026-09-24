@@ -56,7 +56,7 @@ def test_release_windows_job_attests_the_installed_msi_before_collecting_install
     assert steps[sep]["if"] == "runner.os == 'Windows'"
     native = _index(steps, "scripts/build_native_runtime.py")
     assert "runner.os == 'Windows' && '--require-static-crt'" in steps[native]["run"]
-    freeze = _index(steps, "scripts/build_worker_sidecar.py")
+    freeze = _index(steps, "scripts/build_engine_sidecar.py")
     build = _index(steps, "npm run tauri:build")
     gate = _index(steps, "scripts/windows/attest-installed-msi.ps1")
     collect = _index(steps, "scripts/collect_release_artifacts.py")
@@ -100,7 +100,7 @@ def test_msi_gate_script_installs_silently_attests_and_uninstalls() -> None:
     assert '"/x", "`"$msiPath`"", "/qn", "/norestart"' in script
     assert "CurrentVersion\\Uninstall" in script
     assert "InstallLocation" in script
-    assert "resources\\openastroflow-worker" in script
+    assert "resources\\ufwbpp-engine" in script
     assert "scripts\\attest_bundled_runtime.py" in script
     assert "--resource-root" in script and "--target" in script and "--output" in script
     assert '"--main-executable", $mainExe' in script

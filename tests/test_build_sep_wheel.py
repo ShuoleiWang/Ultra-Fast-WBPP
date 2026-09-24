@@ -16,7 +16,7 @@ from scripts import build_sep_wheel as sep_build
 # sdist. They change only when the patch or the sdist pin changes, which must
 # be a deliberate, reviewed edit of this table.
 EXPECTED_PATCHED_DIGESTS = {
-    "PKG-INFO": "c5348cf26611d51a3c0c2b3d5fbe1db0ed65e57917d4ef010f5f808b5d993f0a",
+    "PKG-INFO": "1977c611d2a164c81327ab0e94678161344f7360122a825fbeadedd7d8d4e8f8",
     "src/deblend.c": "44e094c71263f0bf92747c8ebc08273c2acea6dd86a0b28c88f66dfcbac027a9",
     "src/extract.c": "2177593878cf5b383010e31b2ad87e04c970f8b0affad9302601907deca4b9b7",
     "src/extract.h": "798375262c5c67e64ceac131d542bb571d3d426d5a176587c80763f92ff6e04e",
@@ -130,7 +130,7 @@ def test_checked_in_patch_targets_exactly_the_declared_files() -> None:
             assert sum(kind in " -" for kind, _ in hunk.lines) == hunk.old_count
             assert sum(kind in " +" for kind, _ in hunk.lines) == hunk.new_count
     text = sep_build.PATCH_PATH.read_text(encoding="utf-8")
-    assert "+Version: 1.4.1+oaf.1" in text
+    assert "+Version: 1.4.1+ufwbpp.1" in text
     assert "+int sep_rand_r(unsigned int * seed)" in text
     assert "-#define rand_r(SEED)" in text
     assert "+  QCALLOC(buffers->start, int64_t, stacksize, status);" in text
@@ -199,9 +199,9 @@ def test_build_and_install_commands_keep_isolation_and_no_deps(tmp_path: Path) -
 
 @pytest.fixture(scope="session")
 def pinned_sdist(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """The pinned sdist, from OAF_SEP_SDIST when set, else fetched from PyPI."""
+    """The pinned sdist, from UFWBPP_SEP_SDIST when set, else fetched from PyPI."""
 
-    override = os.environ.get("OAF_SEP_SDIST")
+    override = os.environ.get("UFWBPP_SEP_SDIST")
     if override:
         return Path(override)
     destination = tmp_path_factory.mktemp("sep-sdist") / sep_build.SDIST_FILENAME
@@ -220,7 +220,7 @@ def test_patch_applies_cleanly_to_the_pinned_sdist(tmp_path: Path, pinned_sdist:
 
     assert digests == EXPECTED_PATCHED_DIGESTS
     pkg_info = (source_root / "PKG-INFO").read_text(encoding="utf-8")
-    assert "\nVersion: 1.4.1+oaf.1\n" in pkg_info
+    assert "\nVersion: 1.4.1+ufwbpp.1\n" in pkg_info
     sepcore = (source_root / "src" / "sepcore.h").read_text(encoding="utf-8")
     assert "#define rand_r(SEED) sep_rand_r(SEED)" in sepcore
     # Applying twice must be detected, never silently doubled.
@@ -241,7 +241,7 @@ def test_check_mode_reports_without_building(
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["ok"] is True
     assert report["mode"] == "check"
-    assert report["patchedVersion"] == "1.4.1+oaf.1"
+    assert report["patchedVersion"] == "1.4.1+ufwbpp.1"
     assert report["patchedFiles"] == EXPECTED_PATCHED_DIGESTS
     assert report["sdist"]["sha256"] == sep_build.SDIST_SHA256
     assert "wheel" not in report

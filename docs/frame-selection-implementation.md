@@ -4,7 +4,7 @@
 
 ## 0. 范围与开关
 
-- 新增 `SelectionParameters`（`openastroflow_engine/selection/parameters.py`），挂在 `E2ERequest.selection` 与 recipe（`recipe.py`）上：
+- 新增 `SelectionParameters`（`ufwbpp/selection/parameters.py`），挂在 `E2ERequest.selection` 与 recipe（`recipe.py`）上：
   - `policy: "legacy-gate" | "unattended-v1"`，默认先保持 `legacy-gate`，验证后切换默认值；
   - `priority: "depth" | "balanced" | "resolution"`（默认 `balanced`）；
   - `aggressiveness: "conservative" | "standard" | "aggressive"`（默认 `standard`，只影响灰区阈值）；
@@ -16,7 +16,7 @@
 ## 1. 模块布局
 
 ```
-openastroflow_engine/selection/
+ufwbpp/selection/
   parameters.py      SelectionParameters, PriorityProfile(p 指数、FWHM 截止 k、灰区阈值表)
   features.py        FrameSelectionFeatures: 从 FrameResult/FrameMeasurement/registration 提取 ~20 个特征
                      + 时间序列特征（同夜按 observed_at 排序的斜率/单调性）
@@ -26,7 +26,7 @@ openastroflow_engine/selection/
   policy.py          决策：exclude / keep / keep_with_maps；生成 SelectionDecision 与理由码
   counterfactual.py  oracle：解析留一 ΔQ（深度、背景、FWHM 代理）与 4×4 分箱重跑模式
   report.py          qc/selection-report.html 与 receipt 片段
-openastroflow_engine/reference/   （评估参照，已有目录约定）
+ufwbpp/reference/   （评估参照，已有目录约定）
   selection_oracle_numpy.py       oracle 的朴素 NumPy 参照（测试用）
 ```
 
@@ -68,7 +68,7 @@ class SelectionDecision:
 
 ### 3.1 权重（P2）
 
-- `T_i`：`estimate_stellar_scale_hints` 的接受尺度（`openastroflow_registration/quality.py:235`），参考帧为 1；不可用时 1 并将 `c_i` 乘 0.7。
+- `T_i`：`estimate_stellar_scale_hints` 的接受尺度（`ufwbpp_registration/quality.py:235`），参考帧为 1；不可用时 1 并将 `c_i` 乘 0.7。
 - `σ_i`：`calibration._normalized_noise_weights` 现有的块噪声估计（`calibration.py:2253`）已在归一化后测量，因此 `1/σ_i^2` 即 `T_i^2/σ_raw,i^2`；**不要再乘一次 T²**。
 - PSF 项 `FWHM_i^(-2p)`：p = 0（depth）/ 1（balanced）/ 2（resolution），FWHM 用全分辨率星点 r50（§4），回退到预览 FWHM × 尺度。
 - `n_i`：夜间因子，= 夜内最佳 FWHM 与全体最佳 FWHM 之比的 −2p 次方（避免整夜偏软时逐帧重复惩罚）。
@@ -186,7 +186,7 @@ v6 其他结论：原生 PSF 让缺陷帧在 FWHM 上清晰分离（失焦 8.2 p
 
 v7（修正 1–3 后）：干净/良性帧全部 KEEP 1.0（`cleanFalsePositives 0`，`benignFalsePositives 0`），标准六缺陷召回 1.0；NGC 7331 耗时回到 105 s，L EQUIVALENT / B INCONCLUSIVE 不变。但带权重图的帧在第一轮积分中权重异常（遮挡帧占总权重 44.5%，Δdepth +0.55 mag），局部云帧也被反事实按"背景变差"剔除，且干净帧仍有微弱图。
 
-单轮诊断（`--max-passes 1`）定位到根因：**QC 网格在 QC 参考帧（星最多的帧，本例来自 2026-09-16 夜）的坐标系，而像素管线的配准参考由 `openastroflow_registration` 另选（本例 2026-09-12 夜的帧），两夜之间是 180° 子午线翻转**。权重图被原样贴到配准帧上，于是清晰区被清零、遮挡区以全权重进入，噪声估计的掩模也盖在了清晰区。修正：
+单轮诊断（`--max-passes 1`）定位到根因：**QC 网格在 QC 参考帧（星最多的帧，本例来自 2026-09-16 夜）的坐标系，而像素管线的配准参考由 `ufwbpp_registration` 另选（本例 2026-09-12 夜的帧），两夜之间是 180° 子午线翻转**。权重图被原样贴到配准帧上，于是清晰区被清零、遮挡区以全权重进入，噪声估计的掩模也盖在了清晰区。修正：
 
 - `RegionWeightMap.transformed(matrix, height, width)`：把图按 `S·Q_f·S⁻¹·T_f⁻¹`（T_f 管线配准矩阵、Q_f QC 配准矩阵、S 预览→原生尺度）重采样到配准帧坐标系（每格中心映射后双线性取值，落在 QC 参考帧外的格权重 1）；E2E 在送入管线前逐帧转换，回执标注 `frame: registered`。
 - 变暗项改为 `ramp × 10^(−0.4·r)`（透过率因子反映未重标定样本的信噪比），斑块需 ≥ 4 个 8 连通格且中位残差 ≥ 0.12 mag；无零格且均值 > 0.99 的图视为化妆性、不生成。

@@ -38,7 +38,7 @@ Where the time goes and how it was removed:
 
 ## 2. Deterministic and verifiable
 
-- **Bit-identical runs.** Two runs of the same project produce the same bytes on the same machine, verified on macOS and on Windows through the installed application's frozen worker ([validation matrix](validation-matrix.md)). Windows and macOS masters differ only by math-library rounding and are compared with [`tools/validation/master_tolerance_gate.py`](../benchmarks/README.md), never by hash.
+- **Bit-identical runs.** Two runs of the same project produce the same bytes on the same machine, verified on macOS and on Windows through the installed application's frozen engine ([validation matrix](validation-matrix.md)). Windows and macOS masters differ only by math-library rounding and are compared with [`tools/validation/master_tolerance_gate.py`](../benchmarks/README.md), never by hash.
 - **One arithmetic, two implementations.** Every native kernel is held value-identical to its NumPy reference by differential tests on every CI runner (Ubuntu, macOS, Windows with MSVC `/fp:strict`), and thread-count invariance tests guarantee that hybrid or throttled cores change timing only ([architecture](architecture.md#platform-and-solver-support)).
 - **Deterministic source extraction.** The PyPI SEP build is non-deterministic on Windows; the bundled patched build is self-tested in every run and an unpatched environment is marked `SEP_NONDETERMINISTIC` in the receipt ([windows.md](windows.md)).
 - **Receipts.** Each product records input identities, algorithm and kernel identifiers, selection decisions, normalization coefficients, rejection counts, platform facts with their sources, and content hashes; the run's `qc/selection.json` records every frame's reasons and counterfactual numbers ([architecture](architecture.md#data-and-correctness-boundaries)).
@@ -98,8 +98,8 @@ A Light with a Bayer pattern (`RGGB`, `BGGR`, `GRBG`, `GBRG`) is processed witho
 ## 9. Platforms
 
 - **macOS 14+ on Apple Silicon.** Validated on a 36 GB M3 Pro (twelve CPU workers and kernel threads, eight QC readers, Metal available and measured; the `auto` integration prefers the native CPU kernels because the rejection statistics dominate). Other M-series machines run the generic profile and are reported as `compatible-generic`, not `performance-validated`, until measured ([hardware](hardware.md)).
-- **Windows 10 22H2 / 11 x64.** ASTAP as the verified final-gate solver, static-CRT kernels and desktop executable, Job Objects that stop the whole worker tree on cancel, an up-front path-length budget (`OUTPUT_PATH_TOO_LONG`), memory-bounded worker counts, antivirus-tolerant file lifecycle, deterministic source extraction; the installed MSI is attested (260 PE images, 0 unresolved imports) and the frozen worker reproduced the development runs bit for bit ([windows.md](windows.md), [validation matrix](validation-matrix.md)).
-- **One platform layer.** Operating-system differences live in `openastroflow_engine.platform`; every probe is a pure function of its raw input and is tested on every host, and no platform fact changes a pixel.
+- **Windows 10 22H2 / 11 x64.** ASTAP as the verified final-gate solver, static-CRT kernels and desktop executable, Job Objects that stop the whole worker tree on cancel, an up-front path-length budget (`OUTPUT_PATH_TOO_LONG`), memory-bounded worker counts, antivirus-tolerant file lifecycle, deterministic source extraction; the installed MSI is attested (260 PE images, 0 unresolved imports) and the frozen engine reproduced the development runs bit for bit ([windows.md](windows.md), [validation matrix](validation-matrix.md)).
+- **One platform layer.** Operating-system differences live in `ufwbpp.platform`; every probe is a pure function of its raw input and is tested on every host, and no platform fact changes a pixel.
 
 ## 10. Tools contributors actually get
 

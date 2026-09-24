@@ -19,15 +19,15 @@ updates:
     schedule:
       interval: weekly
   - package-ecosystem: pip
-    directory: "/packages/openastroflow-engine"
+    directory: "/packages/engine"
     schedule:
       interval: weekly
   - package-ecosystem: pip
-    directory: "/packages/openastroflow-registration"
+    directory: "/packages/registration"
     schedule:
       interval: weekly
   - package-ecosystem: pip
-    directory: "/packaging/worker"
+    directory: "/packaging/engine"
     schedule:
       interval: weekly
   - package-ecosystem: github-actions

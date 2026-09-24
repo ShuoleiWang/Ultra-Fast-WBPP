@@ -19,9 +19,9 @@ use crate::sidecar::{
     command_output, discover_engine, sidecar_output, spawn_sidecar, EngineExecutable, LossyLines,
 };
 
-const PROGRESS_EVENT: &str = "openastroflow://catalog-progress";
-const COMPLETE_EVENT: &str = "openastroflow://catalog-complete";
-const ERROR_EVENT: &str = "openastroflow://catalog-error";
+const PROGRESS_EVENT: &str = "ufwbpp://catalog-progress";
+const COMPLETE_EVENT: &str = "ufwbpp://catalog-complete";
+const ERROR_EVENT: &str = "ufwbpp://catalog-error";
 const MAX_CATALOG_JSON_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DIAGNOSTIC_BYTES: usize = 8 * 1024;
 

@@ -52,7 +52,9 @@ describe("Ultra-Fast WBPP browser development mode", () => {
     await userEvent.click(screen.getByRole("button", { name: /Screen 370 Lights first/ }));
     expect(screen.getByRole("button", { name: /Start processing/ })).toBeEnabled();
     await userEvent.click(screen.getByRole("button", { name: /Start processing/ }));
-    await act(async () => { vi.advanceTimersByTime(6_000); });
+    await act(async () => {
+      vi.advanceTimersByTime(6_000);
+    });
     expect(await screen.findByText("DEMO RESULT")).toBeInTheDocument();
     expect(screen.queryByText("WCS SOLVED")).not.toBeInTheDocument();
     expect(screen.getByText(/No master or astrometric solution was created/)).toBeInTheDocument();
@@ -81,8 +83,12 @@ describe("Ultra-Fast WBPP browser development mode", () => {
   });
 
   it("falls back to English when localStorage is unavailable", () => {
-    vi.spyOn(window.localStorage, "getItem").mockImplementation(() => { throw new DOMException("blocked", "SecurityError"); });
-    vi.spyOn(window.localStorage, "setItem").mockImplementation(() => { throw new DOMException("blocked", "SecurityError"); });
+    vi.spyOn(window.localStorage, "getItem").mockImplementation(() => {
+      throw new DOMException("blocked", "SecurityError");
+    });
+    vi.spyOn(window.localStorage, "setItem").mockImplementation(() => {
+      throw new DOMException("blocked", "SecurityError");
+    });
     expect(() => render(<App />)).not.toThrow();
     expect(screen.getByRole("heading", { name: "Drop in your N.I.N.A. folders" })).toBeInTheDocument();
   });

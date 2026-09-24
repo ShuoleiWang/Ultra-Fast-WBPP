@@ -15,9 +15,9 @@ PATH):
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\python -m pip install -e ./packages/light-frame-qc[test] -e ./packages/openastroflow-registration[test] -e ./packages/openastroflow-engine[test,all]
+.venv\Scripts\python -m pip install -e ./packages/light-frame-qc[test] -e ./packages/registration[test] -e ./packages/engine[test,all]
 .venv\Scripts\python scripts\build_native_runtime.py --build-dir build\native-release
-.venv\Scripts\python -m pytest -q packages/light-frame-qc/tests packages/openastroflow-registration/tests packages/openastroflow-engine/tests tests
+.venv\Scripts\python -m pytest -q packages/light-frame-qc/tests packages/registration/tests packages/engine/tests tests
 ```
 
 `build_native_runtime.py` uses CMake's Visual Studio generator, which locates
@@ -37,7 +37,7 @@ install the patched build before running the tests (CI does the same):
 
 ```powershell
 .venv\Scripts\python scripts\build_sep_wheel.py --install
-.venv\Scripts\python -c "import sep; print(sep.__version__)"   # 1.4.1+oaf.1
+.venv\Scripts\python -c "import sep; print(sep.__version__)"   # 1.4.1+ufwbpp.1
 ```
 
 The script downloads the hash-pinned sdist, applies
@@ -57,7 +57,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\attest-insta
   -Msi "target\release\bundle\msi\Ultra-Fast WBPP_0.1.0_x64_en-US.msi" `
   -Target x86_64-pc-windows-msvc `
   -Python .venv\Scripts\python.exe `
-  -Output build\bundle-attestations\openastroflow-worker-x86_64-pc-windows-msvc.bundled.manifest.json
+  -Output build\bundle-attestations\ufwbpp-engine-x86_64-pc-windows-msvc.bundled.manifest.json
 ```
 
 Add `-KeepInstalled` to leave the application installed for a GUI run.

@@ -14,7 +14,7 @@ The online `npm audit --audit-level=high` check reported zero vulnerabilities fo
 
 ## Python
 
-The online `pip-audit 2.10.1 --local` check reported no known vulnerabilities. The three editable first-party distributions (`light-frame-qc`, `openastroflow-engine`, and `openastroflow-registration`) are not published on PyPI and were explicitly skipped by the index-backed service, so their source tests, public-tree scan, review, and complete bundle SBOM remain separate gates.
+The online `pip-audit 2.10.1 --local` check reported no known vulnerabilities. The three editable first-party distributions (`light-frame-qc`, `ufwbpp`, and `ufwbpp-registration`) are not published on PyPI and were explicitly skipped by the index-backed service, so their source tests, public-tree scan, review, and complete bundle SBOM remain separate gates.
 
 ## Rust
 

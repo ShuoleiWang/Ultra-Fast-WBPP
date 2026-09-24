@@ -1,10 +1,10 @@
-#include "openastroflow/ImageTile.h"
+#include "ufwbpp/ImageTile.h"
 
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
 
-namespace openastroflow::native
+namespace ufwbpp::native
 {
 
 namespace
@@ -74,4 +74,4 @@ std::vector<TileRegion> PartitionRows(
    return result;
 }
 
-} // namespace openastroflow::native
+} // namespace ufwbpp::native

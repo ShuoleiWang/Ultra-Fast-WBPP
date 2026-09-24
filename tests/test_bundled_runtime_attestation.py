@@ -22,7 +22,7 @@ from scripts.attest_bundled_runtime import (
     inspect_windows_runtime,
     write_create_only,
 )
-from scripts.build_worker_sidecar import (
+from scripts.build_engine_sidecar import (
     build_manifest,
     detect_host_target_triple,
     manifest_filename,
@@ -39,35 +39,10 @@ VERSIONS = {
     "packages": {
         "astropy": "8.0.1",
         "light-frame-qc": "0.3.0",
-        "openastroflow-engine": "0.1.0",
-        "openastroflow-registration": "0.1.0a1",
+        "ufwbpp": "0.1.0",
+        "ufwbpp-registration": "0.1.0a1",
         "reproject": "0.21.0",
         "shapely": "2.1.0",
-    },
-}
-WORKER_HANDSHAKE = {
-    "protocolVersion": 1,
-    "sessionId": "packaging-smoke",
-    "sequence": 0,
-    "sentAtUnixMs": 1,
-    "type": "handshake",
-    "payload": {
-        "role": "worker",
-        "implementation": "openastroflow-python-worker",
-        "implementationVersion": "0.1.0",
-        "supportedProtocolVersions": [1],
-        "capabilities": {
-            "schemaVersion": 1,
-            "backendId": "openastroflow-python-worker",
-            "backendVersion": "0.1.0",
-            "workerBuild": "test",
-            "hardwareProfiles": ["generic-arm64-cpu"],
-            "stages": ["quality-control", "calibration", "registration", "integration", "astrometric-solve"],
-            "features": ["cpu-execution", "deterministic-receipts", "offline-astrometric-solver", "fits"],
-            "maximumParallelStages": 1,
-            "inputExtensions": ["fit", "fits", "fts"],
-            "outputExtensions": ["fits"],
-        },
     },
 }
 
@@ -167,11 +142,10 @@ def _test_app(root: Path) -> Path:
 
 
 def _resource_root(root: Path, target: str = TARGET) -> Path:
-    resource = root / "openastroflow-worker"
+    resource = root / "ufwbpp-engine"
     runtime = resource / runtime_directory_name(target)
     runtime.mkdir(parents=True)
     entry = runtime / sidecar_filename(target)
-    handshake = json.dumps(WORKER_HANDSHAKE, sort_keys=True, separators=(",", ":"))
     catalogs = json.dumps(
         {
             "schemaVersion": 1,
@@ -186,9 +160,12 @@ def _resource_root(root: Path, target: str = TARGET) -> Path:
     )
     doctor = json.dumps(
         {
+            "schemaVersion": 1,
+            "engineVersion": "0.1.0",
+            "status": {"pixelExecutionReady": True},
             "nativeKernels": {
                 "loaded": True,
-                "libraryPath": "ignored-by-the-attestation/openastroflow_native.dll",
+                "libraryPath": "ignored-by-the-attestation/ufwbpp_native.dll",
                 "sha256": "sha256:" + "b" * 64,
                 "abiVersion": 1,
                 "cpuArchitecture": "x86_64",
@@ -203,8 +180,7 @@ def _resource_root(root: Path, target: str = TARGET) -> Path:
         f"if [ \"$1\" = \"catalog\" ]; then printf '%s\\n' '{catalogs}'; exit 0; fi\n"
         'if [ "$1" = "run-project" ]; then echo "usage: ultra-fast-wbpp run-project"; exit 0; fi\n'
         f"if [ \"$1\" = \"doctor\" ]; then printf '%s\\n' '{doctor}'; exit 0; fi\n"
-        "read request\n"
-        f"printf '%s\\n' '{handshake}'\n",
+        "exit 2\n",
         encoding="utf-8",
     )
     if os.name != "nt":
@@ -215,7 +191,7 @@ def _resource_root(root: Path, target: str = TARGET) -> Path:
     if target in WINDOWS_TARGET_MACHINES:
         _populate_windows_tree(runtime)
     manifest = build_manifest(
-        runtime, target, versions=VERSIONS, handshake=WORKER_HANDSHAKE
+        runtime, target, versions=VERSIONS, engine_version="0.1.0"
     )
     (resource / manifest_filename(target)).write_text(
         json.dumps(manifest), encoding="utf-8"
@@ -251,9 +227,9 @@ def _populate_windows_tree(runtime: Path) -> None:
     (libs / "msvcp140-9f3d2c1b.dll").write_bytes(
         build_pe_image(imports=("KERNEL32.dll", "VCRUNTIME140.dll", "api-ms-win-crt-string-l1-1-0.dll"))
     )
-    native = internal / "openastroflow_engine" / "native"
+    native = internal / "ufwbpp" / "native"
     native.mkdir(parents=True)
-    (native / "openastroflow_native.dll").write_bytes(build_pe_image(imports=("KERNEL32.dll",)))
+    (native / "ufwbpp_native.dll").write_bytes(build_pe_image(imports=("KERNEL32.dll",)))
     (native / "README.md").write_text("kernels", encoding="utf-8")
 
 
@@ -277,7 +253,7 @@ def test_post_sign_attestation_binds_actual_tree_and_launch_budget(tmp_path: Pat
     assert payload["preSignTreeSha256"] != payload["runtime"]["treeSha256"]
     assert payload["launch"]["version"] == "ultra-fast-wbpp 0.1.0"
     assert payload["launch"]["versionSeconds"] < 5.0
-    assert payload["launch"]["handshakeSeconds"] < 5.0
+    assert payload["launch"]["engineVersion"] == "0.1.0"
     assert payload["launch"]["catalogListSeconds"] < 5.0
     assert payload["launch"]["runProjectHelpSeconds"] < 5.0
 
@@ -474,7 +450,7 @@ def test_runtime_library_attestation_rejects_tampered_package_provenance(
     policy_path = (
         Path(__file__).resolve().parents[1]
         / "packaging"
-        / "worker"
+        / "engine"
         / "macos14-runtime-libraries-v1.json"
     )
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
@@ -593,10 +569,10 @@ def test_windows_import_closure_resolves_every_pe_image_to_system_or_bundled(tmp
     assert resolutions["msvcp140-9f3d2c1b.dll"]["bundleTargets"] == ["_internal/numpy.libs/msvcp140-9f3d2c1b.dll"]
     assert resolutions["KERNEL32.dll"]["resolution"] == "system"
     assert resolutions["ADVAPI32.dll"]["resolution"] == "system"
-    kernels = by_path["_internal/openastroflow_engine/native/openastroflow_native.dll"]
+    kernels = by_path["_internal/ufwbpp/native/ufwbpp_native.dll"]
     assert kernels["crtLinkage"] == "static"
     assert kernels["machine"] == "x86_64"
-    launcher = by_path["openastroflow-worker-x86_64-pc-windows-msvc.exe"]
+    launcher = by_path["ufwbpp-engine-x86_64-pc-windows-msvc.exe"]
     assert launcher["isDll"] is False
     assert launcher["crtLinkage"] == "static"
     # The record is relative to the runtime root: no local path leaks.
@@ -629,7 +605,7 @@ def test_windows_import_closure_rejects_dlls_absent_from_a_clean_machine(tmp_pat
 
 def test_windows_import_closure_requires_a_static_crt_native_kernel_dll(tmp_path: Path) -> None:
     runtime = _windows_runtime(tmp_path)
-    kernels = runtime / "_internal" / "openastroflow_engine" / "native" / "openastroflow_native.dll"
+    kernels = runtime / "_internal" / "ufwbpp" / "native" / "ufwbpp_native.dll"
     kernels.write_bytes(build_pe_image(imports=("KERNEL32.dll", "VCRUNTIME140.dll", "MSVCP140.dll")))
     (runtime / "_internal" / "MSVCP140.dll").write_bytes(build_pe_image(imports=("KERNEL32.dll",)))
 
@@ -638,7 +614,7 @@ def test_windows_import_closure_requires_a_static_crt_native_kernel_dll(tmp_path
     assert audit["violations"] == [
         {
             "code": "NATIVE_KERNEL_DYNAMIC_CRT",
-            "path": "_internal/openastroflow_engine/native/openastroflow_native.dll",
+            "path": "_internal/ufwbpp/native/ufwbpp_native.dll",
             "dynamicCrtImports": ["MSVCP140.dll", "VCRUNTIME140.dll"],
         }
     ]
@@ -647,7 +623,7 @@ def test_windows_import_closure_requires_a_static_crt_native_kernel_dll(tmp_path
 
     kernels.unlink()
     audit = inspect_windows_runtime(runtime, WINDOWS_TARGET)
-    assert audit["violations"] == [{"code": "NATIVE_KERNEL_MISSING", "dll": "openastroflow_native.dll"}]
+    assert audit["violations"] == [{"code": "NATIVE_KERNEL_MISSING", "dll": "ufwbpp_native.dll"}]
 
 
 def test_windows_import_closure_rejects_wrong_machine_and_corrupt_images(tmp_path: Path) -> None:
@@ -672,14 +648,14 @@ def test_windows_import_closure_rejects_wrong_machine_and_corrupt_images(tmp_pat
 
 @pytest.mark.skipif(
     os.name == "nt",
-    reason="uses a POSIX shell launcher standing in for the frozen worker",
+    reason="uses a POSIX shell launcher standing in for the frozen engine",
 )
 def test_windows_attestation_runs_closure_launch_budget_and_native_doctor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     resource = _resource_root(tmp_path, WINDOWS_TARGET)
     # The launch probes need an executable stand-in, which on this host is a
-    # shell script named like the frozen worker; keep the closure audit from
+    # shell script named like the frozen engine; keep the closure audit from
     # treating that script as a broken PE image.
     monkeypatch.setattr("scripts.attest_bundled_runtime._PE_SUFFIXES", {".dll", ".pyd"})
     main_executable = tmp_path / "Ultra-Fast WBPP.exe"
@@ -703,11 +679,10 @@ def test_windows_attestation_runs_closure_launch_budget_and_native_doctor(
     assert payload["windowsDeployment"]["mainExecutable"]["dynamicCrtImports"] == ["VCRUNTIME140.dll"]
     assert payload["nativeKernels"] == {
         "loaded": True,
-        "libraryFileName": "openastroflow_native.dll",
+        "libraryFileName": "ufwbpp_native.dll",
         "sha256": "sha256:" + "b" * 64,
         "abiVersion": 1,
         "cpuArchitecture": "x86_64",
-        "doctorSeconds": payload["nativeKernels"]["doctorSeconds"],
     }
     assert payload["launch"]["version"] == "ultra-fast-wbpp 0.1.0"
     assert "ignored-by-the-attestation" not in json.dumps(payload)

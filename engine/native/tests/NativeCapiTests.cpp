@@ -1,4 +1,4 @@
-#include "openastroflow/c_api.h"
+#include "ufwbpp/c_api.h"
 
 #include <array>
 #include <cmath>
@@ -19,7 +19,7 @@ void Require( bool condition, const char* message )
 
 void TestAbiAndLinearFit()
 {
-   Require( oaf_native_abi_version() == OAF_NATIVE_ABI_VERSION,
+   Require( ufwbpp_native_abi_version() == UFWBPP_NATIVE_ABI_VERSION,
             "native ABI version differs" );
    constexpr std::uint32_t frames = 5;
    constexpr std::uint32_t pixels = 4;
@@ -40,8 +40,8 @@ void TestAbiAndLinearFit()
    std::array<std::uint16_t, pixels> rejected{};
    std::array<char, 256> error{};
 
-   const OafNativeIntegrationRequestV1 request{
-      sizeof( OafNativeIntegrationRequestV1 ),
+   const UfwbppNativeIntegrationRequestV1 request{
+      sizeof( UfwbppNativeIntegrationRequestV1 ),
       2, 2, 0, 2, frames, 2, 2,
       samples.data(), samples.size(),
       scales.data(), scales.size(),
@@ -49,13 +49,13 @@ void TestAbiAndLinearFit()
       weights.data(), weights.size(),
       0.0F, 5.0F, 3.5F, 10, 8, 1.0F, 0.0F
    };
-   OafNativeIntegrationOutputV1 output{
-      sizeof( OafNativeIntegrationOutputV1 ),
+   UfwbppNativeIntegrationOutputV1 output{
+      sizeof( UfwbppNativeIntegrationOutputV1 ),
       integrated.data(), accepted.data(), rejected.data(), integrated.size()
    };
-   const int status = oaf_native_cpu_linear_fit_v1(
+   const int status = ufwbpp_native_cpu_linear_fit_v1(
       &request, &output, error.data(), error.size() );
-   Require( status == OAF_NATIVE_OK, error.data() );
+   Require( status == UFWBPP_NATIVE_OK, error.data() );
    for ( float value : integrated )
       Require( std::isfinite( value ), "C ABI returned a nonfinite sample" );
    for ( std::uint16_t value : accepted )
@@ -65,16 +65,16 @@ void TestAbiAndLinearFit()
 
 void TestCapacityGate()
 {
-   const OafNativeIntegrationRequestV1 request{
-      sizeof( OafNativeIntegrationRequestV1 ), 2, 2, 0, 2, 5, 2, 2
+   const UfwbppNativeIntegrationRequestV1 request{
+      sizeof( UfwbppNativeIntegrationRequestV1 ), 2, 2, 0, 2, 5, 2, 2
    };
-   OafNativeIntegrationOutputV1 output{
-      sizeof( OafNativeIntegrationOutputV1 ), nullptr, nullptr, nullptr, 0
+   UfwbppNativeIntegrationOutputV1 output{
+      sizeof( UfwbppNativeIntegrationOutputV1 ), nullptr, nullptr, nullptr, 0
    };
    std::array<char, 128> error{};
-   Require( oaf_native_cpu_linear_fit_v1(
+   Require( ufwbpp_native_cpu_linear_fit_v1(
                &request, &output, error.data(), error.size() )
-               == OAF_NATIVE_BUFFER_TOO_SMALL,
+               == UFWBPP_NATIVE_BUFFER_TOO_SMALL,
             "C ABI accepted missing output buffers" );
 }
 
@@ -93,19 +93,19 @@ void TestFiveHundredTwelveFramesAreNotTruncated()
    std::array<std::uint16_t, pixels> accepted{};
    std::array<std::uint16_t, pixels> rejected{};
    std::array<char, 256> error{};
-   const OafNativeIntegrationRequestV1 request{
-      sizeof( OafNativeIntegrationRequestV1 ),
+   const UfwbppNativeIntegrationRequestV1 request{
+      sizeof( UfwbppNativeIntegrationRequestV1 ),
       2, 2, 0, 2, frames, 2, 2,
       samples.data(), samples.size(), scales.data(), scales.size(),
       offsets.data(), offsets.size(), weights.data(), weights.size(),
       -1.0F, 5.0F, 5.0F, 10, 8, 1.0F, 0.0F
    };
-   OafNativeIntegrationOutputV1 output{
-      sizeof( OafNativeIntegrationOutputV1 ),
+   UfwbppNativeIntegrationOutputV1 output{
+      sizeof( UfwbppNativeIntegrationOutputV1 ),
       integrated.data(), accepted.data(), rejected.data(), integrated.size()
    };
-   Require( oaf_native_cpu_linear_fit_v1(
-               &request, &output, error.data(), error.size() ) == OAF_NATIVE_OK,
+   Require( ufwbpp_native_cpu_linear_fit_v1(
+               &request, &output, error.data(), error.size() ) == UFWBPP_NATIVE_OK,
             error.data() );
    for ( std::size_t pixel = 0; pixel < pixels; ++pixel )
    {
@@ -121,14 +121,14 @@ void TestOpaqueMetalExecutor()
 {
    std::array<char, 1024> error{};
    std::uint32_t available = 0;
-   Require( oaf_native_metal_available_v1(
-               &available, error.data(), error.size() ) == OAF_NATIVE_OK,
+   Require( ufwbpp_native_metal_available_v1(
+               &available, error.data(), error.size() ) == UFWBPP_NATIVE_OK,
             error.data() );
    if ( available == 0 )
       return;
-   OafNativeMetalExecutorV1* executor = nullptr;
-   Require( oaf_native_metal_executor_create_v1(
-               nullptr, &executor, error.data(), error.size() ) == OAF_NATIVE_OK
+   UfwbppNativeMetalExecutorV1* executor = nullptr;
+   Require( ufwbpp_native_metal_executor_create_v1(
+               nullptr, &executor, error.data(), error.size() ) == UFWBPP_NATIVE_OK
          && executor != nullptr,
             error.data() );
    constexpr std::uint32_t frames = 5;
@@ -148,41 +148,41 @@ void TestOpaqueMetalExecutor()
    std::array<float, pixels> integrated{};
    std::array<std::uint16_t, pixels> accepted{};
    std::array<std::uint16_t, pixels> rejected{};
-   const OafNativeIntegrationRequestV1 request{
-      sizeof( OafNativeIntegrationRequestV1 ),
+   const UfwbppNativeIntegrationRequestV1 request{
+      sizeof( UfwbppNativeIntegrationRequestV1 ),
       2, 2, 0, 2, frames, 2, 2,
       samples.data(), samples.size(), scales.data(), scales.size(),
       offsets.data(), offsets.size(), weights.data(), weights.size(),
       0.0F, 5.0F, 3.5F, 10, 8, 1.0F, 0.0F
    };
-   OafNativeIntegrationOutputV1 output{
-      sizeof( OafNativeIntegrationOutputV1 ),
+   UfwbppNativeIntegrationOutputV1 output{
+      sizeof( UfwbppNativeIntegrationOutputV1 ),
       integrated.data(), accepted.data(), rejected.data(), integrated.size()
    };
-   OafNativeExecutionStatsV1 stats{};
+   UfwbppNativeExecutionStatsV1 stats{};
    stats.struct_size = sizeof( stats );
-   Require( oaf_native_metal_linear_fit_v1(
+   Require( ufwbpp_native_metal_linear_fit_v1(
                executor, &request, &output, &stats,
-               error.data(), error.size() ) == OAF_NATIVE_OK,
+               error.data(), error.size() ) == UFWBPP_NATIVE_OK,
             error.data() );
    Require( stats.executed_on_gpu == 1 && stats.device_name[0] != '\0'
          && stats.submitted_buffer_bytes > 0,
             "opaque Metal C ABI did not report GPU evidence" );
-   oaf_native_metal_executor_destroy_v1( executor );
+   ufwbpp_native_metal_executor_destroy_v1( executor );
 }
 
 void TestOpaqueMetalMaskedNinetySixFrames()
 {
    std::array<char, 1024> error{};
    std::uint32_t available = 0;
-   Require( oaf_native_metal_available_v1(
-               &available, error.data(), error.size() ) == OAF_NATIVE_OK,
+   Require( ufwbpp_native_metal_available_v1(
+               &available, error.data(), error.size() ) == UFWBPP_NATIVE_OK,
             error.data() );
    if ( available == 0 )
       return;
-   OafNativeMetalExecutorV1* executor = nullptr;
-   Require( oaf_native_metal_executor_create_v1(
-               nullptr, &executor, error.data(), error.size() ) == OAF_NATIVE_OK
+   UfwbppNativeMetalExecutorV1* executor = nullptr;
+   Require( ufwbpp_native_metal_executor_create_v1(
+               nullptr, &executor, error.data(), error.size() ) == UFWBPP_NATIVE_OK
          && executor != nullptr,
             error.data() );
    constexpr std::uint32_t frames = 96;
@@ -204,30 +204,30 @@ void TestOpaqueMetalMaskedNinetySixFrames()
    std::array<float, pixels> cpuIntegrated{}, gpuIntegrated{};
    std::array<std::uint16_t, pixels> cpuAccepted{}, gpuAccepted{};
    std::array<std::uint16_t, pixels> cpuRejected{}, gpuRejected{};
-   const OafNativeMaskedIntegrationRequestV1 request{
-      sizeof( OafNativeMaskedIntegrationRequestV1 ),
+   const UfwbppNativeMaskedIntegrationRequestV1 request{
+      sizeof( UfwbppNativeMaskedIntegrationRequestV1 ),
       width, height, 0, height, frames, 2, 2,
       samples.data(), samples.size(), mask.data(), mask.size(),
       scales.data(), scales.size(), offsets.data(), offsets.size(),
       weights.data(), weights.size(), 1, 1.0F, 0.0F
    };
-   OafNativeIntegrationOutputV1 cpuOutput{
-      sizeof( OafNativeIntegrationOutputV1 ), cpuIntegrated.data(),
+   UfwbppNativeIntegrationOutputV1 cpuOutput{
+      sizeof( UfwbppNativeIntegrationOutputV1 ), cpuIntegrated.data(),
       cpuAccepted.data(), cpuRejected.data(), cpuIntegrated.size()
    };
-   OafNativeIntegrationOutputV1 gpuOutput{
-      sizeof( OafNativeIntegrationOutputV1 ), gpuIntegrated.data(),
+   UfwbppNativeIntegrationOutputV1 gpuOutput{
+      sizeof( UfwbppNativeIntegrationOutputV1 ), gpuIntegrated.data(),
       gpuAccepted.data(), gpuRejected.data(), gpuIntegrated.size()
    };
-   Require( oaf_native_cpu_masked_weighted_v1(
+   Require( ufwbpp_native_cpu_masked_weighted_v1(
                &request, &cpuOutput, error.data(), error.size() )
-               == OAF_NATIVE_OK,
+               == UFWBPP_NATIVE_OK,
             error.data() );
-   OafNativeExecutionStatsV1 stats{};
+   UfwbppNativeExecutionStatsV1 stats{};
    stats.struct_size = sizeof( stats );
-   Require( oaf_native_metal_masked_weighted_v1(
+   Require( ufwbpp_native_metal_masked_weighted_v1(
                executor, &request, &gpuOutput, &stats,
-               error.data(), error.size() ) == OAF_NATIVE_OK,
+               error.data(), error.size() ) == UFWBPP_NATIVE_OK,
             error.data() );
    Require( cpuAccepted == gpuAccepted && cpuRejected == gpuRejected,
             "96-frame masked CPU/Metal rejection counts differ" );
@@ -251,7 +251,7 @@ void TestOpaqueMetalMaskedNinetySixFrames()
             "96-frame masked Metal numerical gate failed" );
    Require( stats.executed_on_gpu == 1 && stats.gpu_seconds >= 0,
             "96-frame masked C ABI did not report GPU execution" );
-   oaf_native_metal_executor_destroy_v1( executor );
+   ufwbpp_native_metal_executor_destroy_v1( executor );
 }
 
 } // namespace
@@ -265,7 +265,7 @@ int main()
       TestFiveHundredTwelveFramesAreNotTruncated();
       TestOpaqueMetalExecutor();
       TestOpaqueMetalMaskedNinetySixFrames();
-      std::cout << "OpenAstroFlow native C ABI tests passed\n";
+      std::cout << "Ultra-Fast WBPP native C ABI tests passed\n";
       return 0;
    }
    catch ( const std::exception& error )

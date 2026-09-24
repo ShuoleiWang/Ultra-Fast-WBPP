@@ -4,6 +4,14 @@ Support, compatibility, implementation, and optimization are separate claims. Th
 
 Before tagging a candidate, regenerate the source-test summary and platform evidence from that exact commit. Report optional hardware skips explicitly, retain private data outside Git, and publish only sanitized summaries. Until those checks are complete, the correct status is alpha; in particular, gradient-free output and general PixInsight/WBPP equivalence are not established.
 
+## Structure and naming cleanup (2026-09-24)
+
+| Check | Evidence | Status |
+|---|---|---|
+| Pixels unchanged by the cleanup | NGC 7331 reference project (61 Lights, L/R/G/B), M3 Pro, macOS 27, QC cache off, `run-project --workers 8`, each side with a Release native library built from its own sources: L/R/G/B master files byte-identical to the base commit `02109dd` (L `40ee1b8a5c03a31a`, R `a9479170348d9289`, G `a20bb3c110ad2738`, B `263149bc994caec9`); LRGB pixel data identical (`cae842af2d9e5b74`), header differs only in `OAFVERS` and the checksum cards; 62 admitted / 1 excluded on both; 90.8 s against 94.9 s | Passing |
+| Desktop capability probe | Rust unit tests map `doctor --json` to the capability panel (M3 Pro tuned, Apple generic, Windows x64, unsupported Windows ARM64, missing solver) and read the report from a fake engine | Passing |
+| Engine sidecar packaging | Python tests of the doctor self-report gate, manifest v3 and the bundled-runtime attestation with a fake frozen engine; no bundle was built and no Windows installer was attested for this change | Unit tests only |
+
 ## Blink-screening replay (NGC 6822, 2026-09-22)
 
 | Area | Evidence | Status |
@@ -33,7 +41,6 @@ The following rows describe previous receipts and are historical evidence. The i
 | Area | Evidence | Status |
 |---|---|---|
 | Light Quality Gate | 170 local unit/regression tests plus a separate 370-frame retained plan-only audit | Implemented; the real frames are private and are not in Git |
-| `prepare-wbpp` publication I/O | Deterministic fixture reduced full-content reads from 83,980,800 to 33,592,320 bytes | 60.0% reduction with unchanged create-only/hash gate; [receipt](../packages/light-frame-qc/benchmarks/results/prepare-apply-io-m3-pro-20260901.json) |
 | Complete Python suites | 548 passed and 3 explicit opt-in skips across Quality Gate, registration/scientific-engine, and release/packaging collections | Passing locally; skips require a real Metal device or managed Astrometry.net fixture and are not converted into support claims |
 | Rust control plane | 53 app-core and 29 desktop tests including runtime discovery/tamper, duplicate-run prevention, language-event stability, and exit-time process-group cleanup | Passing locally; hosted macOS/Windows/Linux-development jobs are configured but pending the first authorized public commit |
 | React GUI | 19 component/interaction tests plus a 1280×840 native macOS light-interface review | Native commands are wired to the real controller; browser mode remains a visibly labelled development-only preview |
@@ -52,7 +59,7 @@ The following rows describe previous receipts and are historical evidence. The i
 
 | Profile | Required evidence | Current evidence |
 |---|---|---|
-| `portable-cpu` | Python/Rust protocol and synthetic E2E on x86-64 Linux plus CPU differential gates | Hosted Linux jobs run on main and pull requests; see the exact commit workflow for current results |
+| `portable-cpu` | Python/Rust tests and synthetic E2E on x86-64 Linux plus CPU differential gates | Hosted Linux jobs run on main and pull requests; see the exact commit workflow for current results |
 | `generic-arm64-cpu` | Build and synthetic E2E on Apple Silicon; no Metal required | Local M3 Pro CPU path passing |
 | `generic-apple-metal` | Capability-driven dispatch and CPU differential on at least one M-series runner | Local M3 Pro passing |
 | `m3-pro-tuned` | Retained M3 Pro scientific and performance reports | Forced-Release 96-frame 6252×4176 kernel benchmark at 4.410 s median (4.372–5.397 s; 568.29 MP-frame/s), 96-frame production-adapter three-tile NaN/map differential, and the private 38-frame raw-to-solved Lanczos-3 validation with 25/25 independent reference checks |
@@ -65,7 +72,7 @@ The application may run a generic arm64/Metal path on an unbenchmarked M-series 
 | Area | Evidence (2026-09-21, AMD Ryzen 7 5800H 8C/16T, 16 GB, NVMe, Windows 11 Pro 25H2; hosted `windows-latest` CI) | Status |
 |---|---|---|
 | Native kernels | MSVC 14.44 `/W4 /WX /fp:strict`, static C runtime; the installed DLL imports `KERNEL32.dll` only; ctest and `test_native_kernels.py` value-identical to NumPy on the laptop and on CI | Passing |
-| Source extraction | Patched SEP `1.4.1+oaf.1` built from the pinned sdist; the determinism self-test and the run-to-run comparison of two real projects agree bit for bit; the PyPI build is refused by the same tests | Passing |
+| Source extraction | Patched SEP `1.4.1+ufwbpp.1` built from the pinned sdist; the determinism self-test and the run-to-run comparison of two real projects agree bit for bit; the PyPI build is refused by the same tests | Passing |
 | Python suite | Full engine, quality-gate, registration and repository test suites on the laptop and on Windows CI (Python 3.11/3.12), including the Windows-only file-lock, path-limit, environment-view and job-object tests | Passing |
 | Real project (CLI) | 61-frame NGC 7331 L/R/G/B project with supplied masters, ASTAP `2026.09.01` + D20 verified against the managed indexes 4107–4112: four solved masters and the LRGB product, run-to-run bit-identical (see the laptop numbers in [windows.md](windows.md)) | Passing |
 | Installed application | `scripts/windows/attest-installed-msi.ps1` on the laptop: silent MSI install (8 s), 260 PE images of the installed tree audited with 0 unresolved import edges, kernel DLL and desktop executable static-CRT, GUI-subsystem executable, 3.0 s worker handshake, doctor loading the kernels from the installed tree, clean uninstall (no files, no registry entry). The installed frozen worker then ran the 61-frame project under a minimal environment (no development tools on `PATH`): 285 s, every product bit-identical to the development runs | Passing |

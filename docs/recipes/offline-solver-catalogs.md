@@ -39,7 +39,7 @@ If you downloaded the checked files yourself and want Ultra-Fast WBPP to generat
 ultra-fast-wbpp catalog verify astrometry-net-4107-4112 --configure
 ```
 
-For compatibility with existing installations, the default managed directory remains `~/.openastroflow/catalogs/astrometry-net` on macOS/Linux and `%LOCALAPPDATA%\OpenAstroFlow\catalogs\astrometry-net` on Windows. The compatibility variable `OPENASTROFLOW_DATA_DIR` or `--catalog-dir` can select another location. The generated `astrometry.cfg` is discovered automatically; the compatibility variable `OPENASTROFLOW_ASTROMETRY_CONFIG` can select a specific config.
+The default managed directory is `~/.ultra-fast-wbpp/catalogs/astrometry-net` on macOS/Linux and `%LOCALAPPDATA%\Ultra-Fast-WBPP\catalogs\astrometry-net` on Windows. An installation made under the project's former name (`~/.openastroflow`, `%LOCALAPPDATA%\OpenAstroFlow`) is used in place while the new directory does not exist: the installed-set receipt and `astrometry.cfg` record their absolute location, so the data root is never moved. `UFWBPP_DATA_DIR` or `--catalog-dir` selects another location. The generated `astrometry.cfg` is discovered automatically; `UFWBPP_ASTROMETRY_CONFIG` selects a specific config.
 
 ## 3. Confirm runtime readiness
 
@@ -53,7 +53,7 @@ The first command re-hashes checked index files and validates the generated conf
 Alongside `astrometry.cfg`, installation creates an immutable `installed-set-<catalog>-<identity>.json`. It contains only relative index paths plus their sizes and SHA-256 values, the checked manifest digest, config digest, citation, and an `installedSetIdentity`. Engine integrations can bind a solver's `.match` index evidence to real local files without trusting `INDEXID` alone:
 
 ```python
-from openastroflow_engine.catalogs import installed_set_identity_for_solver_indexes
+from ufwbpp.catalogs import installed_set_identity_for_solver_indexes
 
 reference = installed_set_identity_for_solver_indexes(
     ["astrometry.net:index:4107:healpix:-1:hpnside:0"]
@@ -62,7 +62,7 @@ reference = installed_set_identity_for_solver_indexes(
 
 The strict Astrometry.net adapter now performs this binding automatically. Before starting `solve-field`, it verifies the selected generated config, every installed-set receipt, and every index byte/stat identity reachable from that config. After `.match` selects an `INDEXID`, it calls the binding API, requires one unambiguous concrete `index-<INDEXID>.fits`, and then re-hashes and re-stats the complete preflight snapshot before publication. The scientific receipt records `installedSetIdentity`, checked manifest SHA-256, and each selected index's relative name, size, and SHA-256; it never records the local absolute `receiptPath`.
 
-An unmanaged config/index directory can be used only by an explicitly diagnostic adapter instance. Its WCS and correspondence metrics may be inspected, but `catalogManaged=false` cannot satisfy a required final solve or app-core publication gate. Replacing an index with even a byte-identical new file during solving is treated as drift.
+An unmanaged config/index directory can be used only by an explicitly diagnostic adapter instance. Its WCS and correspondence metrics may be inspected, but `catalogManaged=false` cannot satisfy a required final solve or the desktop publication gate. Replacing an index with even a byte-identical new file during solving is treated as drift.
 
 ## 4. Removal is plan-only
 

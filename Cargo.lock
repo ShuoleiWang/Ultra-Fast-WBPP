@@ -2379,35 +2379,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "openastroflow-app-core"
-version = "0.1.0"
-dependencies = [
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "openastroflow-desktop"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "libc",
- "openastroflow-app-core",
- "serde",
- "serde_json",
- "sha2",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4121,6 +4092,22 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ultra-fast-wbpp-desktop"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
  "windows-sys 0.61.2",
 ]
 

@@ -9,7 +9,7 @@ identical input).  It also grows its object and pixel lists by one object per
 detection, which the Windows heap turns into quadratic copying.  The patch in
 ``packaging/patches/sep-1.4.1-zero-initialised-buffers.patch`` fixes both,
 zero-initialises the Lutz/deblending buffers, and stamps the build
-``1.4.1+oaf.1`` so ``sep.__version__`` identifies it.
+``1.4.1+ufwbpp.1`` so ``sep.__version__`` identifies it.
 
     python scripts/build_sep_wheel.py --check      # download, verify, apply, no build
     python scripts/build_sep_wheel.py              # ... and build the wheel
@@ -54,7 +54,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PATCH_PATH = REPO_ROOT / "packaging" / "patches" / "sep-1.4.1-zero-initialised-buffers.patch"
 
 SEP_VERSION = "1.4.1"
-PATCHED_VERSION = "1.4.1+oaf.1"
+PATCHED_VERSION = "1.4.1+ufwbpp.1"
 SDIST_FILENAME = "sep-1.4.1.tar.gz"
 SDIST_URL = (
     "https://files.pythonhosted.org/packages/a5/34/"
@@ -128,7 +128,7 @@ def download_sdist(destination: Path, *, url: str = SDIST_URL, timeout: float = 
             # A stale or partial file cannot be trusted; refetch it.
             destination.unlink()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    request = urllib.request.Request(url, headers={"User-Agent": "openastroflow-build-sep-wheel/1"})
+    request = urllib.request.Request(url, headers={"User-Agent": "ultra-fast-wbpp-build-sep-wheel/1"})
     handle, temporary_name = tempfile.mkstemp(prefix=".sep-sdist-", dir=str(destination.parent))
     temporary = Path(temporary_name)
     try:
@@ -518,7 +518,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     work_dir = arguments.work_dir.resolve()
     report: dict[str, Any] = {
         "schemaVersion": 1,
-        "kind": "openastroflow-patched-sep-build",
+        "kind": "ultra-fast-wbpp-patched-sep-build",
         "sdist": {"fileName": SDIST_FILENAME, "sha256": SDIST_SHA256, "sizeBytes": SDIST_SIZE, "url": SDIST_URL},
         "patch": {"path": PATCH_PATH.relative_to(REPO_ROOT).as_posix()},
         "upstreamVersion": SEP_VERSION,

@@ -10,7 +10,7 @@ positive summary labels need reevaluation with complete evidence.
 
 `master_tolerance_gate.py` compares baseline/candidate masters and per-metric
 status changes. It does not establish equivalence to a reference pipeline by
-itself. Old `benchmarks/` command paths remain compatibility launchers.
+itself.
 
 Reports and private images stay outside Git. Regression tests live in the
 repository `tests/test_master_evaluation.py` and `test_master_tolerance_gate.py`.

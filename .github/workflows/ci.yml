@@ -30,14 +30,14 @@ jobs:
           cache: pip
           cache-dependency-path: |
             packages/light-frame-qc/pyproject.toml
-            packages/openastroflow-registration/pyproject.toml
-            packages/openastroflow-engine/pyproject.toml
+            packages/registration/pyproject.toml
+            packages/engine/pyproject.toml
       - name: Install local packages
         run: >-
           python -m pip install
           -e "./packages/light-frame-qc[test]"
-          -e "./packages/openastroflow-registration[test]"
-          -e "./packages/openastroflow-engine[test,all]"
+          -e "./packages/registration[test]"
+          -e "./packages/engine[test,all]"
       - name: Replace the PyPI SEP wheel with the deterministic patched build (Windows)
         if: runner.os == 'Windows'
         # sep 1.4.1 from PyPI is non-deterministic on MSVC builds (rand_r shim,
@@ -58,30 +58,26 @@ jobs:
       - name: Require the native kernels to load on this runner
         shell: bash
         run: >-
-          python -c "import json, sys; from openastroflow_engine.native_kernels import describe_native_kernels;
+          python -c "import json, sys; from ufwbpp.native_kernels import describe_native_kernels;
           facts = describe_native_kernels(); print(json.dumps(facts, indent=2));
           sys.exit(0 if facts['loaded'] else 1)"
       - name: Test Quality Gate and engine (native kernels value-identical to NumPy)
         run: >-
           python -m pytest -q
           packages/light-frame-qc/tests
-          packages/openastroflow-registration/tests
-          packages/openastroflow-engine/tests
+          packages/registration/tests
+          packages/engine/tests
           tests
       - name: Enforce public-tree boundary
         shell: bash
         run: |
           python scripts/check_public_tree.py .
           python scripts/check_local_links.py .
-      - name: Smoke CLI and worker handshake
+      - name: Smoke the command line and its doctor self-report
         shell: bash
         run: |
           ultra-fast-wbpp --version
-          openastroflow-engine --version
-          ultra-fast-wbpp doctor --json | python -c "import json, sys; facts = json.load(sys.stdin); sys.exit(0 if facts['nativeKernels']['loaded'] and facts['hardware']['memorySource'] not in {'fallback', 'unavailable'} else 1)"
-          printf '%s\n' '{"protocolVersion":1,"sessionId":"ci-smoke","sequence":0,"sentAtUnixMs":0,"type":"handshake","payload":{"role":"controller","implementation":"ci-smoke","implementationVersion":"1","supportedProtocolVersions":[1]}}' \
-            | openastroflow-worker \
-            | python scripts/verify_worker_handshake.py --runner-os "${RUNNER_OS}" --runner-arch "${RUNNER_ARCH}"
+          ultra-fast-wbpp doctor --json | python -c "import json, sys; facts = json.load(sys.stdin); status = facts['status']; sys.exit(0 if facts['nativeKernels']['loaded'] and status['pixelExecutionReady'] and facts['hardware']['memorySource'] not in {'fallback', 'unavailable'} else 1)"
 
   rust:
     name: Rust · ${{ matrix.os }}
@@ -122,6 +118,8 @@ jobs:
           cache-dependency-path: apps/desktop/package-lock.json
       - run: npm ci
         working-directory: apps/desktop
+      - run: npm run format:check
+        working-directory: apps/desktop
       - run: npm test
         working-directory: apps/desktop
       - run: npm run build
@@ -137,7 +135,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Configure strict CPU baseline
-        run: cmake -S engine/native -B build/native -DOAF_BUILD_TESTS=ON -DOAF_ENABLE_METAL=OFF
+        run: cmake -S engine/native -B build/native -DUFWBPP_BUILD_TESTS=ON -DUFWBPP_ENABLE_METAL=OFF
       - name: Build
         run: cmake --build build/native --config Release --parallel
       - name: Test
@@ -151,7 +149,7 @@ jobs:
       - name: Assert Apple Silicon runner contract
         run: test "$(uname -m)" = "arm64"
       - name: Configure Apple arm64 CPU + Metal
-        run: cmake -S engine/native -B build/native-metal -DOAF_BUILD_TESTS=ON -DOAF_ENABLE_METAL=ON -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S engine/native -B build/native-metal -DUFWBPP_BUILD_TESTS=ON -DUFWBPP_ENABLE_METAL=ON -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build/native-metal --config Release --parallel
       - name: Run Metal differential when the hosted runner exposes a device

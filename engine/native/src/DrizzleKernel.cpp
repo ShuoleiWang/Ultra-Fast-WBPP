@@ -1,4 +1,4 @@
-#include "openastroflow/PortableKernels.h"
+#include "ufwbpp/PortableKernels.h"
 #include "ParallelRange.h"
 
 #include <algorithm>
@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace openastroflow::native
+namespace ufwbpp::native
 {
 
 namespace
@@ -496,4 +496,4 @@ void DrizzleBand( const DrizzleRequest& request )
       } );
 }
 
-} // namespace openastroflow::native
+} // namespace ufwbpp::native
