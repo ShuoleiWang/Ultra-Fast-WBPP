@@ -6,6 +6,7 @@ import math
 import re
 from typing import Any, Mapping
 
+from .calibration import COMBINATIONS, DEFAULT_COMBINATION
 from .calibration_policy import STRICT, WORKFLOWS
 from .selection.parameters import SelectionParameters
 
@@ -390,6 +391,76 @@ class DrizzleRecipe:
 
 
 @dataclass(frozen=True, slots=True)
+class ProperCoadditionRecipe:
+    """The optional ``properCoaddition`` block: ZOGY coaddition, default off.
+
+    Produces one additional linear product per filter; the ordinary
+    rejection/integration master stays the primary product and is untouched.
+    """
+
+    enabled: bool = False
+    outlier_handling: str = "reuse-rejection"
+    apodization_pixels: int = 64
+
+    @classmethod
+    def from_dict(cls, raw: Any) -> ProperCoadditionRecipe:
+        value = _mapping(raw, "properCoaddition")
+        _unknown(
+            value, {"enabled", "outlierHandling", "apodizationPixels"}, "properCoaddition"
+        )
+        enabled = value.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise RecipeError("properCoaddition.enabled must be boolean")
+        outlier_handling = value.get("outlierHandling", "reuse-rejection")
+        if outlier_handling not in {"reuse-rejection", "none"}:
+            raise RecipeError(
+                "properCoaddition.outlierHandling must be reuse-rejection or none"
+            )
+        apodization = value.get("apodizationPixels", 64)
+        if (
+            isinstance(apodization, bool)
+            or not isinstance(apodization, int)
+            or not 0 <= apodization <= 512
+        ):
+            raise RecipeError(
+                "properCoaddition.apodizationPixels must be an integer from 0 to 512"
+            )
+        return cls(
+            enabled=enabled,
+            outlier_handling=outlier_handling,
+            apodization_pixels=apodization,
+        )
+
+    def serializable(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "outlierHandling": self.outlier_handling,
+            "apodizationPixels": self.apodization_pixels,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class IntegrationRecipe:
+    """The optional ``integration`` block: today only the combination rule."""
+
+    combination: str = DEFAULT_COMBINATION
+
+    @classmethod
+    def from_dict(cls, raw: Any) -> IntegrationRecipe:
+        value = _mapping(raw, "integration")
+        _unknown(value, {"combination"}, "integration")
+        combination = value.get("combination", DEFAULT_COMBINATION)
+        if combination not in COMBINATIONS:
+            raise RecipeError(
+                "integration.combination must be one of: " + ", ".join(COMBINATIONS)
+            )
+        return cls(combination=combination)
+
+    def serializable(self) -> dict[str, Any]:
+        return {"combination": self.combination}
+
+
+@dataclass(frozen=True, slots=True)
 class LocalNormalizationRecipe:
     """Disabled legacy recipe field; the experimental pixel path was retired."""
 
@@ -446,6 +517,10 @@ class Recipe:
     selection: SelectionRecipe = field(default_factory=SelectionRecipe)
     solver: SolverRecipe = field(default_factory=SolverRecipe)
     drizzle: DrizzleRecipe = field(default_factory=DrizzleRecipe)
+    proper_coaddition: ProperCoadditionRecipe = field(
+        default_factory=ProperCoadditionRecipe
+    )
+    integration: IntegrationRecipe = field(default_factory=IntegrationRecipe)
     local_normalization: LocalNormalizationRecipe = field(
         default_factory=LocalNormalizationRecipe
     )
@@ -465,6 +540,8 @@ class Recipe:
                 "calibration",
                 "solver",
                 "drizzle",
+                "properCoaddition",
+                "integration",
                 "localNormalization",
                 "outputFormat",
                 "overwrite",
@@ -501,10 +578,21 @@ class Recipe:
         )
         if len({item.source_sha256 for item in raw_frame_overrides}) != len(raw_frame_overrides):
             raise RecipeError("rawFrameMetadataOverrides contains duplicate sourceSha256 values")
+        proper_coaddition = ProperCoadditionRecipe.from_dict(
+            value.get("properCoaddition")
+        )
+        if proper_coaddition.enabled and DrizzleRecipe.from_dict(value.get("drizzle")).enabled:
+            raise RecipeError(
+                "properCoaddition.enabled cannot be combined with drizzle.enabled: "
+                "the drizzled master lives on a finer grid, so the proper coadd "
+                "would have no same-grid solved master to inherit a verified WCS from"
+            )
         return cls(
             calibration=CalibrationRecipe.from_dict(value.get("calibration")),
             solver=SolverRecipe.from_dict(value.get("solver")),
             drizzle=DrizzleRecipe.from_dict(value.get("drizzle")),
+            proper_coaddition=proper_coaddition,
+            integration=IntegrationRecipe.from_dict(value.get("integration")),
             local_normalization=LocalNormalizationRecipe.from_dict(
                 value.get("localNormalization")
             ),
@@ -534,12 +622,28 @@ class Recipe:
             # Only an explicit selection block takes part in the recipe digest,
             # so recipes written before the block existed keep their digest.
             **({"selection": self.selection.serializable()} if self.selection.present else {}),
+            # Likewise the opt-in advanced algorithms: a recipe that does not
+            # ask for them serializes, and digests, exactly as before.
+            **(
+                {"properCoaddition": self.proper_coaddition.serializable()}
+                if self.proper_coaddition.enabled
+                else {}
+            ),
+            **(
+                {"integration": self.integration.serializable()}
+                if self.integration.combination != DEFAULT_COMBINATION
+                else {}
+            ),
         }
 
 
 __all__ = [
+    "COMBINATIONS",
+    "DEFAULT_COMBINATION",
     "CalibrationRecipe",
     "DrizzleRecipe",
+    "IntegrationRecipe",
+    "ProperCoadditionRecipe",
     "LocalNormalizationRecipe",
     "MasterMetadataOverrideRecipe",
     "Recipe",

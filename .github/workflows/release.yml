@@ -16,9 +16,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  versions:
+    name: Version fields agree
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Require one version in package.json, tauri.conf.json, Cargo.toml and the tag
+        # Fails in seconds on Linux, before any macOS or Windows runner starts.
+        # A tag may add a pre-release label (v0.1.0-alpha.2 releases 0.1.0):
+        # the Windows MSI accepts only numeric version components.
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+        run: |
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            python3 scripts/check_release_versions.py --tag "${RELEASE_TAG}"
+          else
+            python3 scripts/check_release_versions.py
+          fi
+
   bundle:
     name: Unsigned bundle · ${{ matrix.os }}
+    needs: versions
     runs-on: ${{ matrix.os }}
+    # A Windows bundle took 25 minutes on the hosted runner (2026-09-21).
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -102,6 +124,13 @@ jobs:
           --report build/native-release/native-build-report.json
           ${{ runner.os == 'Windows' && '--require-static-crt' || '' }}
 
+      - name: Install the desktop dependencies
+        # Before the tests: the Tauri config schema test validates
+        # tauri.conf.json against the installed CLI's schema (node_modules).
+        shell: bash
+        working-directory: apps/desktop
+        run: npm ci
+
       - name: Test source tree and release gates
         shell: bash
         run: |
@@ -144,7 +173,6 @@ jobs:
         env:
           CI: "true"
         run: |
-          npm ci
           npm test
           if [[ "${RUNNER_OS}" == "macOS" ]]; then
             npm run tauri:build:macos-prerelease
@@ -226,9 +254,17 @@ jobs:
         with:
           subject-path: build/release-artifacts/*
 
+      - name: Name the upload after the ref (safe for branch names with '/')
+        id: artifact
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          RUNNER_LABEL: ${{ matrix.os }}
+        run: echo "name=ultra-fast-wbpp-${RUNNER_LABEL}-${REF_NAME//[^A-Za-z0-9._-]/-}" >> "${GITHUB_OUTPUT}"
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: ultra-fast-wbpp-${{ matrix.os }}-${{ github.ref_name }}
+          name: ${{ steps.artifact.outputs.name }}
           path: build/release-artifacts/
           if-no-files-found: error
           retention-days: 14
@@ -238,6 +274,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: bundle
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:

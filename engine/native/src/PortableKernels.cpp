@@ -12,6 +12,11 @@
 #include <utility>
 #include <vector>
 
+#if defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_neon.h>
+#define UFWBPP_WARP_NEON 1
+#endif
+
 namespace ufwbpp::native
 {
 
@@ -44,6 +49,308 @@ void EvaluateLanczos3Weights( double fraction, float weights[6] )
 {
    detail::Lanczos3TableWeights( fraction, weights );
 }
+
+// The reference arithmetic of one warp output pixel: domain test, table
+// weights (cached while a fraction repeats), the 36 products summed in
+// row-major tap order in Float32, and the clamp to the support's range.
+struct WarpPixelContext
+{
+   const float* source;
+   std::int64_t width;
+   std::int64_t height;
+   double xLimit;
+   double yLimit;
+   float domainScale;
+   float xWeights[6] = {};
+   float yWeights[6] = {};
+   // Fractions lie in [0, 1); -1 never matches so the first pixel always
+   // evaluates its weights.
+   double lastXFraction = -1.0;
+   double lastYFraction = -1.0;
+
+   float Evaluate( double inputX, double inputY )
+   {
+      if ( !( std::isfinite( inputX ) && std::isfinite( inputY )
+           && inputX >= 2.0 && inputX <= xLimit
+           && inputY >= 2.0 && inputY <= yLimit ) )
+         return std::numeric_limits<float>::quiet_NaN();
+      const double xFloorValue = std::floor( inputX );
+      const double yFloorValue = std::floor( inputY );
+      const std::int64_t xFloor = static_cast<std::int64_t>( xFloorValue );
+      const std::int64_t yFloor = static_cast<std::int64_t>( yFloorValue );
+      const double xFraction = inputX - xFloorValue;
+      const double yFraction = inputY - yFloorValue;
+      if ( xFraction != lastXFraction )
+      {
+         EvaluateLanczos3Weights( xFraction, xWeights );
+         lastXFraction = xFraction;
+      }
+      if ( yFraction != lastYFraction )
+      {
+         EvaluateLanczos3Weights( yFraction, yWeights );
+         lastYFraction = yFraction;
+      }
+      float samples = 0.0F;
+      bool valid = true;
+      float supportMinimum = std::numeric_limits<float>::infinity();
+      float supportMaximum = -std::numeric_limits<float>::infinity();
+      for ( int j = 0; j < 6; ++j )
+      {
+         std::int64_t yIndex = yFloor + (j - 2);
+         if ( j == 5 )
+            yIndex = std::min<std::int64_t>( yIndex, height - 1 );
+         const float* sourceRow = source + static_cast<std::size_t>( yIndex*width );
+         const float yWeight = yWeights[j];
+         for ( int i = 0; i < 6; ++i )
+         {
+            std::int64_t xIndex = xFloor + (i - 2);
+            if ( i == 5 )
+               xIndex = std::min<std::int64_t>( xIndex, width - 1 );
+            const float combined = yWeight*xWeights[i];
+            const float neighbor = sourceRow[static_cast<std::size_t>( xIndex )];
+            const bool active = combined != 0.0F;
+            const bool finite = std::isfinite( neighbor );
+            if ( active && finite )
+            {
+               supportMinimum = std::min( supportMinimum, neighbor );
+               supportMaximum = std::max( supportMaximum, neighbor );
+               const float product = neighbor*combined;
+               samples = samples + product;
+            }
+            else
+            {
+               if ( active )
+                  valid = false;
+               samples = samples + 0.0F;
+            }
+         }
+      }
+      if ( !valid )
+         return std::numeric_limits<float>::quiet_NaN();
+      const float lower = std::min( supportMinimum, 0.0F );
+      const float upper = std::max( supportMaximum, domainScale );
+      return std::min( std::max( samples, lower ), upper );
+   }
+};
+
+#if UFWBPP_WARP_NEON
+// Output pixels the NEON warp evaluates side by side, one per Float32 lane.
+constexpr std::size_t WarpLanes = 4;
+
+// detail::Lanczos3TableWeights for four fractions, lanes (0,1) and (2,3) in
+// two Float64x2 vectors: every lane performs the scalar operations in the
+// scalar order (x/2 as the exact x*0.5), so each lane's weights are the
+// scalar weights bit for bit.  weights[tap] holds the tap's four lanes.
+inline void Lanczos3WeightsNeon( const double* fraction, float32x4_t weights[6] )
+{
+   const double* table = detail::Lanczos3TableNodeValues();
+   const float64x2_t zero = vdupq_n_f64( 0.0 );
+   const float64x2_t one = vdupq_n_f64( 1.0 );
+   const float64x2_t two = vdupq_n_f64( 2.0 );
+   const float64x2_t six = vdupq_n_f64( 6.0 );
+   float64x2_t quotients[2][6];
+   for ( int pair = 0; pair < 2; ++pair )
+   {
+      const float64x2_t u = vmulq_n_f64( vld1q_f64( fraction + 2*pair ),
+                                         static_cast<double>( detail::Lanczos3TableIntervals ) );
+      const float64x2_t floorU = vrndmq_f64( u );
+      const float64x2_t t = vsubq_f64( u, floorU );
+      const float64x2_t a = vaddq_f64( t, one );
+      const float64x2_t b = vsubq_f64( t, one );
+      const float64x2_t c = vsubq_f64( t, two );
+      const float64x2_t at = vmulq_f64( a, t );
+      const float64x2_t b0 = vdivq_f64( vnegq_f64( vmulq_f64( vmulq_f64( t, b ), c ) ), six );
+      const float64x2_t b1 = vmulq_n_f64( vmulq_f64( vmulq_f64( a, b ), c ), 0.5 );
+      const float64x2_t b2 = vmulq_n_f64( vnegq_f64( vmulq_f64( at, c ) ), 0.5 );
+      const float64x2_t b3 = vdivq_f64( vmulq_f64( at, b ), six );
+      const double* rows0 = table + static_cast<std::size_t>( vgetq_lane_f64( floorU, 0 ) )*6;
+      const double* rows1 = table + static_cast<std::size_t>( vgetq_lane_f64( floorU, 1 ) )*6;
+      float64x2_t values[6];
+      for ( int taps = 0; taps < 6; taps += 2 )
+      {
+         float64x2_t even[4], odd[4];
+         for ( int node = 0; node < 4; ++node )
+         {
+            const float64x2_t lane0 = vld1q_f64( rows0 + 6*node + taps );
+            const float64x2_t lane1 = vld1q_f64( rows1 + 6*node + taps );
+            even[node] = vzip1q_f64( lane0, lane1 );
+            odd[node] = vzip2q_f64( lane0, lane1 );
+         }
+         // ((b0*p0 + b1*p1) + b2*p2) + b3*p3, as the scalar reference.
+         float64x2_t value = vaddq_f64( vmulq_f64( b0, even[0] ), vmulq_f64( b1, even[1] ) );
+         value = vaddq_f64( value, vmulq_f64( b2, even[2] ) );
+         values[taps] = vaddq_f64( value, vmulq_f64( b3, even[3] ) );
+         value = vaddq_f64( vmulq_f64( b0, odd[0] ), vmulq_f64( b1, odd[1] ) );
+         value = vaddq_f64( value, vmulq_f64( b2, odd[2] ) );
+         values[taps + 1] = vaddq_f64( value, vmulq_f64( b3, odd[3] ) );
+      }
+      float64x2_t total = zero;
+      for ( int tap = 0; tap < 6; ++tap )
+         total = vaddq_f64( total, values[tap] );
+      for ( int tap = 0; tap < 6; ++tap )
+         quotients[pair][tap] = vdivq_f64( values[tap], total );
+   }
+   for ( int tap = 0; tap < 6; ++tap )
+      weights[tap] = vcvt_high_f32_f64( vcvt_f32_f64( quotients[0][tap] ), quotients[1][tap] );
+}
+
+inline bool AllLanes( uint32x4_t mask )
+{
+   return vminvq_u32( mask ) != 0;
+}
+
+// WarpLanes interior output pixels (6x6 windows inside the source, no edge
+// clamp applies): their window origins and table weights.
+struct WarpGroupNeon
+{
+   const float* origin[WarpLanes];
+   // Four horizontally adjacent windows on one source row: each tap's four
+   // samples are one vector load.
+   bool contiguous = false;
+   float32x4_t xWeights[6];
+   float32x4_t yWeights[6];
+
+   void Prepare( const float* source, std::int64_t width, const std::int64_t* xFloor,
+                 const std::int64_t* yFloor, const double* xFraction, const double* yFraction )
+   {
+      Lanczos3WeightsNeon( xFraction, xWeights );
+      Lanczos3WeightsNeon( yFraction, yWeights );
+      contiguous = yFloor[1] == yFloor[0] && yFloor[2] == yFloor[0] && yFloor[3] == yFloor[0]
+                && xFloor[1] == xFloor[0] + 1 && xFloor[2] == xFloor[0] + 2
+                && xFloor[3] == xFloor[0] + 3;
+      for ( std::size_t lane = 0; lane < WarpLanes; ++lane )
+         origin[lane] = source + static_cast<std::size_t>( (yFloor[lane] - 2)*width + (xFloor[lane] - 2) );
+   }
+
+   float32x4_t Neighbors( std::size_t offset ) const
+   {
+      if ( contiguous )
+         return vld1q_f32( origin[0] + offset );
+      float32x4_t value = vld1q_dup_f32( origin[0] + offset );
+      value = vld1q_lane_f32( origin[1] + offset, value, 1 );
+      value = vld1q_lane_f32( origin[2] + offset, value, 2 );
+      return vld1q_lane_f32( origin[3] + offset, value, 3 );
+   }
+
+   // Weights of at least 2^-60 make every combined weight a normal nonzero
+   // Float32, so every tap is active.
+   bool AllActive() const
+   {
+      float32x4_t smallest = vabsq_f32( xWeights[0] );
+      for ( int tap = 0; tap < 6; ++tap )
+         smallest = vminq_f32( vminq_f32( smallest, vabsq_f32( xWeights[tap] ) ),
+                               vabsq_f32( yWeights[tap] ) );
+      return AllLanes( vcgeq_f32( smallest, vdupq_n_f32( 0x1p-60F ) ) );
+   }
+};
+
+// The reference clamp: lower = std::min(minimum, 0), upper =
+// std::max(maximum, scale), value = std::min(std::max(samples, lower),
+// upper); invalid lanes are NaN.
+inline void StoreWarpLanesNeon( float32x4_t samples, float32x4_t supportMinimum,
+                                float32x4_t supportMaximum, uint32x4_t invalid,
+                                float domainScale, float* output )
+{
+   const float32x4_t zero = vdupq_n_f32( 0.0F );
+   const float32x4_t scale = vdupq_n_f32( domainScale );
+   const float32x4_t lower = vbslq_f32( vcltq_f32( zero, supportMinimum ), zero, supportMinimum );
+   const float32x4_t upper = vbslq_f32( vcltq_f32( supportMaximum, scale ), scale, supportMaximum );
+   float32x4_t value = vbslq_f32( vcltq_f32( samples, lower ), lower, samples );
+   value = vbslq_f32( vcltq_f32( upper, value ), upper, value );
+   value = vbslq_f32( invalid, vdupq_n_f32( std::numeric_limits<float>::quiet_NaN() ), value );
+   vst1q_f32( output, value );
+}
+
+// WarpPixelContext::Evaluate for one group: lane p runs pixel p's scalar
+// operations in the scalar order -- the same products, the same Float32
+// running sum (+0 for skipped taps), the support bounds as the reference's
+// std::min/std::max selects and the same clamp -- so every output is the
+// scalar output bit for bit.
+inline void WarpExactNeon( const WarpGroupNeon& group, std::int64_t width, float domainScale,
+                           float* output )
+{
+   const float32x4_t zero = vdupq_n_f32( 0.0F );
+   const float32x4_t largest = vdupq_n_f32( std::numeric_limits<float>::max() );
+   const uint32x4_t magnitude = vdupq_n_u32( 0x7fffffffU );
+   float32x4_t samples = zero;
+   float32x4_t supportMinimum = vdupq_n_f32( std::numeric_limits<float>::infinity() );
+   float32x4_t supportMaximum = vdupq_n_f32( -std::numeric_limits<float>::infinity() );
+   uint32x4_t invalid = vdupq_n_u32( 0 );
+   for ( int j = 0; j < 6; ++j )
+      for ( int i = 0; i < 6; ++i )
+      {
+         const float32x4_t combined = vmulq_f32( group.yWeights[j], group.xWeights[i] );
+         const float32x4_t neighbor = group.Neighbors( static_cast<std::size_t>( j*width + i ) );
+         const uint32x4_t active = vtstq_u32( vreinterpretq_u32_f32( combined ), magnitude );
+         const uint32x4_t finite = vcaleq_f32( neighbor, largest );
+         const uint32x4_t taken = vandq_u32( active, finite );
+         supportMinimum = vbslq_f32( vandq_u32( taken, vcltq_f32( neighbor, supportMinimum ) ),
+                                     neighbor, supportMinimum );
+         supportMaximum = vbslq_f32( vandq_u32( taken, vcltq_f32( supportMaximum, neighbor ) ),
+                                     neighbor, supportMaximum );
+         samples = vaddq_f32( samples, vbslq_f32( taken, vmulq_f32( neighbor, combined ), zero ) );
+         invalid = vorrq_u32( invalid, vbicq_u32( active, finite ) );
+      }
+   StoreWarpLanesNeon( samples, supportMinimum, supportMaximum, invalid, domainScale, output );
+}
+
+// The common case of WarpExactNeon for Groups groups at once (independent
+// dependency chains side by side), with the same result: when every tap is
+// active, a non-finite sample makes the running sum non-finite, so a finite
+// sum proves every tap was taken; the sum is then the reference sum, and
+// vminq/vmaxq give the reference bounds whenever the bounds are not zeros
+// (a zero bound could be +0 or -0 depending on which came first, which only
+// the select chain reproduces).  A group without that proof reruns the
+// exact route.  Every group must be AllActive().
+template <std::size_t Groups>
+inline void WarpCommonNeon( const WarpGroupNeon* groups, std::int64_t width, float domainScale,
+                            float* output )
+{
+   float32x4_t samples[Groups];
+   float32x4_t supportMinimum[Groups];
+   float32x4_t supportMaximum[Groups];
+   for ( std::size_t g = 0; g < Groups; ++g )
+   {
+      samples[g] = vdupq_n_f32( 0.0F );
+      supportMinimum[g] = vdupq_n_f32( std::numeric_limits<float>::infinity() );
+      supportMaximum[g] = vdupq_n_f32( -std::numeric_limits<float>::infinity() );
+   }
+   for ( int j = 0; j < 6; ++j )
+      for ( int i = 0; i < 6; ++i )
+      {
+         const std::size_t offset = static_cast<std::size_t>( j*width + i );
+         for ( std::size_t g = 0; g < Groups; ++g )
+         {
+            const float32x4_t combined = vmulq_f32( groups[g].yWeights[j], groups[g].xWeights[i] );
+            const float32x4_t neighbor = groups[g].Neighbors( offset );
+            samples[g] = vaddq_f32( samples[g], vmulq_f32( neighbor, combined ) );
+            supportMinimum[g] = vminq_f32( supportMinimum[g], neighbor );
+            supportMaximum[g] = vmaxq_f32( supportMaximum[g], neighbor );
+         }
+      }
+   const float32x4_t largest = vdupq_n_f32( std::numeric_limits<float>::max() );
+   const uint32x4_t magnitude = vdupq_n_u32( 0x7fffffffU );
+   for ( std::size_t g = 0; g < Groups; ++g )
+   {
+      const uint32x4_t certain = vandq_u32(
+         vcaleq_f32( samples[g], largest ),
+         vandq_u32( vtstq_u32( vreinterpretq_u32_f32( supportMinimum[g] ), magnitude ),
+                    vtstq_u32( vreinterpretq_u32_f32( supportMaximum[g] ), magnitude ) ) );
+      float* groupOutput = output + g*WarpLanes;
+      if ( AllLanes( certain ) )
+         StoreWarpLanesNeon( samples[g], supportMinimum[g], supportMaximum[g], vdupq_n_u32( 0 ),
+                             domainScale, groupOutput );
+      else
+         WarpExactNeon( groups[g], width, domainScale, groupOutput );
+   }
+}
+
+// Output pixels a row chunk prepares before any of them is warped: the
+// geometry, then the weights, then the taps of the whole chunk run as three
+// passes of independent iterations, which the core overlaps far better than
+// one long per-pixel dependency chain.
+constexpr std::size_t WarpChunkGroups = 32;
+#endif
 
 // np.nanmedian over the finite values of one pixel: the middle sorted value
 // for an odd count, Float32(low + high)/2 for an even count.
@@ -197,18 +504,13 @@ void WarpLanczos3Clamped( const WarpLanczos3Request& request,
    const float* source = request.source.data();
    const float domainScale = request.domainScale;
    const std::size_t outputWidth = request.outputWidth;
-   const float nan = std::numeric_limits<float>::quiet_NaN();
    float* output = destination.data();
 
    ParallelRange( request.rowCount, request.threads, WarpRowGrain,
       [&]( std::size_t rowBegin, std::size_t rowEnd )
       {
-         float xWeights[6] = {};
-         float yWeights[6] = {};
-         // Fractions lie in [0, 1); -1 never matches so the first pixel
-         // always evaluates its weights.
-         double lastXFraction = -1.0;
-         double lastYFraction = -1.0;
+         WarpPixelContext pixel{ source, static_cast<std::int64_t>( width ),
+                                 static_cast<std::int64_t>( height ), xLimit, yLimit, domainScale };
          for ( std::size_t localRow = rowBegin; localRow < rowEnd; ++localRow )
          {
             const double outputY = static_cast<double>(
@@ -217,13 +519,13 @@ void WarpLanczos3Clamped( const WarpLanczos3Request& request,
             const double yRowTerm = inverse.m11*outputY;
             const double wRowTerm = inverse.m21*outputY;
             float* row = output + localRow*outputWidth;
-            for ( std::size_t column = 0; column < outputWidth; ++column )
+            const auto inputCoordinate = [&]( std::size_t column, double& inputX, double& inputY )
             {
                const double outputX = static_cast<double>( column );
-               double inputX = inverse.m00*outputX;
+               inputX = inverse.m00*outputX;
                inputX = inputX + xRowTerm;
                inputX = inputX + inverse.m02;
-               double inputY = inverse.m10*outputX;
+               inputY = inverse.m10*outputX;
                inputY = inputY + yRowTerm;
                inputY = inputY + inverse.m12;
                if ( projective )
@@ -234,76 +536,84 @@ void WarpLanczos3Clamped( const WarpLanczos3Request& request,
                   inputX = inputX/w;
                   inputY = inputY/w;
                }
-               if ( !( std::isfinite( inputX ) && std::isfinite( inputY )
-                    && inputX >= 2.0 && inputX <= xLimit
-                    && inputY >= 2.0 && inputY <= yLimit ) )
+            };
+            std::size_t column = 0;
+#if UFWBPP_WARP_NEON
+            // Groups of WarpLanes pixels whose windows need no edge clamp run
+            // in the NEON lanes; any other pixel runs the scalar reference.
+            const auto scalar = [&]( std::size_t first, std::size_t count )
+            {
+               for ( std::size_t lane = 0; lane < count; ++lane )
                {
-                  row[column] = nan;
-                  continue;
+                  double x, y;
+                  inputCoordinate( first + lane, x, y );
+                  row[first + lane] = pixel.Evaluate( x, y );
                }
-               const double xFloorValue = std::floor( inputX );
-               const double yFloorValue = std::floor( inputY );
-               const std::int64_t xFloor =
-                  static_cast<std::int64_t>( xFloorValue );
-               const std::int64_t yFloor =
-                  static_cast<std::int64_t>( yFloorValue );
-               const double xFraction = inputX - xFloorValue;
-               const double yFraction = inputY - yFloorValue;
-               if ( xFraction != lastXFraction )
+            };
+            WarpGroupNeon groups[WarpChunkGroups];
+            bool interior[WarpChunkGroups];
+            while ( column + WarpLanes <= outputWidth )
+            {
+               const std::size_t chunk = std::min( WarpChunkGroups, (outputWidth - column)/WarpLanes );
+               // Geometry and weights of every group of the chunk.
+               for ( std::size_t g = 0; g < chunk; ++g )
                {
-                  EvaluateLanczos3Weights( xFraction, xWeights );
-                  lastXFraction = xFraction;
-               }
-               if ( yFraction != lastYFraction )
-               {
-                  EvaluateLanczos3Weights( yFraction, yWeights );
-                  lastYFraction = yFraction;
-               }
-               float samples = 0.0F;
-               bool valid = true;
-               float supportMinimum = std::numeric_limits<float>::infinity();
-               float supportMaximum = -std::numeric_limits<float>::infinity();
-               for ( int j = 0; j < 6; ++j )
-               {
-                  std::int64_t yIndex = yFloor + (j - 2);
-                  if ( j == 5 )
-                     yIndex = std::min<std::int64_t>( yIndex, height - 1 );
-                  const float* sourceRow =
-                     source + static_cast<std::size_t>( yIndex )*width;
-                  const float yWeight = yWeights[j];
-                  for ( int i = 0; i < 6; ++i )
+                  std::int64_t xFloor[WarpLanes], yFloor[WarpLanes];
+                  double xFraction[WarpLanes], yFraction[WarpLanes];
+                  bool inside = true;
+                  for ( std::size_t lane = 0; lane < WarpLanes && inside; ++lane )
                   {
-                     std::int64_t xIndex = xFloor + (i - 2);
-                     if ( i == 5 )
-                        xIndex = std::min<std::int64_t>( xIndex, width - 1 );
-                     const float combined = yWeight*xWeights[i];
-                     const float neighbor =
-                        sourceRow[static_cast<std::size_t>( xIndex )];
-                     const bool active = combined != 0.0F;
-                     const bool finite = std::isfinite( neighbor );
-                     if ( active && finite )
-                     {
-                        supportMinimum = std::min( supportMinimum, neighbor );
-                        supportMaximum = std::max( supportMaximum, neighbor );
-                        const float product = neighbor*combined;
-                        samples = samples + product;
-                     }
-                     else
-                     {
-                        if ( active )
-                           valid = false;
-                        samples = samples + 0.0F;
-                     }
+                     double inputX, inputY;
+                     inputCoordinate( column + g*WarpLanes + lane, inputX, inputY );
+                     inside = std::isfinite( inputX ) && std::isfinite( inputY )
+                           && inputX >= 2.0 && inputX <= xLimit
+                           && inputY >= 2.0 && inputY <= yLimit;
+                     if ( !inside )
+                        break;
+                     const double xFloorValue = std::floor( inputX );
+                     const double yFloorValue = std::floor( inputY );
+                     xFloor[lane] = static_cast<std::int64_t>( xFloorValue );
+                     yFloor[lane] = static_cast<std::int64_t>( yFloorValue );
+                     xFraction[lane] = inputX - xFloorValue;
+                     yFraction[lane] = inputY - yFloorValue;
+                     inside = xFloor[lane] + 3 <= static_cast<std::int64_t>( width ) - 1
+                           && yFloor[lane] + 3 <= static_cast<std::int64_t>( height ) - 1;
                   }
+                  interior[g] = inside;
+                  if ( inside )
+                     groups[g].Prepare( source, width, xFloor, yFloor, xFraction, yFraction );
                }
-               if ( !valid )
+               // Taps: pairs of common groups side by side.
+               for ( std::size_t g = 0; g < chunk; )
                {
-                  row[column] = nan;
-                  continue;
+                  float* groupOutput = row + column + g*WarpLanes;
+                  if ( !interior[g] )
+                  {
+                     scalar( column + g*WarpLanes, WarpLanes );
+                     ++g;
+                     continue;
+                  }
+                  const bool common = groups[g].AllActive();
+                  if ( common && g + 1 < chunk && interior[g + 1] && groups[g + 1].AllActive() )
+                  {
+                     WarpCommonNeon<2>( groups + g, width, domainScale, groupOutput );
+                     g += 2;
+                     continue;
+                  }
+                  if ( common )
+                     WarpCommonNeon<1>( groups + g, width, domainScale, groupOutput );
+                  else
+                     WarpExactNeon( groups[g], width, domainScale, groupOutput );
+                  ++g;
                }
-               const float lower = std::min( supportMinimum, 0.0F );
-               const float upper = std::max( supportMaximum, domainScale );
-               row[column] = std::min( std::max( samples, lower ), upper );
+               column += chunk*WarpLanes;
+            }
+#endif
+            for ( ; column < outputWidth; ++column )
+            {
+               double x, y;
+               inputCoordinate( column, x, y );
+               row[column] = pixel.Evaluate( x, y );
             }
          }
       } );

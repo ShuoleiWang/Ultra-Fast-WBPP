@@ -45,6 +45,18 @@ def test_ci_windows_python_job_tests_against_the_patched_sep_and_static_crt_kern
     assert _index(steps, "scripts/build_sep_wheel.py --install") < native < tests
     assert _index(steps, "pip check") > _index(steps, "scripts/build_sep_wheel.py --install")
 
+    # CI may reuse a cached wheel (the script re-runs every gate and skips only
+    # the compile); the cache is keyed on the script, the patch and the
+    # interpreter, restored before the build and written from main only.
+    assert "--reuse-wheel" in sep_step["run"]
+    restore = next(i for i, step in enumerate(steps) if str(step.get("uses", "")).startswith("actions/cache/restore@"))
+    save = next(i for i, step in enumerate(steps) if str(step.get("uses", "")).startswith("actions/cache/save@"))
+    assert restore < _index(steps, "scripts/build_sep_wheel.py --install") < save < tests
+    key = steps[restore]["with"]["key"]
+    assert "hashFiles('scripts/build_sep_wheel.py', 'packaging/patches/**')" in key
+    assert "steps.setup-python.outputs.python-version" in key
+    assert "github.ref == 'refs/heads/main'" in steps[save]["if"]
+
     rust = _steps(CI_WORKFLOW, "rust")
     assert "cargo test --workspace --locked" in rust[_index(rust, "cargo test --workspace")]["run"]
 
@@ -54,6 +66,8 @@ def test_release_windows_job_attests_the_installed_msi_before_collecting_install
 
     sep = _index(steps, "scripts/build_sep_wheel.py --install")
     assert steps[sep]["if"] == "runner.os == 'Windows'"
+    # The shipped wheel is always compiled from the verified source.
+    assert "--reuse-wheel" not in steps[sep]["run"]
     native = _index(steps, "scripts/build_native_runtime.py")
     assert "runner.os == 'Windows' && '--require-static-crt'" in steps[native]["run"]
     freeze = _index(steps, "scripts/build_engine_sidecar.py")

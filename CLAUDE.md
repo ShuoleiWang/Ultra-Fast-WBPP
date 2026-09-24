@@ -40,6 +40,7 @@ make desktop-dev | make demo | CARGO_PROFILE_RELEASE_STRIP=none make desktop-bui
 - QC measurements can fail silently: check provenance fields (`fwhmSource`, error keys) on real frames.
 - QC grids live in the QC reference frame, registered pixels in the pipeline reference frame; meridian flips are 180° apart — transform spatial QC products.
 - Windows needs the patched deterministic SEP build; unpatched runs differ (`SEP_NONDETERMINISTIC`).
+- Hosted CI has no Metal device: the CPU↔Metal differential is skipped there, so verify Metal changes with `make native-test` on Apple Silicon. Pull requests run only the CI jobs their paths select (`scripts/ci_changed_areas.py`).
 - Spawn-pool scripts need `if __name__ == "__main__":`; quote zsh globs; absolute paths in parallel shells; `./node_modules/.bin/tsc` inside `apps/desktop`.
 
 ## Where to look

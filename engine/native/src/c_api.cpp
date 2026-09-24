@@ -1139,6 +1139,42 @@ extern "C" int ufwbpp_native_cpu_debayer_bilinear_v1(
       "unknown native debayer failure" );
 }
 
+extern "C" int ufwbpp_native_cpu_add_offset_grid_v1(
+   const UfwbppNativeOffsetGridRequestV1* request,
+   char* error_message,
+   size_t error_message_capacity )
+{
+   if ( request == nullptr )
+   {
+      CopyError( error_message, error_message_capacity, "request is required" );
+      return UFWBPP_NATIVE_INVALID_ARGUMENT;
+   }
+   if ( request->struct_size != sizeof( UfwbppNativeOffsetGridRequestV1 )
+     || request->values == nullptr || request->rows == nullptr || request->grid == nullptr
+     || request->x_nodes == nullptr || request->y_nodes == nullptr )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "offset grid C ABI structure version or input buffer is invalid" );
+      return UFWBPP_NATIVE_INVALID_ARGUMENT;
+   }
+   return GuardedKernelCall(
+      [&]()
+      {
+         using namespace ufwbpp::native;
+         OffsetGridRequest native;
+         native.values = std::span<float>( request->values, request->value_count );
+         native.width = request->width;
+         native.rows = std::span<const std::int64_t>( request->rows, request->row_count );
+         native.grid = std::span<const double>( request->grid, request->grid_count );
+         native.xNodes = std::span<const double>( request->x_nodes, request->x_node_count );
+         native.yNodes = std::span<const double>( request->y_nodes, request->y_node_count );
+         native.threads = request->threads;
+         AddOffsetGrid( native );
+      },
+      error_message, error_message_capacity,
+      "unknown native offset grid failure" );
+}
+
 extern "C" uint32_t ufwbpp_native_default_kernel_threads_v1(void)
 {
    return ufwbpp::native::DefaultKernelThreads();

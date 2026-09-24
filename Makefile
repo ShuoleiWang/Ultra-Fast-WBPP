@@ -78,7 +78,11 @@ native-release-install: native-release-test
 	$(CMAKE) --install $(NATIVE_RELEASE_BUILD) --config Release \
 		--prefix $(NATIVE_INSTALL_PREFIX)
 
-$(MACOS14_BOTTLE_ROOT): packaging/engine/macos14-runtime-libraries-v1.json scripts/fetch_macos14_runtime_libraries.py scripts/build_engine_sidecar.py
+# The bottles are fully determined by the pinned policy, and the sidecar build
+# verifies every pinned byte of an existing copy, so only a policy change
+# refetches (into a fresh root: the fetch is create-only). Editing the scripts
+# must not, or an existing root makes the create-only fetch fail.
+$(MACOS14_BOTTLE_ROOT): packaging/engine/macos14-runtime-libraries-v1.json
 	$(CMAKE) -E make_directory $(dir $(MACOS14_BOTTLE_ROOT))
 	$(PYTHON) scripts/fetch_macos14_runtime_libraries.py \
 		--output $(MACOS14_BOTTLE_ROOT)

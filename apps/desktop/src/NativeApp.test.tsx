@@ -510,6 +510,64 @@ describe("native product workflow", () => {
     expect(native.startRun.mock.calls[0][0].recipe).not.toHaveProperty("localNormalizationEnabled");
   });
 
+  it("sends today's recipe unchanged while the advanced algorithms stay untouched", async () => {
+    render(<App />);
+    await reachRecipe();
+    await userEvent.click(screen.getByText("高级选项与 solver 设置"));
+    expect(screen.getByRole("checkbox", { name: /Proper coaddition/ })).not.toBeChecked();
+    // The engine's IRLS combination measured worse than the default and is not offered.
+    expect(screen.queryByRole("combobox", { name: "稳健合成方式" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
+    await userEvent.click(screen.getByRole("button", { name: /开始处理/ }));
+    const recipe = native.startRun.mock.calls[0][0].recipe;
+    // The opt-in algorithms must not add a single key to a default run.
+    expect(Object.keys(recipe).sort()).toEqual([
+      "balanced",
+      "calibrationWorkflow",
+      "drizzleDropShrink",
+      "drizzleEnabled",
+      "drizzleKernel",
+      "drizzleScale",
+      "solverRequired",
+    ]);
+  });
+
+  it("adds only the proper-coaddition block when that extra product is opted into", async () => {
+    render(<App />);
+    await reachRecipe();
+    await userEvent.click(screen.getByText("高级选项与 solver 设置"));
+    const properCoaddition = screen.getByRole("checkbox", { name: /Proper coaddition/ });
+    // The extra product is not listed with the project's masters, so the hint
+    // says where it is written.
+    expect(properCoaddition.closest("label")).toHaveTextContent("details/runs/");
+    await userEvent.click(properCoaddition);
+    await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
+    await userEvent.click(screen.getByRole("button", { name: /开始处理/ }));
+    const recipe = native.startRun.mock.calls[0][0].recipe;
+    expect(recipe.properCoaddition).toEqual({
+      enabled: true,
+      outlierHandling: "reuse-rejection",
+      apodizationPixels: 64,
+    });
+    expect(recipe).not.toHaveProperty("integration");
+  });
+
+  it("never sends proper coaddition together with drizzle, which the engine refuses", async () => {
+    render(<App />);
+    await reachRecipe();
+    await userEvent.click(screen.getByText("高级选项与 solver 设置"));
+    await userEvent.click(screen.getByRole("checkbox", { name: /Proper coaddition/ }));
+    await userEvent.click(screen.getByRole("checkbox", { name: /^Drizzle/ }));
+    const properCoaddition = screen.getByRole("checkbox", { name: /Proper coaddition/ });
+    expect(properCoaddition).toBeDisabled();
+    expect(properCoaddition).not.toBeChecked();
+    await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
+    await userEvent.click(screen.getByRole("button", { name: /开始处理/ }));
+    const recipe = native.startRun.mock.calls[0][0].recipe;
+    expect(recipe.drizzleEnabled).toBe(true);
+    expect(recipe).not.toHaveProperty("properCoaddition");
+  });
+
   it("reopens completed screening without rerunning, retains it for calibration additions, and invalidates reimported Lights", async () => {
     native.qualityDisposition = "REVIEW";
     render(<App />);

@@ -190,6 +190,17 @@ in flight follows the registration memory budget; each warp receives the
 remaining CPU share. Sources are read in place; the E2E path keeps one inventory
 hash and one final publication hash per original.
 
+Output groups integrate two at a time when the tuning row has at least twelve
+CPU workers and the CPU integration runs (an explicit Metal request keeps one
+group at a time). The groups start largest first, every group's
+global-normalization fit is started ahead in that order, each group records
+its artifacts in its own ledger, which the run ledger takes in group order,
+and the selection counterfactual's observers are created in group order before
+any group starts, so masters and receipts do not depend on the schedule.
+Band heights do not change a master either (rejection pools along rows only
+and the transient model is tile-independent), so a group's memory budget only
+changes how many rows it reads at once.
+
 The Metal path accelerates only the weighted integration kernel while CPU code
 prepares tiles, masks and statistics, so `auto` ordinary integration now selects
 the native CPU kernels whenever they are loaded: the measured M-series cost is

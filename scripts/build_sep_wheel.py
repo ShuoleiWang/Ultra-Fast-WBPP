@@ -27,6 +27,13 @@ kernels already require.  ``--install`` reinstalls the wheel with
 ``sep.__version__`` and the distribution metadata report the patched version
 and that repeated deblending extractions of one crowded field are identical.
 
+``--reuse-wheel`` (CI; the release workflow always compiles) skips only the
+compile: it reuses the one wheel in the wheel directory when the provenance
+record an earlier ``--reuse-wheel`` build wrote beside it names the pinned
+sdist, the patch digest, the digests of the patched files just produced from
+the verified sdist, the target interpreter, and the wheel's own SHA-256.  The
+sdist, patch, install and proof gates all still run.
+
 macOS and Linux keep the PyPI wheel for now; only Windows builds install this.
 """
 
@@ -429,6 +436,77 @@ def build_wheel(source_root: Path, wheel_dir: Path, *, python: str = sys.executa
     return wheels[0]
 
 
+# --------------------------------------------------------------------------
+# wheel reuse (--reuse-wheel)
+# --------------------------------------------------------------------------
+
+PROVENANCE_NAME = "sep-wheel-provenance.json"
+
+_INTERPRETER_SCRIPT = (
+    "import json, platform, sys, sysconfig; print(json.dumps({"
+    "'implementation': platform.python_implementation(), "
+    "'version': sys.version, 'platform': sysconfig.get_platform()}))"
+)
+
+
+def interpreter_identity(python: str = sys.executable) -> dict[str, str]:
+    """Implementation, full version string and platform of the target interpreter."""
+
+    try:
+        completed = subprocess.run(
+            [python, "-c", _INTERPRETER_SCRIPT], text=True, capture_output=True, timeout=120, check=False
+        )
+        identity = json.loads(completed.stdout.strip().splitlines()[-1])
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, IndexError) as error:
+        raise SepBuildError(f"cannot identify the target interpreter: {error}") from error
+    if completed.returncode != 0 or not isinstance(identity, dict):
+        raise SepBuildError("cannot identify the target interpreter")
+    return {key: str(identity[key]) for key in ("implementation", "version", "platform")}
+
+
+def wheel_provenance(
+    *, patch_sha256: str, patched_files: dict[str, str], interpreter: dict[str, str]
+) -> dict[str, Any]:
+    """The source and interpreter a reusable wheel must have been built from."""
+
+    return {
+        "schemaVersion": 1,
+        "sdistSha256": SDIST_SHA256,
+        "patchSha256": patch_sha256,
+        "patchedVersion": PATCHED_VERSION,
+        "patchedFiles": dict(sorted(patched_files.items())),
+        "interpreter": dict(sorted(interpreter.items())),
+    }
+
+
+def record_wheel_provenance(wheel_dir: Path, provenance: dict[str, Any], wheel: Path) -> None:
+    record = {"source": provenance, "wheel": {"fileName": wheel.name, "sha256": _sha256(wheel)}}
+    (wheel_dir / PROVENANCE_NAME).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def reusable_wheel(wheel_dir: Path, provenance: dict[str, Any]) -> Path | None:
+    """The recorded wheel when it was built from exactly ``provenance``, else ``None``."""
+
+    record_path = wheel_dir / PROVENANCE_NAME
+    wheels = sorted(wheel_dir.glob("sep-*.whl")) if wheel_dir.is_dir() else []
+    if len(wheels) != 1 or record_path.is_symlink() or not record_path.is_file():
+        return None
+    wheel = wheels[0]
+    if wheel.is_symlink() or not wheel.is_file() or not wheel.name.startswith(f"sep-{PATCHED_VERSION}-"):
+        return None
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        recorded_wheel = record["wheel"]
+        matches = (
+            record["source"] == provenance
+            and recorded_wheel["fileName"] == wheel.name
+            and recorded_wheel["sha256"] == _sha256(wheel)
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return wheel if matches else None
+
+
 _PROOF_SCRIPT = r"""
 import importlib.metadata, json, sys
 import numpy as np
@@ -509,6 +587,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--python", default=sys.executable, help="interpreter whose pip builds/installs the wheel")
     parser.add_argument("--check", action="store_true", help="download, verify and patch only; do not build")
     parser.add_argument("--install", action="store_true", help="pip install --force-reinstall --no-deps the built wheel and prove it")
+    parser.add_argument(
+        "--reuse-wheel",
+        action="store_true",
+        help="skip the compile when the wheel directory holds a wheel recorded for exactly this source and interpreter",
+    )
     parser.add_argument("--report", type=Path, default=None, help="write a JSON report")
     return parser
 
@@ -535,8 +618,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         report["patchedFiles"] = digests
         if not arguments.check:
             wheel_dir = (arguments.wheel_dir or work_dir / "wheels").resolve()
-            wheel = build_wheel(source_root, wheel_dir, python=arguments.python)
-            report["wheel"] = {"path": str(wheel), "fileName": wheel.name, "sha256": _sha256(wheel), "sizeBytes": wheel.stat().st_size}
+            provenance: dict[str, Any] | None = None
+            wheel: Path | None = None
+            if arguments.reuse_wheel:
+                provenance = wheel_provenance(
+                    patch_sha256=report["patch"]["sha256"],
+                    patched_files=digests,
+                    interpreter=interpreter_identity(arguments.python),
+                )
+                wheel = reusable_wheel(wheel_dir, provenance)
+            reused = wheel is not None
+            if wheel is None:
+                # A record must never outlive the wheel it describes.
+                (wheel_dir / PROVENANCE_NAME).unlink(missing_ok=True)
+                wheel = build_wheel(source_root, wheel_dir, python=arguments.python)
+                if provenance is not None:
+                    record_wheel_provenance(wheel_dir, provenance, wheel)
+            report["wheel"] = {
+                "path": str(wheel),
+                "fileName": wheel.name,
+                "sha256": _sha256(wheel),
+                "sizeBytes": wheel.stat().st_size,
+                "reused": reused,
+            }
             if arguments.install:
                 _run(install_command(wheel, python=arguments.python), cwd=REPO_ROOT)
                 report["installed"] = prove_installation(python=arguments.python)
@@ -562,6 +666,7 @@ __all__ = [
     "PATCHED_FILES",
     "PATCHED_VERSION",
     "PATCH_PATH",
+    "PROVENANCE_NAME",
     "SDIST_SHA256",
     "SDIST_SIZE",
     "SDIST_URL",
@@ -572,11 +677,15 @@ __all__ = [
     "build_wheel",
     "download_sdist",
     "extract_sdist",
+    "interpreter_identity",
     "main",
     "parse_patch",
     "prepare_patched_source",
     "prove_installation",
+    "record_wheel_provenance",
+    "reusable_wheel",
     "verify_sdist",
     "wheel_command",
+    "wheel_provenance",
     "install_command",
 ]

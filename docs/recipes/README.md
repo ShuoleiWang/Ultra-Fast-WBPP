@@ -21,6 +21,10 @@ A recipe is a versioned scientific contract, not a loose collection of GUI toggl
 - **Mosaic panel** — solves panel masters independently, reprojects same-filter panels, solves each resulting mosaic again, then aligns solved filters for color output.
 - **One-shot colour** — Bayer Lights are calibrated as mosaics with per-channel flat scaling, debayered into R/G/B channel groups and, with drizzle, Bayer-drizzled from the mosaic samples; the recipe is the Balanced or Drizzle recipe of the mono case.
 
+## Opt-in extras
+
+[Advanced algorithms](advanced-algorithms.md) covers the two options no built-in contract enables: ZOGY proper coaddition, which adds one more product per filter next to the ordinary master, and the robust IRLS combination of the accepted samples. Both are off by default and a recipe that omits them is unchanged, digest included.
+
 The GUI recommends a recipe from metadata but never silently changes one after planning. Any change produces a new canonical recipe digest and invalidates only affected downstream artifacts.
 
 For the complete product sequence, return to the [main README](../../README.md); a [Simplified Chinese quick start](../README.zh-CN.md) is also available, and the [documentation index](../README.md) maps every page.

@@ -39,6 +39,7 @@ import type {
   StageProgress,
   WorkflowStep,
 } from "./types";
+import { PROPER_COADDITION_REQUEST } from "./types";
 
 import {
   CONTENT_DIGEST,
@@ -159,6 +160,10 @@ export function useWorkflow(t: Translator) {
   const [drizzleScale, setDrizzleScale] = useState<DrizzleScale>(2);
   const [drizzleDropShrink, setDrizzleDropShrink] = useState(0.9);
   const [drizzleKernel, setDrizzleKernel] = useState<DrizzleKernel>("square");
+  // Proper coaddition, opt-in per session and off by default: while it is off
+  // the recipe below is byte-for-byte the recipe sent before it existed. The
+  // extra product never replaces the master.
+  const [properCoadditionEnabled, setProperCoadditionEnabled] = useState(false);
   // Opt-in per session. The native recipe selects local or global normalization
   // from this flag; it must not infer the choice from a visible progress stage.
   const [catalogList, setCatalogList] = useState<CatalogListResponse>();
@@ -1066,6 +1071,10 @@ export function useWorkflow(t: Translator) {
           drizzleKernel,
           solverRequired: true,
           calibrationWorkflow: "mono-standard-v1",
+          // The engine refuses proper coaddition together with drizzle (the
+          // drizzled master lives on a finer grid, so the coadd has no
+          // same-grid solved master to inherit a verified WCS from).
+          ...(properCoadditionEnabled && !drizzleEnabled ? { properCoaddition: PROPER_COADDITION_REQUEST } : {}),
         },
         masterMetadataOverrides: masterOverrideRequests(masterOverrides),
         rawFrameMetadataOverrides: [],
@@ -1421,6 +1430,8 @@ export function useWorkflow(t: Translator) {
     setDrizzleDropShrink,
     drizzleKernel,
     setDrizzleKernel,
+    properCoadditionEnabled,
+    setProperCoadditionEnabled,
     catalogList,
     catalogDoctor,
     solverDoctor,

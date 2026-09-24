@@ -31,6 +31,7 @@ add_library(ufwbpp_native_math STATIC
   src/DrizzleKernel.cpp
   src/ImageTile.cpp
   src/Lanczos3Table.cpp
+  src/OffsetGridKernel.cpp
   src/PortableKernels.cpp
 )
 add_library(Ufwbpp::NativeMath ALIAS ufwbpp_native_math)

@@ -114,7 +114,7 @@ A Light with a Bayer pattern (`RGGB`, `BGGR`, `GRBG`, `GBRG`) is processed witho
 | [`scripts/check_public_tree.py`](../scripts/check_public_tree.py), [`check_local_links.py`](../scripts/check_local_links.py) | Nothing private in the tree, no dead links |
 | [`apps/desktop/scripts/brand_icon.py`](../apps/desktop/scripts/brand_icon.py), [`screenshots.py`](../apps/desktop/scripts/screenshots.py) | Reproducible icon and documentation screenshots |
 
-CI runs the Python suite on Ubuntu, macOS and Windows (3.11 and 3.12) with the kernels built and installed first, Rust fmt/clippy/tests on three OSes, the native C++ tests, the Apple Silicon Metal differential, the React shell tests and build, CodeQL and the public-tree check; `main` is protected by the `CI gate`.
+CI runs the Python suite with the Release kernels built, ctest-checked and installed first on macOS and Windows (Python 3.12, the interpreter the bundles freeze) and on Ubuntu (3.11, the oldest supported), Rust clippy and tests on the three OSes, the React shell's format check, tests and build, the public-tree and link checks, CodeQL and dependency review. A pull request runs only the jobs its changed paths need (a documentation-only change runs the source checks); pushes to `main` run everything, and `main` is protected by the `CI gate`. Hosted runners expose no Metal device, so CI compiles the Metal path but skips the CPU↔Metal differential; that runs on Apple Silicon hardware (`make native-test`).
 
 ## 11. What it does not do
 

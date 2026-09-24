@@ -166,6 +166,55 @@ pub(crate) struct UiRecipeOptions {
     solver_required: bool,
     #[serde(default = "default_calibration_workflow")]
     calibration_workflow: String,
+    // Opt-in proper coaddition: absent unless the user checked it, so a
+    // default run sends exactly the recipe it sent before it existed.  The
+    // engine's robust IRLS combination is not offered here: it measured worse
+    // than the default, and an unknown `integration` key is refused.
+    #[serde(default)]
+    proper_coaddition: Option<UiProperCoaddition>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct UiProperCoaddition {
+    pub(crate) enabled: bool,
+    #[serde(default = "default_outlier_handling")]
+    pub(crate) outlier_handling: String,
+    #[serde(default = "default_apodization_pixels")]
+    pub(crate) apodization_pixels: u32,
+}
+
+const OUTLIER_HANDLING: [&str; 2] = ["reuse-rejection", "none"];
+
+fn default_outlier_handling() -> String {
+    "reuse-rejection".to_owned()
+}
+
+fn default_apodization_pixels() -> u32 {
+    64
+}
+
+/// The engine refuses proper coaddition on a drizzled grid, and the block
+/// names a closed set of values; refusing here keeps the run from starting.
+pub(crate) fn validate_advanced_algorithms(recipe: &UiRecipeOptions) -> Result<(), String> {
+    if let Some(coaddition) = &recipe.proper_coaddition {
+        if coaddition.enabled {
+            if recipe.drizzle_enabled {
+                return Err("proper coaddition cannot run together with drizzle".to_owned());
+            }
+            if !OUTLIER_HANDLING.contains(&coaddition.outlier_handling.as_str()) {
+                return Err(
+                    "proper coaddition outlier handling must be reuse-rejection or none".to_owned(),
+                );
+            }
+            if coaddition.apodization_pixels > 512 {
+                return Err(
+                    "proper coaddition apodization must be between 0 and 512 pixels".to_owned(),
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn default_calibration_workflow() -> String {

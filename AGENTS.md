@@ -54,17 +54,19 @@ make test               # python-test rust-test frontend-test native-test
 make check              # source-check + cargo fmt/clippy + make test
 ```
 
-The individual suites, as CI runs them:
+The individual suites, as CI runs them (a pull request runs the jobs its changed paths select, see `scripts/ci_changed_areas.py`; pushes to `main` run all of them):
 
 ```bash
+.venv/bin/python scripts/build_native_runtime.py --build-dir build/native-release   # Release kernels: build, ctest, install
 .venv/bin/python -m pytest -q packages/light-frame-qc/tests packages/registration/tests packages/engine/tests tests
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 npm --prefix apps/desktop run format:check && npm --prefix apps/desktop test && npm --prefix apps/desktop run build
-cmake -S engine/native -B build/native -DUFWBPP_BUILD_TESTS=ON -DUFWBPP_ENABLE_METAL=ON && cmake --build build/native --parallel && ctest --test-dir build/native --output-on-failure
 .venv/bin/python scripts/check_public_tree.py . && .venv/bin/python scripts/check_local_links.py .
 ```
+
+The unoptimized test build with Metal enabled is `make native-test` (`cmake -S engine/native -B build/native -DUFWBPP_BUILD_TESTS=ON -DUFWBPP_ENABLE_METAL=ON`, build, `ctest`).
 
 Native kernels for real runs: `make native-release-install` (or `python scripts/build_native_runtime.py --build-dir build/native-release`, the chain CI uses) builds `build/native-release` with `CMAKE_BUILD_TYPE=Release`, runs its ctest and installs the library into `packages/engine/src/ufwbpp/native/`. `build/native` (from `make native-build`) is the unoptimized test configuration: run `ctest` there, never install it.
 
@@ -93,6 +95,7 @@ Desktop bundle on macOS: `make desktop-build-macos-prerelease` (release kernels 
 - **Solver PATH.** A Finder-launched app inherits launchd's minimal `PATH`; the solver runtime prepends the solver's own directories so `solve-field` finds its helpers. Keep that when touching `SolverProcessRuntime`.
 - **Spawned pools.** Scripts that use the spawn start method need an `if __name__ == "__main__":` guard, or every worker re-runs the script.
 - **ETXTBSY on Linux.** The sidecar launcher retries a "text file busy" exec; the CI test that caught it stays.
+- **Metal is not tested on hosted CI.** GitHub's macOS runners expose no Metal device: `ctest` reports `native-core-metal-differential` as skipped and the C-ABI Metal checks return early, so a green CI proves only that the Metal path compiles. Verify a change to `engine/native/metal` or the Metal executor with `make native-test` on Apple Silicon.
 - **Shell details.** Quote globs under zsh; use absolute paths when several shells run in parallel; run `tsc` as `./node_modules/.bin/tsc` inside `apps/desktop` (a bare `npx tsc` elsewhere installs an unrelated package).
 - **Real runs are long-ish.** A full project run is about 76 s on an M3 Pro and 4.5 min on the validation laptop; `evaluate_masters.py` takes about two minutes per 26 MP filter pair; the defect-injection harness re-integrates several times. Plan runs, don't poll them.
 

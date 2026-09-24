@@ -212,6 +212,7 @@ pub(super) fn project_request_json(
         return Err("unsupported calibration workflow".to_owned());
     }
     validate_drizzle_options(&request.recipe)?;
+    validate_advanced_algorithms(&request.recipe)?;
     for item in &request.master_metadata_overrides {
         validate_master_override(item)?;
     }
@@ -330,6 +331,17 @@ pub(super) fn project_request_json(
         "execution": {},
         "reviewSelections": request.review_selections,
     });
+    // Opt-in proper coaddition: the block exists in the recipe only when the
+    // user turned it on, so a default run's recipe digest is unchanged.
+    if let Some(coaddition) = &request.recipe.proper_coaddition {
+        if coaddition.enabled {
+            payload["recipe"]["properCoaddition"] = serde_json::json!({
+                "enabled": true,
+                "outlierHandling": coaddition.outlier_handling,
+                "apodizationPixels": coaddition.apodization_pixels,
+            });
+        }
+    }
     // Top-level, and only when the blink view produced one: the engine's
     // request loader treats the key itself as the switch to `explicit-v1`.
     if let Some(selection) = &request.selection {

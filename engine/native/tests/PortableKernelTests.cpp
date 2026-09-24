@@ -1204,6 +1204,271 @@ void TestLanczos3TableIsDeterministicAndAccurate()
             "lanczos table: a zero fraction is an exact copy" );
 }
 
+// The scalar reference of the warp (the kernel's arithmetic before the
+// vectorized lanes): every pixel on its own, row-major taps, Float32 sum,
+// std::min/std::max bounds and clamp.  The kernel must reproduce it bit for
+// bit on every path (vector lanes, their exact fallback, scalar edges).
+std::vector<float> ReferenceWarp( const std::vector<float>& source, std::uint32_t width,
+                                  std::uint32_t height, const AffineInverse& inverse,
+                                  std::uint32_t firstRow, std::uint32_t rowCount,
+                                  std::uint32_t outputWidth, float domainScale )
+{
+   std::vector<float> output( static_cast<std::size_t>( rowCount )*outputWidth );
+   const double xLimit = static_cast<double>( width ) - 3.0;
+   const double yLimit = static_cast<double>( height ) - 3.0;
+   for ( std::uint32_t localRow = 0; localRow < rowCount; ++localRow )
+   {
+      const double outputY = static_cast<double>( firstRow + localRow );
+      for ( std::uint32_t column = 0; column < outputWidth; ++column )
+      {
+         const double outputX = static_cast<double>( column );
+         double inputX = inverse.m00*outputX;
+         inputX = inputX + inverse.m01*outputY;
+         inputX = inputX + inverse.m02;
+         double inputY = inverse.m10*outputX;
+         inputY = inputY + inverse.m11*outputY;
+         inputY = inputY + inverse.m12;
+         if ( !inverse.IsAffine() )
+         {
+            double w = inverse.m20*outputX;
+            w = w + inverse.m21*outputY;
+            w = w + inverse.m22;
+            inputX = inputX/w;
+            inputY = inputY/w;
+         }
+         float& result = output[static_cast<std::size_t>( localRow )*outputWidth + column];
+         if ( !( std::isfinite( inputX ) && std::isfinite( inputY ) && inputX >= 2.0
+                 && inputX <= xLimit && inputY >= 2.0 && inputY <= yLimit ) )
+         {
+            result = Nan;
+            continue;
+         }
+         const double xFloorValue = std::floor( inputX );
+         const double yFloorValue = std::floor( inputY );
+         const std::int64_t xFloor = static_cast<std::int64_t>( xFloorValue );
+         const std::int64_t yFloor = static_cast<std::int64_t>( yFloorValue );
+         float xWeights[6], yWeights[6];
+         detail::Lanczos3TableWeights( inputX - xFloorValue, xWeights );
+         detail::Lanczos3TableWeights( inputY - yFloorValue, yWeights );
+         float samples = 0.0F;
+         bool valid = true;
+         float supportMinimum = std::numeric_limits<float>::infinity();
+         float supportMaximum = -std::numeric_limits<float>::infinity();
+         for ( int j = 0; j < 6; ++j )
+         {
+            std::int64_t yIndex = yFloor + (j - 2);
+            if ( j == 5 )
+               yIndex = std::min<std::int64_t>( yIndex, height - 1 );
+            for ( int i = 0; i < 6; ++i )
+            {
+               std::int64_t xIndex = xFloor + (i - 2);
+               if ( i == 5 )
+                  xIndex = std::min<std::int64_t>( xIndex, width - 1 );
+               const float combined = yWeights[j]*xWeights[i];
+               const float neighbor = source[static_cast<std::size_t>( yIndex*width + xIndex )];
+               if ( combined != 0.0F && std::isfinite( neighbor ) )
+               {
+                  supportMinimum = std::min( supportMinimum, neighbor );
+                  supportMaximum = std::max( supportMaximum, neighbor );
+                  samples = samples + neighbor*combined;
+               }
+               else
+               {
+                  if ( combined != 0.0F )
+                     valid = false;
+                  samples = samples + 0.0F;
+               }
+            }
+         }
+         if ( !valid )
+         {
+            result = Nan;
+            continue;
+         }
+         const float lower = std::min( supportMinimum, 0.0F );
+         const float upper = std::max( supportMaximum, domainScale );
+         result = std::min( std::max( samples, lower ), upper );
+      }
+   }
+   return output;
+}
+
+void TestWarpMatchesTheScalarReferenceBitForBit()
+{
+   const std::uint32_t width = 203;
+   const std::uint32_t height = 71;
+   std::mt19937 generator( 2026 );
+   std::uniform_real_distribution<float> sky( 0.01F, 0.2F );
+   std::vector<float> source( static_cast<std::size_t>( width )*height );
+   for ( float& value : source )
+      value = sky( generator );
+   // Non-finite samples, signed zeros (so zero support bounds take the
+   // select chain), negative samples (so the clamp's lower bound binds) and
+   // values beyond the domain scale.
+   std::uniform_int_distribution<std::size_t> anywhere( 0, source.size() - 1 );
+   for ( int k = 0; k < 40; ++k )
+      source[anywhere( generator )] = Nan;
+   for ( int k = 0; k < 10; ++k )
+      source[anywhere( generator )] = std::numeric_limits<float>::infinity();
+   for ( std::uint32_t y = 30; y < 40; ++y )
+      for ( std::uint32_t x = 100; x < 120; ++x )
+         source[static_cast<std::size_t>( y )*width + x] = ((x + y) & 1) != 0 ? 0.0F : -0.0F;
+   for ( std::uint32_t y = 45; y < 55; ++y )
+      for ( std::uint32_t x = 20; x < 40; ++x )
+         source[static_cast<std::size_t>( y )*width + x] = ((x*y) % 3 == 0) ? -0.05F : 0.0F;
+   for ( std::uint32_t x = 150; x < 170; ++x )
+      source[static_cast<std::size_t>( 10 )*width + x] = 1.5F;
+
+   const auto affine = []( double degrees, double scale, double tx, double ty )
+   {
+      const double angle = degrees*3.141592653589793/180.0;
+      const double c = scale*std::cos( angle );
+      const double s = scale*std::sin( angle );
+      // Inverse of [[c, -s, tx], [s, c, ty]].
+      const double determinant = c*c + s*s;
+      AffineInverse inverse;
+      inverse.m00 = c/determinant;
+      inverse.m01 = s/determinant;
+      inverse.m10 = -s/determinant;
+      inverse.m11 = c/determinant;
+      inverse.m02 = -(inverse.m00*tx + inverse.m01*ty);
+      inverse.m12 = -(inverse.m10*tx + inverse.m11*ty);
+      return inverse;
+   };
+   std::vector<AffineInverse> maps = {
+      affine( 0.1, 1.0002, 3.37, -1.21 ),
+      affine( 7.0, 0.97, 9.5, -6.25 ),
+      affine( 180.3, 0.9998, width - 1.0 + 0.4, height - 1.0 - 0.7 ),
+      affine( 0.0, 1.0, 2.0, -3.0 ),   // integer shift: exactly zero weights
+      affine( 0.0, 1.0, 0.25, 0.5 ),   // constant fractions
+   };
+   AffineInverse projective;
+   projective.m00 = 1.0001;
+   projective.m01 = 0.0003;
+   projective.m02 = 2.1;
+   projective.m10 = -0.0002;
+   projective.m11 = 0.9999;
+   projective.m12 = -1.3;
+   projective.m20 = 2.0e-6;
+   projective.m21 = -3.0e-6;
+   projective.m22 = 1.0;
+   maps.push_back( projective );
+
+   for ( const AffineInverse& inverse : maps )
+      for ( std::uint32_t outputWidth : { width, width - 5 } )
+         for ( std::uint32_t threads : { 1U, 3U } )
+         {
+            const std::uint32_t firstRow = 3;
+            const std::uint32_t rowCount = height - 7;
+            WarpLanczos3Request request;
+            request.source = source;
+            request.sourceWidth = width;
+            request.sourceHeight = height;
+            request.inverse = inverse;
+            request.outputWidth = outputWidth;
+            request.firstRow = firstRow;
+            request.rowCount = rowCount;
+            request.domainScale = 1.0F;
+            request.threads = threads;
+            std::vector<float> actual( request.OutputPixels() );
+            WarpLanczos3Clamped( request, actual );
+            const std::vector<float> expected =
+               ReferenceWarp( source, width, height, inverse, firstRow, rowCount, outputWidth, 1.0F );
+            Require( std::memcmp( actual.data(), expected.data(), actual.size()*sizeof( float ) ) == 0,
+                     "warp: every path reproduces the scalar reference bit for bit" );
+         }
+}
+
+// The reference arithmetic of calibration._add_offset_grid_rows, one pixel
+// at a time: clip, searchsorted(side="right") clipped to [1, n - 1], Float64
+// weights, g_lo*(1 - wx) + g_hi*wx per node row, top*(1 - wy) + bottom*wy,
+// rounded to Float32 once and added in Float32.
+void TestOffsetGridMatchesTheReferenceArithmetic()
+{
+   const std::uint32_t width = 157;
+   const std::vector<double> xNodes = { 0.0, 20.5, 61.0, 100.0, 140.25 };
+   const std::vector<double> yNodes = { 3.0, 17.0, 40.5, 90.0 };
+   std::mt19937 generator( 404 );
+   std::uniform_real_distribution<double> node( -0.02, 0.03 );
+   std::vector<double> grid( xNodes.size()*yNodes.size() );
+   for ( double& value : grid )
+      value = node( generator );
+   // Rows before, between and beyond the nodes, unsorted and repeated, as
+   // sampled rows are.
+   const std::vector<std::int64_t> rows = { 0, 1, 3, 4, 16, 17, 18, 40, 41, 89, 90, 91, 120, 5, 60, 60, 2 };
+   std::uniform_real_distribution<float> sample( 0.0F, 0.5F );
+   std::vector<float> base( rows.size()*width );
+   for ( float& value : base )
+      value = sample( generator );
+   base[3] = Nan;
+   base[width + 7] = std::numeric_limits<float>::infinity();
+
+   const auto locate = []( const std::vector<double>& nodes, double value, std::size_t& lower,
+                           std::size_t& upper, double& weight )
+   {
+      const double clipped = std::min( std::max( value, nodes.front() ), nodes.back() );
+      std::size_t index = 0;
+      while ( index < nodes.size() && nodes[index] <= clipped )
+         ++index;
+      index = std::min<std::size_t>( std::max<std::size_t>( index, 1 ), nodes.size() - 1 );
+      lower = index - 1;
+      upper = index;
+      weight = (clipped - nodes[lower])/(nodes[upper] - nodes[lower]);
+   };
+   std::vector<float> expected = base;
+   for ( std::size_t r = 0; r < rows.size(); ++r )
+   {
+      std::size_t yLower, yUpper;
+      double wy;
+      locate( yNodes, static_cast<double>( rows[r] ), yLower, yUpper, wy );
+      for ( std::uint32_t x = 0; x < width; ++x )
+      {
+         std::size_t xLower, xUpper;
+         double wx;
+         locate( xNodes, static_cast<double>( x ), xLower, xUpper, wx );
+         const double top = grid[yLower*xNodes.size() + xLower]*(1.0 - wx)
+                          + grid[yLower*xNodes.size() + xUpper]*wx;
+         const double bottom = grid[yUpper*xNodes.size() + xLower]*(1.0 - wx)
+                             + grid[yUpper*xNodes.size() + xUpper]*wx;
+         float& value = expected[r*width + x];
+         value = value + static_cast<float>( top*(1.0 - wy) + bottom*wy );
+      }
+   }
+   for ( std::uint32_t threads : { 1U, 3U } )
+   {
+      std::vector<float> actual = base;
+      OffsetGridRequest request;
+      request.values = actual;
+      request.width = width;
+      request.rows = rows;
+      request.grid = grid;
+      request.xNodes = xNodes;
+      request.yNodes = yNodes;
+      request.threads = threads;
+      AddOffsetGrid( request );
+      Require( std::memcmp( actual.data(), expected.data(), actual.size()*sizeof( float ) ) == 0,
+               "offset grid: native rows equal the reference arithmetic bit for bit" );
+   }
+   std::vector<float> values = base;
+   OffsetGridRequest invalid;
+   invalid.values = values;
+   invalid.width = width;
+   invalid.rows = rows;
+   invalid.grid = grid;
+   invalid.xNodes = xNodes;
+   invalid.yNodes = yNodes;
+   std::vector<double> unordered = { 0.0, 20.5, 20.5, 100.0, 140.25 };
+   invalid.xNodes = unordered;
+   RequireThrows<std::invalid_argument>( [&]() { AddOffsetGrid( invalid ); },
+                                         "offset grid: nodes must increase" );
+   invalid.xNodes = xNodes;
+   std::vector<double> nonFinite = grid;
+   nonFinite[2] = std::numeric_limits<double>::quiet_NaN();
+   invalid.grid = nonFinite;
+   RequireThrows<std::invalid_argument>( [&]() { AddOffsetGrid( invalid ); },
+                                         "offset grid: values must be finite" );
+}
+
 // Dynamic chunking: results of every kernel must not depend on how the
 // range is split among threads. Row/pixel counts that are not multiples
 // of the chunk grains exercise the last, partial chunk on several threads.
@@ -1304,6 +1569,7 @@ int main()
       TestWarpConstantFieldIsPreservedAndThreadInvariant();
       TestWarpNanSupportAndDomainClamp();
       TestWarpValidationRejectsBadGeometry();
+      TestWarpMatchesTheScalarReferenceBitForBit();
       TestMadRejectionMatchesReferenceSemantics();
       TestMadRejectionScaleModelMatchesReferenceRule();
       TestMaskedMeanAccumulatesInFrameOrder();
@@ -1313,6 +1579,7 @@ int main()
       TestCAbiRoundTrip();
       TestDrizzleBandDropsExactAreasAndIsBandAndThreadInvariant();
       TestDebayerBilinearMatchesTheReferenceRules();
+      TestOffsetGridMatchesTheReferenceArithmetic();
       TestLanczos3TableIsDeterministicAndAccurate();
       TestDynamicChunkingIsThreadAndGrainInvariant();
       std::cout << "UfwbppPortableKernelTests passed\n";

@@ -27,6 +27,7 @@ from numpy.typing import NDArray
 from .integrity import sha256_digest
 from .calibration import (
     CalibrationError,
+    DEFAULT_COMBINATION,
     DEFAULT_MEMORY_BUDGET,
     FitsFloatWriter,
     FrameExpression,
@@ -983,6 +984,12 @@ def integrate_registered_group(
     )
     if requested_backend == "auto" and load_native_kernels() is not None:
         selected, selection_note = "portable-cpu", NATIVE_CPU_AUTO_REASON
+    if selected != "portable-cpu" and integration.combination != DEFAULT_COMBINATION:
+        selected, selection_note = (
+            "portable-cpu",
+            f"the {integration.combination} combination is implemented by the "
+            "portable CPU reducer only",
+        )
     if selected != "portable-cpu" and any(item.weight_grid or item.pattern_scales for item in canonical):
         selected, selection_note = (
             "portable-cpu",

@@ -83,6 +83,15 @@ NUMPY_MEAN_KERNEL_ID = "numpy-float64-weighted-mean-v1"
 # therefore never below the v1 threshold: v2 rejects a subset of v1's samples.
 REJECTION_SCALE_ALGORITHM = "row-pooled-mad-frame-studentized-v2"
 REJECTION_POOL_HALF_WIDTH = 12
+
+# Pixel combination rules.  The first is the shipped default; a run that
+# does not name one is bit-identical to every run before they existed.
+COMBINATIONS = ("sigma-clip-v2", "irls-huber")
+DEFAULT_COMBINATION = COMBINATIONS[0]
+# Huber's tuning constant: 95% asymptotic efficiency at the normal.
+IRLS_HUBER_K = 1.345
+# A fixed iteration count is what makes the result platform independent.
+IRLS_ITERATIONS = 4
 REJECTION_POOL_MAX_HALF_WIDTH = 64
 REJECTION_FRAME_SCALE_DIGITS = 6
 # Noise weights: 1/sigma^2 of the noise of 4x4 block means.  Per-pixel noise
@@ -201,6 +210,33 @@ def _offset_grid_x_plan(
     return x_lo, x_hi, wx
 
 
+@lru_cache(maxsize=256)
+def _native_offset_grid_supported(
+    grid_value: tuple[tuple[float, ...], ...],
+    x_nodes_value: tuple[float, ...],
+    y_nodes_value: tuple[float, ...],
+) -> bool:
+    """The native kernel's domain: finite values and strictly increasing
+    nodes (the grids global normalization fits).  Anything else keeps the
+    NumPy evaluation, which defines the result for every input."""
+
+    grid = np.asarray(grid_value, dtype=np.float64)
+    x_nodes = np.asarray(x_nodes_value, dtype=np.float64)
+    y_nodes = np.asarray(y_nodes_value, dtype=np.float64)
+    return bool(
+        x_nodes.ndim == 1
+        and y_nodes.ndim == 1
+        and x_nodes.size >= 2
+        and y_nodes.size >= 2
+        and grid.shape == (y_nodes.size, x_nodes.size)
+        and np.all(np.isfinite(grid))
+        and np.all(np.isfinite(x_nodes))
+        and np.all(np.isfinite(y_nodes))
+        and np.all(np.diff(x_nodes) > 0)
+        and np.all(np.diff(y_nodes) > 0)
+    )
+
+
 def _add_offset_grid_rows(
     result: NDArray[np.float32],
     grid_value: tuple[tuple[float, ...], ...],
@@ -216,13 +252,33 @@ def _add_offset_grid_rows(
 
     Every row's value is ``Float32(top*(1-wy) + bottom*wy)`` where ``top`` and
     ``bottom`` are the Float64 horizontal interpolations of the two enclosing
-    node rows.  All rows of the band are evaluated in one broadcast; the
-    elementwise Float64 arithmetic is the same as a row at a time, so the
-    values are identical, without a Python loop over thousands of rows.
+    node rows.  The native kernel (``native-cpu-offset-grid-v1``) evaluates
+    it in one pass per row; the NumPy evaluation below, one broadcast over
+    the band, is the reference and runs without the library or for grids
+    outside the kernel's domain.  Both give identical values.
     """
 
     grid = np.asarray(grid_value, dtype=np.float64)
     y_nodes = np.asarray(y_nodes_value, dtype=np.float64)
+    kernels = load_native_kernels()
+    if (
+        kernels is not None
+        and result.dtype == np.float32
+        and result.flags["C_CONTIGUOUS"]
+        and result.shape[1] == width
+        and _native_offset_grid_supported(grid_value, x_nodes_value, y_nodes_value)
+    ):
+        frame_rows = (
+            np.arange(y0, y1, dtype=np.int64)
+            if absolute_rows is None
+            else np.asarray(absolute_rows, dtype=np.int64)
+        )
+        if frame_rows.size:
+            # One thread: callers already evaluate frames concurrently.
+            kernels.add_offset_grid(
+                result, frame_rows, grid, np.asarray(x_nodes_value, dtype=np.float64), y_nodes, threads=1
+            )
+        return
     x_lo, x_hi, wx = _offset_grid_x_plan(x_nodes_value, width)
     rows = (
         np.arange(y0, y1, dtype=np.float64)
@@ -732,6 +788,10 @@ class IntegrationParameters:
     # the group's mixture scale to their own noise.
     rejection_pool_half_width: int = REJECTION_POOL_HALF_WIDTH
     rejection_frame_noise_scaling: bool = True
+    # How the accepted samples of a pixel are combined.  ``sigma-clip-v2`` is
+    # the shipped weighted mean of the surviving samples; ``irls-huber`` runs
+    # IRLS_HUBER_ITERATIONS reweighting passes with Huber's k on top of it.
+    combination: str = DEFAULT_COMBINATION
 
     def validate(self) -> None:
         if not math.isfinite(self.sigma_clip) or self.sigma_clip <= 0:
@@ -757,6 +817,8 @@ class IntegrationParameters:
             )
         if not isinstance(self.rejection_frame_noise_scaling, bool):
             raise ValueError("rejection_frame_noise_scaling must be a boolean")
+        if self.combination not in COMBINATIONS:
+            raise ValueError("combination must be one of: " + ", ".join(COMBINATIONS))
 
     def serializable(self) -> dict[str, Any]:
         return {
@@ -768,6 +830,13 @@ class IntegrationParameters:
             "transientRejection": self.transient_rejection,
             "rejectionPoolHalfWidth": self.rejection_pool_half_width,
             "rejectionFrameNoiseScaling": self.rejection_frame_noise_scaling,
+            # Only a non-default combination is serialized: the default record
+            # (and every digest built over it) is unchanged.
+            **(
+                {"combination": self.combination}
+                if self.combination != DEFAULT_COMBINATION
+                else {}
+            ),
         }
 
 
@@ -1086,6 +1155,55 @@ def _reduction_kernel_id() -> str:
     return MEAN_KERNEL_ID if load_native_kernels() is not None else NUMPY_MEAN_KERNEL_ID
 
 
+def _effective_rejection_sigma(
+    center: NDArray[np.float32],
+    mad: NDArray[np.float32],
+    enough_samples: NDArray[np.bool_],
+    sigma_floor: _RejectionSigmaFloor,
+    frame_count: int,
+) -> NDArray[np.float32]:
+    """The rejection scale model's per-pixel sigma, floors included.
+
+    Returns a 2-D array under the v1 model and a frame-major 3-D array under
+    the v2 model, where each frame's own noise scales the pooled row MAD.
+    This is the single definition of the scale: the rejection decision below
+    compares against ``sigma_clip`` times this, and the robust IRLS
+    combination reweights against the same value.
+    """
+
+    frame_scales = tuple(sigma_floor.frame_scales)
+    pool_half_width = int(sigma_floor.pool_half_width)
+    robust_sigma = np.asarray(np.float32(1.4826) * mad, dtype=np.float32)
+    numerical_floor = np.maximum(
+        np.float32(REJECTION_FLOOR_ABSOLUTE),
+        np.float32(REJECTION_FLOOR_EPSILON_FACTOR * np.finfo(np.float32).eps)
+        * np.maximum(np.float32(1.0), np.abs(center)),
+    )
+    group_floor = np.float32(sigma_floor.group_sigma_floor)
+    if pool_half_width > 0 or any(scale != 1.0 for scale in frame_scales):
+        # v2 scale model: the noise part of the scale is the pooled MAD of
+        # the row window, scaled to each frame's own noise; per-pixel excess
+        # variance beyond the pooled noise is kept.  Pixels without enough
+        # samples contribute no MAD to their neighbours.
+        pooled = _pooled_row_mad(
+            np.where(enough_samples, mad, np.float32(np.nan)).astype(np.float32),
+            pool_half_width,
+        )
+        sigma_pool = np.asarray(np.float32(1.4826) * pooled, dtype=np.float32)
+        excess = np.maximum(
+            robust_sigma * robust_sigma - sigma_pool * sigma_pool, np.float32(0.0)
+        )
+        scales = np.asarray(
+            frame_scales if frame_scales else (1.0,) * frame_count, dtype=np.float32
+        ).reshape(frame_count, 1, 1)
+        scaled = scales * sigma_pool[None, :, :]
+        sigma_frame = np.sqrt(scaled * scaled + excess[None, :, :])
+        return np.maximum(
+            np.maximum(sigma_frame, group_floor), numerical_floor[None, :, :]
+        )
+    return np.maximum(np.maximum(robust_sigma, group_floor), numerical_floor)
+
+
 def _ordinary_mad_rejection_decision(
     values: NDArray[np.float32],
     parameters: IntegrationParameters,
@@ -1158,38 +1276,9 @@ def _ordinary_mad_rejection_decision(
     enough_samples = (
         np.count_nonzero(finite, axis=0) >= parameters.minimum_rejection_frames
     )
-    robust_sigma = np.asarray(np.float32(1.4826) * mad, dtype=np.float32)
-    numerical_floor = np.maximum(
-        np.float32(REJECTION_FLOOR_ABSOLUTE),
-        np.float32(REJECTION_FLOOR_EPSILON_FACTOR * np.finfo(np.float32).eps)
-        * np.maximum(np.float32(1.0), np.abs(center)),
+    effective_sigma = _effective_rejection_sigma(
+        center, mad, enough_samples, sigma_floor, frame_count
     )
-    group_floor = np.float32(sigma_floor.group_sigma_floor)
-    if pool_half_width > 0 or any(scale != 1.0 for scale in frame_scales):
-        # v2 scale model: the noise part of the scale is the pooled MAD of
-        # the row window, scaled to each frame's own noise; per-pixel excess
-        # variance beyond the pooled noise is kept.  Pixels without enough
-        # samples contribute no MAD to their neighbours.
-        pooled = _pooled_row_mad(
-            np.where(enough_samples, mad, np.float32(np.nan)).astype(np.float32),
-            pool_half_width,
-        )
-        sigma_pool = np.asarray(np.float32(1.4826) * pooled, dtype=np.float32)
-        excess = np.maximum(
-            robust_sigma * robust_sigma - sigma_pool * sigma_pool, np.float32(0.0)
-        )
-        scales = np.asarray(
-            frame_scales if frame_scales else (1.0,) * frame_count, dtype=np.float32
-        ).reshape(frame_count, 1, 1)
-        scaled = scales * sigma_pool[None, :, :]
-        sigma_frame = np.sqrt(scaled * scaled + excess[None, :, :])
-        effective_sigma = np.maximum(
-            np.maximum(sigma_frame, group_floor), numerical_floor[None, :, :]
-        )
-    else:
-        effective_sigma = np.maximum(
-            np.maximum(robust_sigma, group_floor), numerical_floor
-        )
     threshold = np.float32(parameters.sigma_clip) * effective_sigma
     accepted = finite & (np.abs(samples - center[None, :, :]) <= threshold)
     accepted |= finite & ~enough_samples[None, :, :]
@@ -1628,6 +1717,81 @@ def _combined_integration_weights(
     )
 
 
+def _irls_huber_tile(
+    values: NDArray[np.float32],
+    accepted: NDArray[np.bool_],
+    weights: NDArray[np.float64],
+    sample_weights: NDArray[np.float32] | None,
+    parameters: IntegrationParameters,
+    sigma_floor: _RejectionSigmaFloor,
+    start: NDArray[np.float32],
+) -> NDArray[np.float32]:
+    """Iteratively reweighted least squares with Huber's psi, one tile.
+
+    ``start`` is the weighted mean of the accepted samples (today's answer).
+    Each pass forms the standardized residual ``r = (x - mu) / s`` against the
+    rejection scale model's own per-pixel sigma ``s``, multiplies every frame
+    weight by Huber's ``u(r) = min(1, k / |r|)`` and recomputes the weighted
+    mean.  The iteration count is fixed and every reduction is a single
+    ``numpy`` sum over the frame axis, so the result does not depend on the
+    thread count, the machine or the tile height.
+    """
+
+    samples = np.asarray(values, dtype=np.float32)
+    frame_count = samples.shape[0]
+    center = np.full(samples.shape[1:], np.nan, dtype=np.float32)
+    mad = np.full(samples.shape[1:], np.nan, dtype=np.float32)
+    finite = np.isfinite(samples)
+    valid_pixels = np.any(finite, axis=0)
+    if np.any(valid_pixels):
+        selected = samples[:, valid_pixels]
+        selected = np.where(np.isfinite(selected), selected, np.nan)
+        center[valid_pixels] = np.asarray(
+            np.nanmedian(selected, axis=0), dtype=np.float32
+        )
+        mad[valid_pixels] = np.asarray(
+            np.nanmedian(np.abs(selected - center[valid_pixels][None, :]), axis=0),
+            dtype=np.float32,
+        )
+    enough_samples = (
+        np.count_nonzero(finite, axis=0) >= parameters.minimum_rejection_frames
+    )
+    scale = np.asarray(
+        _effective_rejection_sigma(
+            center, mad, enough_samples, sigma_floor, frame_count
+        ),
+        dtype=np.float32,
+    )
+    if scale.ndim == 2:
+        scale = np.broadcast_to(scale, samples.shape)
+    base = (
+        np.broadcast_to(weights[:, None, None], samples.shape)
+        if sample_weights is None
+        else weights[:, None, None] * sample_weights
+    )
+    base = np.where(accepted, np.asarray(base, dtype=np.float64), 0.0)
+    clean = np.where(accepted, np.nan_to_num(samples, nan=0.0), 0.0).astype(np.float64)
+    estimate = np.asarray(start, dtype=np.float64)
+    fallback = np.array(start, dtype=np.float32, copy=True)
+    inverse_scale = np.reciprocal(
+        np.maximum(scale, np.float32(REJECTION_FLOOR_ABSOLUTE)).astype(np.float64)
+    )
+    for _ in range(IRLS_ITERATIONS):
+        residual = np.abs(clean - estimate[None, :, :]) * inverse_scale
+        huber = np.minimum(
+            1.0, IRLS_HUBER_K / np.maximum(residual, IRLS_HUBER_K)
+        )
+        effective = base * huber
+        denominator = np.sum(effective, axis=0, dtype=np.float64)
+        numerator = np.sum(effective * clean, axis=0, dtype=np.float64)
+        estimate = np.divide(
+            numerator, denominator, out=np.array(estimate), where=denominator > 0
+        )
+    result = np.asarray(estimate, dtype=np.float32)
+    usable = np.isfinite(result) & np.any(accepted, axis=0)
+    return np.where(usable, result, fallback)
+
+
 def integrate_expressions(
     expressions: Iterable[FrameExpression],
     output_path: str | os.PathLike[str],
@@ -1729,6 +1893,8 @@ def integrate_expressions(
             output_metadata.setdefault("OAFSTATE", "UNSOLVED_WORKING")
             output_metadata.setdefault("OAFNFRM", len(canonical))
             output_metadata.setdefault("OAFREJ", parameters.sigma_clip)
+            if parameters.combination != DEFAULT_COMBINATION:
+                output_metadata.setdefault("OAFCOMB", parameters.combination)
             writer = stack.enter_context(
                 FitsFloatWriter(temporary, shape, output_metadata, durable=durable)
             )
@@ -1848,6 +2014,22 @@ def integrate_expressions(
                     rejected_per_pixel = np.sum(
                         finite & ~accepted, axis=0, dtype=np.uint16
                     ).astype(np.float32)
+                if parameters.combination != DEFAULT_COMBINATION:
+                    irls_started = time.perf_counter()
+                    result = _irls_huber_tile(
+                        stack_values,
+                        accepted,
+                        weights,
+                        sample_weights,
+                        parameters,
+                        rejection_sigma_floor,
+                        result,
+                    )
+                    timing["combination"] = (
+                        timing.get("combination", 0.0)
+                        + time.perf_counter()
+                        - irls_started
+                    )
                 timing["reduction"] += time.perf_counter() - band_started
                 if tile_observer is not None:
                     from .selection.counterfactual import TileObservation
@@ -1941,6 +2123,19 @@ def integrate_expressions(
                 },
                 "noiseWeights": frame_noise.serializable(),
                 "reducer": _reduction_kernel_id(),
+                **(
+                    {
+                        "combination": {
+                            "rule": parameters.combination,
+                            "iterations": IRLS_ITERATIONS,
+                            "tuningConstant": IRLS_HUBER_K,
+                            "scaleModel": "rejection-scale-model-v2",
+                            "reducer": "numpy-reference",
+                        }
+                    }
+                    if parameters.combination != DEFAULT_COMBINATION
+                    else {}
+                ),
                 **(
                     {
                         "regionWeights": {
