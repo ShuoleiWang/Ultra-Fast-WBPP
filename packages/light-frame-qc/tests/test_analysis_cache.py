@@ -205,15 +205,15 @@ def test_frozen_loader_code_and_dependency_versions_invalidate_fingerprint(monke
     frozen = SimpleNamespace(__name__="lightframeqc.frozen", __spec__=SimpleNamespace(loader=loader))
     dependency = SimpleNamespace(__version__="1.0")
     monkeypatch.setattr(cache_module.importlib, "import_module", lambda name: frozen if name.startswith("lightframeqc.") else dependency)
-    cache_module._implementation_fingerprint.cache_clear()
+    cache_module.implementation_fingerprint.cache_clear()
     try:
         original = cache_module._implementation_fingerprint()
         code = compile("value = 2", "frozen_module.py", "exec")
-        cache_module._implementation_fingerprint.cache_clear()
+        cache_module.implementation_fingerprint.cache_clear()
         changed_code = cache_module._implementation_fingerprint()
         assert changed_code != original
         dependency.__version__ = "2.0"
-        cache_module._implementation_fingerprint.cache_clear()
+        cache_module.implementation_fingerprint.cache_clear()
         assert cache_module._implementation_fingerprint() != changed_code
     finally:
-        cache_module._implementation_fingerprint.cache_clear()
+        cache_module.implementation_fingerprint.cache_clear()

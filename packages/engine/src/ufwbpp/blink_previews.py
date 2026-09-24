@@ -37,29 +37,103 @@ from lightframeqc.parallel import FrameRunner
 from lightframeqc.readers import read_frame_preview
 
 FILMSTRIP_FORMATS = ("jpeg", "png")
-# Asinh softness of the shared stretch and its black/white points in units
-# of the reference's sky sigma.
-STRETCH_SOFTNESS = 4.0
-STRETCH_BLACK_SIGMA = 2.5
-STRETCH_WHITE_SIGMA = 10.0
+# The shared screen transfer function.  The shadows are clipped this many
+# reference sigmas below the sky and the midtone is solved so the sky lands
+# on the target, exactly as a PixInsight-style auto-stretch does; the
+# highlight clip only decides where the far highlights saturate, because the
+# midtone already fixes the curve around the background.
+STRETCH_TARGET = 0.25
+STRETCH_HARD_TARGET = 0.45
+STRETCH_SHADOWS_SIGMA = -2.8
+STRETCH_WHITE_SIGMA = 1000.0
 
 
 @dataclass(frozen=True, slots=True)
 class ChannelStretch:
+    """One channel's screen transfer, derived from its blink reference.
+
+    ``black``/``white`` are the clip points in the frames' own units and
+    ``shadows``/``target`` the coefficients they came from, so a receipt
+    states both what was applied and how it was chosen.
+    """
+
     black: float
     white: float
-    softness: float
+    midtone: float
+    target: float
+    shadows: float
     sky_reference: float
     sigma_reference: float
+    mode: str = "stf"
 
-    def serializable(self) -> dict[str, float]:
+    def serializable(self) -> dict[str, Any]:
         return {
+            "mode": self.mode,
             "black": round(self.black, 3),
             "white": round(self.white, 3),
-            "softness": self.softness,
+            "shadowsClip": round(self.shadows, 4),
+            "midtone": round(self.midtone, 8),
+            "target": round(self.target, 4),
             "skyReference": round(self.sky_reference, 3),
             "sigmaReference": round(self.sigma_reference, 3),
         }
+
+
+def screen_transfer(
+    sky: float,
+    sigma: float,
+    target: float = STRETCH_TARGET,
+    shadows: float = STRETCH_SHADOWS_SIGMA,
+) -> ChannelStretch:
+    """Solve the screen transfer that puts ``sky`` on ``target``.
+
+    The shadows are clipped at ``c0 = sky + shadows * sigma`` and the
+    midtone ``m`` is the exact solution of ``MTF(m, x0) = target`` for the
+    normalized sky ``x0 = (sky - c0) / (white - c0)``:
+
+        ``m = x0 (target - 1) / (2 target x0 - target - x0)``
+
+    which has no zero denominator for ``0 < target < 1`` and ``0 < x0 < 1``.
+    """
+
+    if not math.isfinite(sky):
+        sky = 0.0
+    if not math.isfinite(sigma) or sigma <= 0.0:
+        sigma = max(abs(sky) * 1e-3, 1e-3)
+    if not 0.0 < target < 1.0 or not math.isfinite(shadows) or shadows >= 0.0:
+        raise ValueError("screen transfer needs 0 < target < 1 and a negative shadows clip")
+    black = sky + shadows * sigma
+    white = sky + STRETCH_WHITE_SIGMA * sigma
+    x0 = min(max((sky - black) / (white - black), 1e-9), 1.0 - 1e-9)
+    midtone = x0 * (target - 1.0) / (2.0 * target * x0 - target - x0)
+    return ChannelStretch(
+        black=black,
+        white=white,
+        midtone=min(max(midtone, 1e-6), 1.0 - 1e-6),
+        target=target,
+        shadows=shadows,
+        sky_reference=sky,
+        sigma_reference=sigma,
+    )
+
+
+def apply_stf(image: np.ndarray, stretch: ChannelStretch) -> np.ndarray:
+    """``MTF(m, x)`` on ``x = clip((v - black) / (white - black), 0, 1)``.
+
+    ``(2m - 1) x - m`` is negative for every ``m`` in ``(0, 1)`` and every
+    ``x`` in ``[0, 1]`` (it is ``-m`` at 0 and ``m - 1`` at 1), so the
+    transfer has no pole inside the displayed range.
+    """
+
+    span = max(stretch.white - stretch.black, 1e-6)
+    x = (np.asarray(image, dtype=np.float32) - np.float32(stretch.black)) / np.float32(span)
+    x = np.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
+    np.clip(x, 0.0, 1.0, out=x)
+    midtone = np.float32(stretch.midtone)
+    return np.asarray(
+        ((midtone - np.float32(1.0)) * x) / ((np.float32(2.0) * midtone - np.float32(1.0)) * x - midtone),
+        dtype=np.float32,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +165,9 @@ class FramePreviewSpec:
     linear_path: str
     filmstrip_path: str
     zoom_path: str
+    # A second filmstrip image of the same geometry under a harder stretch,
+    # so the interface can offer a contrast toggle without re-rendering.
+    filmstrip_hard_path: str | None
     # Frame -> blink reference, preview pixels, rows [[a, b, tx], [c, d, ty]];
     # None renders the frame unregistered.
     transform: tuple[tuple[float, float, float], tuple[float, float, float]] | None
@@ -99,6 +176,7 @@ class FramePreviewSpec:
     flux_scale: float
     reference_sky: float
     stretch: ChannelStretch
+    stretch_hard: ChannelStretch | None = None
     filmstrip_format: str = "jpeg"
     jpeg_quality: int = 85
     filmstrip_divisor: int = 2
@@ -117,6 +195,8 @@ class FramePreviewResult:
     zoom_shape: tuple[int, int]
     coverage: float | None
     registered: bool
+    filmstrip_hard_path: str | None = None
+    filmstrip_hard_bytes: int = 0
     # The sky level the normalization subtracted (calibrated when masters
     # were applied) and whether they were.
     sky: float | None = None
@@ -204,8 +284,8 @@ def robust_sigma(values: np.ndarray) -> float:
     return 1.4826 * float(np.median(np.abs(finite - center)))
 
 
-def channel_stretch(reference_linear: np.ndarray, filmstrip_divisor: int = 2) -> ChannelStretch:
-    """Black/white points from the reference's filmstrip-scale statistics."""
+def channel_statistics(reference_linear: np.ndarray, filmstrip_divisor: int = 2) -> tuple[float, float]:
+    """The reference's sky and MADN at the scale the filmstrip is judged at."""
 
     small = block_mean(np.asarray(reference_linear, dtype=np.float32), filmstrip_divisor)
     finite = small[np.isfinite(small)]
@@ -213,13 +293,18 @@ def channel_stretch(reference_linear: np.ndarray, filmstrip_divisor: int = 2) ->
     sigma = robust_sigma(small)
     if not math.isfinite(sigma) or sigma <= 0.0:
         sigma = max(abs(sky) * 1e-3, 1e-3)
-    return ChannelStretch(
-        black=sky - STRETCH_BLACK_SIGMA * sigma,
-        white=sky + STRETCH_WHITE_SIGMA * sigma,
-        softness=STRETCH_SOFTNESS,
-        sky_reference=sky,
-        sigma_reference=sigma,
-    )
+    return sky, sigma
+
+
+def channel_stretch(
+    reference_linear: np.ndarray,
+    filmstrip_divisor: int = 2,
+    target: float = STRETCH_TARGET,
+) -> ChannelStretch:
+    """The channel's screen transfer from the reference's own statistics."""
+
+    sky, sigma = channel_statistics(reference_linear, filmstrip_divisor)
+    return screen_transfer(sky, sigma, target=target)
 
 
 def compose_to_reference(
@@ -284,12 +369,7 @@ def warp_to_reference(
 
 
 def stretch_to_8bit(image: np.ndarray, stretch: ChannelStretch) -> np.ndarray:
-    span = max(stretch.white - stretch.black, 1e-6)
-    normalized = (np.asarray(image, dtype=np.float32) - stretch.black) / span
-    normalized = np.nan_to_num(normalized, nan=0.0, posinf=1.0, neginf=0.0)
-    np.clip(normalized, 0.0, 1.0, out=normalized)
-    stretched = np.arcsinh(stretch.softness * normalized) / math.asinh(stretch.softness)
-    return np.asarray(np.rint(stretched * 255.0), dtype=np.uint8)
+    return np.asarray(np.rint(apply_stf(image, stretch) * 255.0), dtype=np.uint8)
 
 
 def _encode(pixels: np.ndarray, *, format_name: str, quality: int) -> bytes:
@@ -337,19 +417,33 @@ def render_frame(spec: FramePreviewSpec) -> FramePreviewResult:
             spec.reference_sky
         )
         zoom_pixels = stretch_to_8bit(normalized, spec.stretch)
-        filmstrip_pixels = stretch_to_8bit(block_mean(normalized, spec.filmstrip_divisor), spec.stretch)
+        small = block_mean(normalized, spec.filmstrip_divisor)
+        filmstrip_pixels = stretch_to_8bit(small, spec.stretch)
         zoom_bytes = _encode(zoom_pixels, format_name="png", quality=spec.jpeg_quality)
         filmstrip_bytes = _encode(
             filmstrip_pixels, format_name=spec.filmstrip_format, quality=spec.jpeg_quality
         )
         _write_new(Path(spec.zoom_path), zoom_bytes)
         _write_new(Path(spec.filmstrip_path), filmstrip_bytes)
+        # The harder variant is one more transfer and encode of an array that
+        # is already in memory; it never decides whether the frame rendered.
+        hard_path, hard_bytes = None, b""
+        if spec.filmstrip_hard_path is not None and spec.stretch_hard is not None:
+            hard_bytes = _encode(
+                stretch_to_8bit(small, spec.stretch_hard),
+                format_name=spec.filmstrip_format,
+                quality=spec.jpeg_quality,
+            )
+            _write_new(Path(spec.filmstrip_hard_path), hard_bytes)
+            hard_path = spec.filmstrip_hard_path
         return FramePreviewResult(
             index=spec.index,
             filmstrip_path=spec.filmstrip_path,
             zoom_path=spec.zoom_path,
             filmstrip_bytes=len(filmstrip_bytes),
             zoom_bytes=len(zoom_bytes),
+            filmstrip_hard_path=hard_path,
+            filmstrip_hard_bytes=len(hard_bytes),
             filmstrip_shape=(int(filmstrip_pixels.shape[1]), int(filmstrip_pixels.shape[0])),
             zoom_shape=(int(zoom_pixels.shape[1]), int(zoom_pixels.shape[0])),
             coverage=coverage,
@@ -398,9 +492,14 @@ __all__ = [
     "FramePreviewResult",
     "FramePreviewSpec",
     "PreviewCalibration",
+    "STRETCH_HARD_TARGET",
+    "STRETCH_TARGET",
+    "apply_stf",
     "block_mean",
     "calibrate_linear",
+    "channel_statistics",
     "channel_stretch",
+    "screen_transfer",
     "compose_to_reference",
     "render_frame",
     "render_previews",

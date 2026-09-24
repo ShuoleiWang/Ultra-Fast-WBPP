@@ -523,6 +523,13 @@ export interface BlinkDiagnostics {
 export interface BlinkFramePreviews {
   diagnostic?: BlinkDiagnosticPreviews;
   filmstrip: string | null;
+  /**
+   * A second, harder-stretched image of the same geometry as `filmstrip`, for
+   * the contrast toggle.  Absent in sessions measured before it existed; the
+   * interface then silently shows the normal image.
+   */
+  filmstripHard?: string | null;
+  filmstripHardDataUrl?: string | null;
   zoom: string | null;
   coverage: number;
   filmstripDataUrl?: string | null;
@@ -570,7 +577,18 @@ export interface BlinkChannel {
   frameCount: number;
   reference: { index: number; sourceSha256: string; rule: string } | null;
   statistics: { skyClean: number | null; cleanCount: number; sourcesBest: number | null; fwhmBest: number | null };
-  stretch: { black: number; white: number; softness: number; skyReference: number; sigmaReference: number } | null;
+  /** `mode`/`shadowsClip`/`midtone`/`target` describe the harder STF stretch; absent in older sessions. */
+  stretch: {
+    black: number;
+    white: number;
+    softness: number;
+    skyReference: number;
+    sigmaReference: number;
+    mode?: "asinh" | "stf";
+    shadowsClip?: number;
+    midtone?: number;
+    target?: number;
+  } | null;
   previewGeometry: {
     display?: { algorithm: string; noiseReference: number | null; referenceCalibration: string };
     filmstrip: [number, number];

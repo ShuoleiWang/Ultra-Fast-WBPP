@@ -3013,6 +3013,7 @@ def _screen_lights(
     qc_timings: dict[str, float] = {}
     qc_cache_stats: dict[str, int] = {}
     qc_measurement_stats: dict[str, Any] = {}
+    qc_measurement_cache_stats: dict[str, int] = {}
     qc_started = perf_counter()
     measurements = measure_paths(
         [str(path) for path in lights],
@@ -3021,6 +3022,8 @@ def _screen_lights(
         workers=request.workers,
         stats=qc_measurement_stats,
         runner=frame_runner,
+        cache_directory=quality_cache_directory(),
+        cache_stats=qc_measurement_cache_stats,
     )
     qc_timings["measurementSeconds"] = perf_counter() - qc_started
     _emit(progress, ProgressStage.QUALITY_CONTROL, "running", f"measured {len(measurements)} Light frames; analyzing star fields")
@@ -3043,6 +3046,7 @@ def _screen_lights(
     qc_manifest["measurement"] = qc_measurement_stats
     qc_manifest["analysis"] = qc_analysis_stats
     qc_manifest["analysisCache"] = qc_cache_stats
+    qc_manifest["measurementCache"] = qc_measurement_cache_stats
     approved_review_paths, approval_request_digest, approval_evidence = _apply_review_approvals(
         request=request,
         identities=sources.identities,

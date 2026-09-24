@@ -2861,12 +2861,164 @@ progress::-webkit-progress-value {
   }
 }
 
+/* The channel is the unit of the review: a step rail, then one channel's
+   header, stage, completion state and filmstrip.  Each channel carries its
+   filter accent through --channel-accent. */
+.blink-rail {
+  flex: 0 0 auto;
+  padding: 8px 12px 0;
+  background: var(--surface);
+  overflow-x: auto;
+}
+.blink-rail-steps {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  min-width: min-content;
+}
+.blink-rail-steps > li {
+  display: flex;
+  flex: 1 1 0;
+  min-width: 168px;
+}
+.blink-rail-step {
+  --channel-accent: var(--secondary);
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px 8px 13px;
+  text-align: left;
+  border: 0.5px solid var(--hairline);
+  border-radius: var(--radius-card);
+  background: var(--field);
+  color: var(--label);
+  box-shadow: inset 3px 0 0 var(--channel-accent);
+  transition:
+    background var(--duration) var(--ease),
+    box-shadow var(--duration) var(--ease);
+}
+.blink-rail-step:hover {
+  background: var(--hover);
+}
+.blink-rail-step.current {
+  background: var(--surface);
+  border-color: transparent;
+  box-shadow:
+    inset 3px 0 0 var(--channel-accent),
+    inset 0 0 0 1.5px var(--channel-accent),
+    0 1px 3px var(--shadow-1);
+}
+.blink-rail-step:focus-visible {
+  outline: none;
+  box-shadow:
+    inset 3px 0 0 var(--channel-accent),
+    inset 0 0 0 1.5px var(--channel-accent),
+    0 0 0 3px var(--focus);
+}
+.blink-rail-key {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--secondary);
+  background: var(--seg);
+}
+.blink-rail-step.current .blink-rail-key {
+  color: #fff;
+  background: var(--channel-accent);
+}
+.blink-rail-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.blink-rail-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.blink-rail-filter {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--label);
+}
+.blink-rail-target {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.blink-rail-tick {
+  color: var(--ok);
+  font-size: 12px;
+}
+.blink-rail-counts {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--label);
+  white-space: nowrap;
+}
+.blink-rail-kept {
+  color: var(--secondary);
+}
+.blink-rail-step.short .blink-rail-kept {
+  color: var(--stop);
+}
+.blink-rail-meter {
+  display: block;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--track);
+  overflow: hidden;
+}
+.blink-rail-meter > span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--channel-accent);
+  transition: width var(--duration) var(--ease);
+}
+.blink-rail-step.done .blink-rail-meter > span {
+  background: var(--ok);
+}
+.blink-rail-state {
+  font-size: 10px;
+  color: var(--secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.blink-rail-step.done .blink-rail-state {
+  color: var(--ok);
+}
+
 /* Blink review keeps loading/error states outside the transformed image box. */
 .blink-review-progress {
+  --channel-accent: var(--secondary);
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 6px 12px;
+  padding: 8px 12px;
   background: var(--surface);
   border-bottom: 1px solid var(--separator);
 }
@@ -2877,6 +3029,10 @@ progress::-webkit-progress-value {
   flex-direction: column;
   gap: 2px;
 }
+.blink-review-progress > div > strong {
+  font-size: 13px;
+  font-weight: 600;
+}
 .blink-review-progress span,
 .blink-review-progress small {
   color: var(--secondary);
@@ -2886,6 +3042,126 @@ progress::-webkit-progress-value {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.blink-channel-mark {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--channel-accent);
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.18);
+}
+.blink-channel-counts {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 14px;
+}
+.blink-channel-counts > span {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.2;
+}
+.blink-channel-counts b {
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--label);
+}
+.blink-channel-counts small {
+  font-size: 10px;
+}
+
+/* The explicit end of a channel: what it kept, and the way on. */
+.blink-channel-complete {
+  --channel-accent: var(--ok);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--surface);
+  border-top: 1px solid var(--separator);
+  box-shadow: inset 3px 0 0 var(--channel-accent);
+}
+.blink-channel-complete > div {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.blink-channel-complete strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+.blink-channel-complete small {
+  font-size: 11px;
+  color: var(--secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.blink-complete-mark {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--ok);
+  background: var(--ok-bg);
+}
+.blink-channel-complete.confirmed .blink-complete-mark {
+  color: #fff;
+  background: var(--ok);
+}
+
+/* The launch bar states the review per channel, not as one number. */
+.blink-launch-checklist {
+  flex: 1 1 260px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.blink-launch-checklist > li {
+  --channel-accent: var(--secondary);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 11px;
+  background: var(--field);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.blink-launch-filter {
+  font-weight: 600;
+  color: var(--channel-accent);
+}
+.blink-launch-counts {
+  color: var(--secondary);
+  font-variant-numeric: tabular-nums;
+}
+.blink-launch-checklist > li.done {
+  background: var(--ok-bg);
+}
+.blink-launch-checklist > li.short {
+  background: var(--stop-bg);
+}
+.blink-contrast button {
+  padding: 0 8px;
 }
 .blink-load-state {
   position: absolute;

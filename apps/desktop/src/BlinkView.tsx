@@ -68,6 +68,60 @@ function flagValueText(flag: BlinkFlag): string {
   }
 }
 
+/**
+ * A stable accent per filter, so every channel reads as its own step of the
+ * workflow.  Unknown filters get a deterministic hue from their name.
+ */
+const FILTER_ACCENTS: Record<string, string> = {
+  L: "#79808d",
+  LUM: "#79808d",
+  R: "#ff453a",
+  G: "#32d74b",
+  B: "#0a84ff",
+  HA: "#ff375f",
+  HALPHA: "#ff375f",
+  SII: "#ff9f0a",
+  OIII: "#3fc7e0",
+  RGB: "#a06bff",
+  OSC: "#a06bff",
+  NONE: "#9aa0ac",
+};
+export function filterAccent(filter: string): string {
+  const key = (filter || "NONE").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (FILTER_ACCENTS[key]) return FILTER_ACCENTS[key];
+  let hue = 0;
+  for (let index = 0; index < key.length; index += 1) hue = (hue * 31 + key.charCodeAt(index)) % 360;
+  return `hsl(${hue} 62% 55%)`;
+}
+/** A channel is done only when every frame was displayed *and* the channel confirmed. */
+const channelDone = (channel: BlinkChannelSummary) => channel.confirmed && channel.viewed === channel.total;
+const channelState = (channel: BlinkChannelSummary): "idle" | "active" | "done" =>
+  channelDone(channel) ? "done" : channel.viewed > 0 ? "active" : "idle";
+const channelStateLabel = (channel: BlinkChannelSummary, t: Translator) =>
+  channelDone(channel)
+    ? t("blinkChannelStateDone", { kept: channel.kept, total: channel.total })
+    : channel.viewed > 0
+      ? t("blinkChannelStateActive", { viewed: channel.viewed, total: channel.total })
+      : t("blinkChannelStateIdle");
+/** The nights the channel spans, as one label. */
+const channelNightSpan = (channel: BlinkChannelSummary) => {
+  const nights = [...new Set(channel.frames.map((frame) => frame.night))].sort();
+  if (!nights.length) return "—";
+  return nights.length === 1 ? nights[0] : `${nights[0]} → ${nights[nights.length - 1]}`;
+};
+
+/** The contrast of the blinked image: the engine's normal stretch or its harder one. */
+type Contrast = "normal" | "hard";
+const CONTRAST_KEY = "ultra-fast-wbpp.blinkContrast";
+const storedContrast = (): Contrast => {
+  try {
+    return window.sessionStorage.getItem(CONTRAST_KEY) === "hard" ? "hard" : "normal";
+  } catch {
+    // Hardened/private webviews can refuse storage; the preference is a convenience.
+    return "normal";
+  }
+};
+
 /** Two frames blinking: the sidebar's symbol for the view. */
 export const BlinkIcon = (props: SVGProps<SVGSVGElement>) => (
   <svg
@@ -344,11 +398,88 @@ export function BlinkFrameDetails({
   );
 }
 
+/**
+ * The channel step rail: the unit of the workflow.  Every channel is one step
+ * with its filter accent, its state and its counts; the current one is
+ * emphasised and carries the keyboard number that selects it.
+ */
+function BlinkChannelRail({
+  channels,
+  currentId,
+  minimumKept,
+  onSelect,
+  t,
+}: {
+  channels: BlinkChannelSummary[];
+  currentId: string | undefined;
+  minimumKept: number;
+  onSelect: (index: number) => void;
+  t: Translator;
+}) {
+  return (
+    <nav className="blink-rail" aria-label={t("blinkChannelLabel")}>
+      <ol className="blink-rail-steps">
+        {channels.map((item, index) => {
+          const current = item.channelId === currentId;
+          const state = channelState(item);
+          const stateLabel = channelStateLabel(item, t);
+          const viewedText = t("blinkViewedCount", { viewed: item.viewed, total: item.total });
+          const keptText = t("blinkKeptCount", { kept: item.kept, total: item.total });
+          const short = item.kept < minimumKept;
+          return (
+            <li key={item.channelId}>
+              <button
+                type="button"
+                className={`blink-rail-step ${state}${current ? " current" : ""}${short ? " short" : ""}`}
+                style={{ ["--channel-accent" as string]: filterAccent(item.filter) }}
+                aria-pressed={current}
+                aria-current={current ? "step" : undefined}
+                aria-label={`${item.filter} · ${viewedText}${item.confirmed ? " ✓" : ""} · ${keptText}${
+                  state === "idle" ? ` · ${stateLabel}` : ""
+                }`}
+                title={`${item.target} · ${item.filter}`}
+                onClick={() => onSelect(index)}
+              >
+                <span className="blink-rail-key" aria-hidden="true">
+                  {index + 1}
+                </span>
+                <span className="blink-rail-body">
+                  <span className="blink-rail-line">
+                    <span className="blink-rail-filter">{item.filter}</span>
+                    <span className="blink-rail-target">{item.target}</span>
+                    {state === "done" && (
+                      <span className="blink-rail-tick" aria-hidden="true">
+                        ✓
+                      </span>
+                    )}
+                  </span>
+                  <span className="blink-rail-counts">
+                    {viewedText}
+                    {item.confirmed ? " ✓" : ""}
+                    <span className="blink-rail-kept">{keptText}</span>
+                  </span>
+                  <span className="blink-rail-meter" aria-hidden="true">
+                    <span style={{ width: `${item.total ? Math.round((100 * item.viewed) / item.total) : 0}%` }} />
+                  </span>
+                  <span className="blink-rail-state">{stateLabel}</span>
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ol>
+    </nav>
+  );
+}
+
 /** The blink launch bar: output folder, kept counts, the blockers of the selection, back and start. */
 function BlinkLaunchBar({ workflow, t }: { workflow: Workflow; t: Translator }) {
   const kept = workflow.blinkChannels.reduce((sum, channel) => sum + channel.kept, 0);
   const total = workflow.blinkChannels.reduce((sum, channel) => sum + channel.total, 0);
   const blocked = !workflow.canStart && !workflow.demoMode;
+  // Every blocker of the selection is stated per channel, with the same
+  // requirements and the same messages as before.
+  const unfinished = workflow.blinkChannels.filter((channel) => !channelDone(channel));
   return (
     <footer className="launchbar blink-launchbar">
       {blocked && (
@@ -356,6 +487,17 @@ function BlinkLaunchBar({ workflow, t }: { workflow: Workflow; t: Translator }) 
           <summary>{t("blockers")}</summary>
           <ul>
             {!workflow.blinkReviewComplete && <li>{t("blockerBlinkReview")}</li>}
+            {!workflow.blinkReviewComplete &&
+              unfinished.map((channel) => (
+                <li key={`review-${channel.channelId}`}>
+                  {t("blockerBlinkChannelReview", {
+                    target: channel.target,
+                    filter: channel.filter,
+                    viewed: channel.viewed,
+                    total: channel.total,
+                  })}
+                </li>
+              ))}
             {workflow.insufficientBlinkPanels.map((channel) => (
               <li key={channel.channelId}>
                 {t("blockerBlinkChannel", {
@@ -396,10 +538,28 @@ function BlinkLaunchBar({ workflow, t }: { workflow: Workflow; t: Translator }) 
           {t("chooseOutput")}
         </button>
       </div>
+      <ul className="blink-launch-checklist" aria-label={t("blinkLaunchChecklist")}>
+        {workflow.blinkChannels.map((channel) => {
+          const done = channelDone(channel);
+          const short = channel.kept < workflow.minimumKeptPerChannel;
+          return (
+            <li
+              key={channel.channelId}
+              className={`${done ? "done" : "pending"}${short ? " short" : ""}`}
+              style={{ ["--channel-accent" as string]: filterAccent(channel.filter) }}
+              title={`${channel.target} · ${channel.filter}`}
+            >
+              <span className={`dot ${short ? "stop" : done ? "ok" : "warn"}`} />
+              <span className="blink-launch-filter">{channel.filter}</span>
+              <span className="blink-launch-counts">
+                {t("blinkViewedCount", { viewed: channel.viewed, total: channel.total })} ·{" "}
+                {t("blinkKeptCount", { kept: channel.kept, total: channel.total })}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
       <div className="actions">
-        <span className="muted blink-kept-summary">
-          {workflow.blinkChannels.map((channel) => `${channel.filter} ${channel.kept}/${channel.total}`).join(" · ")}
-        </span>
         <button type="button" className="btn quiet" onClick={() => workflow.setStep("import")}>
           {t("back")}
         </button>
@@ -449,6 +609,15 @@ export function BlinkView({
   const [loadedFrame, setLoadedFrame] = useState<string>();
   const [compare, setCompare] = useState(false);
   const [displayMode, setDisplayMode] = useState<"detail" | "field">("detail");
+  // Which stretch of the same frame is blinked; remembered for the session.
+  const [contrast, setContrast] = useState<Contrast>(storedContrast);
+  useEffect(() => {
+    try {
+      window.sessionStorage.setItem(CONTRAST_KEY, contrast);
+    } catch {
+      // Storage can be unavailable; the contrast choice is a convenience only.
+    }
+  }, [contrast]);
   useEffect(() => {
     setLoadedFrame(undefined);
     setPlaying(false);
@@ -464,6 +633,23 @@ export function BlinkView({
   const containerRef = useRef<HTMLElement>(null);
   const tileRefs = useRef(new Map<string, HTMLButtonElement>());
   const cache = usePreviewCache(workflow.loadBlinkPreview, session?.manifest.sessionId);
+
+  // The filmstrip image of a frame at the chosen contrast; a session measured
+  // before the harder stretch existed silently keeps the normal image.
+  const filmstripPath = useCallback(
+    (frame: BlinkFrame | undefined) =>
+      (contrast === "hard"
+        ? (frame?.previews.filmstripHard ?? frame?.previews.filmstrip)
+        : frame?.previews.filmstrip) ?? null,
+    [contrast],
+  );
+  const filmstripInline = useCallback(
+    (frame: BlinkFrame | undefined) =>
+      contrast === "hard" && frame?.previews.filmstripHard
+        ? (frame.previews.filmstripHardDataUrl ?? undefined)
+        : (frame?.previews.filmstripDataUrl ?? undefined),
+    [contrast],
+  );
 
   const order = useMemo(() => filmstripOrder(channel?.frames ?? [], chronological), [channel, chronological]);
   const groups = useMemo(() => {
@@ -614,12 +800,13 @@ export function BlinkView({
   // image once zoomed in (never while playing: the loop stays cheap).
   const wantZoom = !playing && zoomFactor > ZOOM_IMAGE_FACTOR;
   const filmstripUrl = useCallback(
-    (frame: BlinkFrame | undefined) =>
-      frame && !cache.error(frame.previews.filmstrip)
-        ? (cache.get("filmstrip", frame.previews.filmstrip) ??
-          (cache.inlineAllowed(frame.previews.filmstrip) ? (frame.previews.filmstripDataUrl ?? undefined) : undefined))
-        : undefined,
-    [cache],
+    (frame: BlinkFrame | undefined) => {
+      if (!frame) return undefined;
+      const path = filmstripPath(frame);
+      if (cache.error(path)) return undefined;
+      return cache.get("filmstrip", path) ?? (cache.inlineAllowed(path) ? filmstripInline(frame) : undefined);
+    },
+    [cache, filmstripPath, filmstripInline],
   );
   const stageUrl = (frame: BlinkFrame | undefined) =>
     frame && displayMode === "field" && frame.previews.diagnostic?.field
@@ -629,30 +816,43 @@ export function BlinkView({
         : undefined;
   useEffect(() => {
     if (!current) return;
-    if (!current.previews.filmstripDataUrl) cache.ensure("filmstrip", current.previews.filmstrip);
+    if (!filmstripInline(current)) cache.ensure("filmstrip", filmstripPath(current));
     if (wantZoom && displayMode === "detail") cache.ensure("zoom", current.previews.zoom);
     if (displayMode === "field") {
       cache.ensure("zoom", current.previews.diagnostic?.field);
       cache.ensure("zoom", reference?.previews.diagnostic?.field);
     }
-    if (reference && !reference.previews.filmstripDataUrl) cache.ensure("filmstrip", reference.previews.filmstrip);
+    if (reference && !filmstripInline(reference)) cache.ensure("filmstrip", filmstripPath(reference));
     if (wantZoom && displayMode === "detail" && reference && (compare || holdReference))
       cache.ensure("zoom", reference.previews.zoom);
-    // Prefetch the neighbours in play order and the visible tiles around the frame.
+    // Prefetch the neighbours in play order and the visible tiles around the
+    // frame — never past the ends of this channel's own order.
     for (const delta of [1, 2, -1, 3, 4, 5, 6, -2, -3, -4, -5, -6]) {
       const frame = order[(currentIndex + delta + order.length) % order.length];
-      if (frame && !frame.previews.filmstripDataUrl) cache.ensure("filmstrip", frame.previews.filmstrip);
+      if (frame && !filmstripInline(frame)) cache.ensure("filmstrip", filmstripPath(frame));
     }
-  }, [cache, compare, current, currentIndex, holdReference, order, reference, wantZoom, displayMode]);
+  }, [
+    cache,
+    compare,
+    current,
+    currentIndex,
+    holdReference,
+    order,
+    reference,
+    wantZoom,
+    displayMode,
+    filmstripPath,
+    filmstripInline,
+  ]);
 
   useEffect(() => {
     if (!current) return;
     const error =
       current.previews.error ??
-      cache.error(displayMode === "field" ? current.previews.diagnostic?.field : current.previews.filmstrip) ??
-      (!current.previews.filmstrip && !current.previews.filmstripDataUrl ? t("blinkPreviewFailed") : undefined);
+      cache.error(displayMode === "field" ? current.previews.diagnostic?.field : filmstripPath(current)) ??
+      (!filmstripPath(current) && !filmstripInline(current) ? t("blinkPreviewFailed") : undefined);
     workflow.reportPreviewFailure(current.sourceSha256, error || undefined);
-  }, [current, cache, workflow.reportPreviewFailure, t, displayMode]);
+  }, [current, cache, workflow.reportPreviewFailure, t, displayMode, filmstripPath, filmstripInline]);
   const decisionOf = (frame: BlinkFrame): BlinkDecision => decisions[frame.sourceSha256] ?? "KEEP";
   const toggleRange = (frame: BlinkFrame, shift: boolean) => {
     const anchor = order.findIndex((item) => item.sourceSha256 === anchorRef.current);
@@ -668,13 +868,43 @@ export function BlinkView({
     setPlaying(false);
     select(frame.sourceSha256);
   };
+  // Channel navigation.  The review never leaves the current channel by
+  // itself: only these calls change it, and each one re-anchors the stage on
+  // the target channel's own first frame.
+  const channelIndex = Math.max(
+    0,
+    channels.findIndex((item) => item.channelId === channel?.channelId),
+  );
   const selectChannel = (index: number) => {
     const target = channels[index];
     if (target) {
       setPlaying(false);
+      setKeptOnly(false);
       workflow.selectBlinkChannel(target.channelId);
       select(filmstripOrder(target.frames, chronological)[0]?.sourceSha256);
     }
+  };
+  const stepChannel = (delta: number) => {
+    if (channels.length < 2) return;
+    selectChannel((channelIndex + delta + channels.length) % channels.length);
+  };
+  // The channel the completion state offers next: the first unfinished one
+  // after this one (wrapping), or else the next finished one to go back to.
+  const rotatedChannels = [...channels.slice(channelIndex + 1), ...channels.slice(0, channelIndex)];
+  const nextChannel = rotatedChannels.find((item) => !channelDone(item)) ?? rotatedChannels[0];
+  const nextChannelDone = nextChannel ? channelDone(nextChannel) : false;
+  const confirmBlocked = Boolean(
+    channel?.frames.some(
+      (frame) => workflow.previewFailures[frame.sourceSha256] && (decisions[frame.sourceSha256] ?? "KEEP") !== "DROP",
+    ),
+  );
+  const channelComplete = Boolean(channel && channel.total > 0 && channel.viewed === channel.total);
+  const advanceChannel = () => {
+    if (!channel) return;
+    setPlaying(false);
+    if (!channel.confirmed && !confirmBlocked) workflow.confirmBlinkChannel(channel.channelId);
+    const index = channels.findIndex((item) => item.channelId === nextChannel?.channelId);
+    if (index >= 0) selectChannel(index);
   };
 
   const decideAndNext = (decision: BlinkDecision) => {
@@ -705,6 +935,18 @@ export function BlinkView({
     }
     const inButton = Boolean(target.closest("button"));
     const handled = () => event.preventDefault();
+    // 1–N pick a channel directly; Tab / Shift+Tab step through them while the
+    // focus is on the view itself (inside a control, Tab stays Tab).
+    if (/^[1-9]$/.test(key)) {
+      handled();
+      selectChannel(Number(key) - 1);
+      return;
+    }
+    if (key === "Tab" && !inButton && !event.altKey && channels.length > 1) {
+      handled();
+      stepChannel(event.shiftKey ? -1 : 1);
+      return;
+    }
     switch (key) {
       case "ArrowRight":
         handled();
@@ -754,13 +996,6 @@ export function BlinkView({
       case "0":
         handled();
         setView(undefined);
-        return;
-      case "1":
-      case "2":
-      case "3":
-      case "4":
-        handled();
-        selectChannel(Number(key) - 1);
         return;
       default:
         break;
@@ -852,11 +1087,11 @@ export function BlinkView({
         ? frame.previews.diagnostic.field
         : wantZoom && frame && cache.get("zoom", frame.previews.zoom)
           ? frame.previews.zoom
-          : frame?.previews.filmstrip;
+          : filmstripPath(frame);
     const error = frame
       ? (frame.previews.error ??
         cache.error(currentPath) ??
-        (!frame.previews.filmstrip && !frame.previews.filmstripDataUrl ? t("blinkPreviewFailed") : undefined))
+        (!filmstripPath(frame) && !filmstripInline(frame) ? t("blinkPreviewFailed") : undefined))
       : undefined;
     const loaded = () => {
       if (!frame) return;
@@ -867,7 +1102,7 @@ export function BlinkView({
       <div key={key} className="blink-pane">
         {frame && url && (
           <PreviewCanvas
-            key={`${frame.sourceSha256}:${displayMode}:${wantZoom ? "zoom" : "filmstrip"}`}
+            key={`${frame.sourceSha256}:${displayMode}:${contrast}:${wantZoom ? "zoom" : "filmstrip"}`}
             src={url}
             label={alt(frame)}
             width={paneWidth}
@@ -937,6 +1172,8 @@ export function BlinkView({
     );
   };
   const showReference = holdReference && reference && !compare;
+  const accent = filterAccent(channel.filter);
+  const hardContrastAvailable = channel.frames.some((frame) => Boolean(frame.previews.filmstripHard));
   const keptTotal = channels.reduce((sum, item) => sum + item.kept, 0);
   const frameTotal = channels.reduce((sum, item) => sum + item.total, 0);
 
@@ -955,25 +1192,6 @@ export function BlinkView({
           <span className="muted">{t("blinkKeptSummary", { kept: keptTotal, total: frameTotal })}</span>
         </h1>
         <div className="chead-row">
-          <div className="chips" role="group" aria-label={t("blinkChannelLabel")}>
-            {channels.map((item, index) => (
-              <button
-                type="button"
-                key={item.channelId}
-                className="chip"
-                aria-pressed={item.channelId === channel.channelId}
-                title={`${item.target} · ${item.filter}`}
-                onClick={() => selectChannel(index)}
-              >
-                <span
-                  className={`dot ${item.kept < workflow.minimumKeptPerChannel ? "stop" : item.flagged ? "warn" : "ok"}`}
-                />
-                {item.filter} · {t("blinkViewedCount", { viewed: item.viewed, total: item.total })}
-                {item.confirmed ? " ✓" : ""}
-              </button>
-            ))}
-          </div>
-          <span className="spacer" />
           <div className="blink-controls">
             <button
               type="button"
@@ -1016,6 +1234,16 @@ export function BlinkView({
                 <option value="detail">{t("blinkDiagDetailMode")}</option>
                 <option value="field">{t("blinkDiagFieldMode")}</option>
               </select>
+            )}
+            {hardContrastAvailable && (
+              <span className="seg blink-contrast" role="group" aria-label={t("blinkContrastLabel")}>
+                <button type="button" aria-pressed={contrast === "normal"} onClick={() => setContrast("normal")}>
+                  {t("blinkContrastNormal")}
+                </button>
+                <button type="button" aria-pressed={contrast === "hard"} onClick={() => setContrast("hard")}>
+                  {t("blinkContrastHard")}
+                </button>
+              </span>
             )}
             <button
               type="button"
@@ -1060,16 +1288,43 @@ export function BlinkView({
           </div>
         </div>
       </div>
-      <div className="blink-review-progress">
+      <BlinkChannelRail
+        channels={channels}
+        currentId={channel.channelId}
+        minimumKept={workflow.minimumKeptPerChannel}
+        onSelect={selectChannel}
+        t={t}
+      />
+      <div className="blink-review-progress" style={{ ["--channel-accent" as string]: accent }}>
+        <span className="blink-channel-mark" aria-hidden="true">
+          {channel.filter}
+        </span>
         <div>
-          <strong title={t("blinkHumanReviewHint")}>{t("blinkHumanReviewTitle")}</strong>
+          <strong title={t("blinkHumanReviewHint")}>
+            {t("blinkChannelHeading", { filter: channel.filter, target: channel.target })}
+          </strong>
           <small title={reference?.name}>
+            {t("blinkChannelFacts", { frames: channel.total, nights: channelNightSpan(channel) })} ·{" "}
             {t(current?.diagnostics ? "blinkDiagReference" : "blinkReferenceNormalization", {
               filter: channel.filter,
               name: reference?.name ?? "—",
             })}
           </small>
         </div>
+        <span className="blink-channel-counts">
+          <span>
+            <b>
+              {channel.viewed}/{channel.total}
+            </b>
+            <small>{t("blinkViewedLabel")}</small>
+          </span>
+          <span>
+            <b>
+              {channel.kept}/{channel.total}
+            </b>
+            <small>{t("blinkKeptLabel")}</small>
+          </span>
+        </span>
         <button
           type="button"
           className="btn small"
@@ -1084,10 +1339,7 @@ export function BlinkView({
         <button
           type="button"
           className="btn primary"
-          disabled={
-            channel.viewed !== channel.total ||
-            channel.frames.some((f) => workflow.previewFailures[f.sourceSha256] && decisionOf(f) !== "DROP")
-          }
+          disabled={channel.viewed !== channel.total || confirmBlocked}
           onClick={() => {
             setPlaying(false);
             workflow.confirmBlinkChannel(channel.channelId);
@@ -1117,6 +1369,37 @@ export function BlinkView({
               {compare && pane(reference, "reference")}
               {pane(showReference ? reference : current, "current")}
             </div>
+            {channelComplete && (
+              <div
+                className={`blink-channel-complete${channel.confirmed ? " confirmed" : ""}`}
+                role="status"
+                style={{ ["--channel-accent" as string]: accent }}
+              >
+                <span className="blink-complete-mark" aria-hidden="true">
+                  ✓
+                </span>
+                <div>
+                  <strong>{t("blinkChannelDone", { filter: channel.filter })}</strong>
+                  <small>
+                    {t("blinkChannelDoneDetail", {
+                      kept: channel.kept,
+                      dropped: channel.total - channel.kept,
+                      total: channel.total,
+                    })}
+                    {channel.confirmed ? "" : ` · ${t("blinkChannelDoneConfirmHint")}`}
+                  </small>
+                </div>
+                {nextChannel ? (
+                  <button type="button" className="btn primary" disabled={confirmBlocked} onClick={advanceChannel}>
+                    {nextChannelDone
+                      ? t("blinkBackToChannel", { filter: nextChannel.filter })
+                      : t("blinkNextChannel", { filter: nextChannel.filter })}
+                  </button>
+                ) : (
+                  <span className="badge ok">{t("blinkAllChannelsDone")}</span>
+                )}
+              </div>
+            )}
             <div className="blink-decide-bar">
               <button type="button" className="btn" onClick={() => stepBy(-1)}>
                 {t("blinkPrevious")}
@@ -1215,9 +1498,9 @@ export function BlinkView({
                         <FilmstripImage
                           frame={frame}
                           url={url}
-                          error={cache.error(frame.previews.filmstrip)}
-                          ensure={() => cache.ensure("filmstrip", frame.previews.filmstrip)}
-                          onError={() => cache.fail(frame.previews.filmstrip)}
+                          error={cache.error(filmstripPath(frame))}
+                          ensure={() => cache.ensure("filmstrip", filmstripPath(frame))}
+                          onError={() => cache.fail(filmstripPath(frame))}
                           t={t}
                         />
                         <span className="blink-bar" aria-hidden="true" />
@@ -1249,6 +1532,7 @@ export function BlinkView({
           <p>{t("blinkKeysNavigate")}</p>
           <p>{t("blinkKeysDecide")}</p>
           <p>{t("blinkKeysView")}</p>
+          <p>{t("blinkKeysChannel")}</p>
         </details>
       </div>
       <BlinkLaunchBar workflow={workflow} t={t} />

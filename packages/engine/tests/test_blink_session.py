@@ -10,7 +10,8 @@ from PIL import Image
 import pytest
 
 from ufwbpp.blink_previews import (
-    ChannelStretch,
+    apply_stf,
+    screen_transfer,
     block_mean,
     compose_to_reference,
     stretch_to_8bit,
@@ -63,7 +64,7 @@ def _check_manifest_contract(manifest: dict, session: Path, count: int) -> None:
         has_exclude = any(flag["severity"] == "EXCLUDE" for flag in frame["flags"])
         assert (frame["defaultDecision"] == "DROP") == has_exclude
         assert all(flag["severity"] in {"EXCLUDE", "ATTENTION"} for flag in frame["flags"])
-        for key in ("filmstrip", "zoom"):
+        for key in ("filmstrip", "filmstripHard", "zoom"):
             relative = frame["previews"][key]
             if relative is None:
                 continue
@@ -72,6 +73,20 @@ def _check_manifest_contract(manifest: dict, session: Path, count: int) -> None:
             assert path.is_file() and not path.is_symlink()
             head = path.read_bytes()[:8]
             assert head.startswith(JPEG_SIGNATURE) or head.startswith(PNG_SIGNATURE)
+    for channel in manifest["channels"]:
+        stretch = channel["stretch"]
+        if stretch is None:
+            continue
+        # The desktop reads these; the harder variant is derived from them.
+        assert set(stretch) == {
+            "mode", "black", "white", "shadowsClip", "midtone", "target",
+            "skyReference", "sigmaReference",
+        }
+        assert stretch["mode"] == "stf" and stretch["target"] == 0.25
+        assert stretch["shadowsClip"] == -2.8
+        assert 0.0 < stretch["midtone"] < 1.0
+        assert stretch["black"] < stretch["skyReference"] < stretch["white"]
+    assert set(manifest["measurementCache"]) <= {"hits", "misses", "writes"}
     drop = sum(frame["defaultDecision"] == "DROP" for frame in frames)
     attention = sum(frame["defaultDecision"] == "KEEP" and bool(frame["flags"]) for frame in frames)
     assert manifest["counts"] == {
@@ -259,11 +274,50 @@ def test_preview_primitives() -> None:
     shifted = compose_to_reference([[1, 0, 5], [0, 1, 1], [0, 0, 1]], [[1, 0, 2], [0, 1, 1], [0, 0, 1]])
     assert shifted == ((1.0, 0.0, 3.0), (0.0, 1.0, 0.0))
     assert compose_to_reference(None, np.eye(3)) is None
-    stretch = ChannelStretch(black=0.0, white=100.0, softness=4.0, sky_reference=25.0, sigma_reference=10.0)
-    pixels = stretch_to_8bit(np.array([[-10.0, 0.0, 50.0, 100.0, np.nan]], dtype=np.float32), stretch)
+    # The screen transfer puts the reference sky exactly on its target and
+    # keeps every brighter value graded instead of clipping it white.
+    stretch = screen_transfer(sky=25.0, sigma=10.0)
+    assert stretch.mode == "stf"
+    assert stretch.black == pytest.approx(25.0 - 2.8 * 10.0)
+    assert stretch.white == pytest.approx(25.0 + 1000.0 * 10.0)
+    assert apply_stf(np.array([stretch.sky_reference], dtype=np.float32), stretch)[0] == pytest.approx(0.25, abs=1e-4)
+    harder = screen_transfer(sky=25.0, sigma=10.0, target=0.45)
+    assert apply_stf(np.array([stretch.sky_reference], dtype=np.float32), harder)[0] == pytest.approx(0.45, abs=1e-4)
+    # A higher target is a stronger stretch: a smaller midtone balance.
+    assert harder.midtone < stretch.midtone
+    stretch = screen_transfer(sky=50.0, sigma=10.0)
+    pixels = stretch_to_8bit(np.array([[-10.0, stretch.black, 50.0, stretch.white, np.nan]], dtype=np.float32), stretch)
     assert pixels.dtype == np.uint8
     assert pixels[0, 0] == 0 and pixels[0, 1] == 0 and pixels[0, 3] == 255 and pixels[0, 4] == 0
-    assert 128 < pixels[0, 2] < 255
+    assert pixels[0, 2] == round(0.25 * 255)
+    # Monotone, finite and never divides by zero across the whole domain.
+    ramp = apply_stf(np.linspace(stretch.black - 50.0, stretch.white + 50.0, 4096, dtype=np.float32), stretch)
+    assert np.all(np.isfinite(ramp)) and np.all(np.diff(ramp) >= -1e-7)
+    assert ramp[0] == pytest.approx(0.0) and ramp[-1] == pytest.approx(1.0)
+    with pytest.raises(ValueError):
+        screen_transfer(sky=50.0, sigma=10.0, target=1.0)
+
+
+def test_a_second_session_reuses_the_cached_measurements(
+    synthetic_project: dict[str, tuple[Path, ...]], tmp_path: Path
+) -> None:
+    """The blink pass pays for the measurement; the next one does not."""
+
+    lights = list(synthetic_project["lights"][:6])
+    first = run_blink_session(BlinkRequest.from_mapping(_request(lights, tmp_path / "first")))
+    second = run_blink_session(BlinkRequest.from_mapping(_request(lights, tmp_path / "second")))
+
+    assert first["measurementCache"] == {"misses": 6, "writes": 6}
+    assert second["measurementCache"] == {"hits": 6}
+    # The same evidence and the same decisions, from a cached measurement.
+    for key in ("counts", "referenceRule"):
+        assert second[key] == first[key]
+    assert [(frame["sourceSha256"], frame["defaultDecision"], frame["flags"]) for frame in second["frames"]] == [
+        (frame["sourceSha256"], frame["defaultDecision"], frame["flags"]) for frame in first["frames"]
+    ]
+    assert [channel["stretch"] for channel in second["channels"]] == [
+        channel["stretch"] for channel in first["channels"]
+    ]
 
 
 def test_diagnostic_session_exports_complementary_views_without_changing_admission(synthetic_project: dict, tmp_path: Path) -> None:

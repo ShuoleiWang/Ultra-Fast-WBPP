@@ -57,6 +57,7 @@ from .blink_previews import (
     FramePreviewSpec,
     PreviewCalibration,
     calibrate_linear,
+    STRETCH_HARD_TARGET,
     channel_stretch,
     compose_to_reference,
     render_previews,
@@ -72,6 +73,8 @@ MAX_BLINK_LIGHTS = 10_000
 MAX_BLINK_MASTERS = 64
 LINEAR_DIRECTORY = "linear"
 FILMSTRIP_DIRECTORY = "filmstrip"
+# The same filmstrip images under the harder stretch, for the contrast toggle.
+FILMSTRIP_HARD_DIRECTORY = "filmstrip-hard"
 ZOOM_DIRECTORY = "zoom"
 # A master dark serves a Light whose exposure is within this fraction.
 DARK_EXPOSURE_TOLERANCE = 0.05
@@ -674,6 +677,7 @@ def _preview_specs(
         if not reference_calibrated:
             calibration = None
         stretch = channel_stretch(reference_data, divisor)
+        stretch_hard = channel_stretch(reference_data, divisor, target=STRETCH_HARD_TARGET)
         stretches[channel_id] = stretch
         output_shape = (int(reference_data.shape[0]), int(reference_data.shape[1]))
         reference_sky = (
@@ -725,6 +729,7 @@ def _preview_specs(
                     index=index,
                     linear_path=str(linear),
                     filmstrip_path=str(session / FILMSTRIP_DIRECTORY / f"{index:04d}-{safe_stem(frame.filter_name, 16)}-{stem}.{suffix}"),
+                    filmstrip_hard_path=str(session / FILMSTRIP_HARD_DIRECTORY / f"{index:04d}-{safe_stem(frame.filter_name, 16)}-{stem}.{suffix}"),
                     zoom_path=str(session / ZOOM_DIRECTORY / f"{index:04d}-{safe_stem(frame.filter_name, 16)}-{stem}.png"),
                     transform=transform,
                     output_shape=output_shape,
@@ -732,6 +737,7 @@ def _preview_specs(
                     flux_scale=flux_scale,
                     reference_sky=reference_sky,
                     stretch=stretch,
+                    stretch_hard=stretch_hard,
                     filmstrip_format=options.filmstrip_format,
                     jpeg_quality=options.jpeg_quality,
                     filmstrip_divisor=divisor,
@@ -776,9 +782,11 @@ def run_blink_session(
         emit("measure", f"measuring {len(lights)} Light frames")
         started = perf_counter()
         measurement_stats: dict[str, Any] = {}
+        measurement_cache_stats: dict[str, int] = {}
         measurements = measure_paths(
             lights, session, config, workers=workers, stats=measurement_stats,
             runner=frame_runner, linear_directory=linear_root,
+            cache_directory=quality_cache_directory(), cache_stats=measurement_cache_stats,
         )
         timings["measurementSeconds"] = perf_counter() - started
         emit("analyze", "analyzing star fields")
@@ -833,7 +841,7 @@ def run_blink_session(
 
     manifest = _manifest(
         request, session, lights, evidence, results, rendered, stretches, geometry, timings,
-        measurement_stats, analysis_stats, cache_stats, notes, workers, gate_policy,
+        measurement_stats, analysis_stats, cache_stats, measurement_cache_stats, notes, workers, gate_policy,
     )
     manifest_path = session / "manifest.json"
     encoded = (json.dumps(manifest, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
@@ -857,6 +865,7 @@ def _manifest(
     measurement_stats: Mapping[str, Any],
     analysis_stats: Mapping[str, Any],
     cache_stats: Mapping[str, int],
+    measurement_cache_stats: Mapping[str, int],
     notes: Sequence[str],
     workers: int,
     gate_policy: GatePolicy,
@@ -897,8 +906,14 @@ def _manifest(
                         if preview is not None and preview.zoom_path
                         else None
                     ),
+                    "filmstripHard": (
+                        Path(preview.filmstrip_hard_path).relative_to(session).as_posix()
+                        if preview is not None and preview.filmstrip_hard_path
+                        else None
+                    ),
                     "coverage": None if preview is None else (None if preview.coverage is None else round(preview.coverage, 4)),
                     "filmstripBytes": preview.filmstrip_bytes if preview is not None else 0,
+                    "filmstripHardBytes": preview.filmstrip_hard_bytes if preview is not None else 0,
                     "zoomBytes": preview.zoom_bytes if preview is not None else 0,
                     "error": preview.error if preview is not None else "not rendered",
                     **({"diagnostic": preview.diagnostic_previews} if preview is not None and preview.diagnostic_previews is not None else {}),
@@ -956,6 +971,7 @@ def _manifest(
         "measurement": dict(measurement_stats),
         "analysis": dict(analysis_stats),
         "analysisCache": dict(cache_stats),
+        "measurementCache": dict(measurement_cache_stats),
         "counts": counts,
         "channels": channels,
         "frames": frames,
