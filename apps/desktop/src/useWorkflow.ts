@@ -964,6 +964,8 @@ export function useWorkflow(t: Translator) {
     const session = blinkSessionRef.current;
     if (!session) throw new Error("no blink session");
     if (session.demo) {
+      const hard = session.manifest.frames.find((item) => item.previews.filmstripHard === relativePath);
+      if (hard?.previews.filmstripHardDataUrl) return hard.previews.filmstripHardDataUrl;
       const frame = session.manifest.frames.find(
         (item) => item.previews.zoom === relativePath || item.previews.filmstrip === relativePath,
       );

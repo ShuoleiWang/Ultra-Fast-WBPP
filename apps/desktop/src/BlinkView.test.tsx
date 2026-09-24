@@ -174,6 +174,17 @@ const stage = () => within(document.querySelector(".blink-stage") as HTMLElement
 const tiles = () => screen.getAllByRole("button", { name: /^NGC 6822_300\.00s_/ });
 const currentTile = () => tiles().find((tile) => tile.getAttribute("aria-current") === "true")!;
 const chip = (filter: string) => screen.getByRole("button", { name: new RegExp(`^${filter} · \\d+/\\d+ viewed`) });
+const railSteps = () => screen.getAllByRole("button", { name: /^\w+ · \d+\/\d+ viewed/ });
+const contrast = (name: "Normal" | "Hard") =>
+  within(screen.getByRole("group", { name: "Contrast" })).getByRole("button", { name });
+const stageSrc = () => (screen.getAllByTestId("blink-stage-decoder")[0] as HTMLImageElement).getAttribute("src");
+/** Display every frame of the current channel without confirming it. */
+async function viewCurrentChannel() {
+  for (const tile of Array.from(document.querySelectorAll<HTMLButtonElement>(".blink-tile"))) {
+    fireEvent.click(tile);
+    await paintStage();
+  }
+}
 const key = (name: string, init: Record<string, unknown> = {}) => {
   fireEvent.keyDown(view(), { key: name, ...init });
   fireEvent.keyUp(view(), { key: name, ...init });
@@ -194,6 +205,7 @@ beforeEach(() => {
   native.runtime = true;
   native.handlers = undefined;
   window.localStorage.clear();
+  window.sessionStorage.clear();
   // Reduced motion keeps playback off until a test asks for it, so the current frame is deterministic.
   vi.spyOn(window, "matchMedia").mockImplementation((query: string) => ({
     matches: query.includes("reduced-motion"),
@@ -600,6 +612,135 @@ describe("human Blink screening", () => {
       await screen.findByText("Blink measurement failed: Error: BLINK_NO_LIGHTS: no Light frames"),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Start processing/ })).toBeDisabled();
+  });
+});
+
+describe("channel-first Blink workflow", () => {
+  it("lists every channel as a step of the review with its state and counts", async () => {
+    render(<App />);
+    await reachBlink();
+    const steps = railSteps();
+    expect(steps).toHaveLength(2);
+    expect(steps[0]).toHaveAttribute("aria-current", "step");
+    expect(steps[0]).toHaveTextContent("L");
+    expect(steps[0]).toHaveTextContent("0/14 viewed");
+    expect(steps[0]).toHaveTextContent("14/14 kept");
+    expect(steps[0]).toHaveTextContent("Not started");
+    expect(steps[1]).toHaveTextContent("0/8 viewed");
+    expect(steps[1]).not.toHaveAttribute("aria-current");
+    await paintStage();
+    expect(chip("L")).toHaveTextContent("In progress · 1/14 viewed");
+    // 1–N pick a channel, Tab and Shift+Tab step through them.
+    key("2");
+    expect(chip("R")).toHaveAttribute("aria-pressed", "true");
+    expect(chip("R")).toHaveAttribute("aria-current", "step");
+    key("Tab");
+    expect(chip("L")).toHaveAttribute("aria-pressed", "true");
+    key("Tab", { shiftKey: true });
+    expect(chip("R")).toHaveAttribute("aria-pressed", "true");
+    key("1");
+    expect(chip("L")).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("keeps the review inside one channel and offers the next one when it is finished", async () => {
+    render(<App />);
+    await reachBlink();
+    expect(tiles()).toHaveLength(14);
+    // Stepping, Home/End and the counters never reach the other channel.
+    key("End");
+    expect(currentTile()).toBe(tiles().at(-1));
+    key("ArrowRight");
+    expect(currentTile()).toBe(tiles()[0]);
+    expect(tiles()).toHaveLength(14);
+    expect(chip("R")).toHaveTextContent("0/8 viewed");
+    expect(screen.queryByText("Channel L reviewed")).not.toBeInTheDocument();
+
+    await viewCurrentChannel();
+    expect(screen.getByText("Channel L reviewed")).toBeInTheDocument();
+    expect(screen.getByText(/14 kept, 0 dropped of 14/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Next channel · R" }));
+    expect(chip("L")).toHaveTextContent("14/14 viewed ✓");
+    expect(chip("R")).toHaveAttribute("aria-pressed", "true");
+    expect(tiles()).toHaveLength(8);
+    expect(screen.queryByText("Channel L reviewed")).not.toBeInTheDocument();
+
+    // With every other channel finished the completion state wraps back.
+    await viewCurrentChannel();
+    expect(screen.getByText("Channel R reviewed")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Back to L" }));
+    expect(chip("R")).toHaveTextContent("8/8 viewed ✓");
+    expect(chip("L")).toHaveAttribute("aria-pressed", "true");
+    expect(tiles()).toHaveLength(14);
+  });
+
+  it("states the launch requirements per channel", async () => {
+    render(<App />);
+    await reachBlink();
+    await userEvent.click(screen.getByRole("button", { name: "Choose output folder" }));
+    const checklist = () => screen.getByRole("list", { name: "Review status per channel" });
+    expect(within(checklist()).getByText("0/14 viewed · 14/14 kept")).toBeInTheDocument();
+    expect(within(checklist()).getByText("0/8 viewed · 8/8 kept")).toBeInTheDocument();
+    expect(screen.getByText("Complete and confirm the manual review of every channel first.")).toBeInTheDocument();
+    expect(
+      screen.getByText("NGC 6822 × L: 0 of 14 frames viewed; view them all and confirm the channel."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("NGC 6822 × R: 0 of 8 frames viewed; view them all and confirm the channel."),
+    ).toBeInTheDocument();
+
+    await reviewChannel(/Confirm L/);
+    expect(within(checklist()).getByText("14/14 viewed · 14/14 kept").closest("li")).toHaveClass("done");
+    expect(
+      screen.queryByText("NGC 6822 × L: 14 of 14 frames viewed; view them all and confirm the channel."),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("NGC 6822 × R: 0 of 8 frames viewed; view them all and confirm the channel."),
+    ).toBeInTheDocument();
+    // The kept counts stay per channel once the second one is reviewed too.
+    fireEvent.click(screen.getAllByRole("button", { name: "Drop night" })[0]);
+    await reviewChannel(/Confirm R/);
+    expect(within(checklist()).getByText("8/8 viewed · 3/8 kept")).toBeInTheDocument();
+    expect(within(checklist()).getByText("14/14 viewed · 14/14 kept")).toBeInTheDocument();
+    expect(screen.queryByText(/frames viewed; view them all/)).not.toBeInTheDocument();
+  });
+
+  it("switches the blinked image between the normal and the harder stretch and remembers it", async () => {
+    render(<App />);
+    await reachBlink();
+    await paintStage();
+    const normal = stageSrc();
+    expect(normal).toBe(manifest().frames[0].previews.filmstripDataUrl);
+    expect(contrast("Normal")).toHaveAttribute("aria-pressed", "true");
+    await userEvent.click(contrast("Hard"));
+    await paintStage();
+    expect(stageSrc()).toBe(manifest().frames[0].previews.filmstripHardDataUrl);
+    expect(document.querySelectorAll(".blink-tile .blink-thumb-canvas").length).toBeGreaterThan(0);
+    expect(window.sessionStorage.getItem("ultra-fast-wbpp.blinkContrast")).toBe("hard");
+    await userEvent.click(contrast("Normal"));
+    await paintStage();
+    expect(stageSrc()).toBe(normal);
+    expect(window.sessionStorage.getItem("ultra-fast-wbpp.blinkContrast")).toBe("normal");
+  });
+
+  it("silently keeps the normal image for a session measured without the harder stretch", async () => {
+    const plain = (): BlinkMeasureResponse => {
+      const base = manifest();
+      return {
+        ...base,
+        frames: base.frames.map((frame) => ({
+          ...frame,
+          previews: { ...frame.previews, filmstripHard: null, filmstripHardDataUrl: null },
+        })),
+      };
+    };
+    native.blinkMeasure.mockImplementation(async () => plain());
+    window.sessionStorage.setItem("ultra-fast-wbpp.blinkContrast", "hard");
+    render(<App />);
+    await reachBlink();
+    await paintStage();
+    expect(screen.queryByRole("group", { name: "Contrast" })).not.toBeInTheDocument();
+    expect(stageSrc()).toBe(manifest().frames[0].previews.filmstripDataUrl);
+    expect(chip("L")).toHaveTextContent("1/14 viewed");
   });
 });
 

@@ -40,7 +40,7 @@ from .identity import (
     compute_file_identity,
     verify_file_identity_stat,
 )
-from .models import FrameMeasurement, FrameMetadata, Star
+from .models import FileIdentity, FrameMeasurement, FrameMetadata, Star
 from .parallel import FrameRunner
 from .readers import (
     DEFAULT_MAX_FULL_DECODE_BYTES,
@@ -586,18 +586,102 @@ def _thumbnail_name(run_token: str, index: int, path: Path) -> str:
     return f"{run_token}-{index:06d}-{stem}-{digest}.png"
 
 
-_MeasureTask = tuple[str, str | None, QcConfig, str | None]
+@dataclass(frozen=True, slots=True)
+class _MeasureTask:
+    """One frame of :func:`measure_paths` as a child process receives it."""
+
+    path: str
+    thumbnail_path: str | None
+    config: QcConfig
+    linear_path: str | None
+    cache_directory: str | None
 
 
 def linear_preview_name(index: int) -> str:
     return f"{index:04d}.npy"
 
 
-def _measure_task(task: _MeasureTask) -> FrameMeasurement:
-    """One frame of :func:`measure_paths`, importable so a child process can run it."""
+def _replay_preview_side_effects(
+    task: _MeasureTask, measurement: FrameMeasurement, identity: FileIdentity
+) -> FrameMeasurement | None:
+    """Write the preview images a cached measurement did not produce.
 
-    path, thumbnail, config, linear = task
-    return measure_frame_safe(path, config=config, thumbnail_path=thumbnail, linear_path=linear)
+    The thumbnail and the linear preview are functions of the decoded
+    preview alone, so one read reproduces them exactly while the extraction,
+    the statistics and the native-resolution PSF pass stay skipped.  Any
+    failure returns ``None`` and the caller measures the frame normally;
+    whatever this attempt had already written is removed first, so the
+    create-only destinations are free for that second attempt.
+    """
+
+    try:
+        preview = read_frame_preview(
+            task.path,
+            max_long_edge=task.config.preview_long_edge,
+            image_index=0,
+            max_full_decode_bytes=DEFAULT_MAX_FULL_DECODE_BYTES,
+        )
+        thumbnail = (
+            save_thumbnail_png(preview, task.thumbnail_path)
+            if task.thumbnail_path is not None
+            else None
+        )
+        if task.linear_path is not None:
+            save_linear_preview(preview, task.linear_path)
+        verify_file_identity_stat(task.path, identity)
+    except Exception:
+        for destination in (task.thumbnail_path, task.linear_path):
+            if destination is not None:
+                try:
+                    Path(destination).unlink(missing_ok=True)
+                except OSError:
+                    pass
+        return None
+    measurement.thumbnail_path = thumbnail
+    return measurement
+
+
+def _measure_task(task: _MeasureTask) -> tuple[FrameMeasurement, str]:
+    """Measure one frame, reusing a cached measurement of the same bytes.
+
+    The returned outcome (``off``, ``hit``, ``miss`` or ``stored``) travels
+    with the measurement because the frame workers are separate processes.
+    """
+
+    def measured() -> FrameMeasurement:
+        return measure_frame_safe(
+            task.path,
+            config=task.config,
+            thumbnail_path=task.thumbnail_path,
+            linear_path=task.linear_path,
+        )
+
+    if task.cache_directory is None:
+        return measured(), "off"
+    from .measurement_cache import FrameMeasurementCache
+
+    try:
+        identity = compute_file_identity(task.path)
+        cache = FrameMeasurementCache(
+            task.cache_directory,
+            task.config,
+            max_full_decode_bytes=DEFAULT_MAX_FULL_DECODE_BYTES,
+        )
+        key = cache.key(task.path, identity)
+    except Exception:
+        return measured(), "off"
+    cached = cache.load(key)
+    if cached is not None:
+        # The freshly computed identity is the authoritative one; the digest
+        # already agrees because it is part of the key.
+        cached.identity = identity
+        if task.thumbnail_path is None and task.linear_path is None:
+            return cached, "hit"
+        replayed = _replay_preview_side_effects(task, cached, identity)
+        if replayed is not None:
+            return replayed, "hit"
+    measurement = measured()
+    return measurement, "stored" if cache.store(key, measurement) else "miss"
 
 
 def measure_paths(
@@ -609,6 +693,8 @@ def measure_paths(
     stats: dict[str, Any] | None = None,
     runner: FrameRunner | None = None,
     linear_directory: str | os.PathLike[str] | None = None,
+    cache_directory: Path | str | None = None,
+    cache_stats: dict[str, int] | None = None,
 ) -> list[FrameMeasurement]:
     """Measure paths in stable order, optionally with bounded parallelism.
 
@@ -622,6 +708,9 @@ def measure_paths(
     stages); otherwise the call opens and closes its own.  With
     ``linear_directory`` every frame's linear preview is kept there as
     ``NNNN.npy`` (:func:`linear_preview_name`, N = position in ``paths``).
+    ``cache_directory`` enables the advisory per-frame measurement cache
+    (:mod:`lightframeqc.measurement_cache`); ``cache_stats`` receives its
+    ``hits``/``misses``/``writes``.
     """
 
     config.validate()
@@ -643,24 +732,34 @@ def measure_paths(
     # A fresh token makes rerunning into an existing report directory safe.
     # Old review thumbnails remain recoverable and no file is overwritten.
     run_token = secrets.token_hex(5)
+    cache_root = None if cache_directory is None else str(Path(cache_directory).expanduser())
     tasks: list[_MeasureTask] = [
-        (
-            str(frame_path),
-            str(thumbnail_root / _thumbnail_name(run_token, index, frame_path))
+        _MeasureTask(
+            path=str(frame_path),
+            thumbnail_path=str(thumbnail_root / _thumbnail_name(run_token, index, frame_path))
             if thumbnail_root is not None
             else None,
-            config,
-            str(linear_root / linear_preview_name(index)) if linear_root is not None else None,
+            config=config,
+            linear_path=str(linear_root / linear_preview_name(index)) if linear_root is not None else None,
+            cache_directory=cache_root,
         )
         for index, frame_path in enumerate(ordered_paths)
     ]
 
     owned = FrameRunner(workers, len(tasks)) if runner is None else None
     with owned if owned is not None else nullcontext(runner) as active:
-        results = active.map(_measure_task, tasks)
+        outcomes = active.map(_measure_task, tasks)
         if stats is not None:
             stats.update(active.stats)
-    return results
+    if cache_stats is not None:
+        counters = {"hit": "hits", "miss": "misses", "stored": "writes"}
+        for _, outcome in outcomes:
+            if outcome == "stored":
+                cache_stats["misses"] = cache_stats.get("misses", 0) + 1
+            name = counters.get(outcome)
+            if name is not None:
+                cache_stats[name] = cache_stats.get(name, 0) + 1
+    return [measurement for measurement, _ in outcomes]
 
 
 __all__ = [

@@ -40,6 +40,7 @@ _MODULES = (
     "analysis", "analysis_cache", "registration", "triangle_bootstrap",
     "grouping", "statistics", "metadata", "config", "models", "morphology",
 )
+_PACKAGES = ("numpy", "scipy", "skimage", "astroalign", "astropy")
 _RESULT_FIELDS = {
     "path", "group_id", "reference_path", "decision", "confidence", "reasons",
     "warnings", "registration", "features", "star_count", "grid",
@@ -68,17 +69,21 @@ def _encode(value: Any) -> bytes:
     ).encode("ascii")
 
 
-@lru_cache(maxsize=1)
-def _implementation_fingerprint() -> str:
+@lru_cache(maxsize=8)
+def implementation_fingerprint(
+    schema: int, modules: tuple[str, ...], packages: tuple[str, ...]
+) -> str:
     """Hash source or frozen loader code; never deserialize executable cache data.
 
     No manual-version fallback: if a packaged loader cannot expose its code,
     caching is disabled. This is preferable to reusing stale scientific results.
-    The small fingerprint is shared for this process's loaded implementation.
+    The small fingerprint is shared for this process's loaded implementation;
+    every cache in the package names the modules and runtime packages its own
+    stored values depend on, so a change to either is a miss.
     """
     digest = hashlib.sha256()
-    digest.update(_encode([_SCHEMA, sys.version, platform.machine(), sys.byteorder]))
-    for name in _MODULES:
+    digest.update(_encode([schema, sys.version, platform.machine(), sys.byteorder]))
+    for name in modules:
         module = importlib.import_module(f"lightframeqc.{name}")
         loader = module.__spec__.loader
         source_path = Path(module.__file__) if getattr(module, "__file__", None) else None
@@ -91,12 +96,16 @@ def _implementation_fingerprint() -> str:
             contents = marshal.dumps(code)
         digest.update(_encode(name))
         digest.update(hashlib.sha256(contents).digest())
-    for name in ("numpy", "scipy", "skimage", "astroalign", "astropy"):
+    for name in packages:
         version = getattr(importlib.import_module(name), "__version__", None)
         if not isinstance(version, str) or not version:
             raise ValueError("Cache runtime version is unavailable")
         digest.update(_encode([name, version]))
     return digest.hexdigest()
+
+
+def _implementation_fingerprint() -> str:
+    return implementation_fingerprint(_SCHEMA, _MODULES, _PACKAGES)
 
 
 _STAR_FLOAT_FIELDS = ("x", "y", "flux", "peak", "a", "b", "theta", "fwhm", "ellipticity")
@@ -309,10 +318,7 @@ class GroupAnalysisCache:
             return None
 
     def _private_directory(self) -> None:
-        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        info = self.directory.lstat()
-        if not stat.S_ISDIR(info.st_mode) or (os.name == "posix" and (info.st_uid != os.getuid() or info.st_mode & 0o077)):
-            raise ValueError("Cache directory is not private")
+        private_cache_directory(self.directory)
 
     def load(self, key: str | None, frames: list[FrameMeasurement]) -> tuple[list[dict[str, Any]], list[FrameResult]] | None:
         try:
@@ -383,19 +389,34 @@ class GroupAnalysisCache:
                     pass
 
     def _prune(self) -> None:
-        entries = []
-        for path in self.directory.glob("*.json"):
-            if len(path.stem) != 64 or any(character not in "0123456789abcdef" for character in path.stem):
-                continue
-            try:
-                info = path.lstat()
-                if stat.S_ISREG(info.st_mode):
-                    entries.append((info.st_mtime_ns, path, info.st_size))
-            except OSError:
-                continue
-        entries.sort(reverse=True)
-        total = 0
-        for index, (_, path, size) in enumerate(entries):
-            total += size
-            if index >= _MAX_ENTRIES or total > _MAX_TOTAL_BYTES:
-                path.unlink(missing_ok=True)
+        prune_cache_directory(self.directory, _MAX_ENTRIES, _MAX_TOTAL_BYTES)
+
+
+def private_cache_directory(directory: Path) -> None:
+    """Create (or accept) a cache directory only this user can read."""
+
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    info = directory.lstat()
+    if not stat.S_ISDIR(info.st_mode) or (os.name == "posix" and (info.st_uid != os.getuid() or info.st_mode & 0o077)):
+        raise ValueError("Cache directory is not private")
+
+
+def prune_cache_directory(directory: Path, max_entries: int, max_total_bytes: int) -> None:
+    """Keep the newest entries within both bounds; every entry is disposable."""
+
+    entries = []
+    for path in directory.glob("*.json"):
+        if len(path.stem) != 64 or any(character not in "0123456789abcdef" for character in path.stem):
+            continue
+        try:
+            info = path.lstat()
+            if stat.S_ISREG(info.st_mode):
+                entries.append((info.st_mtime_ns, path, info.st_size))
+        except OSError:
+            continue
+    entries.sort(reverse=True)
+    total = 0
+    for index, (_, path, size) in enumerate(entries):
+        total += size
+        if index >= max_entries or total > max_total_bytes:
+            path.unlink(missing_ok=True)

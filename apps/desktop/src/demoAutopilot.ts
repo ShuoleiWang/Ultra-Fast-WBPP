@@ -118,7 +118,11 @@ function starField(seed: number, count: number) {
   });
 }
 
-/** A 391×261 SVG preview: sky level, gradient and star brightness follow the frame's numbers. */
+/**
+ * A 391×261 SVG preview: sky level, gradient and star brightness follow the
+ * frame's numbers.  `hard` stands in for the engine's harder STF stretch: the
+ * faint stars and the background gradient come up, the highlights saturate.
+ */
 function svgPreview(
   stars: ReturnType<typeof starField>,
   sky: number,
@@ -126,16 +130,18 @@ function svgPreview(
   transparency: number,
   registered: boolean,
   gradient: number,
+  hard = false,
 ): string {
-  const level = Math.min(150, Math.round(38 + 42 * Math.log2(Math.max(0.5, sky / skyClean) + 0.5)));
+  const base = 38 + 42 * Math.log2(Math.max(0.5, sky / skyClean) + 0.5);
+  const level = Math.min(170, Math.round(hard ? 30 + base * 1.45 : base));
   const grey = (value: number) => `rgb(${value},${value},${Math.min(255, value + 6)})`;
-  const corner = Math.min(210, Math.round(level + gradient * 70));
+  const corner = Math.min(225, Math.round(level + gradient * 70 * (hard ? 2.1 : 1)));
   const shift = registered ? "" : ` transform="translate(23 -14) rotate(2 195 130)"`;
-  const visible = stars.filter((star) => star.o * transparency > 0.3);
+  const visible = stars.filter((star) => star.o * transparency > (hard ? 0.16 : 0.3));
   const body = visible
     .map(
       (star) =>
-        `<circle cx="${star.x.toFixed(1)}" cy="${star.y.toFixed(1)}" r="${(star.r * Math.sqrt(transparency)).toFixed(2)}" fill="#fff" opacity="${Math.min(1, star.o * transparency).toFixed(2)}"/>`,
+        `<circle cx="${star.x.toFixed(1)}" cy="${star.y.toFixed(1)}" r="${(star.r * Math.sqrt(transparency) * (hard ? 1.35 : 1)).toFixed(2)}" fill="#fff" opacity="${Math.min(1, star.o * transparency * (hard ? 1.6 : 1)).toFixed(2)}"/>`,
     )
     .join("");
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 391 261"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${grey(level)}"/><stop offset="1" stop-color="${grey(corner)}"/></linearGradient></defs><rect width="391" height="261" fill="url(#g)"/><g${shift}>${body}</g></svg>`;
@@ -159,6 +165,7 @@ function buildChannel(
     const registered = spec.registered !== false;
     const skyRatio = spec.sky / skyClean;
     const preview = svgPreview(stars, spec.sky, skyClean, spec.transparency, registered, spec.shape);
+    const previewHard = svgPreview(stars, spec.sky, skyClean, spec.transparency, registered, spec.shape, true);
     const defaultDecision = spec.flags.some((item) => item.severity === "EXCLUDE") ? "DROP" : "KEEP";
     return {
       index,
@@ -196,9 +203,11 @@ function buildChannel(
       score: { log10: Number((-3.4 - spec.z * 0.5).toFixed(2)), z: spec.z, rank: spec.rank },
       previews: {
         filmstrip: `filmstrip/${String(index).padStart(4, "0")}-${filter}-${stem}.jpg`,
+        filmstripHard: `filmstrip-hard/${String(index).padStart(4, "0")}-${filter}-${stem}.jpg`,
         zoom: `zoom/${String(index).padStart(4, "0")}-${filter}-${stem}.png`,
         coverage: registered ? 0.99 : 1,
         filmstripDataUrl: preview,
+        filmstripHardDataUrl: previewHard,
         zoomDataUrl: preview,
       },
       transformToReference: registered
@@ -250,6 +259,10 @@ function buildChannel(
       softness: 4,
       skyReference: skyClean,
       sigmaReference: 43.3,
+      mode: "stf",
+      shadowsClip: -2.8,
+      midtone: 0.25,
+      target: 0.25,
     },
     previewGeometry: { filmstrip: [782, 522], zoom: [1563, 1044], sourceShape: [4176, 6252] },
     nights,
