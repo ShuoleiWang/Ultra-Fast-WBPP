@@ -8,7 +8,7 @@ with Pillow and NumPy so the icon set is reproducible from this file.
     .venv/bin/python apps/desktop/scripts/brand_icon.py
 
 writes the Tauri icon set (PNG sizes, .icns via iconutil on macOS, .ico),
-assets/branding/openastroflow-icon-1024.png and the SVG brand mark used in
+assets/branding/ultra-fast-wbpp-icon-1024.png and the SVG brand mark used in
 the toolbar and the README.
 """
 
@@ -224,7 +224,7 @@ BRAND_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width
 def main() -> int:
     icon = render_icon()
     BRANDING.mkdir(parents=True, exist_ok=True)
-    icon.save(BRANDING / "openastroflow-icon-1024.png", "PNG", optimize=True)
+    icon.save(BRANDING / "ultra-fast-wbpp-icon-1024.png", "PNG", optimize=True)
     (BRANDING / "ultra-fast-wbpp-mark.svg").write_text(BRAND_SVG)
     for size in (32, 64, 128):
         write_png(icon, ICON_DIR / f"{size}x{size}.png", size)

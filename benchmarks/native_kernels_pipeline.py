@@ -43,23 +43,23 @@ import numpy as np
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
-for relative in ("packages/openastroflow-engine/src", "packages/light-frame-qc/src", "packages/openastroflow-registration"):
+for relative in ("packages/engine/src", "packages/light-frame-qc/src", "packages/registration"):
     candidate = REPOSITORY / relative
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
-from openastroflow_engine import native_kernels  # noqa: E402
-from openastroflow_engine.calibration import (  # noqa: E402
+from ufwbpp import native_kernels  # noqa: E402
+from ufwbpp.calibration import (  # noqa: E402
     FrameExpression,
     IntegrationMapPaths,
     IntegrationParameters,
     read_frame_info,
     integrate_expressions,
 )
-from openastroflow_engine.hardware import detect_hardware  # noqa: E402
-from openastroflow_engine.performance_profile import select_execution_tuning  # noqa: E402
-from openastroflow_engine import pixel_pipeline as pipeline  # noqa: E402
-from openastroflow_engine.pixel_pipeline import AffineTransform, PipelineParameters  # noqa: E402
+from ufwbpp.hardware import detect_hardware  # noqa: E402
+from ufwbpp.performance_profile import select_execution_tuning  # noqa: E402
+from ufwbpp import pixel_pipeline as pipeline  # noqa: E402
+from ufwbpp.pixel_pipeline import AffineTransform, PipelineParameters  # noqa: E402
 
 
 def _portable_path(path: Path) -> str:
@@ -405,7 +405,7 @@ def main() -> int:
         "source": _git_commit(),
         "results": {},
     }
-    with tempfile.TemporaryDirectory(prefix="oaf-bench-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="ufwbpp-bench-") as temporary:
         scratch = Path(args.scratch) if args.scratch else Path(temporary)
         scratch.mkdir(parents=True, exist_ok=True)
         # macOS temporary roots are symlinks; keep every generated path canonical.

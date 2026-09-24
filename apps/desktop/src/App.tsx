@@ -25,29 +25,106 @@ function App() {
   // same one.  A digest a new session no longer has falls back to the view's
   // first frame, so no reset is needed when the session changes.
   const [blinkSelectedSha, setBlinkSelectedSha] = useState<string>();
-  useEffect(() => { setVisiblePassFrames(PASS_FRAME_BATCH); setSelectedPath(undefined); setDecisionFilter("ALL"); }, [workflow.qualityInspection]);
+  useEffect(() => {
+    setVisiblePassFrames(PASS_FRAME_BATCH);
+    setSelectedPath(undefined);
+    setDecisionFilter("ALL");
+  }, [workflow.qualityInspection]);
   const lightCount = workflow.sources.find((source) => source.role === "LIGHT")?.fileCount ?? 0;
   const platform = workflow.capabilities?.platform;
-  const macos = (workflow.nativeRuntime && (platform === "macos" || (platform === undefined && typeof navigator !== "undefined" && /Mac/i.test(navigator.platform)))) || requestedMacChrome();
+  const macos =
+    (workflow.nativeRuntime &&
+      (platform === "macos" ||
+        (platform === undefined && typeof navigator !== "undefined" && /Mac/i.test(navigator.platform)))) ||
+    requestedMacChrome();
   const selectedFrame = workflow.qualityInspection?.frames.find((frame) => frame.path === selectedPath);
-  const showInspector = inspectorOpen && (workflow.step === "import" || workflow.step === "inspect" || workflow.step === "blink");
+  const showInspector =
+    inspectorOpen && (workflow.step === "import" || workflow.step === "inspect" || workflow.step === "blink");
 
-  return <div className={`app ${workflow.step === "blink" ? "blink-focused" : ""} ${macos ? "platform-macos" : ""} ${workflow.nativeRuntime ? "" : "browser"}`} onContextMenu={(event) => { if (!(event.target instanceof Element) || !event.target.closest("input, textarea, [contenteditable=true]")) event.preventDefault(); }}>
-    <a className="skip-link" href="#workspace">{t("skipWorkspace")}</a>
-    <Toolbar workflow={workflow} language={language} setLanguage={setLanguage} t={t} inspectorOpen={inspectorOpen} onToggleInspector={() => setInspectorOpen((open) => !open)} />
-    <div className="body">
-      <Sidebar workflow={workflow} t={t} inventoryTab={inventoryTab} setInventoryTab={setInventoryTab} />
-      <main id="workspace" className="content" onDragEnter={(event) => { event.preventDefault(); workflow.setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={() => workflow.setDragging(false)} onDrop={(event) => { event.preventDefault(); workflow.setDragging(false); }}>
-        {workflow.isDragging && <div className="drop-overlay">{workflow.nativeRuntime ? t("dropNative") : t("dropBrowser")}</div>}
-        {workflow.step === "import" && <ImportView workflow={workflow} t={t} inputPathsText={inputPathsText} setInputPathsText={setInputPathsText} outputPathText={outputPathText} setOutputPathText={setOutputPathText} inventoryTab={inventoryTab} setInventoryTab={setInventoryTab} lightCount={lightCount} />}
-        {workflow.step === "inspect" && <ScreeningView workflow={workflow} t={t} outputPathText={outputPathText} setOutputPathText={setOutputPathText} selectedPath={selectedPath} setSelectedPath={setSelectedPath} visiblePassFrames={visiblePassFrames} setVisiblePassFrames={setVisiblePassFrames} decisionFilter={decisionFilter} setDecisionFilter={setDecisionFilter} lightCount={lightCount} />}
-        {workflow.step === "blink" && <BlinkView workflow={workflow} t={t} inspectorOpen={inspectorOpen} selectedSha={blinkSelectedSha} setSelectedSha={setBlinkSelectedSha} />}
-        {workflow.step === "run" && <RunView workflow={workflow} t={t} />}
-        {workflow.step === "result" && <ResultView workflow={workflow} t={t} />}
-      </main>
-      {showInspector && <Inspector workflow={workflow} t={t} frame={selectedFrame} blinkSelectedSha={blinkSelectedSha} />}
+  return (
+    <div
+      className={`app ${workflow.step === "blink" ? "blink-focused" : ""} ${macos ? "platform-macos" : ""} ${workflow.nativeRuntime ? "" : "browser"}`}
+      onContextMenu={(event) => {
+        if (!(event.target instanceof Element) || !event.target.closest("input, textarea, [contenteditable=true]"))
+          event.preventDefault();
+      }}
+    >
+      <a className="skip-link" href="#workspace">
+        {t("skipWorkspace")}
+      </a>
+      <Toolbar
+        workflow={workflow}
+        language={language}
+        setLanguage={setLanguage}
+        t={t}
+        inspectorOpen={inspectorOpen}
+        onToggleInspector={() => setInspectorOpen((open) => !open)}
+      />
+      <div className="body">
+        <Sidebar workflow={workflow} t={t} inventoryTab={inventoryTab} setInventoryTab={setInventoryTab} />
+        <main
+          id="workspace"
+          className="content"
+          onDragEnter={(event) => {
+            event.preventDefault();
+            workflow.setDragging(true);
+          }}
+          onDragOver={(event) => event.preventDefault()}
+          onDragLeave={() => workflow.setDragging(false)}
+          onDrop={(event) => {
+            event.preventDefault();
+            workflow.setDragging(false);
+          }}
+        >
+          {workflow.isDragging && (
+            <div className="drop-overlay">{workflow.nativeRuntime ? t("dropNative") : t("dropBrowser")}</div>
+          )}
+          {workflow.step === "import" && (
+            <ImportView
+              workflow={workflow}
+              t={t}
+              inputPathsText={inputPathsText}
+              setInputPathsText={setInputPathsText}
+              outputPathText={outputPathText}
+              setOutputPathText={setOutputPathText}
+              inventoryTab={inventoryTab}
+              setInventoryTab={setInventoryTab}
+              lightCount={lightCount}
+            />
+          )}
+          {workflow.step === "inspect" && (
+            <ScreeningView
+              workflow={workflow}
+              t={t}
+              outputPathText={outputPathText}
+              setOutputPathText={setOutputPathText}
+              selectedPath={selectedPath}
+              setSelectedPath={setSelectedPath}
+              visiblePassFrames={visiblePassFrames}
+              setVisiblePassFrames={setVisiblePassFrames}
+              decisionFilter={decisionFilter}
+              setDecisionFilter={setDecisionFilter}
+              lightCount={lightCount}
+            />
+          )}
+          {workflow.step === "blink" && (
+            <BlinkView
+              workflow={workflow}
+              t={t}
+              inspectorOpen={inspectorOpen}
+              selectedSha={blinkSelectedSha}
+              setSelectedSha={setBlinkSelectedSha}
+            />
+          )}
+          {workflow.step === "run" && <RunView workflow={workflow} t={t} />}
+          {workflow.step === "result" && <ResultView workflow={workflow} t={t} />}
+        </main>
+        {showInspector && (
+          <Inspector workflow={workflow} t={t} frame={selectedFrame} blinkSelectedSha={blinkSelectedSha} />
+        )}
+      </div>
     </div>
-  </div>;
+  );
 }
 
 export default App;

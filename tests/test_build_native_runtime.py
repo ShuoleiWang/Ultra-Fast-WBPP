@@ -8,9 +8,9 @@ from scripts import build_native_runtime as native_build
 
 
 def test_host_library_name_follows_the_platform_service_layer() -> None:
-    assert native_build.host_library_name("darwin") == "libopenastroflow_native.dylib"
-    assert native_build.host_library_name("win32") == "openastroflow_native.dll"
-    assert native_build.host_library_name("linux") == "libopenastroflow_native.so"
+    assert native_build.host_library_name("darwin") == "libufwbpp_native.dylib"
+    assert native_build.host_library_name("win32") == "ufwbpp_native.dll"
+    assert native_build.host_library_name("linux") == "libufwbpp_native.so"
 
 
 def test_metal_defaults_to_the_host_and_is_overridable() -> None:
@@ -29,14 +29,14 @@ def test_commands_are_release_strict_and_explicit(tmp_path: Path) -> None:
     assert configure[:5] == ["cmake", "-S", str(native_build.NATIVE_SOURCE), "-B", str(build_dir)]
     assert "-G" in configure and "Ninja" in configure
     assert "-A" not in configure
-    assert "-DOAF_BUILD_TESTS=ON" in configure
-    assert "-DOAF_ENABLE_METAL=OFF" in configure
+    assert "-DUFWBPP_BUILD_TESTS=ON" in configure
+    assert "-DUFWBPP_ENABLE_METAL=OFF" in configure
     assert "-DCMAKE_BUILD_TYPE=Release" in configure
     vs = native_build.configure_command(
         build_dir, metal=False, tests=False, generator=None, architecture="x64"
     )
     assert vs[vs.index("-A") + 1] == "x64"
-    assert "-DOAF_BUILD_TESTS=OFF" in vs
+    assert "-DUFWBPP_BUILD_TESTS=OFF" in vs
     build = native_build.build_command(build_dir, jobs=4)
     assert build == ["cmake", "--build", str(build_dir), "--config", "Release", "--parallel", "4"]
     assert native_build.test_command(build_dir)[-3:] == ["-C", "Release", "--output-on-failure"]
@@ -63,9 +63,9 @@ def test_cmake_cache_parser_and_stale_library_removal(tmp_path: Path) -> None:
     assert native_build.cmake_cache(tmp_path / "missing") == {}
     runtime = tmp_path / "native"
     runtime.mkdir()
-    (runtime / "openastroflow_native.dll").write_bytes(b"x")
+    (runtime / "ufwbpp_native.dll").write_bytes(b"x")
     (runtime / "README.md").write_text("keep", encoding="utf-8")
-    assert native_build.remove_stale_libraries(runtime) == ["openastroflow_native.dll"]
+    assert native_build.remove_stale_libraries(runtime) == ["ufwbpp_native.dll"]
     assert (runtime / "README.md").exists()
     assert native_build.remove_stale_libraries(runtime) == []
 
@@ -95,7 +95,7 @@ def test_library_import_facts_record_the_dll_closure_and_crt_linkage(tmp_path: P
     )
     static = tmp_path / "static.dll"
     static.write_bytes(build_pe_image(imports=("KERNEL32.dll",)))
-    dylib = tmp_path / "libopenastroflow_native.dylib"
+    dylib = tmp_path / "libufwbpp_native.dylib"
     dylib.write_bytes(b"\xcf\xfa\xed\xfe" + b"\0" * 64)
 
     facts = native_build.library_import_facts(dynamic)
@@ -142,12 +142,12 @@ def _fake_build_chain(monkeypatch, runtime_dir: Path, dll_bytes: bytes) -> list[
         commands.append(list(command))
         if "--install" in command:
             runtime_dir.mkdir(parents=True, exist_ok=True)
-            (runtime_dir / "openastroflow_native.dll").write_bytes(dll_bytes)
+            (runtime_dir / "ufwbpp_native.dll").write_bytes(dll_bytes)
         return 0.01
 
     monkeypatch.setattr(native_build, "_run", run)
     monkeypatch.setattr(native_build, "RUNTIME_DIR", runtime_dir)
-    monkeypatch.setattr(native_build, "host_library_name", lambda sys_platform=None: "openastroflow_native.dll")
+    monkeypatch.setattr(native_build, "host_library_name", lambda sys_platform=None: "ufwbpp_native.dll")
     return commands
 
 
@@ -191,3 +191,10 @@ def test_windows_build_report_marks_static_crt_as_compliant(tmp_path: Path, monk
     assert report["library"]["imports"] == ["KERNEL32.dll"]
     assert report["library"]["dynamicCrtImports"] == []
     assert report["library"]["machine"] == "x86_64"
+
+
+def test_install_prefix_is_the_engine_source_root() -> None:
+    # The library is installed next to the package that loads it; a wrong
+    # prefix installs it where no import ever looks.
+    assert (native_build.INSTALL_PREFIX / "ufwbpp" / "native_kernels.py").is_file()
+    assert native_build.RUNTIME_DIR == native_build.INSTALL_PREFIX / "ufwbpp" / "native"

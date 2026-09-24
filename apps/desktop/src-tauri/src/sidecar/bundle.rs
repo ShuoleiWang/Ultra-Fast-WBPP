@@ -5,36 +5,36 @@ use super::*;
 #[cfg(any(debug_assertions, test))]
 pub(super) fn executable_name() -> &'static str {
     if cfg!(windows) {
-        "openastroflow-worker.exe"
+        "ufwbpp-engine.exe"
     } else {
-        "openastroflow-worker"
+        "ufwbpp-engine"
     }
 }
 
 pub(super) fn target_suffixed_name() -> &'static str {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        "openastroflow-worker-aarch64-apple-darwin"
+        "ufwbpp-engine-aarch64-apple-darwin"
     }
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     {
-        "openastroflow-worker-x86_64-apple-darwin"
+        "ufwbpp-engine-x86_64-apple-darwin"
     }
     #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
     {
-        "openastroflow-worker-aarch64-pc-windows-msvc.exe"
+        "ufwbpp-engine-aarch64-pc-windows-msvc.exe"
     }
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     {
-        "openastroflow-worker-x86_64-pc-windows-msvc.exe"
+        "ufwbpp-engine-x86_64-pc-windows-msvc.exe"
     }
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     {
-        "openastroflow-worker-aarch64-unknown-linux-gnu"
+        "ufwbpp-engine-aarch64-unknown-linux-gnu"
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
-        "openastroflow-worker-x86_64-unknown-linux-gnu"
+        "ufwbpp-engine-x86_64-unknown-linux-gnu"
     }
     #[cfg(not(any(
         all(target_os = "macos", target_arch = "aarch64"),
@@ -45,7 +45,7 @@ pub(super) fn target_suffixed_name() -> &'static str {
         all(target_os = "linux", target_arch = "x86_64")
     )))]
     {
-        "openastroflow-worker-unsupported-target"
+        "ufwbpp-engine-unsupported-target"
     }
 }
 
@@ -58,7 +58,7 @@ pub(super) fn target_manifest_name() -> String {
 
 pub(super) fn target_triple_name() -> &'static str {
     target_suffixed_name()
-        .trim_start_matches("openastroflow-worker-")
+        .trim_start_matches("ufwbpp-engine-")
         .trim_end_matches(".exe")
 }
 
@@ -128,16 +128,16 @@ pub(super) fn verify_bundled_runtime(resource_root: &Path) -> Result<EngineExecu
         "kind",
         "targetTriple",
         "runtime",
-        "protocol",
+        "engine",
         "versions",
         "collections",
     ]);
     if object_keys(&manifest)? != expected_top
-        || manifest["schemaVersion"] != 2
-        || manifest["kind"] != "openastroflow-worker-sidecar"
+        || manifest["schemaVersion"] != 3
+        || manifest["kind"] != "ufwbpp-engine-sidecar"
         || manifest["targetTriple"] != target_triple_name()
     {
-        return Err("bundled runtime manifest has the wrong v2 contract".to_owned());
+        return Err("bundled runtime manifest has the wrong v3 contract".to_owned());
     }
     let runtime = &manifest["runtime"];
     let expected_runtime = BTreeSet::from([
@@ -294,7 +294,7 @@ pub(crate) fn discover_engine<R: Runtime>(app: &AppHandle<R>) -> Result<EngineEx
         .path()
         .resource_dir()
         .map_err(|error| format!("cannot resolve signed application resources: {error}"))?;
-    let bundled_root = resources.join("resources").join("openastroflow-worker");
+    let bundled_root = resources.join("resources").join("ufwbpp-engine");
     if bundled_root.is_dir() {
         return verify_bundled_runtime(&bundled_root);
     }
@@ -305,7 +305,7 @@ pub(crate) fn discover_engine<R: Runtime>(app: &AppHandle<R>) -> Result<EngineEx
     #[cfg(debug_assertions)]
     let mut candidates = development_candidate_paths(
         true,
-        std::env::var_os("OPENASTROFLOW_ENGINE_EXECUTABLE").map(PathBuf::from),
+        std::env::var_os("UFWBPP_ENGINE_EXECUTABLE").map(PathBuf::from),
         std::env::current_exe().ok(),
     );
     #[cfg(debug_assertions)]
@@ -315,9 +315,9 @@ pub(crate) fn discover_engine<R: Runtime>(app: &AppHandle<R>) -> Result<EngineEx
             .join(".venv")
             .join(if cfg!(windows) { "Scripts" } else { "bin" })
             .join(if cfg!(windows) {
-                "openastroflow-engine.exe"
+                "ultra-fast-wbpp.exe"
             } else {
-                "openastroflow-engine"
+                "ultra-fast-wbpp"
             }),
     );
 
@@ -334,5 +334,5 @@ pub(crate) fn discover_engine<R: Runtime>(app: &AppHandle<R>) -> Result<EngineEx
         return Ok(EngineExecutable { path });
     }
     #[cfg(debug_assertions)]
-    Err("Ultra-Fast WBPP scientific sidecar was not found. Install a signed app bundle or set OPENASTROFLOW_ENGINE_EXECUTABLE to the development engine executable.".to_owned())
+    Err("Ultra-Fast WBPP scientific sidecar was not found. Install a signed app bundle or set UFWBPP_ENGINE_EXECUTABLE to the development engine executable.".to_owned())
 }

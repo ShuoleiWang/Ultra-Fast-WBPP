@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="../assets/branding/openastroflow-icon-1024.png" width="128" alt="Ultra-Fast WBPP 图标">
+  <img src="../assets/branding/ultra-fast-wbpp-icon-1024.png" width="128" alt="Ultra-Fast WBPP 图标">
 </p>
 
 <h1 align="center">Ultra-Fast WBPP</h1>
@@ -164,13 +164,13 @@ Blink 已接入[互补显示诊断](blink-display-redesign.md)：共同尺度的
 
 | 目录 | 职责 |
 |---|---|
-| `apps/desktop` | React 界面与 Tauri 桌面桥接（[指南](../apps/desktop/README.md)） |
-| `crates/app-core` | GUI 与 worker 共用的项目状态与执行契约 |
-| `packages/openastroflow-engine` | 校准、配准、归一化、积分、drizzle、筛片、求解器、命令行 |
-| `packages/light-frame-qc` | Light 测量、原生 PSF、质量门禁 |
+| `apps/desktop` | React 界面与 Tauri 桌面桥接；它调用引擎的命令行（[指南](../apps/desktop/README.md)） |
+| `packages/engine` | `ultra-fast-wbpp` 引擎（Python 包 `ufwbpp`）：校准、归一化、积分、drizzle、筛片、求解器、命令行 |
+| `packages/light-frame-qc` | Light 测量、原生 PSF、质量门禁、Blink 标记 |
+| `packages/registration` | 星点检测、变换估计、重采样与公共覆盖区几何 |
 | `engine/native` | C++ 内核（重采样、拒绝、归约、drizzle、去马赛克、Lanczos 表）与 Metal |
-| `benchmarks` | 主图评估、容差门、运行追踪器、内核基准、筛片 harness |
-| `scripts`、`packaging` | 原生构建链、sidecar 打包、安装包验证、公开树与链接检查 |
+| `tools/validation`、`benchmarks` | 主图评估与容差门；运行追踪器、内核基准、筛片 harness |
+| `scripts`、`packaging` | 原生构建链、引擎 sidecar 打包、安装包验证、公开树与链接检查 |
 | `docs` | [索引](README.md) · [features](features.md) · [架构](architecture.md) · [配方](recipes/README.md) · [验证](validation-matrix.md) · [Windows](windows.md) |
 
 参与贡献：[CONTRIBUTING.md](../CONTRIBUTING.md) 是环境与规则，[AGENTS.md](../AGENTS.md) 是完整的工作指南（Codex 自动读取），[CLAUDE.md](../CLAUDE.md) 面向 Claude Code 会话。`make test` 运行 Python、Rust、前端与原生测试；`make check` 另加格式、lint 与公开树检查。

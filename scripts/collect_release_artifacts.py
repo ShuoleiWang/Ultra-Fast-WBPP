@@ -117,6 +117,7 @@ def _bundle_files(repository: Path, target: str) -> list[Path]:
             len(msi) != 1
             or len(nsis) != 1
             or set(selected) != set(candidates)
+            # Assets of the withdrawn alpha carried the project's former name.
             or any("openastroflow" in path.name.casefold() for path in selected)
             or any(version not in path.name for path in selected)
         ):
@@ -174,7 +175,7 @@ def collect(
     if not bundles:
         raise ReleaseCollectionError("Tauri emitted no distributable bundle")
     sidecar_root = sidecar_root or repository / "build" / "sidecars"
-    sidecar_manifest = sidecar_root / f"openastroflow-worker-{target}.manifest.json"
+    sidecar_manifest = sidecar_root / f"ufwbpp-engine-{target}.manifest.json"
     if not sidecar_manifest.is_file() or sidecar_manifest.is_symlink():
         raise ReleaseCollectionError("sidecar manifest is missing")
     try:
@@ -186,7 +187,7 @@ def collect(
     if not sidecar_runtime.is_dir() or sidecar_runtime.is_symlink():
         raise ReleaseCollectionError("sidecar runtime tree is missing")
     attestation_root = attestation_root or repository / "build" / "bundle-attestations"
-    attestation_source = attestation_root / f"openastroflow-worker-{target}.bundled.manifest.json"
+    attestation_source = attestation_root / f"ufwbpp-engine-{target}.bundled.manifest.json"
     if attestation_source.exists() and (
         attestation_source.is_symlink() or not attestation_source.is_file()
     ):

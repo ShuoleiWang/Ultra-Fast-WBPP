@@ -14,11 +14,9 @@ import type {
   InspectRequest,
   InspectResponse,
   HashSourcesResponse,
-  PipelineArtifactEvent,
   PipelineCompleteEvent,
   PipelineErrorEvent,
   PipelineEventHandlers,
-  PipelineLogEvent,
   PipelineProgressEvent,
   QualityInspection,
   RunReceipt,
@@ -70,25 +68,59 @@ const mockBridge: DesktopBridge = {
       unavailableReason: translateCurrent("browserSidecarMissing"),
     };
   },
-  async inspectPaths() { throw browserOnlyError(); },
-  async inspectCalibration() { throw browserOnlyError(); },
-  async inspectQuality() { throw browserOnlyError(); },
-  async blinkMeasure() { throw browserOnlyError(); },
-  async loadBlinkPreview() { throw browserOnlyError(); },
-  async hashSources() { throw browserOnlyError(); },
-  async startRun() { throw browserOnlyError(); },
+  async inspectPaths() {
+    throw browserOnlyError();
+  },
+  async inspectCalibration() {
+    throw browserOnlyError();
+  },
+  async inspectQuality() {
+    throw browserOnlyError();
+  },
+  async blinkMeasure() {
+    throw browserOnlyError();
+  },
+  async loadBlinkPreview() {
+    throw browserOnlyError();
+  },
+  async hashSources() {
+    throw browserOnlyError();
+  },
+  async startRun() {
+    throw browserOnlyError();
+  },
   async cancelRun() {},
-  async pickInputFiles() { throw browserOnlyError(); },
-  async pickInputDirectories() { throw browserOnlyError(); },
-  async pickOutputParent() { throw browserOnlyError(); },
-  async catalogList() { throw browserOnlyError(); },
-  async catalogDoctor() { throw browserOnlyError(); },
-  async solverDoctor() { throw browserOnlyError(); },
-  async startCatalogInstall() { throw browserOnlyError(); },
+  async pickInputFiles() {
+    throw browserOnlyError();
+  },
+  async pickInputDirectories() {
+    throw browserOnlyError();
+  },
+  async pickOutputParent() {
+    throw browserOnlyError();
+  },
+  async catalogList() {
+    throw browserOnlyError();
+  },
+  async catalogDoctor() {
+    throw browserOnlyError();
+  },
+  async solverDoctor() {
+    throw browserOnlyError();
+  },
+  async startCatalogInstall() {
+    throw browserOnlyError();
+  },
   async cancelCatalogInstall() {},
-  async verifyCatalog() { throw browserOnlyError(); },
-  async openProviderTerms() { throw browserOnlyError(); },
-  async revealOutput() { throw browserOnlyError(); },
+  async verifyCatalog() {
+    throw browserOnlyError();
+  },
+  async openProviderTerms() {
+    throw browserOnlyError();
+  },
+  async revealOutput() {
+    throw browserOnlyError();
+  },
 };
 
 const normalizeSelection = (selection: string | string[] | null): string[] => {
@@ -104,9 +136,14 @@ const tauriBridge: DesktopBridge = {
   blinkMeasure: (request) => invoke("blink_measure", { request }),
   async loadBlinkPreview(sessionDirectory, relativePath) {
     // The controller answers with the data URL itself or wrapped as `{ dataUrl }`.
-    const result = await invoke<string | { dataUrl?: unknown }>("load_blink_preview", { sessionDirectory, relativePath });
-    const dataUrl = typeof result === "string" ? result : result && typeof result === "object" ? result.dataUrl : undefined;
-    if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:image/")) throw new Error(translateCurrent("blinkPreviewInvalid"));
+    const result = await invoke<string | { dataUrl?: unknown }>("load_blink_preview", {
+      sessionDirectory,
+      relativePath,
+    });
+    const dataUrl =
+      typeof result === "string" ? result : result && typeof result === "object" ? result.dataUrl : undefined;
+    if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:image/"))
+      throw new Error(translateCurrent("blinkPreviewInvalid"));
     return dataUrl;
   },
   hashSources: (paths) => invoke("hash_sources", { request: { paths } }),
@@ -114,20 +151,24 @@ const tauriBridge: DesktopBridge = {
   cancelRun: (jobId) => invoke("cancel_project", { jobId }),
   async pickInputFiles() {
     const { open } = await import("@tauri-apps/plugin-dialog");
-    return normalizeSelection(await open({
-      multiple: true,
-      directory: false,
-      title: translateCurrent("dialogFrames"),
-      filters: [{ name: "Astronomy frames", extensions: ["fit", "fits", "fts", "xisf"] }],
-    }));
+    return normalizeSelection(
+      await open({
+        multiple: true,
+        directory: false,
+        title: translateCurrent("dialogFrames"),
+        filters: [{ name: "Astronomy frames", extensions: ["fit", "fits", "fts", "xisf"] }],
+      }),
+    );
   },
   async pickInputDirectories() {
     const { open } = await import("@tauri-apps/plugin-dialog");
-    return normalizeSelection(await open({
-      multiple: true,
-      directory: true,
-      title: translateCurrent("dialogFolders"),
-    }));
+    return normalizeSelection(
+      await open({
+        multiple: true,
+        directory: true,
+        title: translateCurrent("dialogFolders"),
+      }),
+    );
   },
   async pickOutputParent() {
     const { open } = await import("@tauri-apps/plugin-dialog");
@@ -172,9 +213,15 @@ export async function listenForCatalogEvents(handlers: CatalogEventHandlers): Pr
   if (!hasTauriRuntime()) return () => undefined;
   const { listen } = await import("@tauri-apps/api/event");
   const disposers = await Promise.all([
-    listen("openastroflow://catalog-progress", ({ payload }) => handlers.onProgress(payload as Parameters<CatalogEventHandlers["onProgress"]>[0])),
-    listen("openastroflow://catalog-complete", ({ payload }) => handlers.onComplete(payload as Parameters<CatalogEventHandlers["onComplete"]>[0])),
-    listen("openastroflow://catalog-error", ({ payload }) => handlers.onError(payload as Parameters<CatalogEventHandlers["onError"]>[0])),
+    listen("ufwbpp://catalog-progress", ({ payload }) =>
+      handlers.onProgress(payload as Parameters<CatalogEventHandlers["onProgress"]>[0]),
+    ),
+    listen("ufwbpp://catalog-complete", ({ payload }) =>
+      handlers.onComplete(payload as Parameters<CatalogEventHandlers["onComplete"]>[0]),
+    ),
+    listen("ufwbpp://catalog-error", ({ payload }) =>
+      handlers.onError(payload as Parameters<CatalogEventHandlers["onError"]>[0]),
+    ),
   ]);
   return () => disposers.forEach((dispose) => dispose());
 }
@@ -183,11 +230,9 @@ export async function listenForPipelineEvents(handlers: PipelineEventHandlers): 
   if (!hasTauriRuntime()) return () => undefined;
   const { listen } = await import("@tauri-apps/api/event");
   const disposers = await Promise.all([
-    listen<PipelineProgressEvent>("openastroflow://pipeline-progress", ({ payload }) => handlers.onProgress(payload)),
-    listen<PipelineArtifactEvent>("openastroflow://pipeline-artifact", ({ payload }) => handlers.onArtifact(payload)),
-    listen<PipelineCompleteEvent>("openastroflow://pipeline-complete", ({ payload }) => handlers.onComplete(payload)),
-    listen<PipelineErrorEvent>("openastroflow://pipeline-error", ({ payload }) => handlers.onError(payload)),
-    listen<PipelineLogEvent>("openastroflow://pipeline-log", ({ payload }) => handlers.onLog?.(payload)),
+    listen<PipelineProgressEvent>("ufwbpp://pipeline-progress", ({ payload }) => handlers.onProgress(payload)),
+    listen<PipelineCompleteEvent>("ufwbpp://pipeline-complete", ({ payload }) => handlers.onComplete(payload)),
+    listen<PipelineErrorEvent>("ufwbpp://pipeline-error", ({ payload }) => handlers.onError(payload)),
   ]);
   return () => disposers.forEach((dispose) => dispose());
 }

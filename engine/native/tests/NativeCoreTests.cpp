@@ -1,7 +1,7 @@
-#include "openastroflow/FusedLnIntegration.h"
-#include "openastroflow/ImageTile.h"
-#if defined(OAF_WITH_METAL)
-#include "openastroflow/MetalFusedLnIntegration.h"
+#include "ufwbpp/FusedIntegration.h"
+#include "ufwbpp/ImageTile.h"
+#if defined(UFWBPP_WITH_METAL)
+#include "ufwbpp/MetalFusedIntegration.h"
 #endif
 
 #include <algorithm>
@@ -18,7 +18,7 @@
 namespace
 {
 
-using namespace openastroflow::native;
+using namespace ufwbpp::native;
 
 void Require( bool condition, const std::string& message )
 {
@@ -91,7 +91,7 @@ struct Fixture
       samples[4*pixels + 9] = std::numeric_limits<float>::quiet_NaN();
    }
 
-   FusedLnIntegrationRequest Request() const
+   FusedIntegrationRequest Request() const
    {
       return {
          tile, frames, gridWidth, gridHeight,
@@ -144,11 +144,11 @@ void TestCpuOracleMaskAndWeights()
    const std::vector<float> scale( 2*4, 2.0F );
    const std::vector<float> offset( 2*4, -1.0F );
    const std::vector<float> weights{ 1, 3 };
-   const FusedLnIntegrationRequest request{
+   const FusedIntegrationRequest request{
       tile, 2, 2, 2, samples, mask, scale, offset, weights, 0x3f
    };
-   const FusedLnIntegrationResult result =
-      RunCpuOracleFusedLnIntegration( request );
+   const FusedIntegrationResult result =
+      RunCpuOracleFusedIntegration( request );
    Require( result.acceptedSamples
                == std::vector<std::uint16_t>{ 1, 2, 2, 2 }
          && result.rejectedSamples
@@ -175,7 +175,7 @@ void TestCpuLinearFitSupportsFiveHundredTwelveFrames()
       tile, frames, 2, 2, samples, scales, offsets, weights,
       -1.0F, 5.0F, 5.0F
    };
-   const FusedLnIntegrationResult result =
+   const FusedIntegrationResult result =
       RunCpuOracleNativeLinearFitIntegration( request );
    for ( std::size_t pixel = 0; pixel < pixels; ++pixel )
    {
@@ -187,16 +187,16 @@ void TestCpuLinearFitSupportsFiveHundredTwelveFrames()
    }
 }
 
-#if defined(OAF_WITH_METAL)
+#if defined(UFWBPP_WITH_METAL)
 void TestMetalMatchesCpu( const std::filesystem::path& metalSource )
 {
    Fixture fixture;
-   const FusedLnIntegrationRequest request = fixture.Request();
-   const FusedLnIntegrationResult cpu =
-      RunCpuOracleFusedLnIntegration( request );
+   const FusedIntegrationRequest request = fixture.Request();
+   const FusedIntegrationResult cpu =
+      RunCpuOracleFusedIntegration( request );
    MetalExecutionStats stats;
-   MetalFusedLnIntegrationExecutor executor( metalSource );
-   const FusedLnIntegrationResult gpu = executor.Run( request, &stats );
+   MetalFusedIntegrationExecutor executor( metalSource );
+   const FusedIntegrationResult gpu = executor.Run( request, &stats );
    Require( gpu.acceptedSamples == cpu.acceptedSamples
          && gpu.rejectedSamples == cpu.rejectedSamples,
             "Metal and CPU oracle sample counts differ" );
@@ -235,7 +235,7 @@ void TestMetalOutputRangeNormalization(
       -0.25F, 0.0F, 0.5F, 1.5F,
       std::numeric_limits<float>::quiet_NaN()
    };
-   MetalFusedLnIntegrationExecutor executor( metalSource );
+   MetalFusedIntegrationExecutor executor( metalSource );
    MetalExecutionStats stats;
    const OutputRangeNormalization range =
       executor.NormalizeOutputRangeInPlace( samples, &stats );
@@ -274,10 +274,10 @@ void TestMetalNativeRobustRejection(
       fixture.tile, fixture.frames, fixture.gridWidth, fixture.gridHeight,
       fixture.samples, fixture.scale, fixture.offset, fixture.weights
    };
-   const FusedLnIntegrationResult cpu =
+   const FusedIntegrationResult cpu =
       RunCpuOracleNativeRobustIntegration( request );
-   MetalFusedLnIntegrationExecutor executor( metalSource );
-   const FusedLnIntegrationResult gpu =
+   MetalFusedIntegrationExecutor executor( metalSource );
+   const FusedIntegrationResult gpu =
       executor.RunNativeRobustRejection( request );
    Require( gpu.acceptedSamples == cpu.acceptedSamples
          && gpu.rejectedSamples == cpu.rejectedSamples,
@@ -324,10 +324,10 @@ void TestMetalNativeLinearFitRejection(
       fixture.tile, fixture.frames, fixture.gridWidth, fixture.gridHeight,
       fixture.samples, fixture.scale, fixture.offset, fixture.weights
    };
-   const FusedLnIntegrationResult cpu =
+   const FusedIntegrationResult cpu =
       RunCpuOracleNativeLinearFitIntegration( request );
-   MetalFusedLnIntegrationExecutor executor( metalSource );
-   const FusedLnIntegrationResult gpu =
+   MetalFusedIntegrationExecutor executor( metalSource );
+   const FusedIntegrationResult gpu =
       executor.RunNativeLinearFitRejection( request );
    Require( gpu.acceptedSamples == cpu.acceptedSamples
          && gpu.rejectedSamples == cpu.rejectedSamples,
@@ -372,13 +372,13 @@ void TestMetalMaskedFiveHundredTwelveFrames(
    const std::vector<float> scales( frames*4, 1.0F );
    const std::vector<float> offsets( frames*4, 0.0F );
    const std::vector<float> weights( frames, 1.0F );
-   const FusedLnIntegrationRequest request{
+   const FusedIntegrationRequest request{
       tile, frames, 2, 2, samples, mask, scales, offsets, weights, 1
    };
-   const FusedLnIntegrationResult cpu =
-      RunCpuOracleFusedLnIntegration( request );
-   MetalFusedLnIntegrationExecutor executor( metalSource );
-   const FusedLnIntegrationResult gpu = executor.Run( request );
+   const FusedIntegrationResult cpu =
+      RunCpuOracleFusedIntegration( request );
+   MetalFusedIntegrationExecutor executor( metalSource );
+   const FusedIntegrationResult gpu = executor.Run( request );
    Require( gpu.acceptedSamples == cpu.acceptedSamples
          && gpu.rejectedSamples == cpu.rejectedSamples,
             "512-frame masked Metal rejection counts differ" );
@@ -413,15 +413,15 @@ int main( int argc, char** argv )
       TestConstantBicubicGrid();
       TestCpuOracleMaskAndWeights();
       TestCpuLinearFitSupportsFiveHundredTwelveFrames();
-#if defined(OAF_WITH_METAL)
+#if defined(UFWBPP_WITH_METAL)
       if ( argc != 2 )
          throw std::invalid_argument(
-            "usage: OpenAstroFlowNativeCoreTests /absolute/path/to/source.metal" );
+            "usage: UfwbppNativeCoreTests /absolute/path/to/source.metal" );
       const std::filesystem::path metalSource =
          std::filesystem::canonical( argv[1] );
-      if ( !MetalFusedLnIntegrationAvailable() )
+      if ( !MetalFusedIntegrationAvailable() )
       {
-         std::cout << "OpenAstroFlowNativeCoreTests skipped: Metal is unavailable\n";
+         std::cout << "UfwbppNativeCoreTests skipped: Metal is unavailable\n";
          return 77;
       }
       TestMetalMatchesCpu( metalSource );
@@ -432,14 +432,14 @@ int main( int argc, char** argv )
 #else
       if ( argc != 1 )
          throw std::invalid_argument(
-            "OpenAstroFlowNativeCoreTests takes no arguments without Metal" );
+            "UfwbppNativeCoreTests takes no arguments without Metal" );
 #endif
-      std::cout << "OpenAstroFlowNativeCoreTests passed\n";
+      std::cout << "UfwbppNativeCoreTests passed\n";
       return 0;
    }
    catch ( const std::exception& error )
    {
-      std::cerr << "OpenAstroFlowNativeCoreTests failed: " << error.what() << '\n';
+      std::cerr << "UfwbppNativeCoreTests failed: " << error.what() << '\n';
       return 1;
    }
 }

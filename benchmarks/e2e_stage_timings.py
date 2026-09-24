@@ -38,10 +38,10 @@ import numpy as np
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 for relative in (
-    "packages/openastroflow-engine/src",
+    "packages/engine/src",
     "packages/light-frame-qc/src",
-    "packages/openastroflow-registration",
-    "packages/openastroflow-engine/tests",
+    "packages/registration",
+    "packages/engine/tests",
     "benchmarks",
 ):
     candidate = REPOSITORY / relative
@@ -49,12 +49,12 @@ for relative in (
         sys.path.insert(0, str(candidate))
 
 from native_kernels_pipeline import _git_commit, _portable_path, _synthetic_dataset  # noqa: E402
-from openastroflow_engine import native_kernels  # noqa: E402
-from openastroflow_engine.calibration import IntegrationParameters  # noqa: E402
-from openastroflow_engine.e2e import E2ERequest, IntegrationMode, run_e2e  # noqa: E402
-from openastroflow_engine.hardware import detect_hardware  # noqa: E402
-from openastroflow_engine.performance_profile import select_execution_tuning  # noqa: E402
-from openastroflow_engine.pixel_pipeline import PipelineParameters  # noqa: E402
+from ufwbpp import native_kernels  # noqa: E402
+from ufwbpp.calibration import IntegrationParameters  # noqa: E402
+from ufwbpp.workflows.single_target import E2ERequest, IntegrationMode, run_e2e  # noqa: E402
+from ufwbpp.hardware import detect_hardware  # noqa: E402
+from ufwbpp.performance_profile import select_execution_tuning  # noqa: E402
+from ufwbpp.pixel_pipeline import PipelineParameters  # noqa: E402
 from test_e2e import FakeSolver  # noqa: E402
 
 
@@ -229,7 +229,7 @@ def main() -> int:
         "shape": [height, width],
         "frames": args.frames,
     }
-    with tempfile.TemporaryDirectory(prefix="oaf-e2e-bench-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="ufwbpp-e2e-bench-") as temporary:
         scratch = (Path(args.scratch) if args.scratch else Path(temporary)).resolve()
         scratch.mkdir(parents=True, exist_ok=True)
         dataset_started = time.perf_counter()

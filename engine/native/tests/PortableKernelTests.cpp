@@ -1,5 +1,5 @@
-#include "openastroflow/PortableKernels.h"
-#include "openastroflow/c_api.h"
+#include "ufwbpp/PortableKernels.h"
+#include "ufwbpp/c_api.h"
 #include "Lanczos3Table.h"
 
 #include <algorithm>
@@ -17,7 +17,7 @@
 namespace
 {
 
-using namespace openastroflow::native;
+using namespace ufwbpp::native;
 
 constexpr float Nan = std::numeric_limits<float>::quiet_NaN();
 
@@ -689,7 +689,7 @@ void TestCAbiRoundTrip()
    std::vector<float> source( width*height );
    for ( std::size_t index = 0; index < source.size(); ++index )
       source[index] = static_cast<float>( index % 7 )*0.1F;
-   OafNativeWarpLanczos3RequestV1 warp{};
+   UfwbppNativeWarpLanczos3RequestV1 warp{};
    warp.struct_size = sizeof( warp );
    warp.source_width = width;
    warp.source_height = height;
@@ -704,24 +704,24 @@ void TestCAbiRoundTrip()
    warp.domain_scale = 1.0F;
    std::vector<float> band( width*3 );
    std::array<char, 256> error{};
-   Require( oaf_native_cpu_warp_lanczos3_v1(
+   Require( ufwbpp_native_cpu_warp_lanczos3_v1(
                &warp, band.data(), band.size(), error.data(), error.size() )
-               == OAF_NATIVE_OK,
+               == UFWBPP_NATIVE_OK,
             error.data() );
    AffineInverse nativeInverse{ 1.0, 0.0, 0.25, 0.0, 1.0, -0.5 };
    const std::vector<float> full = Warp( source, width, height, nativeInverse, 1 );
    for ( std::size_t index = 0; index < band.size(); ++index )
       Require( SameOrBothNan( band[index], full[2*width + index] ),
                "C ABI band must match the direct kernel band" );
-   Require( oaf_native_cpu_warp_lanczos3_v1(
+   Require( ufwbpp_native_cpu_warp_lanczos3_v1(
                &warp, band.data(), band.size() - 1, error.data(), error.size() )
-               == OAF_NATIVE_BUFFER_TOO_SMALL,
+               == UFWBPP_NATIVE_BUFFER_TOO_SMALL,
             "C ABI must reject an undersized destination" );
 
    const std::uint32_t frames = 4;
    std::vector<float> samples( frames*width*height, 3.0F );
    samples[2*width*height + 5] = 900.0F;
-   OafNativeMadRejectionRequestV1 mad{};
+   UfwbppNativeMadRejectionRequestV1 mad{};
    mad.struct_size = sizeof( mad );
    mad.frame_count = frames;
    mad.row_count = height;
@@ -736,15 +736,15 @@ void TestCAbiRoundTrip()
    mad.epsilon_floor = 16.0F*1.1920928955078125e-07F;
    std::vector<std::uint8_t> accepted( samples.size(), 9 );
    std::vector<float> center( width*height );
-   Require( oaf_native_cpu_mad_rejection_v1(
+   Require( ufwbpp_native_cpu_mad_rejection_v1(
                &mad, accepted.data(), accepted.size(), center.data(),
-               center.size(), error.data(), error.size() ) == OAF_NATIVE_OK,
+               center.size(), error.data(), error.size() ) == UFWBPP_NATIVE_OK,
             error.data() );
    Require( accepted[2*width*height + 5] == 0 && accepted[5] == 1,
             "C ABI MAD rejection must flag the outlier only" );
    Require( center[5] == 3.0F, "C ABI centre must be the median" );
 
-   OafNativeMadRejectionRequestV2 madV2{};
+   UfwbppNativeMadRejectionRequestV2 madV2{};
    madV2.struct_size = sizeof( madV2 );
    madV2.frame_count = frames;
    madV2.row_count = height;
@@ -763,29 +763,29 @@ void TestCAbiRoundTrip()
    madV2.pool_half_width = 12;
    std::vector<std::uint8_t> acceptedV2( samples.size(), 9 );
    std::vector<float> centerV2( width*height );
-   Require( oaf_native_cpu_mad_rejection_v2(
+   Require( ufwbpp_native_cpu_mad_rejection_v2(
                &madV2, acceptedV2.data(), acceptedV2.size(), centerV2.data(),
-               centerV2.size(), error.data(), error.size() ) == OAF_NATIVE_OK,
+               centerV2.size(), error.data(), error.size() ) == UFWBPP_NATIVE_OK,
             error.data() );
    Require( acceptedV2[2*width*height + 5] == 0 && acceptedV2[5] == 1,
             "C ABI MAD v2 rejection must flag the outlier only" );
    Require( centerV2 == center, "C ABI MAD v2 centres equal v1" );
    madV2.frame_scales = nullptr;
-   Require( oaf_native_cpu_mad_rejection_v2(
+   Require( ufwbpp_native_cpu_mad_rejection_v2(
                &madV2, acceptedV2.data(), acceptedV2.size(), centerV2.data(),
                centerV2.size(), error.data(), error.size() )
-               == OAF_NATIVE_INVALID_ARGUMENT,
+               == UFWBPP_NATIVE_INVALID_ARGUMENT,
             "C ABI MAD v2 must reject a scale count without a pointer" );
    madV2.frame_scale_count = 0;
    madV2.pool_half_width = 0;
-   Require( oaf_native_cpu_mad_rejection_v2(
+   Require( ufwbpp_native_cpu_mad_rejection_v2(
                &madV2, acceptedV2.data(), acceptedV2.size(), centerV2.data(),
-               centerV2.size(), error.data(), error.size() ) == OAF_NATIVE_OK,
+               centerV2.size(), error.data(), error.size() ) == UFWBPP_NATIVE_OK,
             error.data() );
    Require( acceptedV2 == accepted, "C ABI MAD v2 without the scale model equals v1" );
 
    std::vector<double> weights( frames, 0.25 );
-   OafNativeMaskedMeanRequestV1 mean{};
+   UfwbppNativeMaskedMeanRequestV1 mean{};
    mean.struct_size = sizeof( mean );
    mean.frame_count = frames;
    mean.row_count = height;
@@ -800,43 +800,43 @@ void TestCAbiRoundTrip()
    std::vector<float> integrated( width*height );
    std::vector<std::uint16_t> acceptedCount( width*height );
    std::vector<std::uint16_t> rejectedCount( width*height );
-   OafNativeMaskedMeanOutputV1 output{};
+   UfwbppNativeMaskedMeanOutputV1 output{};
    output.struct_size = sizeof( output );
    output.integrated = integrated.data();
    output.accepted_samples = acceptedCount.data();
    output.rejected_samples = rejectedCount.data();
    output.pixel_capacity = integrated.size();
-   Require( oaf_native_cpu_masked_mean_v1(
-               &mean, &output, error.data(), error.size() ) == OAF_NATIVE_OK,
+   Require( ufwbpp_native_cpu_masked_mean_v1(
+               &mean, &output, error.data(), error.size() ) == UFWBPP_NATIVE_OK,
             error.data() );
    Require( integrated[5] == 3.0F && acceptedCount[5] == 3 && rejectedCount[5] == 1,
             "C ABI masked mean must exclude the rejected outlier" );
-   Require( oaf_native_default_kernel_threads_v1() >= 1,
+   Require( ufwbpp_native_default_kernel_threads_v1() >= 1,
             "default kernel thread count must be positive" );
 
-   OafNativeCpuFeaturesV1 features{};
+   UfwbppNativeCpuFeaturesV1 features{};
    features.struct_size = sizeof( features );
-   Require( oaf_native_cpu_features_v1( &features, error.data(), error.size() )
-               == OAF_NATIVE_OK,
+   Require( ufwbpp_native_cpu_features_v1( &features, error.data(), error.size() )
+               == UFWBPP_NATIVE_OK,
             error.data() );
-   Require( features.architecture == OAF_NATIVE_CPU_ARCHITECTURE_X86_64
-         || features.architecture == OAF_NATIVE_CPU_ARCHITECTURE_ARM64,
+   Require( features.architecture == UFWBPP_NATIVE_CPU_ARCHITECTURE_X86_64
+         || features.architecture == UFWBPP_NATIVE_CPU_ARCHITECTURE_ARM64,
             "cpu features must name the compiled architecture" );
    const std::string names( features.features );
-   Require( features.architecture != OAF_NATIVE_CPU_ARCHITECTURE_X86_64
+   Require( features.architecture != UFWBPP_NATIVE_CPU_ARCHITECTURE_X86_64
          || names.find( "sse4.2" ) != std::string::npos,
             "every x86-64 host running this test supports SSE4.2" );
-   Require( features.architecture != OAF_NATIVE_CPU_ARCHITECTURE_ARM64
+   Require( features.architecture != UFWBPP_NATIVE_CPU_ARCHITECTURE_ARM64
          || names == "neon",
             "arm64 reports neon" );
    Require( names.find( ' ' ) == std::string::npos && names.find( ",," ) == std::string::npos,
             "feature names are a comma-separated lowercase list" );
    Require( std::strlen( features.brand ) < sizeof( features.brand ),
             "brand string is NUL-terminated" );
-   OafNativeCpuFeaturesV1 wrongSize{};
+   UfwbppNativeCpuFeaturesV1 wrongSize{};
    wrongSize.struct_size = 1;
-   Require( oaf_native_cpu_features_v1( &wrongSize, error.data(), error.size() )
-               == OAF_NATIVE_INVALID_ARGUMENT,
+   Require( ufwbpp_native_cpu_features_v1( &wrongSize, error.data(), error.size() )
+               == UFWBPP_NATIVE_INVALID_ARGUMENT,
             "cpu features must reject an unexpected struct size" );
 }
 
@@ -1049,12 +1049,12 @@ void TestDrizzleBandDropsExactAreasAndIsBandAndThreadInvariant()
    request.channel = 255;
 
    // C ABI round trip against the direct kernel.
-   OafNativeDrizzleRequestV1 abi{};
+   UfwbppNativeDrizzleRequestV1 abi{};
    abi.struct_size = sizeof( abi );
    abi.source_width = width;
    abi.source_rows = height;
    abi.scale = 2;
-   abi.kernel = OAF_NATIVE_DRIZZLE_KERNEL_SQUARE;
+   abi.kernel = UFWBPP_NATIVE_DRIZZLE_KERNEL_SQUARE;
    abi.output_width = outputWidth;
    abi.output_rows = outputHeight;
    abi.threads = 3;
@@ -1073,16 +1073,16 @@ void TestDrizzleBandDropsExactAreasAndIsBandAndThreadInvariant()
    abi.output_count = abiSum.size();
    abi.output_touched = abiTouched.data();
    std::array<char, 256> error{};
-   Require( oaf_native_cpu_drizzle_v1( &abi, error.data(), error.size() ) == OAF_NATIVE_OK,
+   Require( ufwbpp_native_cpu_drizzle_v1( &abi, error.data(), error.size() ) == UFWBPP_NATIVE_OK,
             error.data() );
    Require( abiSum == single.sum && abiWeight == single.weight && abiTouched == single.touched,
             "drizzle: C ABI equals the direct kernel" );
    abi.scale = 9;
-   Require( oaf_native_cpu_drizzle_v1( &abi, error.data(), error.size() ) == OAF_NATIVE_INVALID_ARGUMENT,
+   Require( ufwbpp_native_cpu_drizzle_v1( &abi, error.data(), error.size() ) == UFWBPP_NATIVE_INVALID_ARGUMENT,
             "drizzle: C ABI rejects an unsupported scale" );
    abi.scale = 2;
    abi.output_count = abiSum.size() - 1;
-   Require( oaf_native_cpu_drizzle_v1( &abi, error.data(), error.size() ) == OAF_NATIVE_INVALID_ARGUMENT,
+   Require( ufwbpp_native_cpu_drizzle_v1( &abi, error.data(), error.size() ) == UFWBPP_NATIVE_INVALID_ARGUMENT,
             "drizzle: C ABI rejects mismatched accumulators" );
 
    request.pixfrac = 0.0;
@@ -1152,7 +1152,7 @@ void TestDebayerBilinearMatchesTheReferenceRules()
 
 void TestLanczos3TableIsDeterministicAndAccurate()
 {
-   using namespace openastroflow::native::detail;
+   using namespace ufwbpp::native::detail;
    // The series agrees with libm to a few ulps and is exact at integers.
    for ( int i = -40; i <= 40; ++i )
    {
@@ -1315,12 +1315,12 @@ int main()
       TestDebayerBilinearMatchesTheReferenceRules();
       TestLanczos3TableIsDeterministicAndAccurate();
       TestDynamicChunkingIsThreadAndGrainInvariant();
-      std::cout << "OpenAstroFlowPortableKernelTests passed\n";
+      std::cout << "UfwbppPortableKernelTests passed\n";
       return 0;
    }
    catch ( const std::exception& error )
    {
-      std::cerr << "OpenAstroFlowPortableKernelTests failed: " << error.what() << '\n';
+      std::cerr << "UfwbppPortableKernelTests failed: " << error.what() << '\n';
       return 1;
    }
 }

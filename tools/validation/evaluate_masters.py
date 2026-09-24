@@ -9,7 +9,7 @@ units; background amplitudes are measured against ``sigma_ref``, PixInsight's
 own per-pixel noise.  Noise verdicts use binned effective noise, which is
 insensitive to interpolation, never the per-pixel sigma.
 
-    .venv/bin/python benchmarks/evaluate_masters.py \\
+    .venv/bin/python tools/validation/evaluate_masters.py \\
         --pair L ours_L.fits pi_L.xisf --pair R ours_R.fits pi_R.xisf \\
         --out build/eval-report
 

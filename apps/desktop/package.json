@@ -10,6 +10,8 @@
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
     "test:watch": "vitest",
+    "format": "prettier --write src",
+    "format:check": "prettier --check src",
     "tauri": "tauri",
     "tauri:build": "tauri build",
     "tauri:build:macos-prerelease": "tauri build --bundles app --config src-tauri/tauri.prerelease.conf.json"
@@ -31,6 +33,7 @@
     "@types/react-dom": "^19.1.7",
     "@vitejs/plugin-react": "^5.0.2",
     "jsdom": "^26.1.0",
+    "prettier": "3.9.9",
     "typescript": "^5.9.2",
     "vite": "^7.1.3",
     "vitest": "^3.2.4"

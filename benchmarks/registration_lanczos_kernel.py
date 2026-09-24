@@ -19,7 +19,7 @@ import time
 from astropy.io import fits
 import numpy as np
 
-from openastroflow_engine import calibration
+from ufwbpp import calibration
 
 
 def load_baseline(path: Path):
@@ -75,7 +75,7 @@ def main() -> None:
         "candidateFunctionSha256": hashlib.sha256(inspect.getsource(after).encode()).hexdigest(),
         "cases": {},
     }
-    with tempfile.TemporaryDirectory(prefix="oaf-lanczos-kernel-") as directory:
+    with tempfile.TemporaryDirectory(prefix="ufwbpp-lanczos-kernel-") as directory:
         source = Path(directory) / "synthetic.fits"
         fits.writeto(source, pixels, fits.Header({"OAFNDOM": "NORMALIZED_TEST", "OAFNSCL": 1.0}))
         with calibration.FitsFrame(source) as frame:

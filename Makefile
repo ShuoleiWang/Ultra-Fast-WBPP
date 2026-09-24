@@ -2,8 +2,8 @@ PYTHON ?= $(firstword $(wildcard .venv/bin/python .venv/Scripts/python.exe) pyth
 CMAKE ?= cmake
 NATIVE_BUILD ?= build/native
 NATIVE_RELEASE_BUILD := build/native-release
-NATIVE_INSTALL_PREFIX := packages/openastroflow-engine/src
-NATIVE_RUNTIME_DIR := $(NATIVE_INSTALL_PREFIX)/openastroflow_engine/native
+NATIVE_INSTALL_PREFIX := packages/engine/src
+NATIVE_RUNTIME_DIR := $(NATIVE_INSTALL_PREFIX)/ufwbpp/native
 MACOS14_BOTTLE_ROOT ?= build/macos14-runtime-libraries
 HOST_SYSTEM := $(shell uname -s 2>/dev/null)
 
@@ -21,7 +21,7 @@ endif
 
 bootstrap:
 	python3 -m venv .venv
-	.venv/bin/python -m pip install -e './packages/light-frame-qc[test]' -e './packages/openastroflow-registration[test]' -e './packages/openastroflow-engine[test,all]' -r packaging/worker/requirements-build.txt
+	.venv/bin/python -m pip install -e './packages/light-frame-qc[test]' -e './packages/registration[test]' -e './packages/engine[test,all]' -r packaging/engine/requirements-build.txt
 	.venv/bin/python -m pip check
 	npm --prefix apps/desktop ci
 	$(MAKE) native-build
@@ -37,20 +37,21 @@ test: python-test rust-test frontend-test native-test
 python-test:
 	$(PYTHON) -m pytest -q \
 		packages/light-frame-qc/tests \
-		packages/openastroflow-registration/tests \
-		packages/openastroflow-engine/tests \
+		packages/registration/tests \
+		packages/engine/tests \
 		tests
 
 rust-test:
 	cargo test --workspace --locked
 
 frontend-test:
+	npm --prefix apps/desktop run format:check
 	npm --prefix apps/desktop test
 	npm --prefix apps/desktop run build
 
 native-configure:
 	$(CMAKE) -S engine/native -B $(NATIVE_BUILD) \
-		-DOAF_BUILD_TESTS=ON -DOAF_ENABLE_METAL=ON
+		-DUFWBPP_BUILD_TESTS=ON -DUFWBPP_ENABLE_METAL=ON
 
 native-build: native-configure
 	$(CMAKE) --build $(NATIVE_BUILD) --parallel
@@ -60,7 +61,7 @@ native-test: native-build
 
 native-release-configure:
 	$(CMAKE) -S engine/native -B $(NATIVE_RELEASE_BUILD) \
-		-DOAF_BUILD_TESTS=ON -DOAF_ENABLE_METAL=ON \
+		-DUFWBPP_BUILD_TESTS=ON -DUFWBPP_ENABLE_METAL=ON \
 		-DCMAKE_BUILD_TYPE=Release
 
 native-release-build: native-release-configure
@@ -71,13 +72,13 @@ native-release-test: native-release-build
 
 native-release-install: native-release-test
 	$(CMAKE) -E rm -f \
-		$(NATIVE_RUNTIME_DIR)/libopenastroflow_native.dylib \
-		$(NATIVE_RUNTIME_DIR)/libopenastroflow_native.so \
-		$(NATIVE_RUNTIME_DIR)/openastroflow_native.dll
+		$(NATIVE_RUNTIME_DIR)/libufwbpp_native.dylib \
+		$(NATIVE_RUNTIME_DIR)/libufwbpp_native.so \
+		$(NATIVE_RUNTIME_DIR)/ufwbpp_native.dll
 	$(CMAKE) --install $(NATIVE_RELEASE_BUILD) --config Release \
 		--prefix $(NATIVE_INSTALL_PREFIX)
 
-$(MACOS14_BOTTLE_ROOT): packaging/worker/macos14-runtime-libraries-v1.json scripts/fetch_macos14_runtime_libraries.py scripts/build_worker_sidecar.py
+$(MACOS14_BOTTLE_ROOT): packaging/engine/macos14-runtime-libraries-v1.json scripts/fetch_macos14_runtime_libraries.py scripts/build_engine_sidecar.py
 	$(CMAKE) -E make_directory $(dir $(MACOS14_BOTTLE_ROOT))
 	$(PYTHON) scripts/fetch_macos14_runtime_libraries.py \
 		--output $(MACOS14_BOTTLE_ROOT)
@@ -85,9 +86,9 @@ $(MACOS14_BOTTLE_ROOT): packaging/worker/macos14-runtime-libraries-v1.json scrip
 macos14-runtime-libraries: $(MACOS14_BOTTLE_ROOT)
 
 desktop-sidecar: native-release-install $(DESKTOP_SIDECAR_PLATFORM_DEPS)
-	$(PYTHON) scripts/build_worker_sidecar.py --output-dir build/sidecars $(DESKTOP_SIDECAR_PLATFORM_ARGS)
+	$(PYTHON) scripts/build_engine_sidecar.py --output-dir build/sidecars $(DESKTOP_SIDECAR_PLATFORM_ARGS)
 	$(PYTHON) scripts/stage_tauri_sidecar.py \
-		build/sidecars/openastroflow-worker-$$($(PYTHON) -c 'from scripts.build_worker_sidecar import detect_host_target_triple; print(detect_host_target_triple())').manifest.json
+		build/sidecars/ufwbpp-engine-$$($(PYTHON) -c 'from scripts.build_engine_sidecar import detect_host_target_triple; print(detect_host_target_triple())').manifest.json
 
 desktop-build: desktop-sidecar
 	npm --prefix apps/desktop run $(DESKTOP_BUILD_SCRIPT)
@@ -105,11 +106,11 @@ check: source-check
 	$(MAKE) test
 
 doctor:
-	openastroflow-engine doctor
+	ufwbpp doctor
 
 clean:
 	$(CMAKE) -E rm -rf build
 	$(CMAKE) -E rm -f \
-		$(NATIVE_RUNTIME_DIR)/libopenastroflow_native.dylib \
-		$(NATIVE_RUNTIME_DIR)/libopenastroflow_native.so \
-		$(NATIVE_RUNTIME_DIR)/openastroflow_native.dll
+		$(NATIVE_RUNTIME_DIR)/libufwbpp_native.dylib \
+		$(NATIVE_RUNTIME_DIR)/libufwbpp_native.so \
+		$(NATIVE_RUNTIME_DIR)/ufwbpp_native.dll

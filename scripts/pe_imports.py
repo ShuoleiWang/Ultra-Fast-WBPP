@@ -4,7 +4,7 @@
 The release gates need to know which DLLs a ``.dll``/``.pyd``/``.exe`` will
 load before it ever runs: a native kernel library that links the dynamic
 Visual C++ runtime only works on machines that happen to have the
-redistributable, and a frozen worker whose extension modules import a DLL that
+redistributable, and a frozen engine whose extension modules import a DLL that
 is neither part of Windows nor shipped in the tree fails on a clean machine.
 ``dumpbin`` needs a Visual Studio prompt and ``pefile`` is not a dependency, so
 this module walks the on-disk structures directly:
@@ -19,7 +19,7 @@ parser deliberately does not follow thunks, resolve function names, or trust
 the ``Size`` field of a data directory where the format's own terminator is
 authoritative.
 
-    python scripts/pe_imports.py path/to/openastroflow_native.dll
+    python scripts/pe_imports.py path/to/ufwbpp_native.dll
 """
 
 from __future__ import annotations

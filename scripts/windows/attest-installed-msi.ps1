@@ -7,7 +7,7 @@
     Release gate for the Windows installer. The attestation must run against the
     tree that msiexec actually lays down, not against the build directory, so
     that the resource path the desktop app resolves at run time, the WiX file
-    table and the frozen worker are all proven together:
+    table and the frozen engine are all proven together:
 
       1. msiexec /i <msi> /qn /norestart /L*v <log>
          The Tauri MSI is per-machine (Program Files), so this needs an
@@ -17,8 +17,8 @@
       3. Check the layout the app's sidecar discovery expects
          (resource_dir() is the executable directory on Windows):
            <InstallLocation>\<main binary>.exe   (exactly one .exe at the root)
-           <InstallLocation>\resources\openastroflow-worker\openastroflow-worker-<target>.manifest.json
-           <InstallLocation>\resources\openastroflow-worker\openastroflow-worker-<target>\openastroflow-worker-<target>.exe
+           <InstallLocation>\resources\ufwbpp-engine\ufwbpp-engine-<target>.manifest.json
+           <InstallLocation>\resources\ufwbpp-engine\ufwbpp-engine-<target>\ufwbpp-engine-<target>.exe
       4. python scripts\attest_bundled_runtime.py --resource-root ... --target ... --output ...
          (PE import closure against Windows system DLLs, static-CRT kernel DLL,
          launch budget, doctor proving the kernels load from the installed tree).
@@ -33,7 +33,7 @@
     powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\attest-installed-msi.ps1 `
         -Msi "target\release\bundle\msi\Ultra-Fast WBPP_0.1.0_x64_en-US.msi" `
         -Target x86_64-pc-windows-msvc `
-        -Output build\bundle-attestations\openastroflow-worker-x86_64-pc-windows-msvc.bundled.manifest.json
+        -Output build\bundle-attestations\ufwbpp-engine-x86_64-pc-windows-msvc.bundled.manifest.json
 #>
 [CmdletBinding()]
 param(
@@ -125,7 +125,7 @@ try {
     Write-Step "installed at $installLocation"
 
     # The layout the desktop app resolves: resource_dir() is the exe directory.
-    # Tauri keeps the Cargo binary name (openastroflow-desktop.exe) unless
+    # Tauri keeps the Cargo binary name (ultra-fast-wbpp-desktop.exe) unless
     # mainBinaryName is configured, so the executable is located, not assumed:
     # the install root must hold exactly one .exe.
     $rootExecutables = @(Get-ChildItem -Path $installLocation -File -Filter "*.exe")
@@ -133,9 +133,9 @@ try {
         throw ("expected exactly one executable in {0}, found {1}" -f $installLocation, (($rootExecutables | ForEach-Object { $_.Name }) -join ", "))
     }
     $mainExe = $rootExecutables[0].FullName
-    $resourceRoot = Join-Path $installLocation "resources\openastroflow-worker"
-    $manifest = Join-Path $resourceRoot "openastroflow-worker-$Target.manifest.json"
-    $workerExe = Join-Path $resourceRoot "openastroflow-worker-$Target\openastroflow-worker-$Target.exe"
+    $resourceRoot = Join-Path $installLocation "resources\ufwbpp-engine"
+    $manifest = Join-Path $resourceRoot "ufwbpp-engine-$Target.manifest.json"
+    $workerExe = Join-Path $resourceRoot "ufwbpp-engine-$Target\ufwbpp-engine-$Target.exe"
     foreach ($required in @($mainExe, $manifest, $workerExe)) {
         if (-not (Test-Path $required -PathType Leaf)) {
             throw "installed layout is missing $required"

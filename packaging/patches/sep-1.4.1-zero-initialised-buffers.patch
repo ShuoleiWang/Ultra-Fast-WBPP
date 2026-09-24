@@ -1,4 +1,4 @@
-sep 1.4.1 -> 1.4.1+oaf.1: deterministic and linear-time source extraction
+sep 1.4.1 -> 1.4.1+ufwbpp.1: deterministic and linear-time source extraction
 on Windows (MSVC builds), behaviour-neutral elsewhere.
 
 Applied by scripts/build_sep_wheel.py to the hash-pinned sep==1.4.1 sdist
@@ -30,7 +30,7 @@ in the repository so the modified library remains rebuildable from source:
    place (the Windows heap) and made extraction cost per object grow with
    the object count.  Logical sizes and outputs are unchanged.
 
-4. PKG-INFO: the sdist version becomes 1.4.1+oaf.1 so that
+4. PKG-INFO: the sdist version becomes 1.4.1+ufwbpp.1 so that
    sep.__version__ and importlib.metadata identify the patched build.
 
 Outputs (all catalog columns and the segmentation map) are bit-identical to
@@ -43,7 +43,7 @@ diff --git a/PKG-INFO b/PKG-INFO
  Metadata-Version: 2.1
  Name: sep
 -Version: 1.4.1
-+Version: 1.4.1+oaf.1
++Version: 1.4.1+ufwbpp.1
  Summary: Astronomical source extraction and photometry library
  Author: Emmanuel Bertin, Kyle Barbary, Kyle Boone, Thomas Robitaille, Matt Craig, Curtis McCully, Evert Rol, Joe Lyman, Michael Wuertenberger, Ingvar Stepanyan, Gabe Brammer, Peter Watson
  Maintainer-email: Peter Watson <peter.watson+sep@inaf.it>

@@ -1,9 +1,9 @@
 //! Ultra-Fast WBPP desktop controller.
 //!
 //! The webview never performs scientific work and never fabricates completion.
-//! A signed sidecar owns inventory and pixel execution; this controller owns
-//! protocol ordering, process lifetime, filesystem identity checks, and the
-//! app-core final-result gate.
+//! The bundled engine (one command-line process per operation) owns inventory
+//! and pixel execution; this controller owns process lifetime, filesystem
+//! identity checks and the final verification of returned products.
 
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ mod platform;
 mod project;
 mod sidecar;
 
-use sidecar::{InspectRequest, InspectResponse, PipelineRegistry, RunReceipt, RunRequest};
+use sidecar::{InspectRequest, InspectResponse};
 
 #[tauri::command]
 async fn catalog_list(app: AppHandle) -> Result<serde_json::Value, String> {
@@ -160,29 +160,6 @@ async fn hash_sources(
         .map_err(|error| format!("source hashing task failed: {error}"))?
 }
 
-#[tauri::command]
-async fn start_pipeline(
-    app: AppHandle,
-    registry: State<'_, Arc<PipelineRegistry>>,
-    request: RunRequest,
-) -> Result<RunReceipt, String> {
-    let registry = registry.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || sidecar::start_pipeline(app, registry, request))
-        .await
-        .map_err(|error| format!("pipeline launch task failed: {error}"))?
-}
-
-#[tauri::command]
-async fn cancel_pipeline(
-    registry: State<'_, Arc<PipelineRegistry>>,
-    job_id: String,
-) -> Result<(), String> {
-    let registry = registry.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || sidecar::cancel_pipeline(&registry, &job_id))
-        .await
-        .map_err(|error| format!("pipeline cancellation task failed: {error}"))?
-}
-
 fn terminate_managed_children<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let mut failures = Vec::new();
     if let Err(error) = project::terminate_all(
@@ -199,11 +176,6 @@ fn terminate_managed_children<R: Runtime>(app: &AppHandle<R>) -> Result<(), Stri
     ) {
         failures.push(error);
     }
-    if let Err(error) =
-        sidecar::terminate_all(app.state::<Arc<PipelineRegistry>>().inner().as_ref())
-    {
-        failures.push(error);
-    }
     if failures.is_empty() {
         Ok(())
     } else {
@@ -214,7 +186,6 @@ fn terminate_managed_children<R: Runtime>(app: &AppHandle<R>) -> Result<(), Stri
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
-        .manage(Arc::new(PipelineRegistry::default()))
         .manage(Arc::new(catalog::CatalogRegistry::default()))
         .manage(Arc::new(project::ProjectRegistry::default()))
         .plugin(tauri_plugin_dialog::init())
@@ -234,9 +205,7 @@ pub fn run() {
             inspect_quality,
             blink_measure,
             load_blink_preview,
-            hash_sources,
-            start_pipeline,
-            cancel_pipeline
+            hash_sources
         ])
         .build(tauri::generate_context!())
         .expect("error while building Ultra-Fast WBPP desktop application");
@@ -259,7 +228,6 @@ mod tests {
     #[test]
     fn managed_shutdown_is_idempotent_when_no_jobs_are_running() {
         let app = tauri::test::mock_app();
-        assert!(app.manage(Arc::new(PipelineRegistry::default())));
         assert!(app.manage(Arc::new(catalog::CatalogRegistry::default())));
         assert!(app.manage(Arc::new(project::ProjectRegistry::default())));
         terminate_managed_children(app.handle()).expect("first shutdown");

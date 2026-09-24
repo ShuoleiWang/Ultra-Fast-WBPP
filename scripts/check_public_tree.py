@@ -14,6 +14,7 @@ import sys
 
 IGNORED_PARTS = {
     ".git",
+    ".ultra-fast-wbpp",
     ".openastroflow",
     ".mypy_cache",
     ".pytest_cache",
@@ -30,8 +31,8 @@ LOCAL_IGNORED_PREFIXES = (
     # Git-indexed files below these paths are still audited because
     # tracked-file inspection bypasses local exclusions.
     "apps/desktop/src-tauri/binaries/",
-    "apps/desktop/src-tauri/resources/openastroflow-worker/",
-    "packages/openastroflow-engine/src/openastroflow_engine/native/",
+    "apps/desktop/src-tauri/resources/ufwbpp-engine/",
+    "packages/engine/src/ufwbpp/native/",
 )
 RAW_SUFFIXES = {".fit", ".fits", ".fts", ".fz", ".xisf", ".xdrz", ".xnml"}
 BINARY_RUNTIME_SUFFIXES = {".dll", ".dylib", ".exe", ".so"}

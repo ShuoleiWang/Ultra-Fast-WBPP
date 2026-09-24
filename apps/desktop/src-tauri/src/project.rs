@@ -15,6 +15,8 @@ pub(crate) use previews::{
 mod requests;
 pub(crate) use requests::checked_flag_code;
 use requests::*;
+mod astrometry;
+use astrometry::AstrometricSolutionReceipt;
 mod completion;
 use completion::*;
 mod execution;
@@ -30,7 +32,6 @@ use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use openastroflow_app_core::{AstrometricSolutionReceipt, Validate};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Runtime};
@@ -38,9 +39,9 @@ use tauri::{AppHandle, Emitter, Runtime};
 use crate::platform::{self, ManagedChild};
 use crate::sidecar::{discover_engine, new_public_identifier, LossyLines};
 
-const PROGRESS_EVENT: &str = "openastroflow://pipeline-progress";
-const COMPLETE_EVENT: &str = "openastroflow://pipeline-complete";
-const ERROR_EVENT: &str = "openastroflow://pipeline-error";
+const PROGRESS_EVENT: &str = "ufwbpp://pipeline-progress";
+const COMPLETE_EVENT: &str = "ufwbpp://pipeline-complete";
+const ERROR_EVENT: &str = "ufwbpp://pipeline-error";
 const MAX_RESULT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DIAGNOSTIC_BYTES: usize = 8 * 1024;
 
@@ -162,8 +163,6 @@ pub(crate) struct UiRecipeOptions {
     drizzle_drop_shrink: f64,
     #[serde(default = "default_drizzle_kernel")]
     drizzle_kernel: String,
-    #[serde(default)]
-    local_normalization_enabled: bool,
     solver_required: bool,
     #[serde(default = "default_calibration_workflow")]
     calibration_workflow: String,
@@ -190,9 +189,6 @@ const DRIZZLE_KERNELS: [&str; 4] = ["square", "circular", "gaussian", "point"];
 /// The engine recipe rejects the same values; checking here keeps the error
 /// next to the control instead of a failed run.
 fn validate_drizzle_options(recipe: &UiRecipeOptions) -> Result<(), String> {
-    if recipe.local_normalization_enabled {
-        return Err("LOCAL_NORMALIZATION_REMOVED: use default normalization".to_owned());
-    }
     if !recipe.drizzle_enabled {
         return Ok(());
     }

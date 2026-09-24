@@ -3,7 +3,7 @@
 
 macOS (``--app``): codesign verification, the Mach-O deployment-target and
 dylib-closure audit, the pinned runtime-library provenance, and the launch
-budget of the frozen worker inside the read-only disk image.
+budget of the frozen engine inside the read-only disk image.
 
 Windows (``--resource-root`` with a ``*-pc-windows-msvc`` target): the PE
 import-closure audit of the installed worker tree (every ``.dll``/``.pyd``/
@@ -11,7 +11,7 @@ import-closure audit of the installed worker tree (every ``.dll``/``.pyd``/
 the native kernel DLL must link the C runtime statically), the same launch
 budget, and a ``doctor`` run proving the kernels load from the installed
 layout.  The MSI is installed by ``scripts/windows/attest-installed-msi.ps1``,
-which points this script at ``<InstallLocation>\\resources\\openastroflow-worker``.
+which points this script at ``<InstallLocation>\\resources\\ufwbpp-engine``.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ import time
 from typing import Any, Mapping, Sequence
 
 try:
-    from scripts.build_worker_sidecar import (
+    from scripts.build_engine_sidecar import (
         WINDOWS_TARGETS,
         ResourceBoundaryError,
         SidecarBuildError,
@@ -40,9 +40,9 @@ try:
         load_macos14_runtime_policy,
         manifest_filename,
         normalize_target_triple,
-        run_native_kernel_smoke,
+        loaded_native_kernel_facts,
+        run_engine_doctor,
         run_runtime_library_smoke,
-        run_worker_handshake,
         runtime_directory_name,
         validate_manifest,
     )
@@ -55,7 +55,7 @@ try:
         read_pe_imports,
     )
 except ModuleNotFoundError:  # direct ``python scripts/...`` execution
-    from build_worker_sidecar import (
+    from build_engine_sidecar import (
         WINDOWS_TARGETS,
         ResourceBoundaryError,
         SidecarBuildError,
@@ -64,9 +64,9 @@ except ModuleNotFoundError:  # direct ``python scripts/...`` execution
         load_macos14_runtime_policy,
         manifest_filename,
         normalize_target_triple,
-        run_native_kernel_smoke,
+        loaded_native_kernel_facts,
+        run_engine_doctor,
         run_runtime_library_smoke,
-        run_worker_handshake,
         runtime_directory_name,
         validate_manifest,
     )
@@ -94,7 +94,7 @@ WINDOWS_TARGET_MACHINES = {
     "x86_64-pc-windows-msvc": "x86_64",
     "aarch64-pc-windows-msvc": "aarch64",
 }
-NATIVE_KERNEL_DLL_NAME = "openastroflow_native.dll"
+NATIVE_KERNEL_DLL_NAME = "ufwbpp_native.dll"
 _PE_SUFFIXES = {".dll", ".pyd", ".exe"}
 
 _THIN_MACHO_MAGICS = {
@@ -959,20 +959,9 @@ def _run_version(entry_point: Path, timeout_seconds: float) -> tuple[str, float]
     return version, elapsed
 
 
-def _run_handshake(entry_point: Path, timeout_seconds: float) -> tuple[dict[str, Any], float]:
-    started = time.perf_counter()
-    try:
-        handshake = run_worker_handshake(
-            [str(entry_point)], timeout_seconds=timeout_seconds
-        )
-    except SidecarBuildError as error:
-        raise BundleAttestationError(f"bundled handshake failed: {error}") from error
-    return handshake, time.perf_counter() - started
-
-
 def _run_catalog_list(entry_point: Path, timeout_seconds: float) -> tuple[tuple[str, ...], float]:
     started = time.perf_counter()
-    with tempfile.TemporaryDirectory(prefix="openastroflow-attest-catalog-") as catalog_root:
+    with tempfile.TemporaryDirectory(prefix="ultra-fast-wbpp-attest-catalog-") as catalog_root:
         try:
             result = subprocess.run(
                 [
@@ -1025,13 +1014,13 @@ def _run_project_help(entry_point: Path, timeout_seconds: float) -> float:
     return elapsed
 
 
-def _run_native_kernel_smoke(entry_point: Path, timeout_seconds: float) -> tuple[dict[str, Any], float]:
+def _run_doctor(entry_point: Path, timeout_seconds: float) -> tuple[dict[str, Any], float]:
     started = time.perf_counter()
     try:
-        facts = run_native_kernel_smoke([str(entry_point)], timeout_seconds=timeout_seconds)
+        report = run_engine_doctor([str(entry_point)], timeout_seconds=timeout_seconds)
     except SidecarBuildError as error:
-        raise BundleAttestationError(f"installed native kernel smoke failed: {error}") from error
-    return facts, time.perf_counter() - started
+        raise BundleAttestationError(f"bundled engine doctor failed: {error}") from error
+    return report, time.perf_counter() - started
 
 
 def _attest_runtime_libraries(
@@ -1065,7 +1054,7 @@ def _attest_runtime_libraries(
         != "ultra-fast-wbpp-macos-runtime-library-provenance"
         or provenance["targetTriple"] != "aarch64-apple-darwin"
         or provenance["policySha256"]
-        != _sha256(REPOSITORY / "packaging" / "worker" / "macos14-runtime-libraries-v1.json")
+        != _sha256(REPOSITORY / "packaging" / "engine" / "macos14-runtime-libraries-v1.json")
     ):
         raise BundleAttestationError("macOS runtime-library provenance identity changed")
     expected_packages = [
@@ -1211,7 +1200,6 @@ def attest_runtime(
         )
 
     version, version_seconds = _run_version(entry_point, max_start_seconds)
-    handshake, handshake_seconds = _run_handshake(entry_point, max_start_seconds)
     catalog_ids, catalog_seconds = _run_catalog_list(entry_point, max_start_seconds)
     project_help_seconds = _run_project_help(entry_point, max_start_seconds)
     runtime_library_provenance = None
@@ -1229,19 +1217,21 @@ def attest_runtime(
         ) = _attest_runtime_libraries(runtime_path, entry_point, max_start_seconds)
     if max(
         version_seconds,
-        handshake_seconds,
         catalog_seconds,
         project_help_seconds,
         runtime_library_smoke_seconds,
     ) > max_start_seconds:
         raise BundleAttestationError("bundled runtime exceeded the startup budget")
-    expected_version = pre_sign["protocol"]["engineVersion"]
-    if handshake["payload"]["implementationVersion"] != expected_version:
-        raise BundleAttestationError("bundled worker version differs from pre-sign manifest")
+    # ``doctor`` is not a start-up latency probe (it enumerates hardware and
+    # probes the solvers), so it gets its own generous timeout and is
+    # recorded, not budgeted.
+    report, doctor_seconds = _run_doctor(entry_point, max(60.0, 4 * max_start_seconds))
+    if report["engineVersion"] != pre_sign["engine"]["version"]:
+        raise BundleAttestationError("bundled engine version differs from pre-sign manifest")
 
     payload = {
         "schemaVersion": 1,
-        "kind": "openastroflow-bundled-runtime-attestation",
+        "kind": "ultra-fast-wbpp-bundled-runtime-attestation",
         "targetTriple": target,
         "bundleName": bundle_name,
         "preSignTreeSha256": pre_sign["runtime"]["treeSha256"],
@@ -1251,12 +1241,11 @@ def attest_runtime(
             "maximumSeconds": max_start_seconds,
             "version": version,
             "versionSeconds": round(version_seconds, 6),
-            "handshakeSeconds": round(handshake_seconds, 6),
             "catalogListSeconds": round(catalog_seconds, 6),
             "catalogIds": list(catalog_ids),
             "runProjectHelpSeconds": round(project_help_seconds, 6),
-            "protocolVersion": handshake["protocolVersion"],
-            "implementationVersion": handshake["payload"]["implementationVersion"],
+            "engineVersion": report["engineVersion"],
+            "doctorSeconds": round(doctor_seconds, 6),
         },
     }
     if runtime_library_provenance is not None and runtime_library_smoke is not None:
@@ -1266,11 +1255,10 @@ def attest_runtime(
             "smokeSeconds": round(runtime_library_smoke_seconds, 6),
         }
     if windows_deployment is not None:
-        # ``doctor`` is not a start-up latency probe (it enumerates hardware),
-        # so it gets its own generous timeout and is recorded, not budgeted.
-        native_kernels, native_seconds = _run_native_kernel_smoke(
-            entry_point, max(60.0, 4 * max_start_seconds)
-        )
+        try:
+            native_kernels = loaded_native_kernel_facts(report)
+        except SidecarBuildError as error:
+            raise BundleAttestationError(f"installed native kernel smoke failed: {error}") from error
         payload["windowsDeployment"] = windows_deployment
         library_path = native_kernels.get("libraryPath")
         payload["nativeKernels"] = {
@@ -1280,7 +1268,6 @@ def attest_runtime(
             "sha256": native_kernels.get("sha256"),
             "abiVersion": native_kernels.get("abiVersion"),
             "cpuArchitecture": native_kernels.get("cpuArchitecture"),
-            "doctorSeconds": round(native_seconds, 6),
         }
     return payload
 
@@ -1308,7 +1295,7 @@ def _parser() -> argparse.ArgumentParser:
         "--resource-root",
         type=Path,
         help=(
-            "installed openastroflow-worker resource root; for a *-pc-windows-msvc "
+            "installed ufwbpp-engine resource root; for a *-pc-windows-msvc "
             "target this also runs the PE import-closure audit and the native kernel doctor"
         ),
     )
@@ -1339,7 +1326,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             resource_root = (
                 application_resources
                 / "resources"
-                / "openastroflow-worker"
+                / "ufwbpp-engine"
             )
             legal_resources = attest_legal_resources(application_resources)
             signature = _mac_signature(arguments.app)

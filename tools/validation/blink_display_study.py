@@ -20,9 +20,9 @@ from PIL import Image
 
 from lightframeqc.content_hash import file_sha256, stat_identity
 from lightframeqc.readers import read_frame_preview
-from openastroflow_engine.blink_native_crops import native_atlas, star_positions
-from openastroflow_engine.blink_diagnostics import DISPLAY_ALGORITHM, DisplayReference, choose_display_reference, detail_transfer, diagnostic_preview, local_noise
-from openastroflow_engine.blink_previews import _master_preview, PreviewCalibration, calibrate_linear, channel_stretch, compose_to_reference, stretch_to_8bit, warp_to_reference
+from ufwbpp.blink_native_crops import native_atlas, star_positions
+from ufwbpp.blink_diagnostics import DISPLAY_ALGORITHM, DisplayReference, choose_display_reference, detail_transfer, diagnostic_preview, local_noise
+from ufwbpp.blink_previews import _master_preview, PreviewCalibration, calibrate_linear, channel_stretch, compose_to_reference, stretch_to_8bit, warp_to_reference
 
 
 def save_image(path: Path, values: np.ndarray, size: tuple[int, int] | None = None) -> None:

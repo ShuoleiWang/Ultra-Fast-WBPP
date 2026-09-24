@@ -8,8 +8,8 @@ One implementation for every platform (CI, release, developer machines):
 configures ``engine/native`` as a Release build with the strict flags that the
 CMake project applies (``/W4 /WX /fp:strict`` on MSVC, ``-Werror -fno-fast-math
 -ffp-contract=off`` elsewhere), builds it, runs ``ctest`` and installs the
-shared library into ``packages/openastroflow-engine/src/openastroflow_engine/
-native`` where ``openastroflow_engine.native_kernels`` finds it.  Apple Metal is
+shared library into ``packages/engine/src/ufwbpp/
+native`` where ``ufwbpp.native_kernels`` finds it.  Apple Metal is
 enabled on macOS and disabled elsewhere unless ``--metal`` says otherwise.
 
 The optional ``--report`` JSON records the installed library's path, SHA-256,
@@ -20,7 +20,7 @@ On Windows the installed DLL's PE import table is parsed (``scripts/
 pe_imports.py``) and recorded as ``library.imports``/``library.crtLinkage``.
 The CMake project links the Visual C++ runtime statically, so the DLL must not
 import ``MSVCP140.dll``/``VCRUNTIME140*.dll``: a dynamic CRT is only present on
-machines with the matching redistributable, and the frozen worker cannot rely
+machines with the matching redistributable, and the frozen engine cannot rely
 on that.  ``--require-static-crt`` (the default on Windows; CI passes it
 explicitly) turns such an import into a build failure.
 """
@@ -61,21 +61,21 @@ except ModuleNotFoundError:  # direct ``python scripts/...`` execution
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 NATIVE_SOURCE = REPO_ROOT / "engine" / "native"
-INSTALL_PREFIX = REPO_ROOT / "packages" / "openastroflow-engine" / "src"
-RUNTIME_DIR = INSTALL_PREFIX / "openastroflow_engine" / "native"
+INSTALL_PREFIX = REPO_ROOT / "packages" / "engine" / "src"
+RUNTIME_DIR = INSTALL_PREFIX / "ufwbpp" / "native"
 LIBRARY_NAMES = (
-    "libopenastroflow_native.dylib",
-    "libopenastroflow_native.so",
-    "openastroflow_native.dll",
+    "libufwbpp_native.dylib",
+    "libufwbpp_native.so",
+    "ufwbpp_native.dll",
 )
 
 
 def host_library_name(sys_platform: str = sys.platform) -> str:
     if sys_platform == "darwin":
-        return "libopenastroflow_native.dylib"
+        return "libufwbpp_native.dylib"
     if sys_platform == "win32":
-        return "openastroflow_native.dll"
-    return "libopenastroflow_native.so"
+        return "ufwbpp_native.dll"
+    return "libufwbpp_native.so"
 
 
 def metal_enabled(choice: str, sys_platform: str = sys.platform) -> bool:
@@ -102,8 +102,8 @@ def configure_command(
         command.extend(["-A", architecture])
     command.extend(
         [
-            f"-DOAF_BUILD_TESTS={'ON' if tests else 'OFF'}",
-            f"-DOAF_ENABLE_METAL={'ON' if metal else 'OFF'}",
+            f"-DUFWBPP_BUILD_TESTS={'ON' if tests else 'OFF'}",
+            f"-DUFWBPP_ENABLE_METAL={'ON' if metal else 'OFF'}",
             "-DCMAKE_BUILD_TYPE=Release",
         ]
     )
@@ -210,7 +210,7 @@ def static_crt_violation(import_facts: dict[str, Any] | None) -> str | None:
         "the native kernel DLL imports the dynamic Visual C++ runtime ("
         + ", ".join(offenders)
         + "); it must be built with MSVC_RUNTIME_LIBRARY=MultiThreaded (/MT) so the "
-        "frozen worker runs on machines without the VC++ redistributable. Rebuild "
+        "frozen engine runs on machines without the VC++ redistributable. Rebuild "
         "from a clean build directory after checking engine/native/CMakeLists.txt."
     )
 

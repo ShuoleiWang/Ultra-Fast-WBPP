@@ -4,8 +4,8 @@ from pathlib import Path
 from astropy.io import fits
 import numpy as np
 
-from openastroflow_engine.blink_diagnostics import DisplayReference
-from openastroflow_engine import blink_native_crops as study
+from ufwbpp.blink_diagnostics import DisplayReference
+from ufwbpp import blink_native_crops as study
 
 
 def test_native_crop_uses_preview_block_centers_and_preserves_star_pixels(tmp_path: Path, monkeypatch):

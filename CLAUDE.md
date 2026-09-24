@@ -4,7 +4,7 @@ Guide for Claude Code sessions in this repository. [`AGENTS.md`](AGENTS.md) is t
 
 ## The project in one paragraph
 
-Ultra-Fast WBPP preprocesses astrophotography Lights into verified, plate-solved linear masters: quality-gated selection, calibration, registration, normalization, rejection/integration, optional drizzle, verified plate solving, receipted publication. Python engine (`packages/openastroflow-engine`, `packages/light-frame-qc`), C++/Metal kernels (`engine/native`), Tauri 2 + React desktop (`apps/desktop`), Rust contracts (`crates/app-core`). macOS Apple Silicon and Windows x64. Alpha. Independent implementation, no PixInsight code; masters are compared with PixInsight WBPP masters by the standard in `docs/master-evaluation-standard.md`. What the project does and the evidence for it: [`docs/features.md`](docs/features.md).
+Ultra-Fast WBPP preprocesses astrophotography Lights into verified, plate-solved linear masters: quality-gated selection, calibration, registration, normalization, rejection/integration, optional drizzle, verified plate solving, receipted publication. Python engine (`packages/engine`, `packages/light-frame-qc`, `packages/registration`), C++/Metal kernels (`engine/native`), Tauri 2 + React desktop (`apps/desktop`) that runs the engine's command line (`ultra-fast-wbpp`, bundled as the `ufwbpp-engine` sidecar). macOS Apple Silicon and Windows x64. Alpha. Independent implementation, no PixInsight code; masters are compared with PixInsight WBPP masters by the standard in `docs/master-evaluation-standard.md`. What the project does and the evidence for it: [`docs/features.md`](docs/features.md).
 
 ## Working agreement
 
@@ -22,15 +22,15 @@ Ultra-Fast WBPP preprocesses astrophotography Lights into verified, plate-solved
 
 ```bash
 make bootstrap && make test            # first time; python + rust + frontend + native tests
-.venv/bin/python -m pytest -q packages/light-frame-qc/tests packages/openastroflow-registration/tests packages/openastroflow-engine/tests tests
+.venv/bin/python -m pytest -q packages/light-frame-qc/tests packages/registration/tests packages/engine/tests tests
 cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked
-npm --prefix apps/desktop test && npm --prefix apps/desktop run build
+npm --prefix apps/desktop run format:check && npm --prefix apps/desktop test && npm --prefix apps/desktop run build
 make native-release-install            # Release kernels into the engine package (the only library to install)
 make source-check                      # public-tree and link checks
 make desktop-dev | make demo | CARGO_PROFILE_RELEASE_STRIP=none make desktop-build-macos-prerelease
 ```
 
-`ultra-fast-wbpp doctor --json` shows hardware, kernels and solver readiness; `run` / `run-project … --output <new dir> --recipe <json> --progress-json` run the engine headless. `OPENASTROFLOW_DISABLE_NATIVE_KERNELS=1` selects the NumPy path; `OPENASTROFLOW_QC_CACHE_DIR=off` disables the measurement cache for comparisons.
+`ultra-fast-wbpp doctor --json` shows hardware, kernels and solver readiness; `run` / `run-project … --output <new dir> --recipe <json> --progress-json` run the engine headless. `UFWBPP_DISABLE_NATIVE_KERNELS=1` selects the NumPy path; `UFWBPP_QC_CACHE_DIR=off` disables the measurement cache for comparisons.
 
 ## Gotchas (details in AGENTS.md)
 
@@ -46,18 +46,23 @@ make desktop-dev | make demo | CARGO_PROFILE_RELEASE_STRIP=none make desktop-bui
 
 `docs/README.md` (documentation map) · `docs/architecture.md` (execution path, boundaries, science) · `docs/features.md` (advantages and evidence) · `docs/validation-matrix.md` (what is and is not validated) · `docs/recipes/` (user guides) · `benchmarks/README.md` (measurement tools) · `apps/desktop/README.md` (desktop code map) · `engine/native/README.md` (kernel contracts) · `CHANGELOG.md` (what changed, with numbers).
 
-## Review cleanup layout
+## Module layout and naming
 
-The engine's canonical orchestration modules are `workflows/single_target.py`
-and `workflows/project.py`, with request/progress types in `workflows/contracts.py`
-and solve coordination in `workflows/solve.py`. `e2e.py` and `project_e2e.py` are
-compatibility aliases. Use `calibration_inputs.py` for content-bound master
-metadata, `image_io/fits.py` for FITS primitives, `solvers/process.py` for shared
-solver execution and `publication.py` for create-only color/mosaic publication.
-The registration package is `packages/openastroflow-registration/src`.
-Scientific evaluators live in `tools/validation`; benchmark paths are compatibility
-commands. The desktop controller is split into `project/` and `sidecar/` modules;
-its existing command names and the UI bridge contract stay stable.
+`workflows/project.py` runs a project and calls `workflows/single_target.py`
+once per target; `workflows/solve.py` owns solving and WCS verification,
+`workflows/contracts.py` the request/selection/progress types. The run
+functions and `pixel_pipeline._run_portable_pipeline_fits` are sequences of
+named stages; put new work in a stage, not inline. `integrity.py` holds the
+canonical JSON and SHA-256 forms every digest uses; `calibration_inputs.py`
+content-bound master metadata; `image_io/fits.py` FITS primitives;
+`solvers/process.py` shared solver execution; `publication.py` create-only
+colour/mosaic publication. The desktop asks the engine's `doctor --json` for
+its capabilities; there is no separate worker protocol.
+
+Code identifiers use `ufwbpp` (Python packages, `ufwbpp_native_*`, `UFWBPP_*`
+variables); user-visible names spell out Ultra-Fast WBPP. The `OAF*` FITS
+keywords, the catalog manifests' text and an existing `~/.openastroflow` data
+root keep the former name because users' files depend on them.
 
 LocalNormalization is retired: old enabled recipes fail explicitly, disabled
 legacy fields remain readable, and stellar/background normalization is unchanged.

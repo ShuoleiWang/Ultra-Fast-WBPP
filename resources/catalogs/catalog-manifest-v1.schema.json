@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://openastroflow.org/schema/v1/catalog-manifest-v1.schema.json",
+  "$id": "urn:ultra-fast-wbpp:schema:catalog-manifest-v1",
   "title": "Ultra-Fast WBPP catalog manifest",
   "type": "object",
   "additionalProperties": false,

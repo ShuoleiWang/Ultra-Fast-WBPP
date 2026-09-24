@@ -422,7 +422,7 @@ mod tests {
 
     #[test]
     fn spawn_failure_reports_the_missing_executable() {
-        let mut command = Command::new("openastroflow-missing-sidecar.exe");
+        let mut command = Command::new("ultra-fast-wbpp-missing-sidecar.exe");
         configure_child_process(&mut command);
         let error = ManagedChild::spawn(&mut command).expect_err("missing executable");
         assert_eq!(error.kind(), io::ErrorKind::NotFound);

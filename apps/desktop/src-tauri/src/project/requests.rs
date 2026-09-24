@@ -323,7 +323,6 @@ pub(super) fn project_request_json(
                 "scale": request.recipe.drizzle_scale, "dropShrink": request.recipe.drizzle_drop_shrink,
                 "kernel": request.recipe.drizzle_kernel, "cfaDrizzle": false,
             },
-            "localNormalization": { "enabled": request.recipe.local_normalization_enabled, "tileSizePixels": 256 },
             "outputFormat": "FITS", "overwrite": false, "reviewApprovals": [],
             "rawFrameMetadataOverrides": request.raw_frame_metadata_overrides,
         },
@@ -343,7 +342,7 @@ pub(super) fn project_request_json(
 pub(super) fn create_private_request(value: &serde_json::Value) -> Result<PathBuf, String> {
     let path = std::env::temp_dir().join(format!(
         "{}.json",
-        new_public_identifier("openastroflow-project-request")?
+        new_public_identifier("ultra-fast-wbpp-project-request")?
     ));
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -362,19 +361,7 @@ pub(super) fn create_private_request(value: &serde_json::Value) -> Result<PathBu
     Ok(path)
 }
 
-pub(super) fn sha256_file(path: &Path) -> Result<String, String> {
-    let mut file = File::open(path).map_err(|error| error.to_string())?;
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
-    loop {
-        let count = file.read(&mut buffer).map_err(|error| error.to_string())?;
-        if count == 0 {
-            break;
-        }
-        digest.update(&buffer[..count]);
-    }
-    Ok(format!("{:x}", digest.finalize()))
-}
+pub(super) use crate::sidecar::sha256_file;
 
 pub(super) fn relative_artifact(root: &Path, value: &str) -> Result<(String, PathBuf), String> {
     let relative = Path::new(value);

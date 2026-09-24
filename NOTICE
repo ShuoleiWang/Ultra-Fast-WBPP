@@ -12,12 +12,12 @@ Suggested attribution for an About page or third-party notices file:
 
 The suggested wording is not an additional license condition. MIT does not
 require advertising, a visible logo, or attribution on images processed by
-the software. See docs/licensing.md for the bundled worker's third-party
+the software. See docs/licensing.md for the bundled engine's third-party
 notices; the runtime imports no GPL-licensed library.
 
 Ultra-Fast WBPP is an independent open-source project. It is not affiliated with,
 endorsed by, or sponsored by PixInsight, Pleiades Astrophoto, N.I.N.A., ASTAP,
-Astrometry.net, Siril, STScI, ESA, or the Gaia collaboration.
+Astrometry.net, STScI, ESA, or the Gaia collaboration.
 
 Third-party software and catalog data are governed by their own licenses and
 notices. See THIRD_PARTY_NOTICES.md and the catalog manifests distributed with

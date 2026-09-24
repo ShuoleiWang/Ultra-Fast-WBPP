@@ -36,7 +36,7 @@ it:
   (e.g. G_8 = 1.019993 → 1.020002), not a change of the master, and does
   not fail the gate.
 
-    .venv/bin/python benchmarks/master_tolerance_gate.py \\
+    .venv/bin/python tools/validation/master_tolerance_gate.py \\
         --baseline ~/Astro/Results/baseline --candidate ~/Astro/Results/candidate \\
         --output build/tolerance-gate.json
 

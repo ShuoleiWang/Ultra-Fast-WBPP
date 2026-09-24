@@ -1,6 +1,6 @@
-#include "openastroflow/FusedLnIntegration.h"
-#include "openastroflow/ImageTile.h"
-#include "openastroflow/MetalFusedLnIntegration.h"
+#include "ufwbpp/FusedIntegration.h"
+#include "ufwbpp/ImageTile.h"
+#include "ufwbpp/MetalFusedIntegration.h"
 
 #include <algorithm>
 #include <chrono>
@@ -19,7 +19,7 @@
 namespace
 {
 
-using namespace openastroflow::native;
+using namespace ufwbpp::native;
 
 struct Options
 {
@@ -169,7 +169,7 @@ int main( int argc, char** argv )
       std::uint64_t outputHash = 0;
       bool outputHashInitialized = false;
       OutputRangeNormalization outputRange;
-      MetalFusedLnIntegrationExecutor executor( options.metalSource );
+      MetalFusedIntegrationExecutor executor( options.metalSource );
       const std::uint64_t totalRuns =
          static_cast<std::uint64_t>( options.warmupRuns ) + options.repetitions;
       for ( std::uint64_t run = 0; run < totalRuns; ++run )
@@ -199,14 +199,14 @@ int main( int argc, char** argv )
                }
             syntheticPreparationSeconds += std::chrono::duration<double>(
                std::chrono::steady_clock::now() - preparationStarted ).count();
-            const FusedLnIntegrationRequest request{
+            const FusedIntegrationRequest request{
                tile, options.frames, gridWidth, gridHeight,
                samples, mask, scale, offset, weights,
                DefaultOracleRejectionBits
             };
             MetalExecutionStats stats;
             const auto metalStarted = std::chrono::steady_clock::now();
-            const FusedLnIntegrationResult result = executor.Run( request, &stats );
+            const FusedIntegrationResult result = executor.Run( request, &stats );
             metalCallSeconds += std::chrono::duration<double>(
                std::chrono::steady_clock::now() - metalStarted ).count();
             if ( result.integrated.size() != pixels
@@ -282,19 +282,19 @@ int main( int argc, char** argv )
          << "{\n"
          << "  \"schemaVersion\": 2,\n"
          << "  \"kind\": \"ultra-fast-wbpp-metal-integration-benchmark-v2\",\n"
-         << "  \"build\": {\"configuration\": \"" OAF_BENCH_BUILD_TYPE
-            "\", \"compilerId\": \"" OAF_BENCH_COMPILER_ID
-            "\", \"compilerVersion\": \"" OAF_BENCH_COMPILER_VERSION
-            "\", \"sourceCommit\": \"" OAF_BENCH_SOURCE_COMMIT
+         << "  \"build\": {\"configuration\": \"" UFWBPP_BENCH_BUILD_TYPE
+            "\", \"compilerId\": \"" UFWBPP_BENCH_COMPILER_ID
+            "\", \"compilerVersion\": \"" UFWBPP_BENCH_COMPILER_VERSION
+            "\", \"sourceCommit\": \"" UFWBPP_BENCH_SOURCE_COMMIT
             "\", \"sourceDirty\": "
-         << (OAF_BENCH_SOURCE_DIRTY ? "true" : "false")
+         << (UFWBPP_BENCH_SOURCE_DIRTY ? "true" : "false")
          << ", \"trackedDiffSha256\": \""
-            OAF_BENCH_TRACKED_DIFF_SHA256
+            UFWBPP_BENCH_TRACKED_DIFF_SHA256
             "\", \"untrackedTreeSha256\": \""
-            OAF_BENCH_UNTRACKED_TREE_SHA256
-            "\", \"untrackedFileCount\": " << OAF_BENCH_UNTRACKED_FILE_COUNT
+            UFWBPP_BENCH_UNTRACKED_TREE_SHA256
+            "\", \"untrackedFileCount\": " << UFWBPP_BENCH_UNTRACKED_FILE_COUNT
          << ", \"metalSourceSha256\": \"sha256:"
-            OAF_BENCH_METAL_SOURCE_SHA256 "\"},\n"
+            UFWBPP_BENCH_METAL_SOURCE_SHA256 "\"},\n"
          << "  \"device\": \"" << deviceName << "\",\n"
          << "  \"width\": " << options.width << ",\n"
          << "  \"height\": " << options.height << ",\n"

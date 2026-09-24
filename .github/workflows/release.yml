@@ -33,13 +33,13 @@ jobs:
           cache: pip
           cache-dependency-path: |
             packages/light-frame-qc/pyproject.toml
-            packages/openastroflow-registration/pyproject.toml
-            packages/openastroflow-engine/pyproject.toml
-            packaging/worker/requirements-build.txt
+            packages/registration/pyproject.toml
+            packages/engine/pyproject.toml
+            packaging/engine/requirements-build.txt
 
       - name: Select the Homebrew Python 3.12 (macOS)
         if: runner.os == 'macOS'
-        # The macOS 14 runtime overlay (packaging/worker/macos14-runtime-libraries-v1.json)
+        # The macOS 14 runtime overlay (packaging/engine/macos14-runtime-libraries-v1.json)
         # replaces the Homebrew openssl@3 and mpdecimal dylibs that a
         # Homebrew-built interpreter links against with digest-pinned Sonoma
         # bottles. setup-python installs python.org's framework build, which
@@ -51,10 +51,10 @@ jobs:
         run: |
           brew install python@3.12
           python_bin="$(brew --prefix python@3.12)/bin/python3.12"
-          "${python_bin}" -m venv "${RUNNER_TEMP}/oaf-venv"
-          echo "${RUNNER_TEMP}/oaf-venv/bin" >> "${GITHUB_PATH}"
-          "${RUNNER_TEMP}/oaf-venv/bin/python" -m pip install --upgrade pip
-          "${RUNNER_TEMP}/oaf-venv/bin/python" - <<'PY'
+          "${python_bin}" -m venv "${RUNNER_TEMP}/ufwbpp-venv"
+          echo "${RUNNER_TEMP}/ufwbpp-venv/bin" >> "${GITHUB_PATH}"
+          "${RUNNER_TEMP}/ufwbpp-venv/bin/python" -m pip install --upgrade pip
+          "${RUNNER_TEMP}/ufwbpp-venv/bin/python" - <<'PY'
           import decimal, ssl, sys, _decimal
           print(sys.version, _decimal.__file__)
           print("libmpdec", decimal.__libmpdec_version__, "|", ssl.OPENSSL_VERSION)
@@ -78,13 +78,13 @@ jobs:
         run: >-
           python -m pip install
           -e "./packages/light-frame-qc[test]"
-          -e "./packages/openastroflow-registration[test]"
-          -e "./packages/openastroflow-engine[test,all]"
-          -r packaging/worker/requirements-build.txt
+          -e "./packages/registration[test]"
+          -e "./packages/engine[test,all]"
+          -r packaging/engine/requirements-build.txt
 
       - name: Replace the PyPI SEP wheel with the deterministic patched build (Windows)
         if: runner.os == 'Windows'
-        # The frozen worker ships whatever sep is installed here: the pinned
+        # The frozen engine ships whatever sep is installed here: the pinned
         # sdist plus packaging/patches/*.patch makes MSVC builds deterministic
         # and linear in the object count (see scripts/build_sep_wheel.py).
         run: >-
@@ -105,7 +105,7 @@ jobs:
       - name: Test source tree and release gates
         shell: bash
         run: |
-          python -m pytest -q packages/light-frame-qc/tests packages/openastroflow-registration/tests packages/openastroflow-engine/tests tests
+          python -m pytest -q packages/light-frame-qc/tests packages/registration/tests packages/engine/tests tests
           python scripts/check_public_tree.py .
           python scripts/check_local_links.py .
           cargo fmt --all -- --check
@@ -123,20 +123,20 @@ jobs:
         shell: bash
         run: |
           if [[ "${RUNNER_OS}" == "macOS" ]]; then
-            python scripts/build_worker_sidecar.py \
+            python scripts/build_engine_sidecar.py \
               --output-dir build/sidecars \
               --macos14-bottle-root build/macos14-runtime-libraries
           else
-            python scripts/build_worker_sidecar.py --output-dir build/sidecars
+            python scripts/build_engine_sidecar.py --output-dir build/sidecars
           fi
-          python -c "from scripts.build_worker_sidecar import detect_host_target_triple; print('OAF_TARGET=' + detect_host_target_triple())" >> "$GITHUB_ENV"
+          python -c "from scripts.build_engine_sidecar import detect_host_target_triple; print('UFWBPP_TARGET=' + detect_host_target_triple())" >> "$GITHUB_ENV"
 
       - name: Stage identity-bound Tauri external binary
         shell: bash
         run: >-
           python scripts/stage_tauri_sidecar.py
-          "build/sidecars/openastroflow-worker-${OAF_TARGET}.manifest.json"
-          --target "${OAF_TARGET}"
+          "build/sidecars/ufwbpp-engine-${UFWBPP_TARGET}.manifest.json"
+          --target "${UFWBPP_TARGET}"
 
       - name: Build desktop bundle
         shell: bash
@@ -156,40 +156,40 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          oaf_dmg_stage="$(mktemp -d)"
-          oaf_version="$(node -p "require('./apps/desktop/package.json').version")"
-          oaf_dmg_path="target/release/bundle/dmg/Ultra-Fast-WBPP_${oaf_version}_aarch64.dmg"
-          trap 'rm -rf "${oaf_dmg_stage}"' EXIT
-          cp -R "target/release/bundle/macos/Ultra-Fast WBPP.app" "${oaf_dmg_stage}/"
-          ln -s /Applications "${oaf_dmg_stage}/Applications"
+          ufwbpp_dmg_stage="$(mktemp -d)"
+          ufwbpp_version="$(node -p "require('./apps/desktop/package.json').version")"
+          ufwbpp_dmg_path="target/release/bundle/dmg/Ultra-Fast-WBPP_${ufwbpp_version}_aarch64.dmg"
+          trap 'rm -rf "${ufwbpp_dmg_stage}"' EXIT
+          cp -R "target/release/bundle/macos/Ultra-Fast WBPP.app" "${ufwbpp_dmg_stage}/"
+          ln -s /Applications "${ufwbpp_dmg_stage}/Applications"
           mkdir -p target/release/bundle/dmg
-          test ! -e "${oaf_dmg_path}"
+          test ! -e "${ufwbpp_dmg_path}"
           hdiutil create \
             -volname "Ultra-Fast WBPP" \
-            -srcfolder "${oaf_dmg_stage}" \
+            -srcfolder "${ufwbpp_dmg_stage}" \
             -format UDZO \
             -imagekey zlib-level=9 \
-            "${oaf_dmg_path}"
-          hdiutil verify "${oaf_dmg_path}"
+            "${ufwbpp_dmg_path}"
+          hdiutil verify "${ufwbpp_dmg_path}"
 
       - name: Attest the read-only DMG application and cold-start budget
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          oaf_version="$(node -p "require('./apps/desktop/package.json').version")"
-          oaf_dmg_path="target/release/bundle/dmg/Ultra-Fast-WBPP_${oaf_version}_aarch64.dmg"
-          oaf_mount="$(mktemp -d)"
-          trap 'hdiutil detach "${oaf_mount}" >/dev/null 2>&1 || true; rmdir "${oaf_mount}" >/dev/null 2>&1 || true' EXIT
-          hdiutil attach -readonly -nobrowse -mountpoint "${oaf_mount}" "${oaf_dmg_path}"
-          codesign --verify --deep --strict "${oaf_mount}/Ultra-Fast WBPP.app"
+          ufwbpp_version="$(node -p "require('./apps/desktop/package.json').version")"
+          ufwbpp_dmg_path="target/release/bundle/dmg/Ultra-Fast-WBPP_${ufwbpp_version}_aarch64.dmg"
+          ufwbpp_mount="$(mktemp -d)"
+          trap 'hdiutil detach "${ufwbpp_mount}" >/dev/null 2>&1 || true; rmdir "${ufwbpp_mount}" >/dev/null 2>&1 || true' EXIT
+          hdiutil attach -readonly -nobrowse -mountpoint "${ufwbpp_mount}" "${ufwbpp_dmg_path}"
+          codesign --verify --deep --strict "${ufwbpp_mount}/Ultra-Fast WBPP.app"
           mkdir -p build/bundle-attestations
           python scripts/attest_bundled_runtime.py \
-            --app "${oaf_mount}/Ultra-Fast WBPP.app" \
-            --target "${OAF_TARGET}" \
+            --app "${ufwbpp_mount}/Ultra-Fast WBPP.app" \
+            --target "${UFWBPP_TARGET}" \
             --max-start-seconds 5 \
-            --output "build/bundle-attestations/openastroflow-worker-${OAF_TARGET}.bundled.manifest.json"
-          hdiutil detach "${oaf_mount}"
-          rmdir "${oaf_mount}"
+            --output "build/bundle-attestations/ufwbpp-engine-${UFWBPP_TARGET}.bundled.manifest.json"
+          hdiutil detach "${ufwbpp_mount}"
+          rmdir "${ufwbpp_mount}"
           trap - EXIT
 
       - name: Install the MSI silently, attest the installed runtime, uninstall (Windows)
@@ -200,7 +200,7 @@ jobs:
         # The launch budget is wider than the 5 s macOS one because a first
         # launch of the frozen tree on a hosted runner pays for on-access
         # scanning of thousands of files. The NSIS installer shares the same
-        # frozen worker bytes and is collected below; Authenticode signing
+        # frozen engine bytes and is collected below; Authenticode signing
         # remains a documented release gate that this unsigned prerelease
         # pipeline does not perform.
         run: |
@@ -208,19 +208,19 @@ jobs:
           if ($msi.Count -ne 1) { throw "expected exactly one MSI, found $($msi.Count)" }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/attest-installed-msi.ps1 `
             -Msi $msi[0].FullName `
-            -Target $env:OAF_TARGET `
+            -Target $env:UFWBPP_TARGET `
             -MaxStartSeconds 20 `
-            -Output "build/bundle-attestations/openastroflow-worker-$($env:OAF_TARGET).bundled.manifest.json"
+            -Output "build/bundle-attestations/ufwbpp-engine-$($env:UFWBPP_TARGET).bundled.manifest.json"
           if ($LASTEXITCODE -ne 0) { throw "installed-MSI attestation failed with $LASTEXITCODE" }
 
       - name: Collect bundles, manifests, and checksums
         shell: bash
         run: |
           python scripts/collect_release_artifacts.py \
-            --target "${OAF_TARGET}" \
+            --target "${UFWBPP_TARGET}" \
             --output build/release-artifacts \
             --source-commit "${GITHUB_SHA}" \
-            --sidecar-root apps/desktop/src-tauri/resources/openastroflow-worker
+            --sidecar-root apps/desktop/src-tauri/resources/ufwbpp-engine
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -270,7 +270,7 @@ jobs:
           - Authenticode signing is a release gate: stable releases will carry a signature
             and these warnings will not appear.
 
-          Every installer was produced and attested in this workflow run: the frozen worker's
+          Every installer was produced and attested in this workflow run: the frozen engine's
           DLL/PYD import closure resolves against Windows system DLLs or shipped files, the
           native kernel DLL links the C runtime statically, and the installed runtime passed
           the launch budget before the artifacts were collected.

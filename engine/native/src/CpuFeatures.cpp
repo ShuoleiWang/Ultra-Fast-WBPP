@@ -1,25 +1,25 @@
-#include "openastroflow/CpuFeatures.h"
+#include "ufwbpp/CpuFeatures.h"
 
 #include <cstring>
 
 #if defined(__x86_64__) || defined(_M_X64)
-#  define OAF_CPU_X86_64 1
+#  define UFWBPP_CPU_X86_64 1
 #  if defined(_MSC_VER)
 #     include <intrin.h>
 #  else
 #     include <cpuid.h>
 #  endif
 #elif defined(__aarch64__) || defined(_M_ARM64)
-#  define OAF_CPU_ARM64 1
+#  define UFWBPP_CPU_ARM64 1
 #endif
 
-namespace openastroflow::native
+namespace ufwbpp::native
 {
 
 namespace
 {
 
-#if defined(OAF_CPU_X86_64)
+#if defined(UFWBPP_CPU_X86_64)
 
 struct CpuidRegisters
 {
@@ -126,15 +126,15 @@ CpuFeatures DetectX86()
    return result;
 }
 
-#endif // OAF_CPU_X86_64
+#endif // UFWBPP_CPU_X86_64
 
 } // namespace
 
 CpuFeatures DetectCpuFeatures()
 {
-#if defined(OAF_CPU_X86_64)
+#if defined(UFWBPP_CPU_X86_64)
    return DetectX86();
-#elif defined(OAF_CPU_ARM64)
+#elif defined(UFWBPP_CPU_ARM64)
    CpuFeatures result;
    result.architecture = "arm64";
    result.features.push_back( "neon" );
@@ -158,4 +158,4 @@ std::string JoinFeatures( const CpuFeatures& features )
    return joined;
 }
 
-} // namespace openastroflow::native
+} // namespace ufwbpp::native

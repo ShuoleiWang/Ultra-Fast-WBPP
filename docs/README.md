@@ -34,12 +34,12 @@ Start with the [project README](../README.md) (also in [简体中文](README.zh-
 | Page | What it fixes |
 |---|---|
 | [master-evaluation-standard.md](master-evaluation-standard.md) | How a master is judged against the PixInsight WBPP master of the same data (metrics, tolerances, verdicts); implemented by `tools/validation/evaluate_masters.py` |
-| [../benchmarks/README.md](../benchmarks/README.md) | The measurement tools (evaluator, tolerance gate, tracer, kernel and stage benchmarks) and the retained numbers |
+| [../benchmarks/README.md](../benchmarks/README.md), [../tools/validation/README.md](../tools/validation/README.md) | The measurement tools (tracer, kernel and stage benchmarks) with the retained numbers, and the acceptance tools (evaluator, tolerance gate) |
 | [../engine/native/README.md](../engine/native/README.md) | Native kernel contracts: value identity with the NumPy reference, parity gates, thread invariance |
-| [../protocol/README.md](../protocol/README.md), [../packages/openastroflow-engine/docs/worker-protocol.md](../packages/openastroflow-engine/docs/worker-protocol.md), [../packages/openastroflow-engine/docs/backend-contracts.md](../packages/openastroflow-engine/docs/backend-contracts.md) | The separate worker NDJSON protocol and backend truth flags; the desktop project route is documented in architecture.md |
-| [../apps/desktop/README.md](../apps/desktop/README.md), [../crates/app-core/README.md](../crates/app-core/README.md) | Desktop code map and checks; the shared Rust contracts |
-| [../packages/openastroflow-engine/README.md](../packages/openastroflow-engine/README.md), [../packages/light-frame-qc/README.md](../packages/light-frame-qc/README.md) (Chinese), [../packages/openastroflow-registration/README.md](../packages/openastroflow-registration/README.md) | The engine CLI, the quality-control package, the registration library |
-| [../packaging/worker/README.md](../packaging/worker/README.md), [../scripts/windows/README.md](../scripts/windows/README.md) | Sidecar packaging and the Windows build machine |
+| [../packages/engine/docs/backend-contracts.md](../packages/engine/docs/backend-contracts.md) | Backend truth flags (`available`, `executionReady`) and what `doctor` reports; the desktop's command-line route is documented in architecture.md |
+| [../apps/desktop/README.md](../apps/desktop/README.md) | Desktop code map and checks |
+| [../packages/engine/README.md](../packages/engine/README.md), [../packages/light-frame-qc/README.md](../packages/light-frame-qc/README.md) (Chinese), [../packages/registration/README.md](../packages/registration/README.md) | The engine CLI, the quality-control package, the registration library |
+| [../packaging/engine/README.md](../packaging/engine/README.md), [../scripts/windows/README.md](../scripts/windows/README.md) | Engine sidecar packaging and the Windows build machine |
 
 ## Design records (dated; kept as evidence, Chinese unless noted)
 

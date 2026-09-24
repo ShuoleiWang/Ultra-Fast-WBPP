@@ -11,7 +11,7 @@ import time
 
 import numpy as np
 
-from openastroflow_engine import pixel_pipeline as pipeline
+from ufwbpp import pixel_pipeline as pipeline
 
 
 def baseline_histogram(heights, row_index):

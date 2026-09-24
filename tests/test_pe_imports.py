@@ -182,7 +182,7 @@ def test_is_pe_image_uses_the_magic_not_the_suffix(tmp_path: Path) -> None:
     fake.write_bytes(b"\xcf\xfa\xed\xfe" + b"\0" * 100)
     short = tmp_path / "short.pyd"
     short.write_bytes(b"MZ")
-    dylib = tmp_path / "libopenastroflow_native.dylib"
+    dylib = tmp_path / "libufwbpp_native.dylib"
     dylib.write_bytes(b"\xcf\xfa\xed\xfe" + b"\0" * 100)
 
     assert is_pe_image(dll)

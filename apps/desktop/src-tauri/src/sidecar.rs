@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 mod bundle;
 pub(crate) use bundle::discover_engine;
@@ -10,39 +10,21 @@ pub(crate) use inspection::{hash_sources, inspect_calibration, inspect_paths, in
 mod blink;
 use blink::*;
 pub(crate) use blink::{blink_measure, blink_sessions_root};
-mod worker_protocol;
-use worker_protocol::*;
-pub(crate) use worker_protocol::{cancel_pipeline, start_pipeline, terminate_all};
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{ChildStderr, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use openastroflow_app_core::protocol::{
-    ExecuteMessage, PeerRole, PlanMessage, ProgressState, ProtocolCursor, MAX_NDJSON_LINE_BYTES,
-};
-use openastroflow_app_core::{
-    decode_ndjson_line, encode_ndjson_line, ArtifactReceipt, BackendCapabilities, BackendFeature,
-    GateDecision, HandshakeMessage, HardwareProfile, RequiredResultGate, SafeFileName, StageKind,
-    StageReceipt, Validate, WorkerEnvelope, WorkerMessage, WORKER_PROTOCOL_VERSION,
-};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 
 use crate::platform::{self, ManagedChild};
 
-const PROGRESS_EVENT: &str = "openastroflow://pipeline-progress";
-const ARTIFACT_EVENT: &str = "openastroflow://pipeline-artifact";
-const COMPLETE_EVENT: &str = "openastroflow://pipeline-complete";
-const ERROR_EVENT: &str = "openastroflow://pipeline-error";
-const LOG_EVENT: &str = "openastroflow://pipeline-log";
 const MAX_DIAGNOSTIC_BYTES: usize = 8 * 1024;
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 static IDENTIFIER_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -55,7 +37,7 @@ impl EngineExecutable {
     pub(crate) fn command(&self, subcommand: &str) -> Command {
         let mut command = Command::new(&self.path);
         command.arg(subcommand);
-        // The worker's stdio carries JSON with user paths and captions.  A
+        // The engine's stdio carries JSON with user paths and captions.  A
         // Windows console code page (936 on a Chinese system) would replace
         // or garble every non-ANSI character; Python's UTF-8 mode makes the
         // pipes, the file-system encoding and the console UTF-8 everywhere.
@@ -108,7 +90,7 @@ pub(crate) fn sidecar_output(command: &mut Command) -> std::io::Result<std::proc
     }
 }
 
-/// Lines of a worker's diagnostic stream, decoded leniently.
+/// Lines of an engine process's diagnostic stream, decoded leniently.
 ///
 /// `BufRead::lines` stops at the first line that is not valid UTF-8, so one
 /// stray byte from a solver's console output would end progress reporting
@@ -157,12 +139,6 @@ fn is_text_busy(error: &std::io::Error) -> bool {
 #[cfg(not(unix))]
 fn is_text_busy(_error: &std::io::Error) -> bool {
     false
-}
-
-#[derive(Default)]
-pub(crate) struct PipelineRegistry {
-    jobs: Mutex<HashMap<String, Arc<Mutex<ManagedChild>>>>,
-    shutting_down: AtomicBool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -465,87 +441,6 @@ pub(crate) struct HashSourcesResponse {
     pub entries: Vec<SourceHash>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct RunSource {
-    pub role: String,
-    pub paths: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct RunRequest {
-    pub sources: Vec<RunSource>,
-    pub recipe_id: String,
-    pub output_parent_directory: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct RunReceipt {
-    pub job_id: String,
-    pub accepted: bool,
-    pub execution_mode: &'static str,
-    pub output_directory: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProgressEvent {
-    job_id: String,
-    stage_id: Option<String>,
-    state: ProgressState,
-    fraction: f64,
-    completed_units: Option<u64>,
-    total_units: Option<u64>,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ArtifactEvent {
-    job_id: String,
-    stage: StageReceipt,
-    artifact: ArtifactReceipt,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PipelineErrorEvent {
-    job_id: String,
-    code: String,
-    message: String,
-    retryable: bool,
-    details: BTreeMap<String, serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PipelineLogEvent {
-    job_id: String,
-    stream: &'static str,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CompletedArtifact {
-    kind: &'static str,
-    name: String,
-    path: String,
-    detail: String,
-    receipt: ArtifactReceipt,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CompleteEvent {
-    job_id: String,
-    output_directory: String,
-    artifacts: Vec<CompletedArtifact>,
-    gate: openastroflow_app_core::ResultGateReport,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct InventoryPayload {
@@ -630,12 +525,28 @@ struct InventoryIssue {
     message: String,
 }
 
-#[derive(Debug)]
-struct RuntimeProbe {
-    executable: EngineExecutable,
-    capabilities: BackendCapabilities,
-    selected_profile: HardwareProfile,
-    implementation_version: String,
+/// The part of the engine's `doctor --json` self-report the desktop needs.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorReport {
+    engine_version: String,
+    tuning: DoctorTuning,
+    status: DoctorStatus,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorTuning {
+    profile_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorStatus {
+    pixel_execution_ready: bool,
+    solver_ready: bool,
+    drizzle_ready: bool,
+    metal_ready: bool,
 }
 
 fn now_ms() -> Result<u64, String> {
@@ -664,110 +575,7 @@ pub(crate) fn new_public_identifier(prefix: &str) -> Result<String, String> {
     new_identifier(prefix)
 }
 
-fn controller_handshake(session_id: &str) -> Result<WorkerEnvelope, String> {
-    Ok(WorkerEnvelope {
-        protocol_version: WORKER_PROTOCOL_VERSION,
-        session_id: session_id.to_owned(),
-        sequence: 0,
-        sent_at_unix_ms: now_ms()?,
-        message: WorkerMessage::Handshake(HandshakeMessage {
-            role: PeerRole::Controller,
-            implementation: "openastroflow-desktop".to_owned(),
-            implementation_version: env!("CARGO_PKG_VERSION").to_owned(),
-            supported_protocol_versions: vec![WORKER_PROTOCOL_VERSION],
-            capabilities: None,
-        }),
-    })
-}
-
-fn read_protocol_line(
-    reader: &mut BufReader<std::process::ChildStdout>,
-) -> Result<WorkerEnvelope, String> {
-    let mut line = Vec::new();
-    let count = (&mut *reader)
-        .take((MAX_NDJSON_LINE_BYTES + 1) as u64)
-        .read_until(b'\n', &mut line)
-        .map_err(|error| format!("cannot read worker protocol stream: {error}"))?;
-    if count == 0 {
-        return Err("worker exited before sending its handshake".to_owned());
-    }
-    if count > MAX_NDJSON_LINE_BYTES {
-        return Err(format!(
-            "worker protocol record exceeded {MAX_NDJSON_LINE_BYTES} bytes"
-        ));
-    }
-    decode_ndjson_line(&line).map_err(|error| format!("worker protocol rejected: {error}"))
-}
-
-fn read_handshake_with_timeout(
-    stdout: std::process::ChildStdout,
-) -> Result<(WorkerEnvelope, BufReader<std::process::ChildStdout>), String> {
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        let response = read_protocol_line(&mut reader);
-        let _ = sender.send((response, reader));
-    });
-    let (response, reader) = receiver
-        .recv_timeout(HANDSHAKE_TIMEOUT)
-        .map_err(|_| "scientific sidecar handshake timed out after 30 seconds".to_owned())?;
-    Ok((response?, reader))
-}
-
-fn select_profile(capabilities: &BackendCapabilities) -> Result<HardwareProfile, String> {
-    let host = platform::detect();
-    select_profile_for_host(capabilities, &host)
-}
-
-fn select_profile_for_host(
-    capabilities: &BackendCapabilities,
-    host: &platform::PlatformProfile,
-) -> Result<HardwareProfile, String> {
-    if host.platform == "windows"
-        && capabilities
-            .hardware_profiles
-            .contains(&HardwareProfile::WindowsCpu)
-    {
-        return Ok(HardwareProfile::WindowsCpu);
-    }
-    if host.platform == "windows" {
-        return Err("the Windows sidecar did not advertise windows-cpu".to_owned());
-    }
-    if capabilities
-        .hardware_profiles
-        .contains(&HardwareProfile::M3ProTuned)
-        && host.platform == "macos"
-        && host.architecture == "aarch64"
-        && host.chip.to_ascii_lowercase().contains("m3 pro")
-    {
-        return Ok(HardwareProfile::M3ProTuned);
-    }
-    if host.platform == "macos"
-        && host.architecture == "aarch64"
-        && capabilities
-            .hardware_profiles
-            .contains(&HardwareProfile::GenericAppleMetal)
-    {
-        return Ok(HardwareProfile::GenericAppleMetal);
-    }
-    if host.architecture == "aarch64"
-        && capabilities
-            .hardware_profiles
-            .contains(&HardwareProfile::GenericArm64Cpu)
-    {
-        return Ok(HardwareProfile::GenericArm64Cpu);
-    }
-    if matches!(host.architecture, "aarch64" | "x86_64")
-        && capabilities
-            .hardware_profiles
-            .contains(&HardwareProfile::PortableCpu)
-    {
-        return Ok(HardwareProfile::PortableCpu);
-    }
-    Err("the sidecar did not advertise a hardware profile compatible with this host".to_owned())
-}
-
-/// Windows is release-validated on x86-64 only: the CPU kernels, the worker
+/// Windows is release-validated on x86-64 only: the CPU kernels, the engine
 /// runtime and the retained E2E evidence all target that architecture.  Any
 /// other Windows architecture keeps the shell in its interface-only state.
 fn platform_scientific_release_validated(host: &platform::PlatformProfile) -> bool {
@@ -776,145 +584,89 @@ fn platform_scientific_release_validated(host: &platform::PlatformProfile) -> bo
 
 fn platform_unavailable_reason(host: &platform::PlatformProfile) -> String {
     format!(
-        "Windows on {} is not supported by this release; the validated Windows build is x86-64 only (ARM64 has no worker runtime or E2E acceptance)",
+        "Windows on {} is not supported by this release; the validated Windows build is x86-64 only (ARM64 has no engine runtime or E2E acceptance)",
         host.architecture
     )
 }
 
-fn probe_runtime<R: Runtime>(app: &AppHandle<R>) -> Result<RuntimeProbe, String> {
-    probe_runtime_with(discover_engine(app)?)
+fn read_doctor_report(executable: &EngineExecutable) -> Result<DoctorReport, String> {
+    let mut command = executable.command("doctor");
+    command.arg("--json").stdin(Stdio::null());
+    let stdout = command_output(command, "doctor")?;
+    serde_json::from_slice(&stdout)
+        .map_err(|error| format!("the engine's doctor report is invalid: {error}"))
 }
 
-fn probe_runtime_with(executable: EngineExecutable) -> Result<RuntimeProbe, String> {
-    let session_id = new_identifier("probe")?;
-    let handshake = controller_handshake(&session_id)?;
-    let mut command = executable.command("worker");
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = spawn_sidecar(&mut command)
-        .map_err(|error| format!("cannot launch scientific sidecar: {error}"))?;
-    let mut stdin = child.stdin.take().ok_or("worker stdin is unavailable")?;
-    let stdout = child.stdout.take().ok_or("worker stdout is unavailable")?;
-    stdin
-        .write_all(&encode_ndjson_line(&handshake).map_err(|error| error.to_string())?)
-        .map_err(|error| format!("cannot write controller handshake: {error}"))?;
-    stdin.flush().map_err(|error| error.to_string())?;
-    drop(stdin);
-    let response = read_handshake_with_timeout(stdout).map(|(envelope, _)| envelope);
-    let _ = platform::terminate_process_tree(&mut child);
-    let response = response?;
-    let mut cursor = ProtocolCursor::default();
-    cursor
-        .accept(&response)
-        .map_err(|error| format!("worker handshake ordering rejected: {error}"))?;
-    if response.session_id != session_id {
-        return Err("worker handshake used the wrong session".to_owned());
+fn optimization_tier(
+    report: &DoctorReport,
+    host: &platform::PlatformProfile,
+    release_validated: bool,
+) -> &'static str {
+    match (host.platform, host.architecture) {
+        ("windows", _) if release_validated => "WINDOWS_X64",
+        ("macos", "aarch64")
+            if report.status.metal_ready && report.tuning.profile_id == "apple-m3-pro-tuned-v1" =>
+        {
+            "M3_PRO_TUNED"
+        }
+        ("macos", "aarch64") => "APPLE_SILICON",
+        _ => "PORTABLE",
     }
-    let WorkerMessage::Handshake(message) = response.message else {
-        return Err("worker did not answer with a handshake".to_owned());
-    };
-    if message.role != PeerRole::Worker {
-        return Err("sidecar handshake did not identify a worker".to_owned());
+}
+
+fn capabilities_from_report(
+    report: &DoctorReport,
+    host: &platform::PlatformProfile,
+) -> RuntimeCapabilities {
+    // Only architectures with retained scientific E2E evidence may present
+    // themselves as a product-ready runtime.
+    let release_validated = platform_scientific_release_validated(host);
+    let status = &report.status;
+    let available = status.pixel_execution_ready && status.solver_ready && release_validated;
+    let unavailable_reason = (!available).then(|| {
+        if !release_validated {
+            platform_unavailable_reason(host)
+        } else if !status.pixel_execution_ready {
+            "the engine started, but its pixel executors failed their self-check".to_owned()
+        } else {
+            "the engine started, but no offline plate solver passed its self-check".to_owned()
+        }
+    });
+    let metal = host.platform == "macos" && status.metal_ready;
+    RuntimeCapabilities {
+        platform: host.platform,
+        chip: host.chip.clone(),
+        cpu_backend: if status.pixel_execution_ready {
+            "Native CPU execution".to_owned()
+        } else {
+            "CPU backend unavailable".to_owned()
+        },
+        gpu_backend: if metal {
+            "Metal execution".to_owned()
+        } else if host.platform == "windows" {
+            host.gpu_backend.to_owned()
+        } else {
+            "Portable CPU only".to_owned()
+        },
+        optimization_tier: optimization_tier(report, host, release_validated),
+        available,
+        drizzle_available: status.drizzle_ready,
+        solver_available: status.solver_ready,
+        runtime_version: Some(report.engine_version.clone()),
+        unavailable_reason,
     }
-    let capabilities = message
-        .capabilities
-        .ok_or("worker handshake omitted backend capabilities")?;
-    let selected_profile = select_profile(&capabilities)?;
-    Ok(RuntimeProbe {
-        executable,
-        capabilities,
-        selected_profile,
-        implementation_version: message.implementation_version,
-    })
 }
 
 pub(crate) fn get_capabilities<R: Runtime>(app: &AppHandle<R>) -> RuntimeCapabilities {
-    let platform_profile = platform::detect();
-    match probe_runtime(app) {
-        Ok(probe) => {
-            let required = [
-                StageKind::QualityControl,
-                StageKind::Calibration,
-                StageKind::Registration,
-                StageKind::Integration,
-                StageKind::AstrometricSolve,
-            ];
-            let stages_ready = required
-                .iter()
-                .all(|stage| probe.capabilities.stages.contains(stage));
-            let solver_available = probe
-                .capabilities
-                .features
-                .contains(&BackendFeature::OfflineAstrometricSolver)
-                && probe
-                    .capabilities
-                    .stages
-                    .contains(&StageKind::AstrometricSolve);
-            // Only architectures with retained scientific E2E evidence may
-            // present themselves as a product-ready runtime.
-            let release_validated = platform_scientific_release_validated(&platform_profile);
-            let available = stages_ready && solver_available && release_validated;
-            let unavailable_reason = (!available).then(|| {
-                if release_validated {
-                    "sidecar handshake passed, but one or more required E2E stages are unavailable"
-                        .to_owned()
-                } else {
-                    platform_unavailable_reason(&platform_profile)
-                }
-            });
-            RuntimeCapabilities {
-                platform: platform_profile.platform,
-                chip: platform_profile.chip,
-                cpu_backend: if probe
-                    .capabilities
-                    .features
-                    .contains(&BackendFeature::CpuExecution)
-                {
-                    "Native CPU execution".to_owned()
-                } else {
-                    "CPU backend unavailable".to_owned()
-                },
-                gpu_backend: if probe
-                    .capabilities
-                    .features
-                    .contains(&BackendFeature::MetalExecution)
-                {
-                    "Metal execution".to_owned()
-                } else if platform_profile.platform == "windows" {
-                    platform_profile.gpu_backend.to_owned()
-                } else {
-                    "Portable CPU only".to_owned()
-                },
-                optimization_tier: match probe.selected_profile {
-                    HardwareProfile::PortableCpu => "PORTABLE",
-                    HardwareProfile::M3ProTuned => "M3_PRO_TUNED",
-                    HardwareProfile::GenericAppleMetal => "APPLE_SILICON",
-                    HardwareProfile::GenericArm64Cpu if platform_profile.platform == "macos" => {
-                        "APPLE_SILICON"
-                    }
-                    HardwareProfile::GenericArm64Cpu => "PORTABLE",
-                    HardwareProfile::WindowsCpu if release_validated => "WINDOWS_X64",
-                    HardwareProfile::WindowsCpu => "PORTABLE",
-                },
-                available,
-                drizzle_available: probe.capabilities.stages.contains(&StageKind::Drizzle)
-                    && probe
-                        .capabilities
-                        .features
-                        .contains(&BackendFeature::Drizzle),
-                solver_available,
-                runtime_version: Some(probe.implementation_version),
-                unavailable_reason,
-            }
-        }
+    let host = platform::detect();
+    match discover_engine(app).and_then(|executable| read_doctor_report(&executable)) {
+        Ok(report) => capabilities_from_report(&report, &host),
         Err(error) => RuntimeCapabilities {
-            platform: platform_profile.platform,
-            chip: platform_profile.chip,
-            cpu_backend: platform_profile.cpu_backend.to_owned(),
-            gpu_backend: platform_profile.gpu_backend.to_owned(),
-            optimization_tier: platform_profile.optimization_tier,
+            platform: host.platform,
+            chip: host.chip,
+            cpu_backend: host.cpu_backend.to_owned(),
+            gpu_backend: host.gpu_backend.to_owned(),
+            optimization_tier: host.optimization_tier,
             available: false,
             drizzle_available: false,
             solver_available: false,
@@ -922,6 +674,21 @@ pub(crate) fn get_capabilities<R: Runtime>(app: &AppHandle<R>) -> RuntimeCapabil
             unavailable_reason: Some(error),
         },
     }
+}
+
+/// Lowercase hexadecimal SHA-256 of a file's bytes.
+pub(crate) fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let count = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 pub(crate) fn command_output(mut command: Command, operation: &str) -> Result<Vec<u8>, String> {
