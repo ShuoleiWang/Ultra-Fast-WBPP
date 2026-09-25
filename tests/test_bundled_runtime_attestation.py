@@ -286,7 +286,8 @@ def test_legal_resource_attestation_requires_exact_root_bytes(tmp_path: Path) ->
     canonical.mkdir()
     legal.mkdir(parents=True)
     for name in ("LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "docs/licensing.md",
-                 "LICENSES/GPL-3.0.txt", "LICENSES/astroalign-MIT.txt"):
+                 "LICENSES/GPL-3.0.txt", "LICENSES/astroalign-MIT.txt",
+                 "LICENSES/astrometry-net-BSD-3-Clause.txt"):
         content = f"canonical {name}\n".encode("utf-8")
         (canonical / name).parent.mkdir(parents=True, exist_ok=True)
         (legal / name).parent.mkdir(parents=True, exist_ok=True)
@@ -302,6 +303,7 @@ def test_legal_resource_attestation_requires_exact_root_bytes(tmp_path: Path) ->
         "legal/docs/licensing.md",
         "legal/LICENSES/GPL-3.0.txt",
         "legal/LICENSES/astroalign-MIT.txt",
+        "legal/LICENSES/astrometry-net-BSD-3-Clause.txt",
     ]
 
     (legal / "NOTICE").write_text("drifted\n", encoding="utf-8")

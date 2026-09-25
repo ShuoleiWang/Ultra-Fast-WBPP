@@ -7,7 +7,7 @@ The Tauri 2 + React client for [Ultra-Fast WBPP](../../README.md). A release bun
 Install Python 3.11+, Rust 1.88+, Node.js 22+, CMake 3.28+, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/). From the repository root:
 
 ```bash
-make bootstrap
+make bootstrap BOOTSTRAP_PYTHON=python3.12
 make desktop-dev
 ```
 
@@ -64,7 +64,7 @@ Frontend tests cover mandatory review, channel confirmations, paint-gated playba
 make desktop-build-macos-prerelease
 ```
 
-This builds/tests the Release native library, packages the Python engine, and creates an ad-hoc signed macOS `.app`. It does not create a notarized public release. DMG creation, dependency inventories, signing, and platform acceptance are covered by the [release process](../../docs/release-process.md).
+This builds/tests the Release native library, packages the Python engine, and creates an ad-hoc signed macOS `.app`. It does not create a notarized public release. DMG creation, dependency inventories, signing, and platform acceptance are covered by the [release process](../../docs/release-process.md). `make desktop-build-macos-demo` builds a self-contained demo app with `solve-field` and the index set inside ([building from source](../../docs/building-from-source.md)).
 
 The active desktop targets are Apple Silicon and Windows x86-64. Packaged real-data runs have been exercised on an M3 Pro. On Windows the primary solver is ASTAP (`astap_cli.exe` with a D20 or larger star database), whose solutions the engine verifies against the managed Astrometry.net indexes; solve-field stays the primary solver on macOS, and the recipe's solver backend is `auto`. Result previews travel as data URLs, so output folders on other drives or shares display without widening the asset-protocol scope. Real macOS 14 hardware, broader Mac coverage, the Windows installer attestation and the retained Windows real-data acceptance are covered by the release process; other Windows architectures (ARM64) are refused by the shell.
 

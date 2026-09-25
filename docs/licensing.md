@@ -31,6 +31,11 @@ previous reader on PixInsight-written masters, calibrated and registered
 frames and on every codec/shuffle/sample-format combination), so the Python
 runtime imports no GPL-licensed code.
 
+The self-contained macOS demo build (`make desktop-build-macos-demo`, see the
+[release process](release-process.md#catalogs-and-optional-workers)) is the
+one exception: it bundles Astrometry.net (GPL-3.0-or-later as distributed) and
+index files whose redistribution terms are unresolved, and is never published.
+
 SEP carries LGPL-3.0-or-later requirements, which the frozen engine satisfies as
 a separately replaceable shared library with its notices preserved; the LGPLv3
 refers to the GPLv3 text, which the repository keeps for that reason. Windows

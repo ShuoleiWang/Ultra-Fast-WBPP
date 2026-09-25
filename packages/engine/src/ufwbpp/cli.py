@@ -12,8 +12,10 @@ from typing import Any, Mapping, Sequence
 from . import __version__
 from .backends import StageKind
 from .catalogs import (
+    CatalogError,
     catalog_doctor,
     catalog_list,
+    install_bundled_catalog,
     install_catalog,
     remove_catalog_plan,
     verify_catalog,
@@ -584,12 +586,30 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _install_bundled_catalog() -> None:
+    """A self-contained build installs its bundled index set on first use.
+
+    A failure leaves the solver unconfigured, which ``doctor`` and the run's
+    readiness gate report; it never stops the command itself.
+    """
+
+    try:
+        install_bundled_catalog()
+    except (CatalogError, OSError, ValueError, KeyError) as error:
+        code = getattr(error, "code", type(error).__name__)
+        sys.stderr.write(f"bundled catalog not installed ({code}): {error}\n")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     # Receipts, progress and results are UTF-8 on every platform;
     # a Windows console code page must not decide how they are encoded.
     platform_services.reconfigure_utf8_stdio()
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.command in {"doctor", "run", "run-project"} or (
+        args.command == "catalog" and args.catalog_command in {"list", "doctor"}
+    ):
+        _install_bundled_catalog()
     try:
         if args.command == "doctor":
             payload = doctor_payload()

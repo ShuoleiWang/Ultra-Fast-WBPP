@@ -1,6 +1,7 @@
 """Auditable, user-initiated management of offline plate-solver catalogs.
 
-Catalog files are never bundled or downloaded implicitly.  A checked manifest
+Catalog files are never downloaded implicitly, and only a self-contained demo
+build bundles them (:func:`install_bundled_catalog`).  A checked manifest
 binds every provider URL to an exact byte count and SHA-256.  Successful files
 are published create-only, and immutable installed-set receipts let a solver
 bind an Astrometry.net INDEXID to the actual bytes used later.
@@ -17,9 +18,11 @@ import math
 import os
 from pathlib import Path, PurePath
 import re
+import shutil
 import stat
 import sys
 import tempfile
+import time
 from typing import Any, BinaryIO, Callable, Iterable, Mapping, Protocol, Sequence
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -187,7 +190,7 @@ ProgressCallback = Callable[[Mapping[str, Any]], None]
 
 
 @contextmanager
-def _catalog_lock(root: Path) -> Iterable[None]:
+def _catalog_lock(root: Path, *, wait_seconds: float = 0.0) -> Iterable[None]:
     """Serialize writers without deleting a potentially live lock file."""
 
     lock_path = root / ".catalog-manager.lock"
@@ -195,25 +198,34 @@ def _catalog_lock(root: Path) -> Iterable[None]:
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(lock_path, flags, 0o600)
     locked = False
+    deadline = time.monotonic() + wait_seconds
     try:
         if os.name == "posix":
             import fcntl
 
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as error:
-                raise CatalogError("CATALOG_INSTALL_BUSY", "another catalog writer is active") from error
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError as error:
+                    if time.monotonic() >= deadline:
+                        raise CatalogError("CATALOG_INSTALL_BUSY", "another catalog writer is active") from error
+                    time.sleep(0.05)
             locked = True
         elif os.name == "nt":  # pragma: no cover - exercised by Windows CI
             import msvcrt
 
             if os.fstat(descriptor).st_size == 0:
                 os.write(descriptor, b"\0")
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            try:
-                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
-            except OSError as error:
-                raise CatalogError("CATALOG_INSTALL_BUSY", "another catalog writer is active") from error
+            while True:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                try:
+                    msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError as error:
+                    if time.monotonic() >= deadline:
+                        raise CatalogError("CATALOG_INSTALL_BUSY", "another catalog writer is active") from error
+                    time.sleep(0.05)
             locked = True
         else:  # pragma: no cover - only POSIX and Windows are supported
             raise CatalogError("CATALOG_LOCK_UNSUPPORTED", f"unsupported lock platform: {os.name}")
@@ -1133,25 +1145,7 @@ def verify_catalog(
     )
     guard = _catalog_lock(root) if write_configuration else nullcontext()
     with guard:
-        results: list[dict[str, Any]] = []
-        for artifact in selected:
-            path = root / artifact.artifact_id
-            try:
-                size, digest = _hash_regular_file(path, expected_size=artifact.size_bytes)
-                verified = digest == artifact.sha256
-                error = None if verified else "SHA256_MISMATCH"
-            except CatalogError as failure:
-                size, digest, verified, error = 0, None, False, failure.code
-            results.append(
-                {
-                    "artifactId": artifact.artifact_id,
-                    "path": str(path),
-                    "sizeBytes": size,
-                    "sha256": digest,
-                    "verified": verified,
-                    "error": error,
-                }
-            )
+        results = _verify_artifacts(root, selected)
         complete = bool(results) and all(item["verified"] for item in results)
         receipt = None
         if complete and write_configuration:
@@ -1164,6 +1158,129 @@ def verify_catalog(
         "artifacts": results,
         "installedSet": receipt,
     }
+
+
+def _verify_artifacts(root: Path, artifacts: Sequence[CatalogArtifact]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for artifact in artifacts:
+        path = root / artifact.artifact_id
+        try:
+            size, digest = _hash_regular_file(path, expected_size=artifact.size_bytes)
+            verified = digest == artifact.sha256
+            error = None if verified else "SHA256_MISMATCH"
+        except CatalogError as failure:
+            size, digest, verified, error = 0, None, False, failure.code
+        results.append(
+            {
+                "artifactId": artifact.artifact_id,
+                "path": str(path),
+                "sizeBytes": size,
+                "sha256": digest,
+                "verified": verified,
+                "error": error,
+            }
+        )
+    return results
+
+
+def bundled_astrometry_root(*, environment: Mapping[str, str] | None = None) -> Path | None:
+    """The solver runtime a self-contained demo build ships beside the engine.
+
+    ``scripts/stage_astrometry_runtime.py`` stages it as the app resource
+    ``resources/astrometry-net``, the sibling of the frozen engine's
+    ``resources/ufwbpp-engine/<name>/<name>``; ``UFWBPP_BUNDLED_ASTROMETRY_ROOT``
+    names one for a source-tree engine.
+    """
+
+    env = platform_services.environment_view(
+        os.environ if environment is None else environment,
+        platform_id=platform_services.current().platform_id,
+    )
+    configured = env.get("UFWBPP_BUNDLED_ASTROMETRY_ROOT")
+    if configured:
+        root = Path(configured).expanduser().absolute()
+    elif getattr(sys, "frozen", False):
+        root = Path(sys.executable).resolve().parents[2] / "astrometry-net"
+    else:
+        return None
+    return root if (root / "runtime.json").is_file() else None
+
+
+def _clonefile(source: Path, destination: Path) -> bool:
+    """APFS clone (no extra space); ``False`` where it is unavailable."""
+
+    if sys.platform != "darwin":
+        return False
+    import ctypes
+
+    try:
+        clonefile = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True).clonefile
+    except (OSError, AttributeError):
+        return False
+    clonefile.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint32)
+    clonefile.restype = ctypes.c_int
+    return clonefile(os.fsencode(source), os.fsencode(destination), 0) == 0
+
+
+def _publish_copy(source: Path, destination: Path) -> None:
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.bundled")
+    try:
+        if not _clonefile(source, temporary):
+            shutil.copyfile(source, temporary)
+        try:
+            os.link(temporary, destination, follow_symlinks=False)
+        except FileExistsError as error:
+            raise CatalogError(
+                "CATALOG_PUBLICATION_RACE", f"destination appeared during publication: {destination}"
+            ) from error
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def install_bundled_catalog(
+    *,
+    environment: Mapping[str, str] | None = None,
+    wait_seconds: float = 30.0,
+) -> dict[str, Any] | None:
+    """Install the index set a self-contained build ships, once, without a download.
+
+    The bundled files are cloned (or copied) create-only into the managed
+    catalog directory and pass the same hash verification, receipt and
+    ``astrometry.cfg`` as a provider download.  Existing files are never
+    replaced; one that differs fails verification and the solver stays
+    unconfigured.  Returns ``None`` when there is nothing to do: no bundled
+    runtime, or the catalog directory already has a solver configuration.
+    Concurrent engine processes (the desktop starts three at once) wait for
+    the first one instead of failing on the writer lock.
+    """
+
+    bundle = bundled_astrometry_root(environment=environment)
+    if bundle is None:
+        return None
+    root = default_catalog_root(environment=environment)
+    if _regular_file(root / "astrometry.cfg") is not None:
+        return None
+    record = json.loads((bundle / "runtime.json").read_text(encoding="utf-8"))
+    catalog = record["catalog"]
+    manifest = get_catalog_manifest(str(catalog["catalogId"]), environment=environment)
+    if manifest.manifest_sha256 != catalog["manifestSha256"]:
+        raise CatalogError("CATALOG_BUNDLE_MISMATCH", "the bundled index set was staged from another manifest")
+    source = bundle / str(catalog["relativePath"])
+    root = _ensure_secure_directory(root, create=True)
+    with _catalog_lock(root, wait_seconds=wait_seconds):
+        if _regular_file(root / "astrometry.cfg") is not None:
+            return None
+        for artifact in manifest.artifacts:
+            if _regular_file(root / artifact.artifact_id) is None:
+                _publish_copy(source / artifact.artifact_id, root / artifact.artifact_id)
+        results = _verify_artifacts(root, manifest.artifacts)
+        failed = [item["artifactId"] for item in results if not item["verified"]]
+        if failed:
+            raise CatalogError(
+                "CATALOG_BUNDLE_UNVERIFIED",
+                f"installed index files do not match the checked manifest: {', '.join(failed)}",
+            )
+        return write_installed_set_receipt(manifest, root, results)
 
 
 def catalog_list(

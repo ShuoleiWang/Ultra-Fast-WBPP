@@ -36,6 +36,7 @@ from .solvers.process import (
 from .backends import BackendDescriptor, DeviceKind, StageKind
 from .catalogs import (
     CatalogError,
+    bundled_astrometry_root,
     installed_set_identity_for_solver_indexes,
     installed_set_snapshot_for_solver_config,
     verify_installed_set_snapshot,
@@ -217,6 +218,12 @@ def discover_astrometry_net(
     )
     for key in ("UFWBPP_SOLVE_FIELD", "ASTROMETRY_NET_SOLVE_FIELD"):
         candidate = _candidate_path(env.get(key))
+        if candidate:
+            return candidate
+    # A self-contained build's pinned solver wins over whatever the host has.
+    bundled = bundled_astrometry_root(environment=env)
+    if bundled is not None:
+        candidate = _candidate_path(bundled / "bin" / "solve-field")
         if candidate:
             return candidate
     for name in ("solve-field", "solve-field.exe"):
@@ -855,6 +862,16 @@ class AstrometryNetSolverBackend:
         )
         self.config_path = Path(discovered_config) if discovered_config is not None else None
         path = discover_astrometry_net(executable, environment=platform_services.merged_environment(os.environ, self.environment, platform_id=platform_services.current().platform_id))
+        # A bundled solver ships without upstream's Python ``image2pnm`` and
+        # netpbm's ``pnmfile``, which only sniff the file type and write a
+        # PNM that ``--no-plots`` never uses; image2xy reads the same FITS
+        # either way, so the solution is identical.
+        bundled = bundled_astrometry_root(
+            environment=platform_services.merged_environment(os.environ, self.environment, platform_id=platform_services.current().platform_id)
+        )
+        self.assume_fits_image = (
+            path is not None and bundled is not None and Path(path).resolve().is_relative_to(bundled.resolve())
+        )
         self.runtime: SolverProcessRuntime | None = None
         if path is None:
             self.probe = ExecutableProbe(None, False, False, "unavailable", error_code="EXECUTABLE_UNAVAILABLE", message="solve-field was not found")
@@ -1029,6 +1046,8 @@ class AstrometryNetSolverBackend:
                             f"{self.solve_profile.pixel_error:.12g}",
                         )
                     )
+                    if self.assume_fits_image:
+                        arguments.append("--fits-image")
                     if (
                         attempt.include_hints
                         and request.ra_hint_degrees is not None

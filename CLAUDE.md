@@ -21,13 +21,13 @@ Ultra-Fast WBPP preprocesses astrophotography Lights into verified, plate-solved
 ## Commands
 
 ```bash
-make bootstrap && make test            # first time; python + rust + frontend + native tests
+make bootstrap BOOTSTRAP_PYTHON=python3.12 && make test   # first time; python + rust + frontend + native tests
 .venv/bin/python -m pytest -q packages/light-frame-qc/tests packages/registration/tests packages/engine/tests tests
 cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked
 npm --prefix apps/desktop run format:check && npm --prefix apps/desktop test && npm --prefix apps/desktop run build
 make native-release-install            # Release kernels into the engine package (the only library to install)
 make source-check                      # public-tree and link checks
-make desktop-dev | make demo | CARGO_PROFILE_RELEASE_STRIP=none make desktop-build-macos-prerelease
+make desktop-dev | make demo | CARGO_PROFILE_RELEASE_STRIP=none make desktop-build-macos-prerelease   # …-macos-demo: solver + indexes bundled
 ```
 
 `ultra-fast-wbpp doctor --json` shows hardware, kernels and solver readiness; `run` / `run-project … --output <new dir> --recipe <json> --progress-json` run the engine headless. `UFWBPP_DISABLE_NATIVE_KERNELS=1` selects the NumPy path; `UFWBPP_QC_CACHE_DIR=off` disables the measurement cache for comparisons.

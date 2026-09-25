@@ -1,10 +1,14 @@
 PYTHON ?= $(firstword $(wildcard .venv/bin/python .venv/Scripts/python.exe) python3)
+# The interpreter the .venv is created from; a macOS desktop build needs
+# Homebrew's python@3.12 (docs/building-from-source.md).
+BOOTSTRAP_PYTHON ?= python3
 CMAKE ?= cmake
 NATIVE_BUILD ?= build/native
 NATIVE_RELEASE_BUILD := build/native-release
 NATIVE_INSTALL_PREFIX := packages/engine/src
 NATIVE_RUNTIME_DIR := $(NATIVE_INSTALL_PREFIX)/ufwbpp/native
 MACOS14_BOTTLE_ROOT ?= build/macos14-runtime-libraries
+ASTROMETRY_RUNTIME := apps/desktop/src-tauri/resources/astrometry-net
 HOST_SYSTEM := $(shell uname -s 2>/dev/null)
 
 ifeq ($(HOST_SYSTEM),Darwin)
@@ -17,10 +21,10 @@ DESKTOP_SIDECAR_PLATFORM_DEPS :=
 DESKTOP_SIDECAR_PLATFORM_ARGS :=
 endif
 
-.PHONY: bootstrap demo desktop-dev test python-test rust-test frontend-test native-configure native-build native-test native-release-configure native-release-build native-release-test native-release-install macos14-runtime-libraries desktop-sidecar desktop-build desktop-build-macos-prerelease source-check check doctor clean
+.PHONY: bootstrap demo desktop-dev test python-test rust-test frontend-test native-configure native-build native-test native-release-configure native-release-build native-release-test native-release-install macos14-runtime-libraries desktop-sidecar desktop-build desktop-build-macos-prerelease desktop-build-macos-demo source-check check doctor clean
 
 bootstrap:
-	python3 -m venv .venv
+	$(BOOTSTRAP_PYTHON) -m venv .venv
 	.venv/bin/python -m pip install -e './packages/light-frame-qc[test]' -e './packages/registration[test]' -e './packages/engine[test,all]' -r packaging/engine/requirements-build.txt
 	.venv/bin/python -m pip check
 	npm --prefix apps/desktop ci
@@ -99,6 +103,13 @@ desktop-build: desktop-sidecar
 
 desktop-build-macos-prerelease: desktop-sidecar
 	npm --prefix apps/desktop run tauri:build:macos-prerelease
+
+# Self-contained demo app: solve-field and the index set ship inside it, so a
+# new Mac solves without Homebrew or a download. Astrometry.net is GPL as
+# distributed and the index terms are unresolved: never a public release.
+desktop-build-macos-demo: desktop-sidecar
+	$(PYTHON) scripts/stage_astrometry_runtime.py --output $(ASTROMETRY_RUNTIME)
+	npm --prefix apps/desktop run tauri:build:macos-prerelease -- --config src-tauri/tauri.demo.conf.json
 
 source-check:
 	$(PYTHON) scripts/check_public_tree.py .

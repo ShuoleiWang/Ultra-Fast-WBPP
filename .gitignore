@@ -9,6 +9,7 @@
 **/coverage/
 apps/desktop/src-tauri/binaries/
 apps/desktop/src-tauri/resources/ufwbpp-engine/
+apps/desktop/src-tauri/resources/astrometry-net/
 *.dSYM/
 *.app/
 *.dmg

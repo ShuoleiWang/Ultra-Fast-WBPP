@@ -457,6 +457,34 @@ def test_astrometry_profile_is_solve_only_and_uses_exact_bounded_arguments(
     assert result.evidence["attempts"][0]["plan"]["timeoutSeconds"] == 5.0
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the bundled solver runtime is macOS-only")
+def test_bundled_solver_reads_fits_directly_without_the_python_type_sniffer(tmp_path: Path) -> None:
+    script = write_fake_solver(tmp_path / "fake_solver.py")
+    source = write_input(tmp_path / "light.fits")
+    bundle = tmp_path / "bundle"
+    (bundle / "bin").mkdir(parents=True)
+    (bundle / "runtime.json").write_text("{}", encoding="utf-8")
+    solver = bundle / "bin" / "solve-field"
+    solver.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n', encoding="utf-8")
+    solver.chmod(0o755)
+    argv_log = tmp_path / "argv.json"
+    for bundled in (False, True):
+        environment = {"FAKE_BACKEND": "astrometry", "FAKE_MODE": "success", "FAKE_ARGV_LOG": str(argv_log)}
+        if bundled:
+            environment["UFWBPP_BUNDLED_ASTROMETRY_ROOT"] = str(bundle)
+        backend = AstrometryNetSolverBackend(
+            executable=str(solver),
+            environment=environment,
+            staging_root=tmp_path,
+            timeout_seconds=20.0,
+            probe_timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
+            require_managed_catalog=False,
+        )
+        result = backend.solve(SolveRequest(str(source), str(tmp_path / f"solved-{bundled}.fits")))
+        assert result.status is SolverStatus.SOLVED
+        assert ("--fits-image" in json.loads(argv_log.read_text(encoding="utf-8"))) is bundled
+
+
 def test_stale_hints_cannot_lock_astrometry_out_of_unconstrained_fallback(
     tmp_path: Path,
 ) -> None:
