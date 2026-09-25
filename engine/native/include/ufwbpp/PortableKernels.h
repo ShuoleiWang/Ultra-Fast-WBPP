@@ -316,6 +316,23 @@ struct DebayerRequest
    void Validate() const;
 };
 
+struct OffsetGridRequest
+{
+   // Row-major Float32 values, rows x width, added to in place.
+   std::span<float> values;
+   std::uint32_t width = 0;
+   // The frame row (Float64 coordinate) of every values row.
+   std::span<const std::int64_t> rows;
+   // Node values (yNodes.size() x xNodes.size(), row-major) at increasing
+   // pixel coordinates; coordinates beyond the outer nodes clamp to them.
+   std::span<const double> grid;
+   std::span<const double> xNodes;
+   std::span<const double> yNodes;
+   std::uint32_t threads = 1;
+
+   void Validate() const;
+};
+
 // Bilinear demosaic of a Bayer mosaic into three colour planes, value for
 // value the NumPy reference `lightframeqc.cfa.bilinear_debayer`: every
 // missing sample is the Float64 mean of its known same-colour 4-neighbours
@@ -323,6 +340,14 @@ struct DebayerRequest
 // Float32 once.  Rows are independent, so the result never depends on the
 // thread count.
 void DebayerBilinear( const DebayerRequest& request );
+
+// Adds a bilinear node grid to rows of values, value for value the NumPy
+// reference `calibration._add_offset_grid_rows`: the Float64 horizontal
+// interpolation of the two enclosing node rows (g[lo]*(1 - wx) +
+// g[hi]*wx), their Float64 vertical interpolation (top*(1 - wy) +
+// bottom*wy), rounded to Float32 once and added in Float32.  Rows are
+// independent, so the result never depends on the thread count.
+void AddOffsetGrid( const OffsetGridRequest& request );
 
 // Drizzles one frame band onto one output band.  Output rows are split
 // across threads and every thread visits the input pixels whose drops can

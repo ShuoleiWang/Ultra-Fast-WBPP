@@ -499,6 +499,27 @@ typedef struct UfwbppNativeDebayerRequestV1
    size_t plane_count;
 } UfwbppNativeDebayerRequestV1;
 
+typedef struct UfwbppNativeOffsetGridRequestV1
+{
+   uint32_t struct_size;
+   uint32_t width;
+   uint32_t threads;
+   uint32_t reserved;
+   // row_count x width Float32 values, added to in place.
+   float* values;
+   size_t value_count;
+   // The frame row of every values row.
+   const int64_t* rows;
+   size_t row_count;
+   // y_node_count x x_node_count node values, row-major.
+   const double* grid;
+   size_t grid_count;
+   const double* x_nodes;
+   size_t x_node_count;
+   const double* y_nodes;
+   size_t y_node_count;
+} UfwbppNativeOffsetGridRequestV1;
+
 // Copies the deterministic Lanczos-3 weight table (node_count rows of six
 // Float64 normalized tap weights; see Lanczos3Table.h) into `values`, which
 // holds `capacity` doubles; writes the row count to `node_count`.
@@ -512,6 +533,13 @@ UFWBPP_NATIVE_API int ufwbpp_native_lanczos3_table_v1(
 // Bilinear demosaic of a Bayer mosaic (see PortableKernels.h DebayerBilinear).
 UFWBPP_NATIVE_API int ufwbpp_native_cpu_debayer_bilinear_v1(
    const UfwbppNativeDebayerRequestV1* request,
+   char* error_message,
+   size_t error_message_capacity );
+
+// Adds a bilinear offset grid to rows of values (see PortableKernels.h
+// AddOffsetGrid).
+UFWBPP_NATIVE_API int ufwbpp_native_cpu_add_offset_grid_v1(
+   const UfwbppNativeOffsetGridRequestV1* request,
    char* error_message,
    size_t error_message_capacity );
 

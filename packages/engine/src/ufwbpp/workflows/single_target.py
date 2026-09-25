@@ -56,6 +56,8 @@ from .solve import (
 )
 
 
+from ..proper_coaddition import PROPER_COADD_ALGORITHM_ID
+
 from lightframeqc.cfa import is_cfa_pattern
 from .. import platform as platform_services
 from ..platform import NoReplaceError, remove_file, remove_tree, rename_with_retry
@@ -2644,6 +2646,109 @@ def _ordinary_candidates(
     return candidates, {"mode": IntegrationMode.ORDINARY.value, "filters": coverage}
 
 
+def _promote_proper_coadds(
+    *,
+    proper_paths: Mapping[str, str],
+    solved_products: Mapping[str, Path],
+    products_dir: Path,
+    staging: Path,
+) -> tuple[list[Path], dict[str, Any]]:
+    """Publish each filter's proper coadd beside its solved master.
+
+    The coadd is produced from the same registered frames, on the same
+    reference grid, and cropped to the same rectangle as the ordinary master,
+    so the master's independently verified WCS describes it exactly.  The
+    solution is copied rather than re-solved, and the product says so:
+    ``OAFWCS = 'INHERITED'`` with ``OAFWCSIN`` naming the master it came from.
+    The ordinary master remains the run's primary product.
+    """
+
+    promoted: list[Path] = []
+    records: dict[str, Any] = {}
+    for filter_name in sorted(proper_paths):
+        solved = solved_products.get(filter_name)
+        if solved is None:
+            raise E2EError(
+                "PROPER_COADD_UNSOLVED_GRID",
+                f"filter {filter_name} has a proper coadd but no solved master to inherit from",
+            )
+        source = Path(proper_paths[filter_name]).resolve(strict=True)
+        token = _safe_token(filter_name)
+        destination = products_dir / token / f"{token}.proper.fits"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with source.open("rb") as input_stream, destination.open("xb") as output_stream:
+                shutil.copyfileobj(input_stream, output_stream, length=4 * 1024 * 1024)
+                output_stream.flush()
+                os.fsync(output_stream.fileno())
+        except FileExistsError as error:
+            raise E2EError(
+                "OUTPUT_EXISTS", "refusing to replace a promoted proper coadd",
+                path=str(destination),
+            ) from error
+        solved_header, solved_shape = _read_image_header(solved)
+        _, coadd_shape = _read_image_header(destination)
+        if coadd_shape != solved_shape:
+            raise E2EError(
+                "PROPER_COADD_GRID_MISMATCH",
+                f"{filter_name} proper coadd is {coadd_shape}, its solved master {solved_shape}",
+                path=str(destination),
+            )
+        adopted_cards = [
+            card for card in solved_header.cards if _WCS_CARD_PATTERN.match(card.keyword)
+        ]
+        try:
+            with fits.open(
+                destination,
+                mode="update",
+                memmap=True,
+                do_not_scale_image_data=True,
+                uint=False,
+                checksum=False,
+            ) as hdul:
+                header = hdul[0].header
+                insert_at = header.index("EXTEND") + 1 if "EXTEND" in header else 5
+                for offset, card in enumerate(adopted_cards):
+                    header.insert(insert_at + offset, card)
+                header["OAFSTATE"] = ("SOLVED", "Carries a verified same-grid solution")
+                header["OAFWCS"] = ("INHERITED", "Copied from the same-grid solved master")
+                header["OAFWCSIN"] = (solved.name, "Master whose verified WCS was copied")
+                header.add_history(
+                    "Ultra-Fast WBPP: proper coadd (ZOGY); WCS copied from the "
+                    f"independently verified solve of {solved.name} on the identical grid"
+                )
+                for hdu in hdul:
+                    if "CHECKSUM" in hdu.header or "DATASUM" in hdu.header:
+                        hdu.add_checksum(override_datasum=True)
+                hdul.flush(output_verify="exception")
+            with destination.open("r+b") as stream:
+                os.fsync(stream.fileno())
+        except Exception as error:
+            raise E2EError(
+                "PROPER_COADD_WCS_COPY_FAILED", str(error), path=str(destination)
+            ) from error
+        after_header, after_shape = _read_image_header(destination)
+        validation = validate_wcs_header(after_header, image_shape=after_shape)
+        residual = _wcs_grid_disagreement(solved_header, after_header, after_shape)
+        if not validation.valid or residual is None or residual > 1e-6:
+            raise E2EError(
+                "PROPER_COADD_WCS_INVALID",
+                "the promoted proper coadd does not carry the master's solution exactly",
+                path=str(destination),
+            )
+        promoted.append(destination)
+        records[filter_name] = {
+            "output": str(destination.relative_to(staging)),
+            "wcsSource": str(solved.relative_to(staging)),
+            "wcsProvenance": "INHERITED_SAME_GRID",
+            "wcsGridDisagreementPixels": residual,
+            "wcsValidation": validation.serializable(),
+            "sha256": sha256_digest(destination),
+            "primaryProduct": False,
+        }
+    return promoted, records
+
+
 def _artifact_records(staging: Path, roots: Sequence[Path], *, workers: int = 4) -> list[dict[str, Any]]:
     """Digest every artifact under ``roots`` in a stable order; the files are
     independent and hashing releases the GIL, so they are digested concurrently."""
@@ -4023,6 +4128,24 @@ def run_e2e(
             return result
         _emit(progress, ProgressStage.ASTROMETRY, "completed", "all filters have verified WCS")
 
+        proper_coadd_paths = dict(getattr(pipeline_result, "proper_coadd_paths", {}) or {})
+        proper_coadd_record: dict[str, Any] = {"status": "NOT_REQUESTED"}
+        if proper_coadd_paths:
+            promoted_proper, proper_filters = _promote_proper_coadds(
+                proper_paths=proper_coadd_paths,
+                solved_products=solved_products,
+                products_dir=products_dir,
+                staging=staging,
+            )
+            proper_coadd_record = {
+                "status": "PUBLISHED",
+                "algorithm": PROPER_COADD_ALGORITHM_ID,
+                "options": request.pipeline_parameters.proper_coaddition.serializable(),
+                "additionalProduct": True,
+                "primaryProductUnchanged": True,
+                "filters": proper_filters,
+            }
+
         _emit(progress, ProgressStage.PREVIEW, "started", "rendering solved-master previews")
         preview_paths_staged: list[Path] = []
         for product in product_paths_staged:
@@ -4078,6 +4201,7 @@ def run_e2e(
                 "pixelPipelineReceipt": "receipts/pixel-pipeline.json",
                 "coverage": "coverage/coverage.json",
                 "ordinaryExecutions": ordinary_executions,
+                "properCoaddition": proper_coadd_record,
             },
             "astrometry": {"status": "SOLVED", "requiredForSuccess": True, **astrometry_record},
             "artifacts": artifacts,

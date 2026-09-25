@@ -414,6 +414,10 @@ def _write_create_only(root: Path, relative: str, payload: bytes) -> Path:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
+    # World-readable on purpose: these are public, digest-pinned Homebrew
+    # libraries that build_engine_sidecar.py copies (shutil.copy2 keeps the
+    # mode) into the app bundle, which every user of the machine must be able
+    # to load. The output root itself is created 0o700.
     descriptor = os.open(destination, flags, 0o644)
     try:
         with os.fdopen(descriptor, "wb") as stream:

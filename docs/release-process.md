@@ -12,7 +12,7 @@ This is a release checklist, not a stable-release claim. The current distributio
 ## Release candidate
 
 1. Freeze protocol, project, recipe, receipt, catalog and publication schemas.
-2. Run the full macOS, Windows and Linux-development CI matrix from a clean checkout.
+2. Run the full macOS, Windows and Linux-development CI matrix from a clean checkout (a push to `main` or a manual run of the CI workflow selects every job; pull requests run only the jobs their paths select).
 3. Run staged `gitleaks`, public-tree checks, `npm audit`, `cargo audit`, Python vulnerability scanning, CodeQL and dependency review.
 4. On each native release platform, install the complete Python/PyInstaller dependency closure from a target-specific lock in which every artifact is exactly versioned and SHA-256 bound, then install the three first-party packages without dependency re-resolution. Run `pip check`, build all first-party wheels from source, install them into empty environments, and run CLI/worker/synthetic E2E smoke tests.
 5. Build native CPU and Metal workers, record compiler/SDK/deployment targets and run CPU↔accelerator differential tests.

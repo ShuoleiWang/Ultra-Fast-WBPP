@@ -252,6 +252,15 @@ const EN = {
   drizzleKernel_gaussian: "Gaussian",
   drizzleKernel_point: "Point",
   drizzleDropShrink: "Drop shrink",
+  advancedAlgorithms: "Advanced algorithms",
+  advancedAlgorithmsBadge: "OPT-IN",
+  advancedAlgorithmsHint:
+    "Opt-in and measured only on the reference project, where it showed no point-source gain over the master; it can help when the frames differ much in FWHM. It writes an extra file per channel with its own PSF and never replaces the master.",
+  properCoaddition: "Proper coaddition (extra product)",
+  properCoadditionHint:
+    "Writes <FILTER>.proper.fits under details/runs/<target>/products/<FILTER>/, beside that target's solved master, reusing the integration's rejection. The masters in the output folder are unchanged.",
+  properCoadditionDrizzle:
+    "Unavailable while Drizzle is on: the drizzled master has no same-grid solved master to inherit a WCS from.",
   recheckSetup: "Recheck setup",
   checkingSetup: "Checking…",
   solverSetup: "Astrometric solver",
@@ -912,6 +921,14 @@ const ZH: Record<MessageKey, string> = {
   drizzleKernel_gaussian: "高斯",
   drizzleKernel_point: "点",
   drizzleDropShrink: "液滴收缩",
+  advancedAlgorithms: "进阶算法",
+  advancedAlgorithmsBadge: "需手动开启",
+  advancedAlgorithmsHint:
+    "需手动开启，仅在参考项目上测量过：在那里它相对 master 没有测出点源增益；各帧 FWHM 差异大时可能有帮助。它为每个通道额外写一个带自身 PSF 的文件，从不替换 master。",
+  properCoaddition: "Proper coaddition（额外产品）",
+  properCoadditionHint:
+    "在 details/runs/<目标>/products/<FILTER>/ 下、该目标已解算 master 的旁边额外写出 <FILTER>.proper.fits，沿用积分自身的像素拒绝；输出文件夹里的 master 不变。",
+  properCoadditionDrizzle: "开启 Drizzle 时不可用：drizzle 后的 master 网格不同，无法继承同网格已解算 master 的 WCS。",
   solverSetup: "天文定位 solver",
   ready: "就绪",
   actionRequired: "需要操作",

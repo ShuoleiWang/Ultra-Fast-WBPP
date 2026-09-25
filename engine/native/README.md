@@ -41,9 +41,24 @@ and reproduces v1 exactly when neither is requested),
 `ufwbpp_native_cpu_masked_mean_v1`/`_v2` (v2 applies per-sample region weight
 maps), `ufwbpp_native_cpu_tile_offsets_v1`, `ufwbpp_native_cpu_radon_peaks_v1`
 (the transient-trail line search), `ufwbpp_native_cpu_drizzle_v1`,
-`ufwbpp_native_cpu_debayer_bilinear_v1` and `ufwbpp_native_lanczos3_table_v1` (the
+`ufwbpp_native_cpu_debayer_bilinear_v1`, `ufwbpp_native_cpu_add_offset_grid_v1`
+(the bilinear normalization offset grid added to integration rows; kernel id
+`native-cpu-offset-grid-v1`) and `ufwbpp_native_lanczos3_table_v1` (the
 deterministic weight table behind registration kernel v3), are compiled with `-fno-fast-math
 -ffp-contract=off`, and are covered by `tests/PortableKernelTests.cpp`.
+
+On arm64 the warp evaluates four output pixels per NEON lane group: each lane
+runs its pixel's scalar operations in the scalar order (the Float64 table
+weights, the 36 products and their running Float32 sum, the support bounds
+as `std::min`/`std::max` selects, the clamp), so the output is the scalar
+output bit for bit, the sign of zero included. When every tap weight is
+nonzero, a finite sum proves every sample was taken, and the bounds then come
+from `vminq`/`vmaxq` unless one of them is a zero; any other window reruns the
+exact lane route, and windows that need the edge clamp run the scalar code.
+`TestWarpMatchesTheScalarReferenceBitForBit` holds the three routes to the
+scalar reference on NaN, infinite, signed-zero and negative samples, integer
+shifts, projective maps, row tails and thread counts. Other architectures run
+the scalar code.
 Each kernel splits its range with `ParallelRange`: worker threads (and the
 calling thread) claim fixed-size chunks from an atomic counter (8 warp rows,
 4096 rejection pixels, 8192 reduction pixels, one normalization tile), so a

@@ -8,6 +8,7 @@ NumPy reference arithmetic of the ordinary mono pipeline value for value:
   v2 scale model (row-pooled MAD, per-frame noise factors),
 * ``masked_weighted_mean``: exact Float64 frame-order weighted mean,
 * ``tile_offsets``: per-tile additive normalization offsets,
+* ``add_offset_grid``: the bilinear normalization offset grid added to rows,
 * ``radon_line_peaks``: multi-scale fast-Radon line peaks of the transient
   trail detector.
 
@@ -44,6 +45,7 @@ TILE_OFFSET_KERNEL_ID = "native-cpu-tile-offsets-v1"
 RADON_KERNEL_ID = "native-cpu-radon-peaks-v1"
 DRIZZLE_KERNEL_ID = "native-cpu-drizzle-v1"
 DEBAYER_KERNEL_ID = "native-cpu-debayer-bilinear-v1"
+OFFSET_GRID_KERNEL_ID = "native-cpu-offset-grid-v1"
 DRIZZLE_KERNELS = {"square": 0, "circular": 1, "gaussian": 2, "point": 3}
 _MAXIMUM_KERNEL_THREADS = 64
 
@@ -348,6 +350,25 @@ class _DrizzleRequestV1(ctypes.Structure):
     ]
 
 
+class _OffsetGridRequestV1(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32),
+        ("width", ctypes.c_uint32),
+        ("threads", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32),
+        ("values", ctypes.POINTER(ctypes.c_float)),
+        ("value_count", ctypes.c_size_t),
+        ("rows", ctypes.POINTER(ctypes.c_int64)),
+        ("row_count", ctypes.c_size_t),
+        ("grid", ctypes.POINTER(ctypes.c_double)),
+        ("grid_count", ctypes.c_size_t),
+        ("x_nodes", ctypes.POINTER(ctypes.c_double)),
+        ("x_node_count", ctypes.c_size_t),
+        ("y_nodes", ctypes.POINTER(ctypes.c_double)),
+        ("y_node_count", ctypes.c_size_t),
+    ]
+
+
 class _CpuFeaturesV1(ctypes.Structure):
     _fields_ = [
         ("struct_size", ctypes.c_uint32),
@@ -372,6 +393,7 @@ _REQUIRED_SYMBOLS = (
     "ufwbpp_native_cpu_radon_peaks_v1",
     "ufwbpp_native_cpu_drizzle_v1",
     "ufwbpp_native_cpu_debayer_bilinear_v1",
+    "ufwbpp_native_cpu_add_offset_grid_v1",
     "ufwbpp_native_lanczos3_table_v1",
     "ufwbpp_native_default_kernel_threads_v1",
 )
@@ -475,6 +497,11 @@ class NativeKernels:
             *error_arguments,
         ]
         library.ufwbpp_native_cpu_drizzle_v1.restype = ctypes.c_int
+        library.ufwbpp_native_cpu_add_offset_grid_v1.argtypes = [
+            ctypes.POINTER(_OffsetGridRequestV1),
+            *error_arguments,
+        ]
+        library.ufwbpp_native_cpu_add_offset_grid_v1.restype = ctypes.c_int
         library.ufwbpp_native_default_kernel_threads_v1.argtypes = []
         library.ufwbpp_native_default_kernel_threads_v1.restype = ctypes.c_uint32
         self.hardware_threads = max(1, int(library.ufwbpp_native_default_kernel_threads_v1()))
@@ -544,7 +571,9 @@ class NativeKernels:
             "cpuArchitecture": self.cpu_architecture(),
             "cpuBrand": self.cpu_brand(),
             "cpuFeatures": list(self.cpu_features()),
-            "kernels": [WARP_KERNEL_ID, MAD_KERNEL_ID, MEAN_KERNEL_ID, TILE_OFFSET_KERNEL_ID],
+            "kernels": [
+                WARP_KERNEL_ID, MAD_KERNEL_ID, MEAN_KERNEL_ID, TILE_OFFSET_KERNEL_ID, OFFSET_GRID_KERNEL_ID,
+            ],
         }
 
     @staticmethod
@@ -827,6 +856,54 @@ class NativeKernels:
         if status != 0:
             self._raise(error, status, "native tile offsets")
         return offset, count, residual_mad, valid.view(np.bool_)
+
+    def add_offset_grid(
+        self,
+        values: NDArray[np.float32],
+        rows: NDArray[np.int64],
+        grid: NDArray[np.float64],
+        x_nodes: NDArray[np.float64],
+        y_nodes: NDArray[np.float64],
+        *,
+        threads: int | None = 1,
+    ) -> None:
+        """Add the bilinear offset grid to ``values`` in place.
+
+        ``values`` is a C-contiguous Float32 ``(len(rows), width)`` array;
+        ``rows`` are the frame rows of its rows.  The native kernel and
+        ``calibration._add_offset_grid_rows`` produce identical values.
+        """
+
+        if values.dtype != np.float32 or values.ndim != 2 or not values.flags["C_CONTIGUOUS"]:
+            raise ValueError("offset grid values must be a C-contiguous 2-D Float32 array")
+        row_values = np.ascontiguousarray(rows, dtype=np.int64)
+        grid_values = np.ascontiguousarray(grid, dtype=np.float64)
+        x_values = np.ascontiguousarray(x_nodes, dtype=np.float64)
+        y_values = np.ascontiguousarray(y_nodes, dtype=np.float64)
+        if row_values.shape != (values.shape[0],) or grid_values.shape != (y_values.size, x_values.size):
+            raise ValueError("offset grid rows or node grid do not match")
+        request = _OffsetGridRequestV1()
+        request.struct_size = ctypes.sizeof(_OffsetGridRequestV1)
+        request.width = int(values.shape[1])
+        request.threads = _thread_count(threads)
+        request.values = values.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        request.value_count = values.size
+        request.rows = row_values.ctypes.data_as(ctypes.POINTER(ctypes.c_int64))
+        request.row_count = row_values.size
+        request.grid = grid_values.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+        request.grid_count = grid_values.size
+        request.x_nodes = x_values.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+        request.x_node_count = x_values.size
+        request.y_nodes = y_values.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+        request.y_node_count = y_values.size
+        error = ctypes.create_string_buffer(_ERROR_BYTES)
+        status = int(
+            self._library.ufwbpp_native_cpu_add_offset_grid_v1(
+                ctypes.byref(request), error, ctypes.sizeof(error)
+            )
+        )
+        if status != 0:
+            self._raise(error, status, "native offset grid")
 
     def radon_line_peaks(
         self,

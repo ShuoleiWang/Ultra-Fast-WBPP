@@ -31,6 +31,12 @@ from ufwbpp.catalogs import verify_catalog
 from ufwbpp.solver import SolveRequest, SolverStatus, validate_solver_result
 
 
+# Upper bounds for the fake solver processes, not expectations: the tests
+# assert outcomes. A cold interpreter importing astropy on a hosted Windows
+# runner has needed more than 2 s, which turned an expected failure code into
+# SOLVER_TIMEOUT. The timeout test sets its own short limit.
+FAKE_SOLVER_TIMEOUT_SECONDS = 30.0
+
 @pytest.fixture(autouse=True)
 def isolate_fake_solver_catalog_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fake solvers use explicit catalog fixtures, never a developer's catalog.
@@ -324,8 +330,8 @@ def backend_for(kind: str, script: Path, tmp_path: Path, mode: str = "success"):
         executable_args=(str(script),),
         environment=environment,
         staging_root=tmp_path,
-        timeout_seconds=2.0,
-        probe_timeout_seconds=2.0,
+        timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
+        probe_timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
     )
     # These tests exercise the process contract; the managed-catalog gate has
     # its own tests (test_catalog_correspondence.py), so it is relaxed here.
@@ -414,7 +420,7 @@ def test_astrometry_profile_is_solve_only_and_uses_exact_bounded_arguments(
         },
         staging_root=tmp_path,
         timeout_seconds=20.0,
-        probe_timeout_seconds=2.0,
+        probe_timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
         require_managed_catalog=False,
     )
 
@@ -463,7 +469,7 @@ def test_stale_hints_cannot_lock_astrometry_out_of_unconstrained_fallback(
         environment={"FAKE_BACKEND": "astrometry", "FAKE_MODE": "hint-miss"},
         staging_root=tmp_path,
         timeout_seconds=20.0,
-        probe_timeout_seconds=2.0,
+        probe_timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
         require_managed_catalog=False,
     )
 
@@ -498,6 +504,27 @@ def test_astrometry_profile_validation_and_adaptive_downsampling() -> None:
         AstrometryNetSolveProfile(source_limit=0).validate()
 
 
+def test_small_astrometry_budget_keeps_one_hinted_attempt() -> None:
+    # A budget too small for two process starts runs one constrained attempt
+    # with all of it instead of pretending a fallback was tried. The fake-solver
+    # tests use a generous process bound, so the branch is pinned here.
+    request = SolveRequest(
+        "light.fits",
+        "solved.fits",
+        ra_hint_degrees=270.0,
+        dec_hint_degrees=-15.0,
+        field_of_view_degrees=2.0,
+    )
+    profile = AstrometryNetSolveProfile()
+
+    (only,) = astrometry_backend_module._solve_attempts(profile, request, (30, 40), 2.0)
+    assert (only.name, only.include_hints, only.timeout_seconds) == ("adaptive-hinted", True, 2.0)
+
+    hinted, fallback = astrometry_backend_module._solve_attempts(profile, request, (30, 40), 20.0)
+    assert (hinted.name, fallback.name) == ("adaptive-hinted", "conservative-unconstrained-fallback")
+    assert hinted.timeout_seconds + fallback.timeout_seconds == 20.0
+
+
 def test_astrometry_config_discovery_uses_app_environment_without_probe_args(
     tmp_path: Path,
 ) -> None:
@@ -523,8 +550,8 @@ def test_strict_astrometry_binds_match_index_to_managed_bytes(tmp_path: Path) ->
         catalog_manifest_dir=manifests,
         environment={"FAKE_BACKEND": "astrometry", "FAKE_MODE": "success"},
         staging_root=tmp_path,
-        timeout_seconds=2.0,
-        probe_timeout_seconds=2.0,
+        timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
+        probe_timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
     )
 
     result = backend.solve(SolveRequest(str(source), str(tmp_path / "managed-solved.fits")))
@@ -560,8 +587,8 @@ def test_strict_astrometry_rejects_unmanaged_and_replaced_indexes(tmp_path: Path
         executable_args=(str(script),),
         environment={"FAKE_BACKEND": "astrometry", "FAKE_MODE": "success"},
         staging_root=tmp_path,
-        timeout_seconds=2.0,
-        probe_timeout_seconds=2.0,
+        timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
+        probe_timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
     )
     rejected = unmanaged.solve(
         SolveRequest(str(source), str(tmp_path / "unmanaged-solved.fits"))
@@ -583,8 +610,8 @@ def test_strict_astrometry_rejects_unmanaged_and_replaced_indexes(tmp_path: Path
             "FAKE_CATALOG_PATH": str(catalog_path),
         },
         staging_root=tmp_path,
-        timeout_seconds=2.0,
-        probe_timeout_seconds=2.0,
+        timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
+        probe_timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
     ).solve(SolveRequest(str(source), str(tmp_path / "replaced-solved.fits")))
     assert replaced.status is SolverStatus.FAILED
     assert replaced.evidence["failureCode"] == "CATALOG_FILE_CHANGED"
@@ -636,8 +663,8 @@ def test_optional_local_solver_logs_are_separate_and_path_redacted(tmp_path: Pat
         environment={"FAKE_BACKEND": "astap", "FAKE_MODE": "success"},
         staging_root=tmp_path,
         diagnostic_log_root=log_root,
-        timeout_seconds=2.0,
-        probe_timeout_seconds=2.0,
+        timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
+        probe_timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
         require_managed_catalog=False,
         star_database_dir=fake_star_database(tmp_path),
     )
@@ -677,7 +704,7 @@ def test_posix_process_group_cannot_leave_a_mutating_child(tmp_path: Path) -> No
             "FAKE_CHILD_TRIGGER": str(child_trigger),
         },
         staging_root=tmp_path,
-        timeout_seconds=2.0,
+        timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
         require_managed_catalog=False,
         star_database_dir=fake_star_database(tmp_path),
     )
@@ -706,8 +733,8 @@ def test_success_isolated_input_and_verifiable_receipt(tmp_path: Path, kind: str
         executable_args=(str(script),),
         environment=environment,
         staging_root=tmp_path,
-        timeout_seconds=2.0,
-        probe_timeout_seconds=2.0,
+        timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
+        probe_timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
     )
     backend = (
         AstapSolverBackend(
@@ -841,7 +868,7 @@ def test_exit_and_timeout_fail_closed(tmp_path: Path, kind: str, mode: str, code
     script = write_fake_solver(tmp_path / "fake_solver.py")
     source = write_input(tmp_path / "light.fits")
     backend = backend_for(kind, script, tmp_path, mode)
-    backend.timeout_seconds = 0.15 if mode == "timeout" else 2.0
+    backend.timeout_seconds = 0.15 if mode == "timeout" else FAKE_SOLVER_TIMEOUT_SECONDS
     output = tmp_path / "solved.fits"
 
     result = backend.solve(SolveRequest(str(source), str(output)))
@@ -911,8 +938,8 @@ def test_astap_sip_is_requested_only_when_the_cli_advertises_it(tmp_path: Path) 
         executable_args=(str(script),),
         environment={"FAKE_BACKEND": "astap", "FAKE_MODE": "no-sip", "FAKE_ARGV_LOG": str(argv_log)},
         staging_root=tmp_path,
-        timeout_seconds=2.0,
-        probe_timeout_seconds=2.0,
+        timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
+        probe_timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
         require_managed_catalog=False,
         star_database_dir=fake_star_database(tmp_path),
     )
@@ -933,8 +960,8 @@ def test_astap_sip_is_requested_only_when_the_cli_advertises_it(tmp_path: Path) 
         executable_args=(str(script),),
         environment={"FAKE_BACKEND": "astap", "FAKE_MODE": "success", "FAKE_ARGV_LOG": str(argv_log)},
         staging_root=tmp_path,
-        timeout_seconds=2.0,
-        probe_timeout_seconds=2.0,
+        timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
+        probe_timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
         require_managed_catalog=False,
         star_database_dir=fake_star_database(tmp_path),
         sip_polynomial=False,

@@ -247,3 +247,74 @@ def test_check_mode_reports_without_building(
     assert "wheel" not in report
     assert json.loads(capsys.readouterr().out)["ok"] is True
     assert not (tmp_path / "work" / "wheels").exists()
+
+
+WHEEL_NAME = f"sep-{sep_build.PATCHED_VERSION}-cp312-cp312-win_amd64.whl"
+
+
+def test_reusable_wheel_requires_the_recorded_source_interpreter_and_bytes(tmp_path: Path) -> None:
+    wheels = tmp_path / "wheels"
+    wheels.mkdir()
+    wheel = wheels / WHEEL_NAME
+    wheel.write_bytes(b"wheel bytes")
+    interpreter = {"implementation": "CPython", "version": "3.12.10", "platform": "win-amd64"}
+
+    def provenance(**changes: object) -> dict:
+        fields = {"patch_sha256": "a" * 64, "patched_files": EXPECTED_PATCHED_DIGESTS, "interpreter": interpreter}
+        fields.update(changes)
+        return sep_build.wheel_provenance(**fields)
+
+    assert sep_build.reusable_wheel(wheels, provenance()) is None  # no record yet
+    sep_build.record_wheel_provenance(wheels, provenance(), wheel)
+    assert sep_build.reusable_wheel(wheels, provenance()) == wheel
+    assert sep_build.reusable_wheel(wheels, provenance(patch_sha256="b" * 64)) is None
+    assert sep_build.reusable_wheel(
+        wheels, provenance(patched_files={**EXPECTED_PATCHED_DIGESTS, "src/lutz.c": "0" * 64})
+    ) is None
+    assert sep_build.reusable_wheel(wheels, provenance(interpreter={**interpreter, "version": "3.12.11"})) is None
+    (wheels / "sep-1.4.1-cp312-cp312-win_amd64.whl").write_bytes(b"another wheel")
+    assert sep_build.reusable_wheel(wheels, provenance()) is None  # not exactly one wheel
+    (wheels / "sep-1.4.1-cp312-cp312-win_amd64.whl").unlink()
+    wheel.write_bytes(b"replaced bytes")
+    assert sep_build.reusable_wheel(wheels, provenance()) is None
+
+
+def test_reuse_wheel_skips_only_the_compile(
+    tmp_path: Path, pinned_sdist: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    builds: list[Path] = []
+    commands: list[list[str]] = []
+    proofs: list[str] = []
+
+    def fake_build(source_root: Path, wheel_dir: Path, *, python: str) -> Path:
+        wheel_dir.mkdir(parents=True, exist_ok=True)
+        wheel = wheel_dir / WHEEL_NAME
+        wheel.write_bytes(b"compiled %d" % len(builds))
+        builds.append(source_root)
+        return wheel
+
+    def fake_prove(*, python: str) -> dict:
+        proofs.append(python)
+        return {"version": sep_build.PATCHED_VERSION, "deterministic": True}
+
+    monkeypatch.setattr(sep_build, "build_wheel", fake_build)
+    monkeypatch.setattr(sep_build, "_run", lambda command, cwd=None: commands.append(list(command)) or 0.0)
+    monkeypatch.setattr(sep_build, "prove_installation", fake_prove)
+    work = tmp_path / "work"
+    common = ["--install", "--work-dir", str(work), "--sdist", str(pinned_sdist)]
+
+    reports = []
+    for index, extra in enumerate((["--reuse-wheel"], ["--reuse-wheel"], [])):
+        report_path = tmp_path / f"report-{index}.json"
+        assert sep_build.main([*common, *extra, "--report", str(report_path)]) == 0
+        reports.append(json.loads(report_path.read_text(encoding="utf-8")))
+
+    # The second run reuses the recorded wheel; without --reuse-wheel the
+    # compile always runs and the record no longer describes the wheel.
+    assert [report["wheel"]["reused"] for report in reports] == [False, True, False]
+    assert len(builds) == 2
+    assert not (work / "wheels" / sep_build.PROVENANCE_NAME).exists()
+    # Every run still verified and patched the sdist, reinstalled and proved.
+    assert all(report["patchedFiles"] == EXPECTED_PATCHED_DIGESTS for report in reports)
+    assert len(commands) == 3 and all("--force-reinstall" in command for command in commands)
+    assert len(proofs) == 3

@@ -23,6 +23,7 @@ Start with the [project README](../README.md) (also in [简体中文](README.zh-
 | [recipes/automatic-screening.md](recipes/automatic-screening.md) | Mixed-night import, the legacy gate (what it measures, how it decides, why it cannot see a uniformly bad night) and the optional review |
 | [recipes/drizzle.md](recipes/drizzle.md) | 1×–4× native drizzle: options, products, measured quality |
 | [recipes/osc-cfa.md](recipes/osc-cfa.md) | One-shot-colour (Bayer) Lights: pipeline and the synthetic validation |
+| [recipes/advanced-algorithms.md](recipes/advanced-algorithms.md) | The two opt-in algorithms, both off by default: ZOGY proper coaddition as an additional product, and the robust IRLS combination |
 | [recipes/astrometry.md](recipes/astrometry.md), [recipes/offline-solver-catalogs.md](recipes/offline-solver-catalogs.md) | `SEED` versus `SOLVED`, installing the solver and index set |
 | [recipes/normalization-and-xisf.md](recipes/normalization-and-xisf.md) | XISF inputs, supported stellar/background normalization and retired LN compatibility |
 | [recipes/project-mosaic-rgb.md](recipes/project-mosaic-rgb.md) | Multi-panel projects and RGB/LRGB products |

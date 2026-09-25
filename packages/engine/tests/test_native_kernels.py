@@ -1015,3 +1015,39 @@ def test_masked_mean_sample_weights_match_numpy_reference() -> None:
         samples, accepted, weights, threads=2, sample_weights=np.ones(samples.shape, dtype=np.float32)
     )
     np.testing.assert_array_equal(plain, unit)
+
+
+@requires_native
+@pytest.mark.parametrize("sampled", [False, True])
+def test_native_offset_grid_matches_numpy_bitwise(monkeypatch: pytest.MonkeyPatch, sampled: bool) -> None:
+    from ufwbpp import calibration
+
+    rng = np.random.default_rng(71)
+    width = 203
+    x_nodes = (0.0, 30.5, 77.0, 150.0, 202.0)
+    y_nodes = (4.0, 40.0, 95.5, 160.0)
+    grid = tuple(tuple(float(value) for value in rng.normal(0.0, 0.02, len(x_nodes))) for _ in y_nodes)
+    if sampled:
+        rows = [0, 3, 4, 39, 40, 41, 96, 159, 160, 170, 7, 7, 120]
+        y0, y1 = 0, len(rows)
+    else:
+        rows = None
+        y0, y1 = 2, 171
+    base = rng.uniform(0.0, 0.5, (y1 - y0, width)).astype(np.float32)
+    base[1, 5] = np.nan
+    base[3, 9] = np.inf
+    native = base.copy()
+    calibration._add_offset_grid_rows(native, grid, x_nodes, y_nodes, y0, y1, width, absolute_rows=rows)
+    monkeypatch.setattr(calibration, "load_native_kernels", lambda: None)
+    reference = base.copy()
+    calibration._add_offset_grid_rows(reference, grid, x_nodes, y_nodes, y0, y1, width, absolute_rows=rows)
+    assert not np.array_equal(native, base, equal_nan=True)
+    assert native.tobytes() == reference.tobytes()
+
+
+def test_offset_grid_outside_the_native_domain_uses_numpy() -> None:
+    from ufwbpp import calibration
+
+    assert calibration._native_offset_grid_supported(((0.0, 1.0), (2.0, 3.0)), (0.0, 5.0), (0.0, 5.0))
+    assert not calibration._native_offset_grid_supported(((0.0, float("nan")), (2.0, 3.0)), (0.0, 5.0), (0.0, 5.0))
+    assert not calibration._native_offset_grid_supported(((0.0, 1.0), (2.0, 3.0)), (5.0, 5.0), (0.0, 5.0))

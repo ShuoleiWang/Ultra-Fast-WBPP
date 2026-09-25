@@ -38,6 +38,7 @@ from .pixel_pipeline import (
     RawFrameMetadataOverride,
 )
 from .global_normalization import GlobalNormalizationParameters
+from .proper_coaddition import ProperCoadditionParameters
 from .planning import (
     ExecutionPlan,
     build_plan,
@@ -286,7 +287,9 @@ def build_e2e_request(
     if isinstance(selected_workers, bool) or not isinstance(selected_workers, int) or selected_workers < 1:
         raise RuntimeConfigurationError("WORKER_COUNT_INVALID", "workers must be positive")
     integration = replace(
-        IntegrationParameters(), max_memory_bytes=tuning.integration_memory_bytes
+        IntegrationParameters(),
+        max_memory_bytes=tuning.integration_memory_bytes,
+        combination=recipe.integration.combination,
     )
     pipeline = replace(
         PipelineParameters(),
@@ -297,6 +300,11 @@ def build_e2e_request(
             enabled=True,
         ),
         ordinary_integration_backend="auto",
+        proper_coaddition=ProperCoadditionParameters(
+            enabled=recipe.proper_coaddition.enabled,
+            outlier_handling=recipe.proper_coaddition.outlier_handling,
+            apodization_pixels=recipe.proper_coaddition.apodization_pixels,
+        ),
         master_metadata_overrides=tuple(
             MasterMetadataOverride(
                 source_sha256=item.source_sha256,

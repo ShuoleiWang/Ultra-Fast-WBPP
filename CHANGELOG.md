@@ -4,11 +4,81 @@ All notable changes are documented here. The format follows Keep a Changelog and
 
 ## [Unreleased]
 
+### Opt-in advanced algorithms
+
+- **Proper coaddition (Zackay & Ofek 2017), opt-in and off by default.**
+  `properCoaddition.enabled` adds one more linear product per filter,
+  `<FILTER>.proper.fits`, beside the solved master (in a project run under
+  `details/runs/<target>/products/<FILTER>/`). It is built from the same
+  registered, normalized frames and the same per-pixel rejection decisions as
+  the ordinary master, which stays the run's primary product and comes out
+  byte-identical whether the option is on or off. Every frame's PSF is
+  measured by stacking 298–300 of its own isolated stars (31×31,
+  sigma-clipped, recentred, unit sum; isolation is judged against every
+  detection before the brightest are dropped, and a stamp touching a pixel
+  without data is skipped; an analytic Moffat is the recorded fallback and
+  was never needed here); samples the rejection removed are replaced by the
+  surviving robust mean before the transform (0.06–0.27 % of samples); the
+  frame sits inside a mirrored, faded guard band, so no published pixel is
+  attenuated and the product shows no ringing. Up to three frames are read
+  and measured ahead on their own threads while the transforms stay in frame
+  order, so the product is the same bit for bit however many were prepared
+  ahead. The product carries the same-grid solved master's verified WCS
+  (`OAFWCS = 'INHERITED'`, re-validated on promotion to 2.3e-07 px) and a full
+  receipt: per-frame flux scale, background sigma, PSF source and FWHM,
+  replaced-sample counts, F_R, the coadd PSF's FWHM and the sky added back.
+  Cost on the reference project: 77.9 s and 76.1 s against 65.5 s and 61.4 s for
+  interleaved default runs (about +13 s; 9.3–9.8 s for the 26-frame luminance
+  group, previously 22.5 s). Measured on 400 matched
+  stars per filter with the noise taken from empty apertures and from the
+  scatter of background pixels (registered frames carry noise correlated by
+  the resampling, and an adjacent-difference sigma therefore favours the
+  whitened coadd): peak SNR −1.7 % to +0.7 %, fixed-aperture SNR within
+  ±1.5 % of the ordinary master at r = 2–4 px, per-pixel background noise
+  2.2–4.5 % higher. Against PixInsight the evaluator's G_8 is 1.019 / 1.027 /
+  1.028 / 1.024 (L/R/G/B) for the proper coadd and 1.013 / 1.022 / 1.032 /
+  1.023 for the default master, within each other's confidence intervals.
+  On this data set, whose frames differ little in FWHM, it shows no
+  measurable point-source gain; it is kept as a measurable option. The
+  desktop offers it as a checkbox under advanced options.
+- **Robust IRLS combination, opt-in and off by default.**
+  `integration.combination: "irls-huber"` replaces the final weighted mean of
+  the accepted samples with four iteratively reweighted least-squares passes
+  (Huber k = 1.345) against the existing per-pixel rejection scale model,
+  multiplying the existing inverse-variance frame weights. Fixed iteration
+  count and one NumPy reduction per tile, so the result is independent of the
+  thread count and the machine (two runs gave identical digests); it forces
+  the portable CPU backend. Cost: 252.7 s against 65.9 s, the integration
+  stage going from 8.9 s to 175.6 s on the 26-frame luminance group. On pure
+  Gaussian frames it costs the expected 1.9 % of efficiency; on the real
+  project it moves 64–95 % of pixels by 1.3–2.2 sigma and does not improve
+  the measured background noise. Shipped as a recipe option for measurement,
+  not as a recommendation: the desktop does not offer it.
+- `docs/recipes/advanced-algorithms.md` documents both options, the formulas
+  as implemented and how to judge the proper coadd (point-source SNR, not the
+  standard PSF gates); `docs/validation-matrix.md` records the measurements.
+
 ### Blink review: per-channel workflow, a readable stretch, and measurements that are computed once
 
 - Screening is organised strictly by channel. The review opens on a channel step rail (filter and target, frames viewed and kept, not started / in progress / done, one filter colour each), a channel header states the frame count, the night span and the reference frame, and finishing a channel offers *Next channel*; the launch bar carries a per-channel checklist and names the channels that are unfinished or hold fewer than two kept Lights. Channel numbers and `Tab` move between channels; every per-frame key is unchanged.
 - Preview frames are stretched with a screen transfer function (shadows clipped at 2.8 MADN below the reference's sky, midtones placed so the background lands at 0.25) instead of the previous asinh curve between −2.5σ and +10σ. A frame that must go now looks wrong at a glance: a moonlit frame shows its ramp, and a clouded frame shows the cloud's texture and edge where the old curve rendered a saturated white block. Each frame also carries a harder-stretched variant (background at 0.45) that the review's Normal/Hard control switches to without re-rendering; the cost is 0.17 s for 97 frames.
 - Per-frame measurements are cached by content, quality-control configuration and implementation fingerprint (`lightframeqc.measurement_cache`), so a production run reuses what the blink session measured instead of reading and extracting every Light again; an entry is written only after its decoded form is proven equal to the measurement it came from. Because restored measurements are identical, the existing group-analysis cache now also hits across that boundary. On the 97-Light reference campaign (M3 Pro, 8 workers): blink session 46.2 s → 15.3 s, and the run that follows it 106.2 s → 78.6 s, with the four masters byte-identical to the uncached runs.
+
+### Faster registration warp and group integration, same pixels
+
+- The Lanczos-3 warp evaluates four output pixels per NEON lane group on arm64: each lane performs its pixel's scalar operations in the scalar order (Float64 table weights, the 36 products and their running Float32 sum, the support bounds as `std::min`/`std::max` selects, the clamp), with a shorter route for windows whose samples are all finite and whose bounds are not zeros; any other window reruns the exact lane route and edge windows run the scalar code. Single-threaded warp time on the M3 Pro falls from 53 to 17 ns per pixel; x86-64 keeps the scalar code. A new C++ test holds every route to the scalar reference bit for bit (non-finite, signed-zero and negative samples, integer shifts, projective maps, row tails, thread counts).
+- Output groups integrate two at a time when the tuning row has at least twelve CPU workers and the CPU integration runs; every group's global-normalization fit starts ahead in the order the groups run (largest first). Each group records its artifacts in its own ledger, which the run ledger takes in group order, and the selection counterfactual's observers are created in group order, so receipts and masters do not depend on the schedule. The pixel-pipeline receipt records `integrationGroupConcurrency`.
+- The normalization offset grid is added to integration rows by a native kernel (`ufwbpp_native_cpu_add_offset_grid_v1`, kernel id `native-cpu-offset-grid-v1`) with the NumPy arithmetic of `_add_offset_grid_rows`; the NumPy evaluation stays the reference and the fallback for grids outside the kernel's domain.
+- Pixels are unchanged: the NGC 7331 reference project (62 admitted Lights, L/R/G/B, M3 Pro, macOS 27, QC cache off) produced byte-identical L/R/G/B masters and LRGB pixel data against a baseline built from `8490ce4` with its own Release library, in every run. Interleaved runs took 95.3 s and 88.4 s for the baseline and 72.1 s and 69.4 s with this change (fused calibrate-and-warp 21.4/16.6 s → 8.7/9.7 s); peak resident memory stayed about 10.5 GB. Four groups at once (71.7 s; the fits are GIL-bound), fits with all cores each (73.1 s) and twelve QC workers (75.2 s) were measured and not adopted.
+
+### Leaner CI
+
+- Pull requests run only the jobs their changed paths need. A first job classifies the diff (`scripts/ci_changed_areas.py`): documentation selects nothing, the bundled legal texts select Python and Rust, and `.github/`, Git metadata and unrecognised paths select everything; pushes to `main` and manual runs always run everything. The public-tree and link checks run on every pull request, and the `CI gate` accepts a skipped job only when its area did not change.
+- Removed the jobs that repeated what the Python jobs prove: the three `Native C++` jobs (an unoptimized build with Metal off) and `Apple Silicon Metal compile/differential`, whose differential the hosted runners always skipped for lack of a Metal device. Each Python job still builds, ctest-checks and installs the Release kernels. The Python matrix is macOS and Windows on 3.12 (the interpreter the bundles freeze) and Ubuntu on 3.11 (the oldest supported), and `cargo fmt` runs once. A full run drops from 15 to 10 jobs (macOS 5 → 2); from the per-job medians of the last 30 green runs, weighted ×10 for macOS and ×2 for Windows, from about 215 to about 125 runner-minutes.
+- Rust builds and the Windows patched SEP wheel are cached, written from `main` only. `build_sep_wheel.py --reuse-wheel` skips only the compile, when the cached wheel's recorded provenance matches, and still runs the sdist, patch, install and determinism gates; the release workflow always compiles SEP.
+- Every job has a timeout, and only pull requests cancel superseded runs. CodeQL also analyses the workflows and the Rust crate, with the `security-extended` queries. Dependency review drops `pull-requests: write` and also denies AGPL-3.0 and SSPL-1.0; Dependabot groups action updates and raises pip ranges only when a release falls outside them.
+- Release workflow: a first job requires one version in `package.json`, `tauri.conf.json` and the desktop `Cargo.toml`, and for a tag `v<version>` or `v<version>-<label>` (the MSI accepts only numeric versions); `npm ci` runs before the tests so the Tauri config schema test runs; the upload name is safe for branch names with `/`.
+- The fake-solver tests bound their processes at 30 s instead of 2 s, which a cold interpreter on a Windows runner exceeded; a direct test pins the astrometry planner's small-budget branch that the 2 s bound exercised incidentally.
 
 ### One engine boundary, one name, readable orchestration
 

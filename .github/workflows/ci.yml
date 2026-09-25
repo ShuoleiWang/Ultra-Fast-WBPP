@@ -9,22 +9,72 @@ on:
 permissions:
   contents: read
 
+# Pull requests cancel their superseded runs. Pushes to main and manual runs
+# are grouped by commit, so every main commit keeps its own complete run.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    name: Changed areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      python: ${{ steps.classify.outputs.python }}
+      rust: ${{ steps.classify.outputs.rust }}
+      frontend: ${{ steps.classify.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The pull request's base, head and merge base for the three-dot diff.
+          fetch-depth: 0
+      - name: Select the jobs this change needs (every job unless a pull request)
+        id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          python3 scripts/ci_changed_areas.py
+          --event "${EVENT_NAME}"
+          --base "${BASE_SHA}"
+          --head "${HEAD_SHA}"
+          --github-output "${GITHUB_OUTPUT}"
+
+  source-check:
+    name: Public tree and links
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Enforce public-tree boundary and local links (standard library only)
+        run: |
+          python3 scripts/check_public_tree.py .
+          python3 scripts/check_local_links.py .
+
   python:
     name: Python ${{ matrix.python }} · ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
-        python: ["3.11", "3.12"]
+        include:
+          # The interpreter the macOS and Windows bundles freeze (release.yml)...
+          - os: macos-14
+            python: "3.12"
+          - os: windows-latest
+            python: "3.12"
+          # ... and the oldest supported one (requires-python >= 3.11).
+          - os: ubuntu-latest
+            python: "3.11"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        id: setup-python
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -38,18 +88,47 @@ jobs:
           -e "./packages/light-frame-qc[test]"
           -e "./packages/registration[test]"
           -e "./packages/engine[test,all]"
+      - name: Identify the runner image (Windows)
+        if: runner.os == 'Windows'
+        id: runner-image
+        shell: bash
+        run: echo "id=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "${GITHUB_OUTPUT}"
+      - name: Restore the patched SEP wheel (Windows)
+        if: runner.os == 'Windows'
+        id: sep-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          # Keyed on the build script (sdist pin), the patch, the interpreter
+          # and the runner image (MSVC), so any of them changing recompiles.
+          path: |
+            build/sep-wheel/wheels
+            build/sep-wheel/sep-1.4.1.tar.gz
+          key: sep-wheel-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.id }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('scripts/build_sep_wheel.py', 'packaging/patches/**') }}
       - name: Replace the PyPI SEP wheel with the deterministic patched build (Windows)
         if: runner.os == 'Windows'
         # sep 1.4.1 from PyPI is non-deterministic on MSVC builds (rand_r shim,
         # uninitialised deblending buffers) and quadratic in the object count.
         # The pinned sdist plus packaging/patches/*.patch is compiled here so
         # the tests run against the bytes the Windows sidecar will ship.
+        # --reuse-wheel skips only the compile when the cached wheel's recorded
+        # provenance matches; the sdist, patch, install and proof gates run.
         run: >-
-          python scripts/build_sep_wheel.py --install
+          python scripts/build_sep_wheel.py --install --reuse-wheel
           --report build/sep-wheel/sep-wheel-report.json
+      - name: Save the patched SEP wheel (Windows, main only)
+        if: runner.os == 'Windows' && github.ref == 'refs/heads/main' && steps.sep-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            build/sep-wheel/wheels
+            build/sep-wheel/sep-1.4.1.tar.gz
+          key: ${{ steps.sep-cache.outputs.cache-primary-key }}
       - name: Check installed dependency consistency
         run: python -m pip check
       - name: Build, test and install the native kernels (MSVC /fp:strict, static CRT on Windows)
+        # The Release chain of every platform: configure, build, ctest (Metal
+        # on macOS; hosted runners expose no Metal device, so the CPU/Metal
+        # differential is skipped there), install into the engine package.
         run: >-
           python scripts/build_native_runtime.py
           --build-dir build/native-release
@@ -68,11 +147,6 @@ jobs:
           packages/registration/tests
           packages/engine/tests
           tests
-      - name: Enforce public-tree boundary
-        shell: bash
-        run: |
-          python scripts/check_public_tree.py .
-          python scripts/check_local_links.py .
       - name: Smoke the command line and its doctor self-report
         shell: bash
         run: |
@@ -81,10 +155,14 @@ jobs:
 
   rust:
     name: Rust · ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        # Linux stays: the sidecar launcher's ETXTBSY retry test is Linux-only.
         os: [ubuntu-latest, macos-14, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -99,7 +177,12 @@ jobs:
           rustup set profile minimal
           rustup toolchain install 1.88 --component clippy --component rustfmt
           rustup default 1.88
-      - name: Format
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # Pull requests restore main's cache but never write their own.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Format (once; formatting does not depend on the platform)
+        if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -108,7 +191,10 @@ jobs:
 
   frontend:
     name: React desktop shell
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -125,52 +211,40 @@ jobs:
       - run: npm run build
         working-directory: apps/desktop
 
-  native:
-    name: Native C++ · ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Configure strict CPU baseline
-        run: cmake -S engine/native -B build/native -DUFWBPP_BUILD_TESTS=ON -DUFWBPP_ENABLE_METAL=OFF
-      - name: Build
-        run: cmake --build build/native --config Release --parallel
-      - name: Test
-        run: ctest --test-dir build/native -C Release --output-on-failure
-
-  apple-metal:
-    name: Apple Silicon Metal compile/differential
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Assert Apple Silicon runner contract
-        run: test "$(uname -m)" = "arm64"
-      - name: Configure Apple arm64 CPU + Metal
-        run: cmake -S engine/native -B build/native-metal -DUFWBPP_BUILD_TESTS=ON -DUFWBPP_ENABLE_METAL=ON -DCMAKE_BUILD_TYPE=Release
-      - name: Build
-        run: cmake --build build/native-metal --config Release --parallel
-      - name: Run Metal differential when the hosted runner exposes a device
-        run: ctest --test-dir build/native-metal -C Release --output-on-failure
-
   ci-gate:
     name: CI gate
     if: always()
-    needs: [python, rust, frontend, native, apple-metal]
+    needs: [changes, source-check, python, rust, frontend]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - name: Require every platform matrix
+      - name: Require every selected job (a skip passes only when its area did not change)
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          SOURCE_CHECK_RESULT: ${{ needs['source-check'].result }}
           PYTHON_RESULT: ${{ needs.python.result }}
+          PYTHON_SELECTED: ${{ needs.changes.outputs.python }}
           RUST_RESULT: ${{ needs.rust.result }}
+          RUST_SELECTED: ${{ needs.changes.outputs.rust }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
-          NATIVE_RESULT: ${{ needs.native.result }}
-          APPLE_METAL_RESULT: ${{ needs['apple-metal'].result }}
+          FRONTEND_SELECTED: ${{ needs.changes.outputs.frontend }}
+        shell: bash
         run: |
-          test "${PYTHON_RESULT}" = success
-          test "${RUST_RESULT}" = success
-          test "${FRONTEND_RESULT}" = success
-          test "${NATIVE_RESULT}" = success
-          test "${APPLE_METAL_RESULT}" = success
+          failed=0
+          require() {
+            local job="$1" result="$2" selected="$3"
+            if [[ "${result}" == success ]]; then
+              echo "${job}: success"
+            elif [[ "${result}" == skipped && "${selected}" == false ]]; then
+              echo "${job}: skipped, no change in its area"
+            else
+              echo "::error::${job}: ${result} (selected: ${selected:-unknown})"
+              failed=1
+            fi
+          }
+          require "Changed areas" "${CHANGES_RESULT}" true
+          require "Public tree and links" "${SOURCE_CHECK_RESULT}" true
+          require Python "${PYTHON_RESULT}" "${PYTHON_SELECTED}"
+          require Rust "${RUST_RESULT}" "${RUST_SELECTED}"
+          require "React desktop shell" "${FRONTEND_RESULT}" "${FRONTEND_SELECTED}"
+          exit "${failed}"

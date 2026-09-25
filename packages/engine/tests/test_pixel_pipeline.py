@@ -1176,3 +1176,158 @@ def test_integration_noise_weights_ignore_sky_gradients(tmp_path: Path) -> None:
         )
     # Equal noise must give (nearly) equal weights despite the gradient.
     assert abs(weights[0] / weights[1] - 1.0) < 0.15
+
+
+def test_concurrent_group_integration_matches_the_sequential_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Groups integrated side by side publish the same masters and the same
+    receipt artifact order as one group at a time."""
+
+    import ufwbpp.pixel_pipeline as pipeline
+
+    biases, darks, flats, lights, signal_r, _ = _dataset(tmp_path / "raw")
+    height, width = signal_r.shape
+    for index in range(3):
+        flats.append(
+            _write_frame(
+                tmp_path / "raw" / "flat_g" / f"flat_g_{index}.fits",
+                "Flat",
+                100.0 + 1000.0 * np.ones((height, width), dtype=np.float32),
+                filter_name="G",
+                exposure=2.0,
+            )
+        )
+    green_lights = [
+        _write_frame(
+            tmp_path / "raw" / "light_g" / f"light_g_{index}.fits",
+            "Light",
+            120.0 + signal_r * 0.6,
+            filter_name="G",
+        )
+        for index in range(6)
+    ]
+    observed: list[str] = []
+
+    def observers(group_name: str, paths: object) -> None:
+        observed.append(group_name)
+        return None
+
+    def run(name: str, concurrency: int) -> tuple[dict[str, str], list[tuple[str, str]]]:
+        monkeypatch.setattr(pipeline, "_group_concurrency", lambda *_args: concurrency)
+        output = tmp_path / name
+        pipeline._run_portable_pipeline_fits(
+            bias_files=biases,
+            dark_files=darks,
+            flat_files=flats,
+            light_files=lights + green_lights,
+            output_directory=output,
+            parameters=_parameters(),
+            _integration_tile_observers=observers,
+        )
+        receipt = json.loads((output / "receipt.json").read_text(encoding="utf-8"))
+        assert receipt["statistics"]["integrationGroupConcurrency"] == concurrency
+        masters = {path.name: _sha(path) for path in sorted((output / "masters").glob("master_light_*.fits"))}
+        order = [(item["path"], item["kind"]) for item in receipt["outputs"]]
+        return masters, order
+
+    sequential = run("sequential", 1)
+    concurrent = run("concurrent", 2)
+    assert set(sequential[0]) == {"master_light_G.fits", "master_light_R.fits"}
+    assert concurrent == sequential
+    assert observed == ["G", "R", "G", "R"]
+
+
+def _star_lights(root: Path, filter_name: str, count: int, *, seed: int) -> list[Path]:
+    """Raw Lights of a star field large enough for the PSF and noise measurements."""
+
+    height, width = 192, 224
+    rng = np.random.default_rng(seed)
+    y, x = np.mgrid[:height, :width]
+    field = np.full((height, width), 620.0)
+    for row in range(40, height - 30, 36):
+        for column in range(40, width - 30, 36):
+            sigma = 1.3
+            flux = float(rng.uniform(4000.0, 6000.0))
+            field += flux / (2 * np.pi * sigma**2) * np.exp(
+                -((y - row) ** 2 + (x - column) ** 2) / (2 * sigma**2)
+            )
+    return [
+        _write_frame(
+            root / f"light_{filter_name.lower()}" / f"light_{filter_name.lower()}_{index}.fits",
+            "Light",
+            field + rng.normal(0.0, 6.0 + index, field.shape),
+            filter_name=filter_name,
+        )
+        for index in range(count)
+    ]
+
+
+def test_proper_coadd_is_published_per_group_and_independent_of_the_schedule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ufwbpp.pixel_pipeline as pipeline
+    from ufwbpp.proper_coaddition import ProperCoadditionParameters
+
+    shape = (192, 224)
+    biases = [
+        _write_frame(tmp_path / "raw" / "bias" / f"bias_{index}.fits", "Bias", np.full(shape, 100.0), exposure=0.001)
+        for index in range(3)
+    ]
+    darks = [
+        _write_frame(tmp_path / "raw" / "dark" / f"dark_{index}.fits", "Dark", np.full(shape, 120.0))
+        for index in range(3)
+    ]
+    flats = [
+        _write_frame(
+            tmp_path / "raw" / f"flat_{name.lower()}" / f"flat_{index}.fits",
+            "Flat",
+            np.full(shape, 1100.0),
+            filter_name=name,
+            exposure=2.0,
+        )
+        for name in ("R", "G")
+        for index in range(3)
+    ]
+    lights = _star_lights(tmp_path / "raw", "R", 5, seed=3) + _star_lights(tmp_path / "raw", "G", 5, seed=4)
+    base = _parameters()
+    parameters = replace(
+        base,
+        integration=replace(base.integration, max_memory_bytes=64 * 1024 * 1024),
+        registration_memory_bytes=64 * 1024 * 1024,
+        proper_coaddition=ProperCoadditionParameters(enabled=True, apodization_pixels=16),
+    )
+
+    def run(name: str, concurrency: int) -> tuple[dict[str, str], dict[str, str], dict[str, object]]:
+        monkeypatch.setattr(pipeline, "_group_concurrency", lambda *_args: concurrency)
+        output = tmp_path / name
+        result = pipeline._run_portable_pipeline_fits(
+            bias_files=biases,
+            dark_files=darks,
+            flat_files=flats,
+            light_files=lights,
+            output_directory=output,
+            parameters=parameters,
+        )
+        receipt = json.loads((output / "receipt.json").read_text(encoding="utf-8"))
+        groups = receipt["statistics"]["integrationGroups"]
+        masters = {path.name: _sha(path) for path in sorted((output / "masters").glob("master_light_*.fits"))}
+        propers = {name: _sha(Path(path)) for name, path in sorted(result.proper_coadd_paths.items())}
+        return masters, propers, groups
+
+    sequential = run("sequential", 1)
+    concurrent = run("concurrent", 2)
+    assert concurrent[0] == sequential[0] and concurrent[1] == sequential[1]
+    masters, propers, groups = sequential
+    assert set(propers) == {"G", "R"}
+    for name in ("G", "R"):
+        record = groups[name]["properCoaddition"]
+        assert record["primaryProduct"] is False and record["ordinaryMasterUnaffected"] is True
+        assert "sha256:" + record["croppedSha256"].removeprefix("sha256:") == propers[name]
+        with fits.open(tmp_path / "sequential" / record["outputPath"], memmap=False) as proper:
+            with fits.open(tmp_path / "sequential" / "masters" / f"master_light_{name}.fits", memmap=False) as master:
+                assert proper[0].data.shape == master[0].data.shape
+                assert proper[0].header["OAFPCOAD"] == "zogy-proper-coadd-v1"
+        # Quantized Lights: many sky-subtracted samples are exactly zero, and
+        # the stars must still be measured.
+        assert all(item["psfSource"] == "measured-star-stack" for item in record["frames"])

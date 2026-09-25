@@ -97,18 +97,20 @@ const formatElapsed = (seconds: number) =>
 const dispositionClass = (disposition: GateDisposition) => disposition.toLowerCase().replace("_", "-");
 
 function artifactLabel(kind: OutputArtifactKind, t: Translator): string {
-  return {
-    SOLVED_MONO_FITS: t("artifactSolvedMono"),
-    LINEAR_RGB_FITS: t("artifactLinearRgb"),
-    RGB_PREVIEW_TIFF_16: t("artifactTiff"),
-    RGB_PREVIEW_PNG_16: t("artifactPng"),
-    MONO_PREVIEW_PNG: t("artifactMonoPreview"),
-    RECEIPT: t("artifactReceipt"),
-    REPORT: t("artifactReport"),
-    DRIZZLE_DATA: t("artifactDrizzle"),
-    MASTER: t("artifactMaster"),
-    PREVIEW: t("artifactPreview"),
-  }[kind];
+  return (
+    {
+      SOLVED_MONO_FITS: t("artifactSolvedMono"),
+      LINEAR_RGB_FITS: t("artifactLinearRgb"),
+      RGB_PREVIEW_TIFF_16: t("artifactTiff"),
+      RGB_PREVIEW_PNG_16: t("artifactPng"),
+      MONO_PREVIEW_PNG: t("artifactMonoPreview"),
+      RECEIPT: t("artifactReceipt"),
+      REPORT: t("artifactReport"),
+      DRIZZLE_DATA: t("artifactDrizzle"),
+      MASTER: t("artifactMaster"),
+      PREVIEW: t("artifactPreview"),
+    }[kind] ?? kind
+  );
 }
 
 export function stageLabel(stageId: string, t: Translator): string {
@@ -365,6 +367,29 @@ export function LaunchSettings({
                 />
               </div>
             )}
+            <section className="panel" aria-labelledby="advanced-algorithms-title">
+              <div className="panel-heading">
+                <span id="advanced-algorithms-title">{t("advancedAlgorithms")}</span>
+                <small>{t("advancedAlgorithmsBadge")}</small>
+              </div>
+              <div className="panel-body">
+                <p className="hint">{t("advancedAlgorithmsHint")}</p>
+                <label
+                  className={`toggle ${workflow.properCoadditionEnabled && !workflow.drizzleEnabled ? "enabled" : ""}`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={workflow.properCoadditionEnabled && !workflow.drizzleEnabled}
+                    disabled={workflow.runNavigationLocked || workflow.drizzleEnabled}
+                    onChange={(event) => workflow.setProperCoadditionEnabled(event.target.checked)}
+                  />
+                  <span>
+                    <strong>{t("properCoaddition")}</strong>
+                    <small>{workflow.drizzleEnabled ? t("properCoadditionDrizzle") : t("properCoadditionHint")}</small>
+                  </span>
+                </label>
+              </div>
+            </section>
             <section className="panel" aria-labelledby="solver-title">
               <div className="panel-heading">
                 <span id="solver-title">{t("solverSetup")}</span>

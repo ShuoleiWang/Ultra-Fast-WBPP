@@ -67,6 +67,66 @@ fn sample_selection() -> serde_json::Value {
 }
 
 #[test]
+fn advanced_algorithms_are_absent_unless_enabled_and_refuse_drizzle() {
+    let root = std::env::temp_dir().join(new_public_identifier("advanced-wire").unwrap());
+    std::fs::create_dir_all(&root).unwrap();
+    let light = root.join("light.fits");
+    std::fs::write(&light, b"light input").unwrap();
+    let output = root.join("new-output");
+    let build = |recipe: serde_json::Value| -> ProjectRunRequest {
+        serde_json::from_value(serde_json::json!({
+            "sources": [{"sourceId": "light-1", "role": "LIGHT", "paths": [light], "recursive": false}],
+            "projectName": "NGC 6822", "runLabel": "",
+            "recipe": recipe,
+            "masterMetadataOverrides": [], "rawFrameMetadataOverrides": [], "reviewSelections": [],
+            "outputParentDirectory": root,
+        }))
+        .unwrap()
+    };
+    let base = serde_json::json!({"balanced": true, "drizzleEnabled": false,
+        "solverRequired": true, "calibrationWorkflow": "mono-standard-v1"});
+    // Untouched controls send exactly the recipe they sent before the
+    // algorithms existed: no new keys, so the recipe digest is unchanged.
+    let default_value = project_request_json(&build(base.clone()), &output).unwrap();
+    assert!(default_value["recipe"].get("properCoaddition").is_none());
+    assert!(default_value["recipe"].get("integration").is_none());
+
+    let mut enabled = base.clone();
+    enabled["properCoaddition"] = serde_json::json!({"enabled": true, "outlierHandling": "reuse-rejection", "apodizationPixels": 64});
+    let value = project_request_json(&build(enabled), &output).unwrap();
+    assert_eq!(
+        value["recipe"]["properCoaddition"]["enabled"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        value["recipe"]["properCoaddition"]["apodizationPixels"],
+        serde_json::json!(64)
+    );
+    assert!(value["recipe"].get("integration").is_none());
+
+    // The engine refuses the pair; the run never starts.
+    let mut conflict = base.clone();
+    conflict["drizzleEnabled"] = serde_json::json!(true);
+    conflict["properCoaddition"] = serde_json::json!({"enabled": true});
+    assert!(project_request_json(&build(conflict), &output)
+        .unwrap_err()
+        .contains("drizzle"));
+
+    // The robust IRLS combination is not a desktop option: the key itself is
+    // refused before a request can be built.
+    let mut irls = base;
+    irls["integration"] = serde_json::json!({"combination": "irls-huber"});
+    let refused: Result<ProjectRunRequest, _> = serde_json::from_value(serde_json::json!({
+        "sources": [{"sourceId": "light-1", "role": "LIGHT", "paths": [light], "recursive": false}],
+        "projectName": "NGC 6822", "runLabel": "",
+        "recipe": irls,
+        "masterMetadataOverrides": [], "rawFrameMetadataOverrides": [], "reviewSelections": [],
+        "outputParentDirectory": root,
+    }));
+    assert!(refused.is_err());
+}
+
+#[test]
 fn blink_selection_travels_top_level_and_is_validated() {
     let root = std::env::temp_dir().join(new_public_identifier("selection-wire").unwrap());
     std::fs::create_dir_all(&root).unwrap();
@@ -760,6 +820,7 @@ sys.exit(1)
                 drizzle_kernel: default_drizzle_kernel(),
                 solver_required: true,
                 calibration_workflow: default_calibration_workflow(),
+                proper_coaddition: None,
             },
             master_metadata_overrides: vec![],
             raw_frame_metadata_overrides: vec![],
@@ -858,6 +919,7 @@ fn standard_master_workflow_reaches_worker_without_fabricated_metadata() {
             drizzle_kernel: default_drizzle_kernel(),
             solver_required: true,
             calibration_workflow: "mono-standard-v1".into(),
+            proper_coaddition: None,
         },
         master_metadata_overrides: vec![],
         raw_frame_metadata_overrides: vec![],
@@ -1140,6 +1202,7 @@ print(json.dumps({"success":True,"code":"PROJECT_MONO_SUCCEEDED","state":"SOLVED
                 drizzle_kernel: default_drizzle_kernel(),
                 solver_required: true,
                 calibration_workflow: default_calibration_workflow(),
+                proper_coaddition: None,
             },
             master_metadata_overrides: vec![],
             raw_frame_metadata_overrides: vec![UiRawFrameOverride {

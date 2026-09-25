@@ -83,6 +83,11 @@ from .calibration import (
     write_expression,
 )
 from .native_kernels import WARP_KERNEL_ID, load_native_kernels
+from .proper_coaddition import (
+    PROPER_COADD_ALGORITHM_ID,
+    ProperCoadditionParameters,
+    proper_coadd_group,
+)
 from .preview import render_auto_stretch_preview
 from .hardware import detect_hardware
 from .metal_integration import (
@@ -219,6 +224,12 @@ class PipelineParameters:
     global_normalization: GlobalNormalizationParameters = field(
         default_factory=GlobalNormalizationParameters
     )
+    # Opt-in ZOGY proper coaddition: one ADDITIONAL linear product per group,
+    # from the same registered, normalized frames and the same per-pixel
+    # rejection decisions.  The ordinary master is unaffected either way.
+    proper_coaddition: ProperCoadditionParameters = field(
+        default_factory=ProperCoadditionParameters
+    )
     master_metadata_overrides: tuple[MasterMetadataOverride, ...] = ()
     raw_frame_metadata_overrides: tuple[RawFrameMetadataOverride, ...] = ()
     # Calibrated Lights are computed in memory and registered directly.  They
@@ -283,6 +294,7 @@ class PipelineParameters:
             )
         self.xisf_decode.validate()
         self.global_normalization.validate()
+        self.proper_coaddition.validate()
         seen_overrides: set[str] = set()
         for override in self.master_metadata_overrides:
             override.validate()
@@ -320,6 +332,13 @@ class PipelineParameters:
             ],
             "materializeCalibratedLights": self.materialize_calibrated_lights,
             "captureDrizzleInputs": self.capture_drizzle_inputs,
+            # Serialized only when asked for, so every digest built over these
+            # parameters is unchanged for a run that does not use it.
+            **(
+                {"properCoaddition": self.proper_coaddition.serializable()}
+                if self.proper_coaddition.enabled
+                else {}
+            ),
             "cosmeticHotPixelSigma": self.cosmetic_hot_pixel_sigma,
             "durableIntermediates": self.durable_intermediates,
         }
@@ -335,6 +354,9 @@ class PipelineResult:
     # Per filter, the drizzle inputs captured by ``capture_drizzle_inputs``
     # (in-memory rejection masks; not part of the serializable receipt).
     drizzle_groups: Mapping[str, DrizzleGroupInputs] = field(default_factory=dict)
+    # Per filter, the additional proper-coaddition product, when the recipe
+    # asked for one.  The ordinary masters above stay the primary products.
+    proper_coadd_paths: Mapping[str, str] = field(default_factory=dict)
 
     def serializable(self) -> dict[str, Any]:
         return {
@@ -343,6 +365,11 @@ class PipelineResult:
             "state": self.state,
             "masterLightPaths": list(self.master_light_paths),
             "previewPaths": list(self.preview_paths),
+            **(
+                {"properCoaddPaths": dict(self.proper_coadd_paths)}
+                if self.proper_coadd_paths
+                else {}
+            ),
         }
 
 
@@ -1159,6 +1186,7 @@ class _RejectionMaskRecorder:
         self.bits = [
             np.zeros((height, (width + 7) // 8), dtype=np.uint8) for _ in range(frame_count)
         ]
+        self._rows_seen = np.zeros(height, dtype=bool)
 
     def __call__(self, observation: Any) -> None:
         accepted = np.asarray(observation.accepted, dtype=bool)
@@ -1166,6 +1194,13 @@ class _RejectionMaskRecorder:
         rows = accepted.shape[1]
         for index, frame_bits in enumerate(self.bits):
             frame_bits[first_row : first_row + rows] = np.packbits(accepted[index], axis=1)
+        self._rows_seen[first_row : first_row + rows] = True
+
+    @property
+    def complete(self) -> bool:
+        """Every row was observed; an unobserved row would read as all rejected."""
+
+        return bool(np.all(self._rows_seen))
 
 
 def _compose_tile_observers(*observers: Any) -> Callable[[Any], None] | None:
@@ -3371,6 +3406,8 @@ class _NormalizationFits:
         parameters: PipelineParameters,
         execution_tuning: Any,
         ordered_groups: Sequence[tuple[str, list[Path]]],
+        *,
+        prefetch: bool = True,
     ) -> None:
         self._plan = plan
         self._registered = registered
@@ -3381,7 +3418,7 @@ class _NormalizationFits:
         # Python-level work does not scale past a few threads anyway.
         self._prefetch_workers = max(2, execution_tuning.cpu_workers // 3)
         self._ordered_groups = ordered_groups
-        self._prefetch = parameters.global_normalization.enabled and len(ordered_groups) > 1
+        self._prefetch = prefetch and parameters.global_normalization.enabled and len(ordered_groups) > 1
         self._pool: ThreadPoolExecutor | None = None
         self._prefetched: dict[str, Any] = {}
 
@@ -3438,6 +3475,19 @@ class _NormalizationFits:
             self._job(next_name, next_paths, self._prefetch_workers)
         )
 
+    def prefetch_all(self, order: Sequence[int], *, concurrent: int) -> None:
+        """Start the fit of every group, in ``order``, on ``concurrent``
+        helper threads, so each group's integration waits only for its own
+        fit while the fits of later groups overlap earlier integrations."""
+
+        if not self._parameters.global_normalization.enabled:
+            return
+        self._pool = ThreadPoolExecutor(max_workers=concurrent, thread_name_prefix="ufwbpp-normalize")
+        workers = max(2, self._cpu_workers // concurrent)
+        for position in order:
+            name, paths = self._ordered_groups[position]
+            self._prefetched[name] = self._pool.submit(self._job(name, paths, workers))
+
     def fit(self, group_name: str, paths: list[Path]) -> tuple[Any, list[StellarScaleHint | None], float, bool]:
         """The fit of ``group_name``: its result, hints, fit seconds and
         whether it was prefetched."""
@@ -3464,6 +3514,7 @@ class _GroupProducts:
     drizzle: DrizzleGroupInputs | None
     record: dict[str, Any]
     timing: dict[str, float]
+    proper_coadd: Path | None = None
 
 
 def _public_normalization_evidence(
@@ -3520,6 +3571,28 @@ def _with_region_weights(
     return attached, mapped
 
 
+# Cores per concurrently integrated group.  A group's integration keeps
+# about five cores busy on average (serial reads, writes and Python-level
+# work between its multithreaded kernels), so on larger machines two groups
+# side by side fill the idle cores.
+_CORES_PER_CONCURRENT_GROUP = 6
+
+
+def _group_concurrency(parameters: PipelineParameters, tuning: Any, groups: int) -> int:
+    """How many output groups integrate at the same time.
+
+    Only the CPU integration runs groups side by side (the Metal executor is
+    one per run); the masters never depend on the count, which only changes
+    the schedule.
+    """
+
+    backend = parameters.ordinary_integration_backend
+    cpu = backend == "portable-cpu" or (backend == "auto" and load_native_kernels() is not None)
+    if not cpu or groups < 2:
+        return 1
+    return max(1, min(groups, int(tuning.cpu_workers) // _CORES_PER_CONCURRENT_GROUP))
+
+
 def _integrate_group(
     plan: _RunPlan,
     dirs: _StagingDirs,
@@ -3534,7 +3607,7 @@ def _integrate_group(
     execution_tuning: Any,
     shared_crop: tuple[int, int, int, int] | None,
     group_crops: Mapping[str, Any],
-    tile_observers: Callable[[str, Sequence[str]], Any] | None,
+    tile_observer: Callable[[Any], None] | None,
     ledger: _RunLedger,
 ) -> _GroupProducts:
     """Normalize, reject and integrate one output group, then crop the master
@@ -3611,12 +3684,16 @@ def _integrate_group(
     if plan.region_weight_maps:
         expressions, region_mapped_lights = _with_region_weights(plan, paths, expressions)
     integration_started = time.perf_counter()
+    proper = parameters.proper_coaddition
+    reuse_rejection = proper.enabled and proper.outlier_handling == "reuse-rejection"
     mask_recorder = (
         _RejectionMaskRecorder(len(paths), plan.light_info[paths[0]].shape)
-        if parameters.capture_drizzle_inputs
+        if parameters.capture_drizzle_inputs or reuse_rejection
         else None
     )
-    if mask_recorder is not None and any(path not in lights.calibrated for path in paths):
+    if parameters.capture_drizzle_inputs and any(
+        path not in lights.calibrated for path in paths
+    ):
         raise CalibrationError(
             "DRIZZLE_INPUTS_UNAVAILABLE",
             "drizzle inputs need materialized calibrated Lights",
@@ -3647,13 +3724,10 @@ def _integrate_group(
         quality_weights=[plan.quality_weights[path] for path in paths],
         map_paths=full_maps,
         durable=parameters.durable_intermediates,
-        tile_observer=_compose_tile_observers(
-            tile_observers(group_name, [str(path) for path in paths]) if tile_observers is not None else None,
-            mask_recorder,
-        ),
+        tile_observer=_compose_tile_observers(tile_observer, mask_recorder),
     )
     drizzle = None
-    if mask_recorder is not None:
+    if parameters.capture_drizzle_inputs and mask_recorder is not None:
         drizzle = DrizzleGroupInputs(
             filter_name=group_name,
             cfa_pattern=cfa_pattern,
@@ -3753,6 +3827,103 @@ def _integrate_group(
             },
         },
     )
+    proper_record: dict[str, Any] | None = None
+    proper_light: Path | None = None
+    if proper.enabled:
+        proper_started = time.perf_counter()
+        proper_full = dirs.work / f"proper_{token}.fits"
+        # After global normalization every frame carries the reference's
+        # photometric scale, so the model's per-frame flux scale is the same
+        # constant for all of them: the transparency difference has moved
+        # into each frame's own background sigma, which is exactly where the
+        # weight F_j / sigma_j^2 needs it.  Without normalization there is no
+        # measured transparency to use and equal flux scales are assumed.
+        flux_scale_source = (
+            "normalized-to-reference"
+            if parameters.global_normalization.enabled
+            else "unit-assumed-equal-transparency"
+        )
+        if reuse_rejection and (mask_recorder is None or not mask_recorder.complete):
+            raise CalibrationError(
+                "PROPER_COADD_REJECTION_UNAVAILABLE",
+                f"{group_name}: the integration did not report an accepted-sample mask for every row",
+            )
+        proper_result = proper_coadd_group(
+            expressions,
+            proper_full,
+            master_path=full_master,
+            shape=integration.shape,
+            flux_scales=[1.0] * len(expressions),
+            accepted_bits=mask_recorder.bits if mask_recorder is not None else None,
+            metadata={
+                "IMAGETYP": "Master Light Proper Coadd",
+                "FILTER": group_name,
+                "OAFSTATE": OUTPUT_STATE,
+                "OAFWCS": "UNSOLVED",
+                "EXPTIME": reference_exposure,
+                "OAFINTTM": total_exposure,
+                "OAFNORM": normalization_method,
+                **group_cfa_metadata,
+                **domain_metadata,
+            },
+            parameters=proper,
+            division_floor=parameters.integration.division_floor,
+            max_memory_bytes=parameters.integration.max_memory_bytes,
+            workers=max(1, execution_tuning.cpu_workers),
+            durable=False,
+        )
+        proper_light = dirs.masters / f"proper_light_{token}.fits"
+        proper_statistics, proper_sha256 = _crop_fits(
+            proper_full,
+            proper_light,
+            crop,
+            {
+                "IMAGETYP": "Master Light Proper Coadd",
+                "FILTER": group_name,
+                "EXPTIME": reference_exposure,
+                "OAFINTTM": total_exposure,
+                "OAFSTATE": OUTPUT_STATE,
+                "OAFWCS": "UNSOLVED",
+                "OAFCROP": "AUTO" if parameters.auto_crop else "NONE",
+                "OAFNFRM": len(paths),
+                "OAFNORM": normalization_method,
+                "OAFPCOAD": PROPER_COADD_ALGORITHM_ID,
+                "OAFPCFR": proper_result.flux_scale_norm,
+                "OAFPCFWH": proper_result.coadd_fwhm_pixels,
+                "OAFPCSKY": proper_result.sky_added,
+                "OAFPCAPO": proper.apodization_pixels,
+                "OAFPCREP": proper_result.replaced_samples,
+                "OAFPCOUT": proper.outlier_handling,
+                **group_cfa_metadata,
+                **domain_metadata,
+            },
+            max_memory_bytes=parameters.integration.max_memory_bytes,
+            durable=parameters.durable_intermediates,
+        )
+        ledger.record(
+            proper_light,
+            "MASTER_LIGHT_PROPER_COADD_UNSOLVED",
+            statistics=proper_statistics,
+            sha256=proper_sha256,
+            details={"filter": group_name, "algorithm": PROPER_COADD_ALGORITHM_ID},
+        )
+        remove_file(proper_full)
+        proper_record = {
+            **proper_result.serializable(),
+            "outputPath": str(proper_light.relative_to(dirs.root)),
+            "uncroppedSha256": proper_result.output_sha256,
+            "croppedSha256": proper_sha256,
+            "fluxScaleSource": flux_scale_source,
+            # Region weight maps scale samples in the ordinary weighted mean;
+            # the transform has no per-sample weight, so a group that uses
+            # them coadds unweighted and the receipt says so.
+            "regionWeightMapsApplied": False,
+            "regionWeightMapFrames": len(region_mapped_lights),
+            "statistics": proper_statistics.serializable(),
+            "primaryProduct": False,
+            "ordinaryMasterUnaffected": True,
+        }
+        timing["properCoaddition"] = time.perf_counter() - proper_started
     cropped_maps: dict[str, Path] = {}
     map_statistics: dict[str, Any] = {}
     for map_name, artifact_kind in (
@@ -3825,8 +3996,11 @@ def _integrate_group(
         "cfaPattern": cfa_pattern,
         "masterStatistics": master_stats.serializable(),
         "mapStatistics": map_statistics,
+        **({"properCoaddition": proper_record} if proper_record is not None else {}),
     }
-    return _GroupProducts(master_light, preview_path, drizzle, record, timing)
+    return _GroupProducts(
+        master_light, preview_path, drizzle, record, timing, proper_coadd=proper_light
+    )
 
 
 def _trusted_reuse_receipt(
@@ -3975,11 +4149,31 @@ def _run_portable_pipeline_fits(
             "groups": {},
         }
         ordered_groups = sorted(plan.output_groups.items())
-        fits = _NormalizationFits(plan, lights.by_group, parameters, execution_tuning, ordered_groups)
-        products: dict[str, _GroupProducts] = {}
-        for position, (group_name, paths) in enumerate(ordered_groups):
-            fits.prefetch_after(position)
-            products[group_name] = _integrate_group(
+        concurrency = _group_concurrency(parameters, execution_tuning, len(ordered_groups))
+        fits = _NormalizationFits(
+            plan, lights.by_group, parameters, execution_tuning, ordered_groups,
+            prefetch=concurrency == 1,
+        )
+        # Observers are created here, in group order, so a caller that keeps
+        # them sees the groups in that order however the groups are scheduled.
+        observers = {
+            group_name: (
+                _integration_tile_observers(group_name, [str(path) for path in paths])
+                if _integration_tile_observers is not None
+                else None
+            )
+            for group_name, paths in ordered_groups
+        }
+        # Each group records its artifacts in its own ledger; the run ledger
+        # takes them in group order, so the receipt does not depend on which
+        # group finished first.
+        group_ledgers = {group_name: _RunLedger(staging) for group_name, _ in ordered_groups}
+
+        def integrate(position: int) -> _GroupProducts:
+            group_name, paths = ordered_groups[position]
+            if concurrency == 1:
+                fits.prefetch_after(position)
+            return _integrate_group(
                 plan,
                 dirs,
                 group_name,
@@ -3992,11 +4186,29 @@ def _run_portable_pipeline_fits(
                 execution_tuning=execution_tuning,
                 shared_crop=shared_crop,
                 group_crops=group_crops,
-                tile_observers=_integration_tile_observers,
-                ledger=ledger,
+                tile_observer=observers[group_name],
+                ledger=group_ledgers[group_name],
             )
+
+        if concurrency == 1:
+            results = [integrate(position) for position in range(len(ordered_groups))]
+        else:
+            # Largest groups start first so the last group to finish is a
+            # small one; every group's products are independent of the order.
+            schedule = sorted(
+                range(len(ordered_groups)),
+                key=lambda position: (-len(ordered_groups[position][1]), position),
+            )
+            fits.prefetch_all(schedule, concurrent=concurrency)
+            with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="ufwbpp-group") as pool:
+                futures = {position: pool.submit(integrate, position) for position in schedule}
+            results = [futures[position].result() for position in range(len(ordered_groups))]
+        products: dict[str, _GroupProducts] = {}
+        for (group_name, _paths), product in zip(ordered_groups, results, strict=True):
+            products[group_name] = product
+            ledger.artifacts.extend(group_ledgers[group_name].artifacts)
             stage_timing["groups"][group_name] = {
-                key: round(value, 3) for key, value in products[group_name].timing.items()
+                key: round(value, 3) for key, value in product.timing.items()
             }
         fits.shutdown()
         remove_tree(dirs.work)
@@ -4037,6 +4249,7 @@ def _run_portable_pipeline_fits(
                 "calibration": ledger.stage_statistics,
                 "registration": lights.execution,
                 "integrationGroups": {name: product.record for name, product in products.items()},
+                "integrationGroupConcurrency": concurrency,
                 "timingSeconds": stage_timing,
             },
             # Platform facts behind the execution choices: what the machine
@@ -4082,6 +4295,11 @@ def _run_portable_pipeline_fits(
                 )
                 for name, product in products.items()
                 if product.drizzle is not None
+            },
+            proper_coadd_paths={
+                name: published_path(product.proper_coadd)
+                for name, product in products.items()
+                if product.proper_coadd is not None
             },
         )
     finally:

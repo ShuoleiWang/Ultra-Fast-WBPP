@@ -162,6 +162,23 @@ export type DrizzleScale = 1 | 2 | 3 | 4;
 export type DrizzleKernel = "square" | "circular" | "gaussian" | "point";
 export const DRIZZLE_SCALES: readonly DrizzleScale[] = [1, 2, 3, 4];
 export const DRIZZLE_KERNELS: readonly DrizzleKernel[] = ["square", "circular", "gaussian", "point"];
+/**
+ * Proper coaddition, opt-in per session. It is optional in the recipe: a run
+ * that leaves it off sends exactly the recipe it sent before it existed. (The
+ * engine's robust IRLS combination is a recipe option only; it measured worse
+ * than the default and is not offered here.)
+ */
+export interface ProperCoadditionOptions {
+  enabled: true;
+  outlierHandling: "reuse-rejection";
+  apodizationPixels: number;
+}
+/** The engine's defaults for the extra product; the checkbox only turns them on. */
+export const PROPER_COADDITION_REQUEST: ProperCoadditionOptions = {
+  enabled: true,
+  outlierHandling: "reuse-rejection",
+  apodizationPixels: 64,
+};
 export interface ProjectRecipeOptions {
   balanced: true;
   drizzleEnabled: boolean;
@@ -170,6 +187,11 @@ export interface ProjectRecipeOptions {
   drizzleKernel: DrizzleKernel;
   solverRequired: true;
   calibrationWorkflow: "mono-standard-v1";
+  /**
+   * Writes `details/runs/<target>/products/<FILTER>/<FILTER>.proper.fits` beside
+   * each target's solved master; the project's masters are unchanged. Absent when off.
+   */
+  properCoaddition?: ProperCoadditionOptions;
 }
 export interface ReviewApprovalSelection {
   sourceSha256: string;

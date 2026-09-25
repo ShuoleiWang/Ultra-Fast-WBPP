@@ -14,23 +14,34 @@ updates:
     groups:
       desktop:
         patterns: ["*"]
+  # The pip entries raise a range only when a new release falls outside it;
+  # CI resolves the newest compatible versions on every run anyway.
   - package-ecosystem: pip
     directory: "/packages/light-frame-qc"
     schedule:
       interval: weekly
+    versioning-strategy: increase-if-necessary
   - package-ecosystem: pip
     directory: "/packages/engine"
     schedule:
       interval: weekly
+    versioning-strategy: increase-if-necessary
   - package-ecosystem: pip
     directory: "/packages/registration"
     schedule:
       interval: weekly
+    versioning-strategy: increase-if-necessary
   - package-ecosystem: pip
     directory: "/packaging/engine"
     schedule:
       interval: weekly
+    versioning-strategy: increase-if-necessary
+  # One pull request: the codeql-action init and analyze pins must move
+  # together (split bumps fail with a configuration version mismatch).
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
