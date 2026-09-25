@@ -4,7 +4,7 @@ This is the contributor guide for coding agents and for people. OpenAI Codex rea
 
 ## What this project is
 
-Ultra-Fast WBPP is a desktop and headless preprocessing pipeline for astrophotography: quality-gated Light selection, calibration, registration, normalization, rejection and integration, optional drizzle, plate solving with verification, and receipted publication of linear masters. It is a Python engine (`packages/engine`, `packages/light-frame-qc`, `packages/registration`) with multithreaded C++ kernels and an audited Metal path (`engine/native`), driven by a Tauri 2 + React desktop (`apps/desktop`) that runs the engine's command line, one process per operation. Supported platforms are macOS 14+ on Apple Silicon and Windows 10 22H2 / 11 x64. The project is alpha.
+Ultra-Fast WBPP is a desktop and headless preprocessing pipeline for astrophotography: quality-gated Light selection, calibration, registration, normalization, rejection and integration, optional drizzle, plate solving with verification, and receipted publication of linear masters. It is a Python engine (`packages/engine`, `packages/light-frame-qc`, `packages/registration`) with multithreaded C++ kernels and an audited Metal path (`native`), driven by a Tauri 2 + React desktop (`apps/desktop`) that runs the engine's command line, one process per operation. Supported platforms are macOS 14+ on Apple Silicon and Windows 10 22H2 / 11 x64. The project is alpha.
 
 Naming: the product is "Ultra-Fast WBPP" and its command line is `ultra-fast-wbpp`. Code identifiers use the short token `ufwbpp` (the `ufwbpp` and `ufwbpp_registration` Python packages, `ufwbpp_native_*` C symbols, `UFWBPP_*` environment variables, the `ufwbpp-engine` sidecar); names a user sees spell the product out (`ultra-fast-wbpp-desktop`, `~/.ultra-fast-wbpp`, `io.github.shuoleiwang.ultra-fast-wbpp`). Three things keep the project's former name `openastroflow` on purpose, because users' files carry them: the `OAF*` FITS keyword namespace of the masters, the text of the content-addressed catalog manifests, and an existing data root (`~/.openastroflow`, `%LOCALAPPDATA%\OpenAstroFlow`), which is used in place when present.
 
@@ -15,7 +15,7 @@ It is an independent implementation with no PixInsight/PCL source or binaries. M
 1. **Inputs are read-only, outputs are create-only.** The engine never modifies a source file or an earlier result; every run publishes into a directory that did not exist (`OUTPUT_EXISTS` otherwise, through the platform layer's no-replace rename), and intermediates live under the output volume, never in a system temp directory.
 2. **Fail closed.** No product without its receipt; no `SOLVED` WCS without an engine-verified solution (a header or N.I.N.A. hint is a `SEED`, never promoted); the desktop shows "done" only after Rust re-verified receipt, hashes and final sky coordinates. Do not add "best effort" paths that publish partial science.
 3. **Never commit** acquisition data (FITS/XISF/XDRZ), benchmark or evaluation result files, absolute home-directory paths (a macOS or Windows user folder in any string), API keys or signing material, proprietary application code, or third-party catalogs. `scripts/check_public_tree.py .` and `scripts/check_local_links.py .` run in CI and locally as `make source-check`. Fixtures are tiny and synthetic under `tests/fixtures` (and `packages/**/tests/fixtures`). Receipts written by harnesses must be share-safe (basenames, not paths).
-4. **Scientific changes are contracts.** State the mathematical contract, keep the NumPy/CPU reference implementation, hold the native kernel value-identical to it with a differential test (`packages/engine/tests/test_native_kernels.py`, `engine/native/tests`), give the algorithm a versioned identifier that receipts record, and keep the previous identifier reproducible. When a change may legitimately move pixels (a different numerical evaluation), state and check what it may do with [`tools/validation/master_tolerance_gate.py`](tools/validation/master_tolerance_gate.py). Never loosen a scientific threshold to make a test pass. Discuss algorithm changes in an issue first.
+4. **Scientific changes are contracts.** State the mathematical contract, keep the NumPy/CPU reference implementation, hold the native kernel value-identical to it with a differential test (`packages/engine/tests/test_native_kernels.py`, `native/tests`), give the algorithm a versioned identifier that receipts record, and keep the previous identifier reproducible. When a change may legitimately move pixels (a different numerical evaluation), state and check what it may do with [`tools/validation/master_tolerance_gate.py`](tools/validation/master_tolerance_gate.py). Never loosen a scientific threshold to make a test pass. Discuss algorithm changes in an issue first.
 5. **Performance changes are proven, not claimed.** A pipeline change is verified on a real project by comparing the SHA-256 of the solved masters with a baseline built from the base commit on the same OS (bit-identical), or by the tolerance gate plus unchanged evaluator statuses when pixels may move; report wall time before and after. A change that costs run time needs a strong reason.
 6. **Defaults stay reproducible.** `selection.policy: legacy-gate` is the default and reproduces the historical admission exactly; kernel ABIs `v1`/`v2` remain callable; `include-all` is diagnostic. New behaviour goes behind a recipe field with a documented default.
 7. **Receipts name what ran.** Algorithm ids, kernel ids, backend, selection policy, platform facts and their sources (`platform.hardware`, `platform.tuning`, `platform.nativeKernels`, `execution.sourceExtraction`) are part of every receipt. A fact that was not measured is reported as `fallback`/`unavailable`, not invented.
@@ -27,31 +27,32 @@ It is an independent implementation with no PixInsight/PCL source or binaries. M
 
 | Path | What lives there | Notes for changes |
 |---|---|---|
-| `packages/engine/src/ufwbpp/` | The engine: `cli.py` (every command), `workflows/` (`project.py` multi-target/filter projects and colour products, `single_target.py` one field, `solve.py`, `contracts.py`), `pixel_pipeline.py` (plan → calibration masters → fused calibrate+warp → per-group normalization/rejection/integration), `calibration.py`, `global_normalization.py`, `residual_background.py`, `transient_rejection.py` (fast-Radon trail corridors), `drizzle_native.py`, `selection/` (unattended policy, guards, counterfactual, region weight maps), `blink_session.py`, `native_kernels.py` (ctypes bridge), `integrity.py` (canonical JSON and SHA-256 forms), `platform/` (OS services), `astap_backend.py` / `astrometry_net_backend.py` / `catalog_correspondence.py` (solvers and verification), `recipe.py`, `runtime.py`, `planning.py` | Keep receipt schemas stable; the orchestration functions are split into named stages, keep new work in a stage. `reference/` holds NumPy oracles used by tests. |
+| `packages/engine/src/ufwbpp/` | The engine, one subpackage per domain: `cli.py` (every command); `workflows/` (`project.py` multi-target/filter projects and colour products; `single_target.py` one field, its stages in `sources.py`, `screening.py`, `registration.py`, `integration.py` and `products.py`; `solve.py`; `contracts.py`); `stacking/` (`pipeline.py`: plan → calibration masters → fused calibrate+warp → per-group normalization/rejection/integration, its stages in `run_plan.py`, `masters.py`, `lights.py`, `crop.py` and `groups.py`; the numerics in `integration.py`, `normalization.py`, `residual_background.py`, `transient_rejection.py` (fast-Radon trail corridors), `drizzle_native.py` and `metal_integration.py`); `calibration/` (master metadata, calibration policy, desktop preflight); `image_io/` (FITS and XISF primitives); `selection/` (unattended policy, guards, counterfactual, region weight maps); `quality/` and `blink/` (desktop review and Blink screening); `solvers/` (Astrometry.net and ASTAP adapters, catalog manifests, WCS verification); `products/` (create-only publication, previews, colour, mosaics); `platform/` (OS services); and at the top `native_kernels.py` (ctypes bridge), `integrity.py` (canonical JSON and SHA-256 forms), `errors.py`, `recipe.py`, `runtime.py`, `planning.py` | Keep receipt schemas stable; the orchestration functions are split into named stages, keep new work in a stage. A private helper (`_name`) is shared only inside its subpackage. `reference/` holds NumPy oracles used by tests. |
 | `packages/light-frame-qc/src/lightframeqc/` | Light measurement, the quality gate and Blink flags: `measure.py`, `analysis.py`, `quality_gate.py`, `blink_flags.py`, `blink_reference.py`, `nightly_statistics.py`, `native_psf.py` (native-resolution star stamps), `cfa.py` (Bayer), `source_extraction.py` (SEP determinism self-test), `registration.py` (QC-scale registration), `content_hash.py`; its own `light-frame-qc analyze` command | Its README is in Chinese. Measurements carry provenance fields; check them before trusting a number. |
-| `engine/native/` | C++20 kernels (`PortableKernels.cpp`: Lanczos-3 warp, MAD rejection, masked mean; `DrizzleKernel.cpp`, `DebayerKernel.cpp`, `Lanczos3Table.cpp`, `FusedIntegration.cpp`), Metal integration (`MetalFusedIntegration.mm`), C ABI (`c_api.cpp`), tests | Operation-for-operation reproductions of the NumPy reference; `-fno-fast-math -ffp-contract=off`, MSVC `/fp:strict`. New kernels need a Python reference, a differential test and a thread-count invariance test. |
+| `native/` | C++20 kernels (`PortableKernels.cpp`: Lanczos-3 warp, MAD rejection, masked mean; `DrizzleKernel.cpp`, `DebayerKernel.cpp`, `Lanczos3Table.cpp`, `FusedIntegration.cpp`), Metal integration (`MetalFusedIntegration.mm`), C ABI (`c_api.cpp`), tests | Operation-for-operation reproductions of the NumPy reference; `-fno-fast-math -ffp-contract=off`, MSVC `/fp:strict`. New kernels need a Python reference, a differential test and a thread-count invariance test. |
 | `packages/registration/` | Registration library (`ufwbpp-registration`) | Portable reference path for detection, transform estimation, warping, crop and weights. |
 | `apps/desktop/` | React 19 interface (`src/`, formatted with Prettier) and Tauri Rust bridge (`src-tauri/src/`: `project/` run lifecycle and verification, `sidecar/` engine discovery, `doctor --json` capability probe, inspection and blink, `catalog.rs` index management, `platform/` process trees) | See `apps/desktop/README.md` for the code map and checks. |
 | `tools/validation/` | `evaluate_masters.py` (vs PixInsight masters), `master_tolerance_gate.py` | The acceptance tools of the evaluation standard. |
-| `benchmarks/` | `trace_run.py` (real-run tracer), `native_kernels_pipeline.py`, `e2e_stage_timings.py`, `selection_defect_injection.py`, `selection_oracle_report.py`; `results/` holds only the original checked-in reports | New result files are never committed. |
-| `validation/` | Dated, share-safe evidence receipts | Historical; add new receipts only when share-safe and referenced from `docs/validation-matrix.md`. |
+| `benchmarks/` | `trace_run.py` (real-run tracer), `native_kernels_pipeline.py`, `e2e_stage_timings.py`, `selection_defect_injection.py`, `selection_oracle_report.py` | Reports go to `build/`; result files are never committed. |
+| `docs/evidence/` | Dated, share-safe evidence receipts and benchmark reports that the docs cite | Historical. New results stay out of the tree; add a receipt only when a document must cite it and it is share-safe. |
 | `scripts/` | Build and release tooling: `build_native_runtime.py`, `build_engine_sidecar.py`, `stage_tauri_sidecar.py`, `attest_bundled_runtime.py`, `build_sep_wheel.py`, `check_public_tree.py`, `check_local_links.py`, `windows/` | Tested by `tests/`. |
 | `packaging/` | Engine sidecar spec (`packaging/engine`) and the SEP determinism patch | |
 | `docs/` | Architecture, features, evaluation standard, recipes, platforms, validation, design records | Index in `docs/README.md`. |
-| `tests/` | Repository-level tests (build scripts, release wiring, checkers) | |
+| `tests/` | Tests of the repository tooling: build and release scripts, CI and release wiring, checkers, `tools/` and `benchmarks/` | Package tests live in each package's `tests/`. |
 
-Sizes for orientation: about 57 k lines of Python, 9 k lines of C++/Metal (with tests), 1 070 Python tests, 55 Rust tests, 77 Vitest tests, three C++ test binaries.
+Sizes for orientation: about 60 k lines of Python, 9 k lines of C++/Metal (with tests), 1 190 Python tests, 56 Rust tests, 85 Vitest tests, three C++ test binaries.
 
 ## Setup and commands
 
 Prerequisites: Python 3.11+, Rust 1.88+, Node.js 22+, CMake 3.28+, the Tauri prerequisites (Xcode on macOS; VS 2022 Build Tools on Windows, installed by `scripts/windows/bootstrap.ps1`).
 
 ```bash
-make bootstrap BOOTSTRAP_PYTHON=python3.12   # .venv (Homebrew python@3.12 on macOS) with the three editable packages, npm ci, test build of the kernels
+make bootstrap BOOTSTRAP_PYTHON=python3.12   # .venv (Homebrew python@3.12 on macOS) with the three editable packages, npm ci, Release kernels installed
 make desktop-dev        # Tauri dev window (uses .venv's engine)
 make demo               # browser demo of the interface, no data
 make test               # python-test rust-test frontend-test native-test
 make check              # source-check + cargo fmt/clippy + make test
+make clean              # build/, the installed kernels and the staged app resources
 ```
 
 The individual suites, as CI runs them (a pull request runs the jobs its changed paths select, see `scripts/ci_changed_areas.py`; pushes to `main` run all of them):
@@ -66,9 +67,9 @@ npm --prefix apps/desktop run format:check && npm --prefix apps/desktop test && 
 .venv/bin/python scripts/check_public_tree.py . && .venv/bin/python scripts/check_local_links.py .
 ```
 
-The unoptimized test build with Metal enabled is `make native-test` (`cmake -S engine/native -B build/native -DUFWBPP_BUILD_TESTS=ON -DUFWBPP_ENABLE_METAL=ON`, build, `ctest`).
+The unoptimized test build with Metal enabled is `make native-test` (`cmake -S native -B build/native -DUFWBPP_BUILD_TESTS=ON -DUFWBPP_ENABLE_METAL=ON`, build, `ctest`).
 
-Native kernels for real runs: `make native-release-install` (or `python scripts/build_native_runtime.py --build-dir build/native-release`, the chain CI uses) builds `build/native-release` with `CMAKE_BUILD_TYPE=Release`, runs its ctest and installs the library into `packages/engine/src/ufwbpp/native/`. `build/native` (from `make native-build`) is the unoptimized test configuration: run `ctest` there, never install it.
+Native kernels for real runs: `make native-release-install` (or `python scripts/build_native_runtime.py --build-dir build/native-release`, the chain CI uses) builds `build/native-release` with `CMAKE_BUILD_TYPE=Release`, runs its ctest and installs the library into `packages/engine/src/ufwbpp/native/`. The engine loads only that library (or `UFWBPP_NATIVE_LIBRARY`); `build/native` (from `make native-build`) is the unoptimized test configuration: run `ctest` there, never install it. After the move of the kernel sources from `engine/native` to `native/`, delete old `build/native*` directories: their CMake caches name the old source path.
 
 Engine CLI: `ultra-fast-wbpp doctor --json` (hardware, kernels, solver readiness; the desktop's capability probe), `inventory`, `calibration-check`, `quality-check`, `blink-measure`, `plan`, `run <lights…> <calibration…> --output <new dir> --recipe <json> --progress-json`, `run-project` (multi-target/filter projects; the desktop's route, `--request-json` for scripted callers) and `catalog`. Recipes are versioned JSON contracts (`docs/recipes/`); the desktop uses `mono-standard-v1`.
 
@@ -86,7 +87,7 @@ Desktop bundle on macOS: `make desktop-build-macos-prerelease` (release kernels 
 
 ## Gotchas that have cost time
 
-- **Wrong kernel library installed.** Installing the `build/native` (unoptimized) library makes every kernel 6–7× slower and a project run takes minutes instead of ~76 s. Check `describe_native_kernels()['loaded']` and the library size (release ≈ 225 KB, debug ≈ 640 KB on macOS); reinstall from `build/native-release`.
+- **Wrong kernel library installed.** The engine no longer falls back to `build/native`, but installing that unoptimized library (or pointing `UFWBPP_NATIVE_LIBRARY` at it) makes every kernel 6–7× slower and a project run takes minutes instead of ~76 s. Check `describe_native_kernels()['loaded']` and the library size (release ≈ 225 KB, debug ≈ 640 KB on macOS); reinstall from `build/native-release`.
 - **Bit-identity baselines are per OS.** An OS upgrade changes libm/Accelerate rounding, so master hashes from a previous OS do not match; rebuild the baseline from a `git worktree` of the base commit on the same OS, with its own kernel library and `PYTHONPATH` pointing at all three packages (they are editable installs of the main tree). Windows and macOS masters differ legitimately; compare across platforms only with the tolerance gate.
 - **macOS 27 / Xcode 27 release builds** fail with `E0463 can't find crate` because dyld rejects the stripped proc-macro dylibs; build with `CARGO_PROFILE_RELEASE_STRIP=none`. `cargo clean` does not help.
 - **QC measurements can fail silently.** The native PSF path once returned nothing on scaled 16-bit FITS for a whole round while the summary looked plausible; read the provenance fields.
@@ -95,7 +96,7 @@ Desktop bundle on macOS: `make desktop-build-macos-prerelease` (release kernels 
 - **Solver PATH.** A Finder-launched app inherits launchd's minimal `PATH`; the solver runtime prepends the solver's own directories so `solve-field` finds its helpers. Keep that when touching `SolverProcessRuntime`.
 - **Spawned pools.** Scripts that use the spawn start method need an `if __name__ == "__main__":` guard, or every worker re-runs the script.
 - **ETXTBSY on Linux.** The sidecar launcher retries a "text file busy" exec; the CI test that caught it stays.
-- **Metal is not tested on hosted CI.** GitHub's macOS runners expose no Metal device: `ctest` reports `native-core-metal-differential` as skipped and the C-ABI Metal checks return early, so a green CI proves only that the Metal path compiles. Verify a change to `engine/native/metal` or the Metal executor with `make native-test` on Apple Silicon.
+- **Metal is not tested on hosted CI.** GitHub's macOS runners expose no Metal device: `ctest` reports `native-core-metal-differential` as skipped and the C-ABI Metal checks return early, so a green CI proves only that the Metal path compiles. Verify a change to `native/metal` or the Metal executor with `make native-test` on Apple Silicon.
 - **Shell details.** Quote globs under zsh; use absolute paths when several shells run in parallel; run `tsc` as `./node_modules/.bin/tsc` inside `apps/desktop` (a bare `npx tsc` elsewhere installs an unrelated package).
 - **Real runs are long-ish.** A full project run is about 76 s on an M3 Pro and 4.5 min on the validation laptop; `evaluate_masters.py` takes about two minutes per 26 MP filter pair; the defect-injection harness re-integrates several times. Plan runs, don't poll them.
 
@@ -110,14 +111,21 @@ Desktop bundle on macOS: `make desktop-build-macos-prerelease` (release kernels 
 `workflows/project.py` runs a project (targets, filters, shared calibration,
 colour products and mosaics) and calls `workflows/single_target.py` once per
 target; `workflows/solve.py` owns the final solve and WCS verification and
-`workflows/contracts.py` the request, selection and progress types. Both run
-functions and `pixel_pipeline._run_portable_pipeline_fits` read as a sequence
-of named stages (`_validated_sources`, `_screen_lights`, `_plan_run`,
-`_build_calibration_masters`, `_integrate_group`, ...); a new step belongs in
-a stage, not inline. Use `calibration_inputs.py` for content-bound master
+`workflows/contracts.py` the request, selection and progress types.
+`run_project_e2e`, `run_e2e` and `stacking.pipeline.run_portable_pipeline_fits`
+read as a sequence of named stages (`_prepare_shared_calibration`,
+`_validated_sources`, `_screen_lights`, `_integrate_admitted_lights`,
+`_plan_run`, `_build_calibration_masters`, `_integrate_group`, ...), each in
+the module of its step (`workflows/screening.py`, `workflows/integration.py`,
+`stacking/masters.py`, `stacking/groups.py`, ...); a new step belongs in a
+stage, not inline. Use `calibration/inputs.py` for content-bound master
 metadata, `image_io/fits.py` for FITS primitives, `solvers/process.py` for
-shared solver execution, `publication.py` for create-only colour/mosaic
-publication and `integrity.py` for the byte forms digests are computed over.
+shared solver execution, `products/publication.py` for create-only
+colour/mosaic publication, `errors.py` for errors several packages raise and
+`integrity.py` for the byte forms digests are computed over. A private helper
+(`_name`) is shared only inside its subpackage; one another subpackage needs
+gets a public name. Engine modules import without cycles (only the lazy
+`hardware` ↔ `native_kernels` ↔ `performance_profile` probe remains).
 The desktop controller is split into `project/` and `sidecar/` modules; its
 command names and the UI bridge contract stay stable.
 

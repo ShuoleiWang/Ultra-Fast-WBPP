@@ -5,12 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from ufwbpp.workflows.single_target import (
-    E2EError,
-    E2ERequest,
-    bind_review_approval_selections,
-)
-from ufwbpp.quality_preflight import inspect_light_quality
+from ufwbpp.workflows.single_target import E2EError, E2ERequest
+from ufwbpp.workflows.review import bind_review_approval_selections
+from ufwbpp.quality.preflight import inspect_light_quality
 
 from conftest import write_frame
 
@@ -23,7 +20,7 @@ def isolated_qc_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 def test_quality_preflight_reuses_analysis_but_remeasures_pixels_and_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import ufwbpp.quality_preflight as preflight
+    import ufwbpp.quality.preflight as preflight
 
     light = write_frame(tmp_path / "light.fit", "Light")
     calls = {"measure": 0, "gate": 0}
@@ -49,7 +46,7 @@ def test_quality_preflight_reuses_analysis_but_remeasures_pixels_and_gate(
 
 
 def test_quality_cache_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    from ufwbpp.quality_cache import quality_cache_directory
+    from ufwbpp.quality.cache import quality_cache_directory
 
     monkeypatch.setenv("UFWBPP_QC_CACHE_DIR", "off")
     assert quality_cache_directory() is None

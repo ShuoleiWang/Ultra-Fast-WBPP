@@ -21,10 +21,6 @@ solution.  A failed final solve publishes only ``<output>.unsolved`` evidence.
 
 from __future__ import annotations
 
-from lightframeqc.cfa import CHANNEL_NAMES, is_cfa_pattern, normalize_pattern as normalize_cfa_pattern
-from ..integrity import canonical_json_document, sha256_digest
-from ..calibration_policy import MONO_STANDARD, workflow_receipt
-
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
@@ -40,18 +36,51 @@ import shutil
 import stat
 import tempfile
 import traceback
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, NamedTuple, Sequence
 
 from astropy.io import fits
 from astropy.wcs import WCS
 import numpy as np
 
-from ..calibration import CalibrationError
-from ..color_product import (
+from lightframeqc.cfa import CHANNEL_NAMES, is_cfa_pattern, normalize_pattern as normalize_cfa_pattern
+from lightframeqc.source_extraction import cached_extraction_self_test
+
+from ..calibration.inputs import MasterMetadataOverride
+from ..calibration.policy import MONO_STANDARD, workflow_receipt
+from ..integrity import canonical_json_document, sha256_digest
+from ..models import AssetRole, AssetStatus, FrameAsset, ProjectInventory
+from ..path_budget import DETAILS_DIRECTORY, PROJECT_STAGING_SUFFIX, RUNS_DIRECTORY, target_key
+from ..platform import remove_file, rename_with_retry
+from ..products.color import (
     ColorProductError,
     ColorProductRequest,
     ColorProductResult,
     build_color_product,
+)
+from ..products.mosaic import (
+    MosaicError,
+    MosaicRequest,
+    MosaicResult,
+    ReprojectProvider,
+    build_solved_panel_mosaic,
+)
+from ..products.preview import render_auto_stretch_preview
+from ..solvers.base import SolverBackend, canonical_wcs_sha256, validate_wcs_header
+from ..stacking.crop import histogram_rectangle
+from ..stacking.integration import CalibrationError
+from .common import _fsync_directory, _relativize_solver_attempts, _rename_directory_no_replace, _safe_token
+from .contracts import ProgressEvent
+from .registration import _build_registration_masters
+from .review import bind_review_approval_selections
+from .sharing import _sanitize_shareable_tree, _share_safe_value
+from .single_target import (
+    E2EError,
+    E2ERequest,
+    E2EResult,
+    E2EState,
+    ProgressCallback,
+    ProgressStage,
+    run_e2e,
 )
 from .solve import (
     _SolverHints,
@@ -59,44 +88,13 @@ from .solve import (
     _solve_one,
     _solution_geometry,
 )
-from .single_target import (
-    E2EError,
-    E2ERequest,
-    E2EResult,
-    E2EState,
-    ProgressCallback,
-    ProgressEvent,
-    ProgressStage,
-    _build_registration_masters,
+from .sources import (
     _canonical_inputs,
-    _capture_source,
     _capture_sources,
-    _fsync_directory,
     _input_frame_info,
-    _relativize_solver_attempts,
-    _rename_directory_no_replace,
-    _safe_token,
-    _sanitize_shareable_tree,
-    _share_safe_value,
     _stage_e2e_xisf_inputs,
     _verify_sources,
-    bind_review_approval_selections,
-    run_e2e,
 )
-from ..models import AssetRole, AssetStatus, FrameAsset, ProjectInventory
-from lightframeqc.source_extraction import cached_extraction_self_test
-from ..path_budget import DETAILS_DIRECTORY, PROJECT_STAGING_SUFFIX, RUNS_DIRECTORY, target_key
-from ..platform import remove_file, rename_with_retry
-from ..mosaic import (
-    MosaicError,
-    MosaicRequest,
-    MosaicResult,
-    ReprojectProvider,
-    build_solved_panel_mosaic,
-)
-from ..preview import render_auto_stretch_preview
-from ..pixel_pipeline import MasterMetadataOverride, _histogram_rectangle
-from ..solver import SolverBackend, canonical_wcs_sha256, validate_wcs_header
 
 
 PROJECT_E2E_VERSION = "ultra-fast-wbpp-project-e2e-v1"
@@ -1334,7 +1332,7 @@ def _crop_final_channels(
             common_count += int(np.count_nonzero(common))
             for local_y, row in enumerate(common):
                 heights = np.where(row, heights + 1, 0)
-                candidate = _histogram_rectangle(heights, y0 + local_y)
+                candidate = histogram_rectangle(heights, y0 + local_y)
                 if candidate is not None and (best is None or candidate > best):
                     best = candidate
     if best is None or best[0] == 0:
@@ -1478,17 +1476,52 @@ def _failure_result(
     )
 
 
-def run_project_e2e(
+@dataclass(frozen=True, slots=True)
+class _ProjectRun:
+    """What every stage of one project run shares: the request, the staging
+    tree and its records, the admitted and excluded Lights, and progress."""
+
+    request: ProjectE2ERequest
+    output: Path
+    evidence: Path
+    layout: ProjectLayout
+    sources: tuple[Any, ...]
+    staging: Path
+    details: Path
+    records: dict[str, Any]
+    passed: list[str]
+    excluded: list[str]
+    project_progress: "_ProjectProgress"
+
+
+class _SharedMasters(NamedTuple):
+    direct_approved_panel: bool
+    masters_bias: tuple[str, ...]
+    masters_dark: tuple[str, ...]
+    masters_flat: tuple[str, ...]
+    trusted_generated_master_overrides: tuple[MasterMetadataOverride, ...]
+
+
+class _AlignedChannels(NamedTuple):
+    reference_key: str
+    reference_filter: str
+    mono_paths: dict[str, Path]
+    output_quality: dict[str, dict[str, Any]]
+    astrometry_provenance: dict[str, dict[str, Any]]
+
+
+class _ColorOutputs(NamedTuple):
+    preview_paths: list[Path]
+    color_result: ColorProductResult | None
+    color_paths: dict[str, Path]
+
+
+def _check_project_request(
     request: ProjectE2ERequest,
-    *,
     solver_backends: Sequence[SolverBackend],
-    progress: ProgressCallback | None = None,
-    mosaic_provider: ReprojectProvider | None = None,
-    panel_runner: PanelRunner = run_e2e,
-    mosaic_builder: MosaicBuilder = build_solved_panel_mosaic,
-    color_builder: ColorBuilder = build_color_product,
-) -> ProjectE2EResult:
-    """Run a complete multi-target project and commit one final directory."""
+    mosaic_provider: ReprojectProvider | None,
+) -> tuple[Path, Path, ProjectLayout, ReprojectProvider | None, tuple[Any, ...], Any, dict[str, Any]]:
+    """Refuse a request that cannot run before anything is created."""
 
     output, evidence, layout = _validate_request(request)
     if not solver_backends:
@@ -1497,9 +1530,9 @@ def run_project_e2e(
         any(sum(panel.filter_key == key for panel in layout.panels) > 1 for key in layout.filter_keys)
         or {"r", "g", "b"}.issubset(set(layout.filter_keys))
     ):
-        from ..mosaic import _load_reproject_provider
+        from ..products.mosaic import load_reproject_provider
 
-        capability, mosaic_provider = _load_reproject_provider()
+        capability, mosaic_provider = load_reproject_provider()
         if mosaic_provider is None:
             raise ProjectE2EError(
                 "MOSAIC_BACKEND_UNAVAILABLE", capability.reason or "reproject is unavailable"
@@ -1544,6 +1577,647 @@ def run_project_e2e(
                 "SELECTION_SOURCE_AMBIGUOUS",
                 "selection digests name more than one current Light: " + ", ".join(ambiguous),
             )
+    return output, evidence, layout, mosaic_provider, sources, explicit_selection, run_digests
+
+
+def _prepare_shared_calibration(run: _ProjectRun) -> _SharedMasters:
+    """Build the shared calibration library once, or keep a directly approved request as is."""
+
+    request, staging, details, records, project_progress = run.request, run.staging, run.details, run.records, run.project_progress
+    project_progress.phase("prepare", 0, 1, "building shared calibration library")
+    shared_root = details / "shared-calibration"
+    shared_root.mkdir()
+    direct_approved_panel = bool(request.e2e_request.review_approvals)
+    if direct_approved_panel:
+        # The approval digest is bound to the original calibration/source
+        # request. Rewriting raw calibration into shared masters would
+        # change that context. A one-panel project can safely preserve the
+        # exact request and still use run_e2e's within-run master reuse.
+        masters_bias = ()
+        masters_dark = ()
+        masters_flat = ()
+        trusted_generated_master_overrides = ()
+        shared_receipt = {
+            "schemaVersion": 1,
+            "stage": "shared-calibration-library",
+            "mode": "SINGLE_PANEL_DIRECT_APPROVED_REQUEST",
+            "rawIntegrationCount": 0,
+        }
+        _write_json(shared_root / "receipt.json", shared_receipt)
+    else:
+        (
+            masters_bias,
+            masters_dark,
+            masters_flat,
+            trusted_generated_master_overrides,
+            shared_receipt,
+        ) = _build_shared_calibration(request.e2e_request, shared_root)
+    records["sharedCalibration"] = {
+        "receipt": (shared_root / "receipt.json").relative_to(staging).as_posix(),
+        "receiptSha256": sha256_digest(shared_root / "receipt.json"),
+        "mode": shared_receipt["mode"],
+        "rawIntegrationCount": shared_receipt["rawIntegrationCount"],
+    }
+    project_progress.phase("prepare", 1, 1, "shared calibration library verified")
+    return _SharedMasters(direct_approved_panel, masters_bias, masters_dark, masters_flat, trusted_generated_master_overrides)
+
+
+def _run_target_panels(run: _ProjectRun, shared: _SharedMasters, explicit_selection: Any, run_digests: dict[str, Any], solver_backends: Sequence[SolverBackend], panel_runner: PanelRunner) -> tuple[dict[str, list[tuple[SciencePanel, Path]]], dict[str, dict[str, Any]]] | ProjectE2EResult:
+    """Run every target once with all of its filters; a failed target run fails the project."""
+
+    direct_approved_panel, masters_bias, masters_dark, masters_flat, trusted_generated_master_overrides = shared
+    request, evidence, layout, sources, staging, details, records, passed, excluded, project_progress = run.request, run.evidence, run.layout, run.sources, run.staging, run.details, run.records, run.passed, run.excluded, run.project_progress
+    panels_by_filter: dict[str, list[tuple[SciencePanel, Path]]] = {}
+    panel_quality_by_path: dict[str, dict[str, Any]] = {}
+    runs_root = details / RUNS_DIRECTORY
+    runs_root.mkdir()
+    # One run per target carries every filter of that target: the run
+    # registers all Lights onto one reference frame and crops the filter
+    # masters to one common rectangle, so they share their pixel grid.
+    for index, (group, panels) in enumerate(layout.target_runs, start=1):
+        panel_progress = project_progress.panel_callback(index, group)
+        panel_progress(ProgressEvent(ProgressStage.INVENTORY, "started",
+                                     message=f"target {group.target} ({group.filter_name})"))
+        sub_output = runs_root / _safe_token(group.target_key)
+        panel_digests = run_digests[group.target_key]
+        run_explicit_selection = (
+            replace(
+                explicit_selection,
+                decisions=tuple(
+                    decision
+                    for decision in explicit_selection.decisions
+                    if decision.source_sha256 in panel_digests
+                ),
+            )
+            if explicit_selection is not None
+            else None
+        )
+        if direct_approved_panel:
+            sub_request = replace(
+                request.e2e_request,
+                light_files=group.light_files,
+                output_directory=str(sub_output),
+            )
+        else:
+            panel_pipeline_parameters = replace(
+                request.e2e_request.pipeline_parameters,
+                raw_frame_metadata_overrides=tuple(
+                    item
+                    for item in request.e2e_request.pipeline_parameters.raw_frame_metadata_overrides
+                    if item.source_sha256 in panel_digests
+                ),
+                master_metadata_overrides=(
+                    *request.e2e_request.pipeline_parameters.master_metadata_overrides,
+                    *trusted_generated_master_overrides,
+                ),
+            )
+            sub_request = replace(
+                request.e2e_request,
+                light_files=group.light_files,
+                flat_files=(),
+                dark_files=(),
+                bias_files=(),
+                master_bias_files=masters_bias,
+                master_dark_files=masters_dark,
+                master_flat_files=masters_flat,
+                output_directory=str(sub_output),
+                review_approvals=(),
+                pipeline_parameters=panel_pipeline_parameters,
+                explicit_selection=run_explicit_selection,
+            )
+            run_selections = [
+                selection for selection in request.review_selections
+                if selection["sourceSha256"] in panel_digests
+            ]
+            if run_selections:
+                # Bound against this run's own request: its Lights, the
+                # shared masters it will use, the gate policy and the
+                # pipeline parameters, exactly what run_e2e re-verifies.
+                sub_request = bind_review_approval_selections(sub_request, run_selections)
+        sub_result = panel_runner(
+            sub_request,
+            solver_backends=solver_backends,
+            progress=panel_progress,
+        )
+        passed.extend(sub_result.passed_light_paths)
+        excluded.extend(sub_result.excluded_light_paths)
+        record = {
+            "target": group.target,
+            "targetKey": group.target_key,
+            "panels": [panel.serializable() for panel in panels],
+            "success": sub_result.success,
+            "code": sub_result.code,
+            "receipt": Path(sub_result.receipt_path).relative_to(staging).as_posix(),
+            "receiptSha256": sha256_digest(Path(sub_result.receipt_path)),
+        }
+        records["subruns"].append(record)
+        try:
+            record["screening"] = _screening_record(Path(sub_result.receipt_path), staging, group.target)
+        except (OSError, ValueError, json.JSONDecodeError):
+            record["screening"] = None
+        records["screening"] = _project_screening(records["subruns"])
+        if not sub_result.success:
+            sub_message = sub_result.message or f"{group.target}/{group.filter_name}: {sub_result.code}"
+            _verify_sources(sources)
+            return _failure_result(
+                staging=staging,
+                evidence=evidence,
+                code=sub_result.code,
+                message=sub_message,
+                sources=sources,
+                layout=layout,
+                records=records,
+                passed=passed,
+                excluded=excluded,
+            )
+        products_by_filter = _find_filter_products(
+            sub_result, [panel.filter_name for panel in panels]
+        )
+        record["solvedProducts"] = {}
+        for panel in panels:
+            product = products_by_filter[panel.filter_name]
+            panel_quality_by_path[str(product)] = _accepted_quality(
+                Path(sub_result.receipt_path), panel.filter_name
+            )
+            panels_by_filter.setdefault(panel.filter_key, []).append((panel, product))
+            record["solvedProducts"][panel.filter_name] = {
+                "path": product.relative_to(staging).as_posix(),
+                "sha256": sha256_digest(product),
+            }
+        project_progress.panel_done(index, group)
+    return panels_by_filter, panel_quality_by_path
+
+
+def _build_filter_mosaics(run: _ProjectRun, panels_by_filter: dict[str, list[tuple[SciencePanel, Path]]], panel_quality_by_path: dict[str, dict[str, Any]], solver_backends: Sequence[SolverBackend], mosaic_builder: MosaicBuilder, mosaic_provider: ReprojectProvider | None) -> tuple[dict[str, tuple[str, Path]], dict[str, dict[str, Any]]] | ProjectE2EResult:
+    """Mosaic each filter's panels and solve the mosaic afresh; single panels pass through."""
+
+    request, evidence, layout, sources, staging, details, records, passed, excluded, project_progress = run.request, run.evidence, run.layout, run.sources, run.staging, run.details, run.records, run.passed, run.excluded, run.project_progress
+    final_sources: dict[str, tuple[str, Path]] = {}
+    final_quality: dict[str, dict[str, Any]] = {}
+    mosaic_root = details / "mosaics"
+    mosaic_root.mkdir()
+    mosaic_total = 2 * sum(len(panels) > 1 for panels in panels_by_filter.values())
+    mosaic_completed = 0
+    project_progress.phase("mosaic", 0, mosaic_total, "building and solving filter mosaics" if mosaic_total else "single panels require no mosaic")
+    for filter_key, panels in sorted(panels_by_filter.items()):
+        display_filter = panels[0][0].filter_name
+        if len(panels) == 1:
+            final_sources[filter_key] = (display_filter, panels[0][1])
+            final_quality[filter_key] = panel_quality_by_path[str(panels[0][1])]
+            records["mosaics"][filter_key] = {
+                "mode": "SINGLE_SOLVED_PANEL",
+                "panelCount": 1,
+                "freshFinalSolveRequired": False,
+            }
+            continue
+        assert mosaic_provider is not None
+        working_directory = mosaic_root / f"{_safe_token(filter_key)}-working"
+        mosaic = mosaic_builder(
+            MosaicRequest(
+                panel_paths=tuple(str(path) for _, path in panels),
+                output_directory=str(working_directory),
+                minimum_covered_fraction=request.minimum_mosaic_covered_fraction,
+                minimum_pair_overlap_pixels=request.minimum_pair_overlap_pixels,
+                minimum_pair_overlap_fraction=request.minimum_pair_overlap_fraction,
+                maximum_seam_normalized_mad=request.maximum_seam_normalized_mad,
+            ),
+            provider=mosaic_provider,
+        )
+        working = Path(mosaic.mosaic_path).resolve(strict=True)
+        mosaic_completed += 1
+        project_progress.phase("mosaic", mosaic_completed, mosaic_total, f"{display_filter}: mosaic built; fresh solve pending")
+        working_header, _ = _read_image_header(working)
+        if working_header.get("OAFSTATE") != "NEEDS_FINAL_SOLVE" or working_header.get("OAFWCS") != "PROPAGATED":
+            raise ProjectE2EError(
+                "MOSAIC_STATE_INVALID",
+                "working mosaic must remain NEEDS_FINAL_SOLVE/PROPAGATED",
+                path=str(working),
+            )
+        solved_directory = mosaic_root / f"{_safe_token(filter_key)}-solved"
+        solved_directory.mkdir()
+        solved_path = solved_directory / f"master_light_{_safe_token(display_filter)}_mosaic_wcs.fits"
+        hints = _final_mosaic_hints(working, request.e2e_request)
+        solved, attempts = _solve_one(
+            input_path=working,
+            output_path=solved_path,
+            backends=solver_backends,
+            hints=hints,
+            min_matches=request.e2e_request.min_matches,
+            max_rms_arcsec=request.e2e_request.max_rms_arcsec,
+        )
+        records["mosaics"][filter_key] = {
+            "mode": "SOLVED_PANEL_MOSAIC",
+            "panelCount": len(panels),
+            "workingReceipt": Path(mosaic.receipt_path).relative_to(staging).as_posix(),
+            "workingReceiptSha256": sha256_digest(Path(mosaic.receipt_path)),
+            "workingState": mosaic.state,
+            "propagatedWcsIsFinalSolution": False,
+        }
+        records["finalSolves"][filter_key] = {
+            "status": "SOLVED" if solved else "UNSOLVED",
+            "input": working.relative_to(staging).as_posix(),
+            "output": solved_path.relative_to(staging).as_posix() if solved else None,
+            "hints": hints.serializable(),
+            "attempts": _relativize_solver_attempts(attempts, staging),
+        }
+        if not solved:
+            _verify_sources(sources)
+            return _failure_result(
+                staging=staging,
+                evidence=evidence,
+                code="MOSAIC_FINAL_SOLVE_REQUIRED",
+                message=f"filter {display_filter} mosaic did not pass a fresh final solve",
+                sources=sources,
+                layout=layout,
+                records=records,
+                passed=passed,
+                excluded=excluded,
+            )
+        final_sources[filter_key] = (display_filter, solved_path)
+        accepted_attempt = next(
+            item for item in reversed(attempts) if item.get("accepted") is True
+        )
+        quality = accepted_attempt.get("result", {}).get("astrometricQuality")
+        if not isinstance(quality, Mapping) or quality.get("catalogManaged") is not True:
+            raise ProjectE2EError(
+                "MOSAIC_ASTROMETRY_EVIDENCE_MISSING",
+                "fresh mosaic solve lacks managed catalog evidence",
+            )
+        final_quality[filter_key] = dict(quality)
+        mosaic_completed += 1
+        project_progress.phase("mosaic", mosaic_completed, mosaic_total, f"{display_filter}: fresh mosaic solve verified")
+    return final_sources, final_quality
+
+
+def _align_channels(run: _ProjectRun, final_sources: dict[str, tuple[str, Path]], final_quality: dict[str, dict[str, Any]], mosaic_provider: ReprojectProvider | None) -> _AlignedChannels:
+    """Put every solved channel on the reference grid and crop them to one rectangle."""
+
+    request, staging, records, project_progress = run.request, run.staging, run.records, run.project_progress
+    # Luminance carries the detail of an LRGB product, so when channels do
+    # not already share their grid it is the one that stays unresampled.
+    reference_key = next(
+        (key for key in ("l", "r", "g", "b") if key in final_sources),
+        sorted(final_sources)[0],
+    )
+    reference_filter, reference_path = final_sources[reference_key]
+    mono_paths: dict[str, Path] = {}
+    output_quality: dict[str, dict[str, Any]] = {}
+    astrometry_provenance: dict[str, dict[str, Any]] = {}
+    project_progress.phase("alignment", 0, len(final_sources), "aligning solved channels onto the reference grid")
+    for key, (filter_name, source) in sorted(final_sources.items()):
+        # ``<FILTER>.fits`` so PixInsight labels the opened image with the
+        # channel name (its view identifier comes from the file name).
+        destination = staging / f"{_safe_token(filter_name)}.fits"
+        if key == reference_key:
+            publication = _publish_file(source, destination)
+            alignment = {
+                "filter": filter_name,
+                "mode": "REFERENCE_SOLVED_GRID",
+                "referenceFilter": reference_filter,
+                "wcsProvenance": "INDEPENDENT_SOLVE",
+                "publication": publication,
+                "coverageFraction": 1.0,
+                "source": _source_identity(source),
+                "output": _source_identity(destination),
+            }
+        else:
+            assert mosaic_provider is not None
+            alignment = _align_channel(
+                source,
+                reference_path,
+                destination,
+                filter_name=filter_name,
+                reference_filter=reference_filter,
+                provider=mosaic_provider,
+                tolerance_pixels=request.channel_wcs_tolerance_pixels,
+                minimum_coverage=request.minimum_channel_alignment_coverage,
+            )
+        source_solution = _astrometry_gui_evidence(source, final_quality[key])
+        reference_solution = _astrometry_gui_evidence(
+            reference_path, final_quality[reference_key]
+        )
+        if alignment["mode"] == "REPROJECTED_INDEPENDENT_SOLVE":
+            output_quality[key] = final_quality[reference_key]
+            provenance = {
+                "type": "PROPAGATED_VERIFIED",
+                "freshSolveOnThisPixelGrid": False,
+                "referenceFilter": reference_filter,
+                "referenceSolution": reference_solution,
+                "sourceSolution": source_solution,
+                "reprojection": {
+                    "backendId": mosaic_provider.backend_id if mosaic_provider else None,
+                    "backendVersion": mosaic_provider.version if mosaic_provider else None,
+                    "coverageFraction": alignment["coverageFraction"],
+                    "sampleCount": alignment["sampleCount"],
+                    "maximumNinePointResidualPixelsBeforeAlignment": alignment[
+                        "maximumNinePointResidualPixelsBeforeAlignment"
+                    ],
+                    "maximumNinePointResidualPixelsAfterAlignment": alignment[
+                        "maximumNinePointResidualPixelsAfterAlignment"
+                    ],
+                },
+                "qualityAppliesTo": "REFERENCE_SOLVED_WCS_PROPAGATED_TO_VERIFIED_GRID",
+            }
+        else:
+            output_quality[key] = final_quality[key]
+            provenance = {
+                "type": "FRESH_SOLVE_UNCHANGED_GRID",
+                "freshSolveOnThisPixelGrid": True,
+                "sourceSolution": source_solution,
+                "qualityAppliesTo": "SOURCE_SOLVED_WCS_UNCHANGED",
+            }
+        alignment["astrometryProvenance"] = provenance
+        astrometry_provenance[key] = provenance
+        mono_paths[key] = destination
+        records["alignment"][key] = alignment
+        project_progress.phase("alignment", len(mono_paths), len(final_sources), f"{filter_name}: channel alignment verified")
+
+    if request.e2e_request.pipeline_parameters.auto_crop:
+        final_crop = _crop_final_channels(
+            mono_paths,
+            minimum_retained_fraction=request.e2e_request.pipeline_parameters.minimum_crop_fraction,
+            max_memory_bytes=request.e2e_request.pipeline_parameters.registration_memory_bytes,
+        )
+        records["finalCrop"] = final_crop
+        for key, path in mono_paths.items():
+            # Final identities must describe the cropped files consumed by
+            # previews, RGB and GUI verification, not the intermediate grid.
+            records["alignment"][key]["output"] = _source_identity(path)
+            if final_crop["applied"]:
+                # The crop rewrote the file, so it no longer shares the
+                # run master's storage.
+                records["alignment"][key]["publication"] = "CROPPED_COPY"
+                provenance = astrometry_provenance[key]
+                provenance["type"] = "PROPAGATED_VERIFIED"
+                provenance["freshSolveOnThisPixelGrid"] = False
+                provenance["finalCrop"] = final_crop
+                provenance["qualityAppliesTo"] = "SOLVED_WCS_TRANSLATED_TO_COMMON_CROPPED_GRID"
+    else:
+        records["finalCrop"] = {"mode": "DISABLED", "applied": False}
+    return _AlignedChannels(reference_key, reference_filter, mono_paths, output_quality, astrometry_provenance)
+
+
+def _render_previews_and_color(run: _ProjectRun, final_sources: dict[str, tuple[str, Path]], aligned: _AlignedChannels, color_builder: ColorBuilder) -> _ColorOutputs:
+    """Render the mono previews and, with R, G and B present, the colour products."""
+
+    reference_key, reference_filter, mono_paths, output_quality, astrometry_provenance = aligned
+    request, staging, details, records, project_progress = run.request, run.staging, run.details, run.records, run.project_progress
+    preview_root = staging / "previews"
+    preview_root.mkdir()
+    preview_paths: list[Path] = []
+    color_total = len(mono_paths) + int({"r", "g", "b"}.issubset(mono_paths))
+    project_progress.phase("color", 0, color_total, "rendering mono previews and color products")
+    for key, path in sorted(mono_paths.items()):
+        preview = preview_root / f"{path.stem}.png"
+        render_auto_stretch_preview(
+            path,
+            preview,
+            max_long_edge=request.e2e_request.pipeline_parameters.preview_max_long_edge,
+            max_memory_bytes=request.e2e_request.pipeline_parameters.registration_memory_bytes,
+        )
+        preview_paths.append(preview)
+        project_progress.phase("color", len(preview_paths), color_total, f"{final_sources[key][0]}: preview rendered")
+
+    color_result: ColorProductResult | None = None
+    color_paths: dict[str, Path] = {}
+    if {"r", "g", "b"}.issubset(mono_paths):
+        color_result = color_builder(
+            ColorProductRequest(
+                red_path=str(mono_paths["r"]),
+                green_path=str(mono_paths["g"]),
+                blue_path=str(mono_paths["b"]),
+                luminance_path=str(mono_paths["l"]) if "l" in mono_paths else None,
+                output_directory=str(details / "color"),
+                wcs_tolerance_pixels=request.channel_wcs_tolerance_pixels,
+                preview_max_long_edge=request.e2e_request.pipeline_parameters.preview_max_long_edge,
+            )
+        )
+        # The color stage publishes into ``details/color``; its FITS and
+        # previews surface at the top level like the mono channels.
+        color_publication = {}
+        for name, source in (
+            ("linearRgb", Path(color_result.linear_rgb_path)),
+            ("previewTiff", Path(color_result.preview_tiff_path)),
+            ("previewPng", Path(color_result.preview_png_path)),
+        ):
+            final = (staging if name == "linearRgb" else preview_root) / source.name
+            color_publication[name] = _publish_file(source, final)
+            color_paths[name] = final
+        records["color"] = {
+            "status": "SOLVED_LRGB" if "l" in mono_paths else "SOLVED_RGB",
+            "receipt": Path(color_result.receipt_path).relative_to(staging).as_posix(),
+            "receiptSha256": sha256_digest(Path(color_result.receipt_path)),
+            "publication": color_publication,
+            "luminanceParticipated": "l" in mono_paths,
+            "astrometryProvenance": {
+                "type": "PROPAGATED_VERIFIED",
+                "freshSolveOnRgbCube": False,
+                "referenceFilter": reference_filter,
+                "referenceSolution": _astrometry_gui_evidence(
+                    mono_paths[reference_key], output_quality[reference_key]
+                ),
+                "channelGeometryVerified": True,
+                "finalCrop": records["finalCrop"],
+                "channelProvenanceTypes": {
+                    key: astrometry_provenance[key]["type"]
+                    for key in sorted(mono_paths)
+                },
+                "qualityAppliesTo": "REFERENCE_SOLVED_WCS_PROPAGATED_TO_RGB_GRID",
+            },
+        }
+    else:
+        records["color"] = {
+            "status": "NOT_CREATED_MISSING_RGB_CHANNELS",
+            "availableFilters": sorted(final_sources),
+            "missingRequiredChannels": sorted({"r", "g", "b"} - set(mono_paths)),
+            "monoProductsPublished": True,
+        }
+
+    project_progress.phase("color", color_total, color_total, "color and preview products created")
+    return _ColorOutputs(preview_paths, color_result, color_paths)
+
+
+def _verify_and_publish(run: _ProjectRun, panels_by_filter: dict[str, list[tuple[SciencePanel, Path]]], final_sources: dict[str, tuple[str, Path]], aligned: _AlignedChannels, color: _ColorOutputs) -> ProjectE2EResult:
+    """Verify sources and products, write the receipt and publish the project atomically."""
+
+    preview_paths, color_result, color_paths = color
+    reference_key, reference_filter, mono_paths, output_quality, astrometry_provenance = aligned
+    request, output, layout, sources, staging, records, passed, excluded, project_progress = run.request, run.output, run.layout, run.sources, run.staging, run.records, run.passed, run.excluded, run.project_progress
+    project_progress.phase("verify", 0, 1, "verifying source identities, final products, and receipts")
+    _verify_sources(sources)
+    _sanitize_shareable_tree(staging, sources)
+    public_records = _share_safe_value(
+        records,
+        staging=staging,
+        source_tokens={
+            item.path: f"source/{item.source_id}/{Path(item.path).name}"
+            for item in sources
+        },
+    )
+    public_layout = _share_safe_value(
+        layout.serializable(),
+        staging=staging,
+        source_tokens={
+            item.path: f"source/{item.source_id}/{Path(item.path).name}"
+            for item in sources
+        },
+    )
+    final_artifacts = []
+    final_digests = _sha256_many(
+        [
+            *(path for _key, path in sorted(mono_paths.items())),
+            *(
+                (color_paths["linearRgb"], color_paths["previewTiff"], color_paths["previewPng"])
+                if color_result is not None
+                else ()
+            ),
+            *preview_paths,
+        ]
+    )
+    for key, path in sorted(mono_paths.items()):
+        artifact = _artifact(path, staging, "SOLVED_MONO_FITS", digests=final_digests)
+        artifact["filter"] = final_sources[key][0]
+        artifact["astrometry"] = _astrometry_gui_evidence(
+            path, output_quality[key]
+        )
+        artifact["astrometryProvenance"] = astrometry_provenance[key]
+        artifact["finalGate"] = {
+            "status": "PASS",
+            "managedCatalogRequired": True,
+            "freshMosaicSolve": len(panels_by_filter[key]) > 1,
+            "channelAlignmentPassed": True,
+            "freshSolveOnThisPixelGrid": astrometry_provenance[key][
+                "freshSolveOnThisPixelGrid"
+            ],
+            "propagatedReferenceWcsVerified": astrometry_provenance[key]["type"]
+            == "PROPAGATED_VERIFIED",
+        }
+        final_artifacts.append(artifact)
+    product_paths = list(mono_paths.values())
+    if color_result is not None:
+        for path, kind in (
+            (color_paths["linearRgb"], "LINEAR_RGB_FITS"),
+            (color_paths["previewTiff"], "RGB_PREVIEW_TIFF_16"),
+            (color_paths["previewPng"], "RGB_PREVIEW_PNG_16"),
+        ):
+            final_artifacts.append(_artifact(path, staging, kind, digests=final_digests))
+            product_paths.append(path)
+        rgb_artifact = next(
+            item for item in final_artifacts if item["kind"] == "LINEAR_RGB_FITS"
+        )
+        rgb_artifact["astrometry"] = _astrometry_gui_evidence(
+            color_paths["linearRgb"], output_quality[reference_key]
+        )
+        rgb_artifact["astrometryProvenance"] = records["color"][
+            "astrometryProvenance"
+        ]
+        rgb_artifact["wcsProvenance"] = "PROPAGATED_VERIFIED"
+        rgb_artifact["finalGate"] = {
+            "status": "PASS",
+            "rgbChannelsPresent": True,
+            "luminanceParticipated": "l" in mono_paths,
+            "strictGeometryAndWcsAlignment": True,
+            "freshSolveOnRgbCube": False,
+            "propagatedReferenceWcsVerified": True,
+        }
+    for path in preview_paths:
+        final_artifacts.append(_artifact(path, staging, "MONO_PREVIEW_PNG", digests=final_digests))
+
+    code = "PROJECT_COLOR_SUCCEEDED" if color_result is not None else "PROJECT_MONO_SUCCEEDED"
+    receipt_core = {
+        "schemaVersion": 1,
+        "pipelineVersion": PROJECT_E2E_VERSION,
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "success": True,
+        "state": E2EState.SOLVED.value,
+        "code": code,
+        "recipeDigest": request.e2e_request.recipe_digest,
+        "calibrationPolicy": workflow_receipt(request.e2e_request.pipeline_parameters.calibration_workflow),
+        "layout": public_layout,
+        "sources": [item.serializable() for item in sources],
+        "execution": public_records,
+        "finalProducts": {
+            "monoFilters": [final_sources[key][0] for key in sorted(final_sources)],
+            "rgbCreated": color_result is not None,
+            "luminanceParticipated": color_result is not None and "l" in mono_paths,
+            "artifacts": final_artifacts,
+            "guiArtifacts": final_artifacts,
+            "resultGate": {
+                "status": "PASS",
+                "allMonoProductsSolved": True,
+                "managedCatalogEvidenceRequired": True,
+                "sourceIdentityVerifiedAtCommit": True,
+                "mosaicCoverageOverlapSeamPassed": True,
+                "propagatedAlignedChannelsVerified": all(
+                    value["type"]
+                    in {"FRESH_SOLVE_UNCHANGED_GRID", "PROPAGATED_VERIFIED"}
+                    for value in astrometry_provenance.values()
+                ),
+                "rgbState": (
+                    "SOLVED_LRGB"
+                    if color_result is not None and "l" in mono_paths
+                    else "SOLVED_RGB"
+                    if color_result is not None
+                    else "MONO_ONLY_CHANNELS_MISSING"
+                ),
+            },
+        },
+        "publication": {
+            "atomic": True,
+            "noReplace": True,
+            "outerTransaction": True,
+            "sourceMutation": False,
+            "failurePublishesUnsolvedEvidenceOnly": True,
+        },
+    }
+    receipt_id = "sha256:" + hashlib.sha256(canonical_json_document(receipt_core)).hexdigest()
+    _write_json(staging / "receipt.json", {"receiptId": receipt_id, **receipt_core})
+    project_progress.phase("verify", 1, 1, "final products and receipt verified")
+    project_progress.phase("publish", 0, 1, "atomically publishing the complete project")
+    _fsync_directory(staging)
+    _rename_directory_no_replace(staging, output)
+    _fsync_directory(output.parent)
+    # Progress cannot turn an already committed success into a failure.
+    # The desktop's independent artifact verification releases the final 1%.
+    try:
+        project_progress.phase("publish", 1, 1, "project published; desktop verification pending")
+    except Exception:
+        pass
+    return ProjectE2EResult(
+        success=True,
+        code=code,
+        state=E2EState.SOLVED,
+        output_directory=str(output),
+        evidence_directory=None,
+        receipt_path=str(output / "receipt.json"),
+        product_paths=tuple(str(output / path.relative_to(staging)) for path in product_paths),
+        preview_paths=tuple(str(output / path.relative_to(staging)) for path in preview_paths),
+        passed_light_paths=tuple(passed),
+        excluded_light_paths=tuple(excluded),
+        mono_filters=tuple(final_sources[key][0] for key in sorted(final_sources)),
+        color_product_path=(
+            str(output / color_paths["linearRgb"].relative_to(staging))
+            if color_result is not None
+            else None
+        ),
+    )
+
+
+def run_project_e2e(
+    request: ProjectE2ERequest,
+    *,
+    solver_backends: Sequence[SolverBackend],
+    progress: ProgressCallback | None = None,
+    mosaic_provider: ReprojectProvider | None = None,
+    panel_runner: PanelRunner = run_e2e,
+    mosaic_builder: MosaicBuilder = build_solved_panel_mosaic,
+    color_builder: ColorBuilder = build_color_product,
+) -> ProjectE2EResult:
+    """Run a complete multi-target project and commit one final directory."""
+
+    output, evidence, layout, mosaic_provider, sources, explicit_selection, run_digests = _check_project_request(
+        request, solver_backends, mosaic_provider
+    )
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", suffix=PROJECT_STAGING_SUFFIX, dir=output.parent))
     # The published directory holds only the final channels, ``previews`` and
     # ``receipt.json`` at its top level; every intermediate stage lives under
@@ -1562,589 +2236,22 @@ def run_project_e2e(
     passed: list[str] = []
     excluded: list[str] = []
     project_progress = _ProjectProgress(layout, request.e2e_request, progress)
+    run = _ProjectRun(request, output, evidence, layout, sources, staging, details, records, passed, excluded, project_progress)
     try:
-        project_progress.phase("prepare", 0, 1, "building shared calibration library")
-        shared_root = details / "shared-calibration"
-        shared_root.mkdir()
-        direct_approved_panel = bool(request.e2e_request.review_approvals)
-        if direct_approved_panel:
-            # The approval digest is bound to the original calibration/source
-            # request. Rewriting raw calibration into shared masters would
-            # change that context. A one-panel project can safely preserve the
-            # exact request and still use run_e2e's within-run master reuse.
-            masters_bias = ()
-            masters_dark = ()
-            masters_flat = ()
-            trusted_generated_master_overrides = ()
-            shared_receipt = {
-                "schemaVersion": 1,
-                "stage": "shared-calibration-library",
-                "mode": "SINGLE_PANEL_DIRECT_APPROVED_REQUEST",
-                "rawIntegrationCount": 0,
-            }
-            _write_json(shared_root / "receipt.json", shared_receipt)
-        else:
-            (
-                masters_bias,
-                masters_dark,
-                masters_flat,
-                trusted_generated_master_overrides,
-                shared_receipt,
-            ) = _build_shared_calibration(request.e2e_request, shared_root)
-        records["sharedCalibration"] = {
-            "receipt": (shared_root / "receipt.json").relative_to(staging).as_posix(),
-            "receiptSha256": sha256_digest(shared_root / "receipt.json"),
-            "mode": shared_receipt["mode"],
-            "rawIntegrationCount": shared_receipt["rawIntegrationCount"],
-        }
-        project_progress.phase("prepare", 1, 1, "shared calibration library verified")
-
-        panels_by_filter: dict[str, list[tuple[SciencePanel, Path]]] = {}
-        panel_quality_by_path: dict[str, dict[str, Any]] = {}
-        runs_root = details / RUNS_DIRECTORY
-        runs_root.mkdir()
-        # One run per target carries every filter of that target: the run
-        # registers all Lights onto one reference frame and crops the filter
-        # masters to one common rectangle, so they share their pixel grid.
-        for index, (group, panels) in enumerate(layout.target_runs, start=1):
-            panel_progress = project_progress.panel_callback(index, group)
-            panel_progress(ProgressEvent(ProgressStage.INVENTORY, "started",
-                                         message=f"target {group.target} ({group.filter_name})"))
-            sub_output = runs_root / _safe_token(group.target_key)
-            panel_digests = run_digests[group.target_key]
-            run_explicit_selection = (
-                replace(
-                    explicit_selection,
-                    decisions=tuple(
-                        decision
-                        for decision in explicit_selection.decisions
-                        if decision.source_sha256 in panel_digests
-                    ),
-                )
-                if explicit_selection is not None
-                else None
-            )
-            if direct_approved_panel:
-                sub_request = replace(
-                    request.e2e_request,
-                    light_files=group.light_files,
-                    output_directory=str(sub_output),
-                )
-            else:
-                panel_pipeline_parameters = replace(
-                    request.e2e_request.pipeline_parameters,
-                    raw_frame_metadata_overrides=tuple(
-                        item
-                        for item in request.e2e_request.pipeline_parameters.raw_frame_metadata_overrides
-                        if item.source_sha256 in panel_digests
-                    ),
-                    master_metadata_overrides=(
-                        *request.e2e_request.pipeline_parameters.master_metadata_overrides,
-                        *trusted_generated_master_overrides,
-                    ),
-                )
-                sub_request = replace(
-                    request.e2e_request,
-                    light_files=group.light_files,
-                    flat_files=(),
-                    dark_files=(),
-                    bias_files=(),
-                    master_bias_files=masters_bias,
-                    master_dark_files=masters_dark,
-                    master_flat_files=masters_flat,
-                    output_directory=str(sub_output),
-                    review_approvals=(),
-                    pipeline_parameters=panel_pipeline_parameters,
-                    explicit_selection=run_explicit_selection,
-                )
-                run_selections = [
-                    selection for selection in request.review_selections
-                    if selection["sourceSha256"] in panel_digests
-                ]
-                if run_selections:
-                    # Bound against this run's own request: its Lights, the
-                    # shared masters it will use, the gate policy and the
-                    # pipeline parameters, exactly what run_e2e re-verifies.
-                    sub_request = bind_review_approval_selections(sub_request, run_selections)
-            sub_result = panel_runner(
-                sub_request,
-                solver_backends=solver_backends,
-                progress=panel_progress,
-            )
-            passed.extend(sub_result.passed_light_paths)
-            excluded.extend(sub_result.excluded_light_paths)
-            record = {
-                "target": group.target,
-                "targetKey": group.target_key,
-                "panels": [panel.serializable() for panel in panels],
-                "success": sub_result.success,
-                "code": sub_result.code,
-                "receipt": Path(sub_result.receipt_path).relative_to(staging).as_posix(),
-                "receiptSha256": sha256_digest(Path(sub_result.receipt_path)),
-            }
-            records["subruns"].append(record)
-            try:
-                record["screening"] = _screening_record(Path(sub_result.receipt_path), staging, group.target)
-            except (OSError, ValueError, json.JSONDecodeError):
-                record["screening"] = None
-            records["screening"] = _project_screening(records["subruns"])
-            if not sub_result.success:
-                sub_message = sub_result.message or f"{group.target}/{group.filter_name}: {sub_result.code}"
-                _verify_sources(sources)
-                return _failure_result(
-                    staging=staging,
-                    evidence=evidence,
-                    code=sub_result.code,
-                    message=sub_message,
-                    sources=sources,
-                    layout=layout,
-                    records=records,
-                    passed=passed,
-                    excluded=excluded,
-                )
-            products_by_filter = _find_filter_products(
-                sub_result, [panel.filter_name for panel in panels]
-            )
-            record["solvedProducts"] = {}
-            for panel in panels:
-                product = products_by_filter[panel.filter_name]
-                panel_quality_by_path[str(product)] = _accepted_quality(
-                    Path(sub_result.receipt_path), panel.filter_name
-                )
-                panels_by_filter.setdefault(panel.filter_key, []).append((panel, product))
-                record["solvedProducts"][panel.filter_name] = {
-                    "path": product.relative_to(staging).as_posix(),
-                    "sha256": sha256_digest(product),
-                }
-            project_progress.panel_done(index, group)
-
-        final_sources: dict[str, tuple[str, Path]] = {}
-        final_quality: dict[str, dict[str, Any]] = {}
-        mosaic_root = details / "mosaics"
-        mosaic_root.mkdir()
-        mosaic_total = 2 * sum(len(panels) > 1 for panels in panels_by_filter.values())
-        mosaic_completed = 0
-        project_progress.phase("mosaic", 0, mosaic_total, "building and solving filter mosaics" if mosaic_total else "single panels require no mosaic")
-        for filter_key, panels in sorted(panels_by_filter.items()):
-            display_filter = panels[0][0].filter_name
-            if len(panels) == 1:
-                final_sources[filter_key] = (display_filter, panels[0][1])
-                final_quality[filter_key] = panel_quality_by_path[str(panels[0][1])]
-                records["mosaics"][filter_key] = {
-                    "mode": "SINGLE_SOLVED_PANEL",
-                    "panelCount": 1,
-                    "freshFinalSolveRequired": False,
-                }
-                continue
-            assert mosaic_provider is not None
-            working_directory = mosaic_root / f"{_safe_token(filter_key)}-working"
-            mosaic = mosaic_builder(
-                MosaicRequest(
-                    panel_paths=tuple(str(path) for _, path in panels),
-                    output_directory=str(working_directory),
-                    minimum_covered_fraction=request.minimum_mosaic_covered_fraction,
-                    minimum_pair_overlap_pixels=request.minimum_pair_overlap_pixels,
-                    minimum_pair_overlap_fraction=request.minimum_pair_overlap_fraction,
-                    maximum_seam_normalized_mad=request.maximum_seam_normalized_mad,
-                ),
-                provider=mosaic_provider,
-            )
-            working = Path(mosaic.mosaic_path).resolve(strict=True)
-            mosaic_completed += 1
-            project_progress.phase("mosaic", mosaic_completed, mosaic_total, f"{display_filter}: mosaic built; fresh solve pending")
-            working_header, _ = _read_image_header(working)
-            if working_header.get("OAFSTATE") != "NEEDS_FINAL_SOLVE" or working_header.get("OAFWCS") != "PROPAGATED":
-                raise ProjectE2EError(
-                    "MOSAIC_STATE_INVALID",
-                    "working mosaic must remain NEEDS_FINAL_SOLVE/PROPAGATED",
-                    path=str(working),
-                )
-            solved_directory = mosaic_root / f"{_safe_token(filter_key)}-solved"
-            solved_directory.mkdir()
-            solved_path = solved_directory / f"master_light_{_safe_token(display_filter)}_mosaic_wcs.fits"
-            hints = _final_mosaic_hints(working, request.e2e_request)
-            solved, attempts = _solve_one(
-                input_path=working,
-                output_path=solved_path,
-                backends=solver_backends,
-                hints=hints,
-                min_matches=request.e2e_request.min_matches,
-                max_rms_arcsec=request.e2e_request.max_rms_arcsec,
-            )
-            records["mosaics"][filter_key] = {
-                "mode": "SOLVED_PANEL_MOSAIC",
-                "panelCount": len(panels),
-                "workingReceipt": Path(mosaic.receipt_path).relative_to(staging).as_posix(),
-                "workingReceiptSha256": sha256_digest(Path(mosaic.receipt_path)),
-                "workingState": mosaic.state,
-                "propagatedWcsIsFinalSolution": False,
-            }
-            records["finalSolves"][filter_key] = {
-                "status": "SOLVED" if solved else "UNSOLVED",
-                "input": working.relative_to(staging).as_posix(),
-                "output": solved_path.relative_to(staging).as_posix() if solved else None,
-                "hints": hints.serializable(),
-                "attempts": _relativize_solver_attempts(attempts, staging),
-            }
-            if not solved:
-                _verify_sources(sources)
-                return _failure_result(
-                    staging=staging,
-                    evidence=evidence,
-                    code="MOSAIC_FINAL_SOLVE_REQUIRED",
-                    message=f"filter {display_filter} mosaic did not pass a fresh final solve",
-                    sources=sources,
-                    layout=layout,
-                    records=records,
-                    passed=passed,
-                    excluded=excluded,
-                )
-            final_sources[filter_key] = (display_filter, solved_path)
-            accepted_attempt = next(
-                item for item in reversed(attempts) if item.get("accepted") is True
-            )
-            quality = accepted_attempt.get("result", {}).get("astrometricQuality")
-            if not isinstance(quality, Mapping) or quality.get("catalogManaged") is not True:
-                raise ProjectE2EError(
-                    "MOSAIC_ASTROMETRY_EVIDENCE_MISSING",
-                    "fresh mosaic solve lacks managed catalog evidence",
-                )
-            final_quality[filter_key] = dict(quality)
-            mosaic_completed += 1
-            project_progress.phase("mosaic", mosaic_completed, mosaic_total, f"{display_filter}: fresh mosaic solve verified")
-
-        # Luminance carries the detail of an LRGB product, so when channels do
-        # not already share their grid it is the one that stays unresampled.
-        reference_key = next(
-            (key for key in ("l", "r", "g", "b") if key in final_sources),
-            sorted(final_sources)[0],
+        shared = _prepare_shared_calibration(run)
+        targets = _run_target_panels(run, shared, explicit_selection, run_digests, solver_backends, panel_runner)
+        if isinstance(targets, ProjectE2EResult):
+            return targets
+        panels_by_filter, panel_quality_by_path = targets
+        mosaics = _build_filter_mosaics(
+            run, panels_by_filter, panel_quality_by_path, solver_backends, mosaic_builder, mosaic_provider
         )
-        reference_filter, reference_path = final_sources[reference_key]
-        mono_paths: dict[str, Path] = {}
-        output_quality: dict[str, dict[str, Any]] = {}
-        astrometry_provenance: dict[str, dict[str, Any]] = {}
-        project_progress.phase("alignment", 0, len(final_sources), "aligning solved channels onto the reference grid")
-        for key, (filter_name, source) in sorted(final_sources.items()):
-            # ``<FILTER>.fits`` so PixInsight labels the opened image with the
-            # channel name (its view identifier comes from the file name).
-            destination = staging / f"{_safe_token(filter_name)}.fits"
-            if key == reference_key:
-                publication = _publish_file(source, destination)
-                alignment = {
-                    "filter": filter_name,
-                    "mode": "REFERENCE_SOLVED_GRID",
-                    "referenceFilter": reference_filter,
-                    "wcsProvenance": "INDEPENDENT_SOLVE",
-                    "publication": publication,
-                    "coverageFraction": 1.0,
-                    "source": _source_identity(source),
-                    "output": _source_identity(destination),
-                }
-            else:
-                assert mosaic_provider is not None
-                alignment = _align_channel(
-                    source,
-                    reference_path,
-                    destination,
-                    filter_name=filter_name,
-                    reference_filter=reference_filter,
-                    provider=mosaic_provider,
-                    tolerance_pixels=request.channel_wcs_tolerance_pixels,
-                    minimum_coverage=request.minimum_channel_alignment_coverage,
-                )
-            source_solution = _astrometry_gui_evidence(source, final_quality[key])
-            reference_solution = _astrometry_gui_evidence(
-                reference_path, final_quality[reference_key]
-            )
-            if alignment["mode"] == "REPROJECTED_INDEPENDENT_SOLVE":
-                output_quality[key] = final_quality[reference_key]
-                provenance = {
-                    "type": "PROPAGATED_VERIFIED",
-                    "freshSolveOnThisPixelGrid": False,
-                    "referenceFilter": reference_filter,
-                    "referenceSolution": reference_solution,
-                    "sourceSolution": source_solution,
-                    "reprojection": {
-                        "backendId": mosaic_provider.backend_id if mosaic_provider else None,
-                        "backendVersion": mosaic_provider.version if mosaic_provider else None,
-                        "coverageFraction": alignment["coverageFraction"],
-                        "sampleCount": alignment["sampleCount"],
-                        "maximumNinePointResidualPixelsBeforeAlignment": alignment[
-                            "maximumNinePointResidualPixelsBeforeAlignment"
-                        ],
-                        "maximumNinePointResidualPixelsAfterAlignment": alignment[
-                            "maximumNinePointResidualPixelsAfterAlignment"
-                        ],
-                    },
-                    "qualityAppliesTo": "REFERENCE_SOLVED_WCS_PROPAGATED_TO_VERIFIED_GRID",
-                }
-            else:
-                output_quality[key] = final_quality[key]
-                provenance = {
-                    "type": "FRESH_SOLVE_UNCHANGED_GRID",
-                    "freshSolveOnThisPixelGrid": True,
-                    "sourceSolution": source_solution,
-                    "qualityAppliesTo": "SOURCE_SOLVED_WCS_UNCHANGED",
-                }
-            alignment["astrometryProvenance"] = provenance
-            astrometry_provenance[key] = provenance
-            mono_paths[key] = destination
-            records["alignment"][key] = alignment
-            project_progress.phase("alignment", len(mono_paths), len(final_sources), f"{filter_name}: channel alignment verified")
-
-        if request.e2e_request.pipeline_parameters.auto_crop:
-            final_crop = _crop_final_channels(
-                mono_paths,
-                minimum_retained_fraction=request.e2e_request.pipeline_parameters.minimum_crop_fraction,
-                max_memory_bytes=request.e2e_request.pipeline_parameters.registration_memory_bytes,
-            )
-            records["finalCrop"] = final_crop
-            for key, path in mono_paths.items():
-                # Final identities must describe the cropped files consumed by
-                # previews, RGB and GUI verification, not the intermediate grid.
-                records["alignment"][key]["output"] = _source_identity(path)
-                if final_crop["applied"]:
-                    # The crop rewrote the file, so it no longer shares the
-                    # run master's storage.
-                    records["alignment"][key]["publication"] = "CROPPED_COPY"
-                    provenance = astrometry_provenance[key]
-                    provenance["type"] = "PROPAGATED_VERIFIED"
-                    provenance["freshSolveOnThisPixelGrid"] = False
-                    provenance["finalCrop"] = final_crop
-                    provenance["qualityAppliesTo"] = "SOLVED_WCS_TRANSLATED_TO_COMMON_CROPPED_GRID"
-        else:
-            records["finalCrop"] = {"mode": "DISABLED", "applied": False}
-
-        preview_root = staging / "previews"
-        preview_root.mkdir()
-        preview_paths: list[Path] = []
-        color_total = len(mono_paths) + int({"r", "g", "b"}.issubset(mono_paths))
-        project_progress.phase("color", 0, color_total, "rendering mono previews and color products")
-        for key, path in sorted(mono_paths.items()):
-            preview = preview_root / f"{path.stem}.png"
-            render_auto_stretch_preview(
-                path,
-                preview,
-                max_long_edge=request.e2e_request.pipeline_parameters.preview_max_long_edge,
-                max_memory_bytes=request.e2e_request.pipeline_parameters.registration_memory_bytes,
-            )
-            preview_paths.append(preview)
-            project_progress.phase("color", len(preview_paths), color_total, f"{final_sources[key][0]}: preview rendered")
-
-        color_result: ColorProductResult | None = None
-        color_paths: dict[str, Path] = {}
-        if {"r", "g", "b"}.issubset(mono_paths):
-            color_result = color_builder(
-                ColorProductRequest(
-                    red_path=str(mono_paths["r"]),
-                    green_path=str(mono_paths["g"]),
-                    blue_path=str(mono_paths["b"]),
-                    luminance_path=str(mono_paths["l"]) if "l" in mono_paths else None,
-                    output_directory=str(details / "color"),
-                    wcs_tolerance_pixels=request.channel_wcs_tolerance_pixels,
-                    preview_max_long_edge=request.e2e_request.pipeline_parameters.preview_max_long_edge,
-                )
-            )
-            # The color stage publishes into ``details/color``; its FITS and
-            # previews surface at the top level like the mono channels.
-            color_publication = {}
-            for name, source in (
-                ("linearRgb", Path(color_result.linear_rgb_path)),
-                ("previewTiff", Path(color_result.preview_tiff_path)),
-                ("previewPng", Path(color_result.preview_png_path)),
-            ):
-                final = (staging if name == "linearRgb" else preview_root) / source.name
-                color_publication[name] = _publish_file(source, final)
-                color_paths[name] = final
-            records["color"] = {
-                "status": "SOLVED_LRGB" if "l" in mono_paths else "SOLVED_RGB",
-                "receipt": Path(color_result.receipt_path).relative_to(staging).as_posix(),
-                "receiptSha256": sha256_digest(Path(color_result.receipt_path)),
-                "publication": color_publication,
-                "luminanceParticipated": "l" in mono_paths,
-                "astrometryProvenance": {
-                    "type": "PROPAGATED_VERIFIED",
-                    "freshSolveOnRgbCube": False,
-                    "referenceFilter": reference_filter,
-                    "referenceSolution": _astrometry_gui_evidence(
-                        mono_paths[reference_key], output_quality[reference_key]
-                    ),
-                    "channelGeometryVerified": True,
-                    "finalCrop": records["finalCrop"],
-                    "channelProvenanceTypes": {
-                        key: astrometry_provenance[key]["type"]
-                        for key in sorted(mono_paths)
-                    },
-                    "qualityAppliesTo": "REFERENCE_SOLVED_WCS_PROPAGATED_TO_RGB_GRID",
-                },
-            }
-        else:
-            records["color"] = {
-                "status": "NOT_CREATED_MISSING_RGB_CHANNELS",
-                "availableFilters": sorted(final_sources),
-                "missingRequiredChannels": sorted({"r", "g", "b"} - set(mono_paths)),
-                "monoProductsPublished": True,
-            }
-
-        project_progress.phase("color", color_total, color_total, "color and preview products created")
-        project_progress.phase("verify", 0, 1, "verifying source identities, final products, and receipts")
-        _verify_sources(sources)
-        _sanitize_shareable_tree(staging, sources)
-        public_records = _share_safe_value(
-            records,
-            staging=staging,
-            source_tokens={
-                item.path: f"source/{item.source_id}/{Path(item.path).name}"
-                for item in sources
-            },
-        )
-        public_layout = _share_safe_value(
-            layout.serializable(),
-            staging=staging,
-            source_tokens={
-                item.path: f"source/{item.source_id}/{Path(item.path).name}"
-                for item in sources
-            },
-        )
-        final_artifacts = []
-        final_digests = _sha256_many(
-            [
-                *(path for _key, path in sorted(mono_paths.items())),
-                *(
-                    (color_paths["linearRgb"], color_paths["previewTiff"], color_paths["previewPng"])
-                    if color_result is not None
-                    else ()
-                ),
-                *preview_paths,
-            ]
-        )
-        for key, path in sorted(mono_paths.items()):
-            artifact = _artifact(path, staging, "SOLVED_MONO_FITS", digests=final_digests)
-            artifact["filter"] = final_sources[key][0]
-            artifact["astrometry"] = _astrometry_gui_evidence(
-                path, output_quality[key]
-            )
-            artifact["astrometryProvenance"] = astrometry_provenance[key]
-            artifact["finalGate"] = {
-                "status": "PASS",
-                "managedCatalogRequired": True,
-                "freshMosaicSolve": len(panels_by_filter[key]) > 1,
-                "channelAlignmentPassed": True,
-                "freshSolveOnThisPixelGrid": astrometry_provenance[key][
-                    "freshSolveOnThisPixelGrid"
-                ],
-                "propagatedReferenceWcsVerified": astrometry_provenance[key]["type"]
-                == "PROPAGATED_VERIFIED",
-            }
-            final_artifacts.append(artifact)
-        product_paths = list(mono_paths.values())
-        if color_result is not None:
-            for path, kind in (
-                (color_paths["linearRgb"], "LINEAR_RGB_FITS"),
-                (color_paths["previewTiff"], "RGB_PREVIEW_TIFF_16"),
-                (color_paths["previewPng"], "RGB_PREVIEW_PNG_16"),
-            ):
-                final_artifacts.append(_artifact(path, staging, kind, digests=final_digests))
-                product_paths.append(path)
-            rgb_artifact = next(
-                item for item in final_artifacts if item["kind"] == "LINEAR_RGB_FITS"
-            )
-            rgb_artifact["astrometry"] = _astrometry_gui_evidence(
-                color_paths["linearRgb"], output_quality[reference_key]
-            )
-            rgb_artifact["astrometryProvenance"] = records["color"][
-                "astrometryProvenance"
-            ]
-            rgb_artifact["wcsProvenance"] = "PROPAGATED_VERIFIED"
-            rgb_artifact["finalGate"] = {
-                "status": "PASS",
-                "rgbChannelsPresent": True,
-                "luminanceParticipated": "l" in mono_paths,
-                "strictGeometryAndWcsAlignment": True,
-                "freshSolveOnRgbCube": False,
-                "propagatedReferenceWcsVerified": True,
-            }
-        for path in preview_paths:
-            final_artifacts.append(_artifact(path, staging, "MONO_PREVIEW_PNG", digests=final_digests))
-
-        code = "PROJECT_COLOR_SUCCEEDED" if color_result is not None else "PROJECT_MONO_SUCCEEDED"
-        receipt_core = {
-            "schemaVersion": 1,
-            "pipelineVersion": PROJECT_E2E_VERSION,
-            "createdAt": datetime.now(timezone.utc).isoformat(),
-            "success": True,
-            "state": E2EState.SOLVED.value,
-            "code": code,
-            "recipeDigest": request.e2e_request.recipe_digest,
-            "calibrationPolicy": workflow_receipt(request.e2e_request.pipeline_parameters.calibration_workflow),
-            "layout": public_layout,
-            "sources": [item.serializable() for item in sources],
-            "execution": public_records,
-            "finalProducts": {
-                "monoFilters": [final_sources[key][0] for key in sorted(final_sources)],
-                "rgbCreated": color_result is not None,
-                "luminanceParticipated": color_result is not None and "l" in mono_paths,
-                "artifacts": final_artifacts,
-                "guiArtifacts": final_artifacts,
-                "resultGate": {
-                    "status": "PASS",
-                    "allMonoProductsSolved": True,
-                    "managedCatalogEvidenceRequired": True,
-                    "sourceIdentityVerifiedAtCommit": True,
-                    "mosaicCoverageOverlapSeamPassed": True,
-                    "propagatedAlignedChannelsVerified": all(
-                        value["type"]
-                        in {"FRESH_SOLVE_UNCHANGED_GRID", "PROPAGATED_VERIFIED"}
-                        for value in astrometry_provenance.values()
-                    ),
-                    "rgbState": (
-                        "SOLVED_LRGB"
-                        if color_result is not None and "l" in mono_paths
-                        else "SOLVED_RGB"
-                        if color_result is not None
-                        else "MONO_ONLY_CHANNELS_MISSING"
-                    ),
-                },
-            },
-            "publication": {
-                "atomic": True,
-                "noReplace": True,
-                "outerTransaction": True,
-                "sourceMutation": False,
-                "failurePublishesUnsolvedEvidenceOnly": True,
-            },
-        }
-        receipt_id = "sha256:" + hashlib.sha256(canonical_json_document(receipt_core)).hexdigest()
-        _write_json(staging / "receipt.json", {"receiptId": receipt_id, **receipt_core})
-        project_progress.phase("verify", 1, 1, "final products and receipt verified")
-        project_progress.phase("publish", 0, 1, "atomically publishing the complete project")
-        _fsync_directory(staging)
-        _rename_directory_no_replace(staging, output)
-        _fsync_directory(output.parent)
-        # Progress cannot turn an already committed success into a failure.
-        # The desktop's independent artifact verification releases the final 1%.
-        try:
-            project_progress.phase("publish", 1, 1, "project published; desktop verification pending")
-        except Exception:
-            pass
-        return ProjectE2EResult(
-            success=True,
-            code=code,
-            state=E2EState.SOLVED,
-            output_directory=str(output),
-            evidence_directory=None,
-            receipt_path=str(output / "receipt.json"),
-            product_paths=tuple(str(output / path.relative_to(staging)) for path in product_paths),
-            preview_paths=tuple(str(output / path.relative_to(staging)) for path in preview_paths),
-            passed_light_paths=tuple(passed),
-            excluded_light_paths=tuple(excluded),
-            mono_filters=tuple(final_sources[key][0] for key in sorted(final_sources)),
-            color_product_path=(
-                str(output / color_paths["linearRgb"].relative_to(staging))
-                if color_result is not None
-                else None
-            ),
-        )
+        if isinstance(mosaics, ProjectE2EResult):
+            return mosaics
+        final_sources, final_quality = mosaics
+        aligned = _align_channels(run, final_sources, final_quality, mosaic_provider)
+        color = _render_previews_and_color(run, final_sources, aligned, color_builder)
+        return _verify_and_publish(run, panels_by_filter, final_sources, aligned, color)
     except (ProjectE2EError, E2EError, MosaicError, ColorProductError, CalibrationError, OSError) as error:
         if not staging.exists():
             raise

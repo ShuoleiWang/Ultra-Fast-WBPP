@@ -57,10 +57,9 @@ ufwbpp = [
   "native/*.so",
   "native/*.dll",
   "native/*.md",
+  "solvers/catalog_manifests/*.json",
+  "solvers/catalog_manifests/*.md",
 ]
-
-[tool.setuptools.data-files]
-"share/ufwbpp/catalogs" = ["../../resources/catalogs/*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "../light-frame-qc/src"]

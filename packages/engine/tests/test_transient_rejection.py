@@ -2,13 +2,13 @@ from dataclasses import replace
 
 import numpy as np
 
-from ufwbpp.calibration import (
+from ufwbpp.stacking.integration import (
     IntegrationParameters, _RejectionSigmaFloor,
     _ordinary_mad_rejection_decision, _ordinary_mad_rejection_mask,
     _ordinary_integration_tile,
 )
-from ufwbpp.transient_rejection import detect_transient_trails
-from ufwbpp.residual_background import fit_residual_background
+from ufwbpp.stacking.transient_rejection import detect_transient_trails
+from ufwbpp.stacking.residual_background import fit_residual_background
 
 
 def _scene(trail=True):
@@ -160,7 +160,7 @@ def test_only_added_rejections_receive_sky_alignment_and_original_mad_stays_fixe
 
 def _reference_fit_residual_background(values, bin_factor, weights):
     """The previous one-frame-at-a-time cell statistics, kept as the reference."""
-    from ufwbpp import residual_background as module
+    from ufwbpp.stacking import residual_background as module
 
     n, height, width = values.shape
     cell = max(4, int(np.ceil(128 / bin_factor)))
@@ -194,7 +194,7 @@ def _reference_fit_residual_background(values, bin_factor, weights):
 
 
 def test_vectorized_cell_statistics_match_per_frame_reference(monkeypatch) -> None:
-    from ufwbpp import residual_background as module
+    from ufwbpp.stacking import residual_background as module
 
     rng = np.random.default_rng(31)
     n, height, width = 7, 150, 190
@@ -241,7 +241,7 @@ def _dyadic_path(n, s):
 
 
 def test_fast_radon_levels_are_exact_dyadic_line_sums():
-    from ufwbpp.transient_rejection import fast_radon_levels
+    from ufwbpp.stacking.transient_rejection import fast_radon_levels
 
     rng = np.random.default_rng(0)
     height, width = 8, 11

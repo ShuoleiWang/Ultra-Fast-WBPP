@@ -7,7 +7,7 @@ from astropy.io import fits
 import numpy as np
 import pytest
 
-from ufwbpp.calibration import (
+from ufwbpp.stacking.integration import (
     CalibrationError,
     FitsFrame,
     FrameExpression,

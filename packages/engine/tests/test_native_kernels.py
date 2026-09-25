@@ -19,22 +19,25 @@ import numpy as np
 import pytest
 
 from ufwbpp import native_kernels
-from ufwbpp.calibration import (
+from ufwbpp.stacking.integration import (
     REJECTION_FLOOR_ABSOLUTE,
     REJECTION_FLOOR_EPSILON_FACTOR,
     FitsFrame,
     FrameExpression,
     IntegrationMapPaths,
     IntegrationParameters,
-    _MemoryFrame,
+    MemoryFrame,
     _RejectionSigmaFloor,
     _ordinary_mad_rejection_decision,
     integrate_expressions,
     read_frame_info,
 )
-from ufwbpp.global_normalization import GlobalNormalizationParameters
-from ufwbpp import pixel_pipeline as pipeline
-from ufwbpp.pixel_pipeline import AffineTransform, PipelineParameters
+from ufwbpp.stacking.normalization import GlobalNormalizationParameters
+from ufwbpp.stacking import pipeline
+from ufwbpp.stacking import groups as groups_module
+from ufwbpp.stacking import records as records_module
+from ufwbpp.stacking import warp as warp_module
+from ufwbpp.stacking.parameters import AffineTransform, PipelineParameters
 
 
 KERNELS = native_kernels.load_native_kernels()
@@ -383,15 +386,16 @@ def test_native_lanczos_warp_matches_numpy_resampler_bitwise(
     numpy_destination = tmp_path / "numpy.fits"
     native_destination = tmp_path / "native.fits"
     numpy_execution: dict = {}
-    monkeypatch.setattr(pipeline, "load_native_kernels", lambda *_a, **_k: None)
-    numpy_stats = pipeline._register_frame(
+    monkeypatch.setattr(warp_module, "load_native_kernels", lambda *_a, **_k: None)
+    monkeypatch.setattr(groups_module, "load_native_kernels", lambda *_a, **_k: None)
+    numpy_stats = warp_module._register_frame(
         source, numpy_destination, transform, info,
         max_memory_bytes=budget, resampler="lanczos-3-clamped",
         execution=numpy_execution,
     )
     monkeypatch.undo()
     native_execution: dict = {}
-    native_stats = pipeline._register_frame(
+    native_stats = warp_module._register_frame(
         source, native_destination, transform, info,
         max_memory_bytes=budget, resampler="lanczos-3-clamped",
         native_threads=3, execution=native_execution,
@@ -406,7 +410,7 @@ def test_native_lanczos_warp_matches_numpy_resampler_bitwise(
     assert native_stats == numpy_stats
     assert np.count_nonzero(np.isfinite(native_values)) > shape[0] * shape[1] // 2
     # Streaming digest equals the published file's digest.
-    assert native_execution["sha256"] == pipeline._hash_file(native_destination)
+    assert native_execution["sha256"] == records_module.hash_calibration_file(native_destination)
     assert fits.getheader(native_destination)["OAFRSAMP"] == "LANCZOS-3-CLAMPED"
 
 
@@ -465,9 +469,9 @@ def test_memory_frame_register_matches_file_backed_register(tmp_path: Path) -> N
     )
     transform = _warp_transforms(shape)["small-rotation"]
     with FitsFrame(source) as frame:
-        memory = _MemoryFrame(frame.full_values(), info, source)
+        memory = MemoryFrame(frame.full_values(), info, source)
     for label, candidate in (("file", source), ("memory", memory)):
-        pipeline._register_frame(
+        warp_module._register_frame(
             candidate, tmp_path / f"{label}.fits", transform, info,
             max_memory_bytes=shape[0] * shape[1] * 192, resampler="lanczos-3-clamped",
         )
@@ -490,7 +494,7 @@ def test_native_warp_falls_back_to_numpy_when_the_budget_cannot_hold_the_source(
     )
     transform = _warp_transforms(shape)["fractional-translation"]
     execution: dict = {}
-    pipeline._register_frame(
+    warp_module._register_frame(
         source, tmp_path / "tiny-budget.fits", transform, info,
         max_memory_bytes=shape[1] * 192, resampler="lanczos-3-clamped",
         execution=execution,
@@ -607,7 +611,7 @@ def test_fused_pipeline_matches_numpy_pipeline_and_optionally_skips_calibrated_f
     # Every published artifact digest must equal the file's digest, including
     # the ones computed by the streaming writer.
     for item in native_receipt["outputs"]:
-        assert item["sha256"] == pipeline._hash_file(
+        assert item["sha256"] == records_module.hash_calibration_file(
             Path(native_result.output_directory) / item["path"]
         )
     # Registered pixels are identical across backends and the receipts agree on
@@ -643,7 +647,7 @@ def _random_tile_pairs(seed: int) -> list[tuple[np.ndarray, np.ndarray]]:
 
 @requires_native
 def test_native_tile_offsets_match_numpy_tile_offset_bitwise() -> None:
-    from ufwbpp.global_normalization import _tile_offset
+    from ufwbpp.stacking.normalization import _tile_offset
 
     assert KERNELS is not None
     tiles = _random_tile_pairs(23)
@@ -700,7 +704,7 @@ def _registered_group(tmp_path: Path, seed: int = 5) -> list[Path]:
 def test_global_normalization_native_and_numpy_coefficients_match(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ufwbpp.global_normalization import (
+    from ufwbpp.stacking.normalization import (
         fit_registered_group_global_normalization,
     )
 
@@ -738,8 +742,8 @@ def test_global_normalization_native_and_numpy_coefficients_match(
 
 
 def test_trail_background_normalization_row_runs_match_full_tile_reference() -> None:
-    from ufwbpp.residual_background import ResidualBackgroundAlignment
-    from ufwbpp.transient_rejection import TransientRejectionModel
+    from ufwbpp.stacking.residual_background import ResidualBackgroundAlignment
+    from ufwbpp.stacking.transient_rejection import TransientRejectionModel
 
     rng = np.random.default_rng(3)
     frames, rows, width = 6, 40, 32
@@ -778,7 +782,7 @@ def test_trail_background_normalization_row_runs_match_full_tile_reference() -> 
 
 
 def test_sampled_expression_rows_match_per_row_evaluation(tmp_path: Path) -> None:
-    from ufwbpp.calibration import (
+    from ufwbpp.stacking.integration import (
         _canonical_expression,
         _expression_rows,
         _expression_sampled_rows,
@@ -816,7 +820,7 @@ def test_sampled_expression_rows_match_per_row_evaluation(tmp_path: Path) -> Non
             row = _expression_rows(expression, sources, int(y), int(y) + 1, division_floor=1e-12)[0]
             assert np.array_equal(sampled[position], row, equal_nan=True)
         # The sampled statistics helper must equal a per-row reference.
-        from ufwbpp.calibration import _sample_coordinates
+        from ufwbpp.stacking.integration import _sample_coordinates
 
         rows, columns = _sample_coordinates((height, width), 120)
         expected = []
@@ -829,7 +833,7 @@ def test_sampled_expression_rows_match_per_row_evaluation(tmp_path: Path) -> Non
 
 
 def test_nanmedian_frames_matches_numpy_nanmedian() -> None:
-    from ufwbpp.robust_statistics import nanmedian_frames
+    from ufwbpp.stacking.robust_statistics import nanmedian_frames
 
     rng = np.random.default_rng(5)
     for frames in (1, 2, 3, 4, 7, 12, 13):
@@ -848,7 +852,7 @@ def test_nanmedian_frames_matches_numpy_nanmedian() -> None:
 def test_rejection_sigma_floor_matches_per_row_reference(tmp_path: Path) -> None:
     from contextlib import ExitStack
 
-    from ufwbpp.calibration import (
+    from ufwbpp.stacking.integration import (
         REJECTION_FLOOR_ABSOLUTE,
         REJECTION_FLOOR_GROUP_FRACTION,
         REJECTION_FLOOR_MAX_SAMPLES,
@@ -925,7 +929,7 @@ def _trail_preview(seed: int, height: int, width: int, frames: int = 7) -> np.nd
 def test_native_radon_peaks_match_numpy_candidate_lines_bitwise(
     seed: int, height: int, width: int
 ) -> None:
-    from ufwbpp import transient_rejection as tr
+    from ufwbpp.stacking import transient_rejection as tr
 
     assert KERNELS is not None
     values = _trail_preview(seed, height, width)
@@ -966,7 +970,7 @@ def test_native_radon_peaks_reject_bad_geometry() -> None:
 
 @requires_native
 def test_detect_transient_trails_native_and_numpy_models_match(monkeypatch: pytest.MonkeyPatch) -> None:
-    from ufwbpp import transient_rejection as tr
+    from ufwbpp.stacking import transient_rejection as tr
 
     values = _trail_preview(5, 110, 160)
     native = tr.detect_transient_trails(values, 4, workers=3)
@@ -1020,7 +1024,7 @@ def test_masked_mean_sample_weights_match_numpy_reference() -> None:
 @requires_native
 @pytest.mark.parametrize("sampled", [False, True])
 def test_native_offset_grid_matches_numpy_bitwise(monkeypatch: pytest.MonkeyPatch, sampled: bool) -> None:
-    from ufwbpp import calibration
+    from ufwbpp.stacking import integration as calibration
 
     rng = np.random.default_rng(71)
     width = 203
@@ -1046,7 +1050,7 @@ def test_native_offset_grid_matches_numpy_bitwise(monkeypatch: pytest.MonkeyPatc
 
 
 def test_offset_grid_outside_the_native_domain_uses_numpy() -> None:
-    from ufwbpp import calibration
+    from ufwbpp.stacking import integration as calibration
 
     assert calibration._native_offset_grid_supported(((0.0, 1.0), (2.0, 3.0)), (0.0, 5.0), (0.0, 5.0))
     assert not calibration._native_offset_grid_supported(((0.0, float("nan")), (2.0, 3.0)), (0.0, 5.0), (0.0, 5.0))

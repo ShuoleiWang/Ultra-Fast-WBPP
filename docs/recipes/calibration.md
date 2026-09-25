@@ -18,3 +18,18 @@ Lights of the same filter may contain multiple exposure lengths. Each Light uses
 Calibration is tiled to stay within the detected memory budget. A recipe cannot select a concurrency/tile combination whose estimated peak exceeds the reserved fraction of unified or system memory.
 
 In standard mono, missing Bayer metadata follows the selected monochrome mode; an explicit Bayer pattern (RGGB, BGGR, GRBG, GBRG) selects the one-shot-colour path, in which the master flat is applied with separate scaling factors per colour channel (see [OSC / CFA](osc-cfa.md)). Normal PI XISF masters therefore do not need a per-file form or values copied from Lights. Advanced overrides are sparse: omitted fields do not replace file metadata, and a real numeric zero remains distinct from an unrecorded value. Numeric units are still validated before additive subtraction. See [XISF pixels and LocalNormalization](normalization-and-xisf.md).
+
+## Files from PixInsight WBPP
+
+- **Raw data arranged for WBPP is read from its headers.** Folders such as `DATE_0322/` with Lights plus a WBPP `masterFlat_…_FILTER-R_mono.xisf` import as they are. WBPP's XISF masters (`imageType` and IMAGETYP `Master Flat`, `Master Dark`, `Master Bias`) are used as supplied masters.
+- **Frames without IMAGETYP.** When a frame has no IMAGETYP, the folder names it:
+  - `Light(s)`, `Flat(s)`, `Dark(s)`, `Bias`/`Biases`.
+  - `DarkFlats`/`FlatDarks`, and N.I.N.A.'s IMAGETYP `DARKFLAT`, count as Darks. Darks match by exact exposure, so a Flat-Dark calibrates only the Flats.
+- **Filter from the folder.** A frame without a FILTER keyword takes its filter from a WBPP keyword folder such as `FILTER_Ha/`.
+- **WBPP's output is not an input.**
+  - Lights that PixInsight already calibrated or registered are refused as Lights, with one `PROCESSED_LIGHT` error: import the raw Lights instead. They keep IMAGETYP `LIGHT`, and processing them again would repeat the dark subtraction and flat division. They are recognised by the XISF properties `PCL:Calibration:*` and `PCL:AlignmentMatrix`, or for FITS by WBPP's `calibrated/`/`registered/` folders together with their `_c`/`_r` suffixes.
+  - `masterLight` and `LN_Reference` files are products: the command line ignores them with a warning, and the desktop does not import them.
+  - Byte-identical copies of a Light are refused (`DUPLICATE_LIGHT`), so no exposure counts twice.
+- **Per-night Flats are not supported yet.** WBPP can calibrate each night with its own Flats through grouping keywords (`DATE_…`, `NIGHT_…`, `SESSION_…` in folder names). The engine recognises those keywords but still builds one Flat per filter:
+  - One filter with a MasterFlat per night is refused, and the message names the nights (`FLAT_SOURCE_AMBIGUOUS`, `FLAT_MATCH_AMBIGUOUS`). Process each night as its own project, or supply one MasterFlat.
+  - Raw Flats from several nights are combined into one master for the filter, with a warning that names the nights.

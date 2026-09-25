@@ -8,10 +8,11 @@ import numpy as np
 import pytest
 
 from conftest import write_frame
-from ufwbpp.calibration import CalibrationError, read_frame_info
-from ufwbpp.calibration_preflight import inspect_calibration
+from ufwbpp.stacking.integration import CalibrationError, read_frame_info
+from ufwbpp.calibration.preflight import inspect_calibration
 from ufwbpp.inventory import inventory_project
-from ufwbpp.pixel_pipeline import MasterMetadataOverride, run_portable_pipeline, _apply_master_metadata_overrides
+from ufwbpp.stacking.pipeline import run_portable_pipeline
+from ufwbpp.calibration.inputs import MasterMetadataOverride, apply_master_metadata_overrides
 from ufwbpp.recipe import Recipe, RecipeError
 from ufwbpp.runtime import build_e2e_request
 from test_pixel_pipeline import _dataset, _parameters, _write_frame, _sha
@@ -81,12 +82,12 @@ def test_sparse_overrides_keep_real_zero_and_unknown_does_not_erase_metadata(tmp
     actual = MasterMetadataOverride(source_sha256=_sha(master), camera='UNKNOWN', gain=0, bias_included=False)
     actual.validate()
     info = read_frame_info(master)
-    updated, = _apply_master_metadata_overrides(({master: info},), (actual,), {})
+    updated, = apply_master_metadata_overrides(({master: info},), (actual,), {})
     assert updated[master].camera == info.camera
     assert updated[master].offset == info.offset
     assert updated[master].gain == 0
     with pytest.raises(CalibrationError, match='exactly one'):
-        _apply_master_metadata_overrides(({master: info},), (replace(actual, source_sha256='sha256:'+'0'*64),), {})
+        apply_master_metadata_overrides(({master: info},), (replace(actual, source_sha256='sha256:'+'0'*64),), {})
     with pytest.raises(RecipeError):
         _standard_recipe(workflow='automatic')
 

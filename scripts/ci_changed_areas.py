@@ -16,8 +16,8 @@ pull request.  The table is conservative:
   checked out or found (``.gitattributes``, ``.gitignore``) and every path the
   table does not recognise select every area;
 * documentation selects nothing: ``*.md`` outside ``packages/`` (whose
-  READMEs are package metadata), ``docs/``, the dated ``validation/``
-  receipts, ``assets/`` artwork and ``CITATION.cff``;
+  READMEs are package metadata), ``docs/`` (with the dated evidence
+  receipts in ``docs/evidence/``), ``assets/`` artwork and ``CITATION.cff``;
 * the legal texts the desktop bundle ships (``LICENSE``, ``NOTICE``,
   ``LICENSES/``, ``THIRD_PARTY_NOTICES.md``, ``docs/licensing.md``) select the
   Python and Rust areas, whatever their suffix.
@@ -51,7 +51,7 @@ BUNDLED_LEGAL_FILES = frozenset({"LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", 
 BUNDLED_LEGAL_PREFIXES = ("LICENSES/",)
 
 DOCUMENTATION_FILES = frozenset({"CITATION.cff"})
-DOCUMENTATION_PREFIXES = ("docs/", "validation/", "assets/")
+DOCUMENTATION_PREFIXES = ("docs/", "assets/")
 
 # Read by the Python contract tests (bundle contract, release versions) as
 # well as by their own toolchain.
@@ -61,6 +61,7 @@ RUST_AND_PYTHON_FILES = frozenset(
         "apps/desktop/src-tauri/Cargo.toml",
         "apps/desktop/src-tauri/tauri.conf.json",
         "apps/desktop/src-tauri/tauri.prerelease.conf.json",
+        "apps/desktop/src-tauri/tauri.demo.conf.json",
     }
 )
 DESKTOP_PACKAGE = "apps/desktop/package.json"
@@ -68,17 +69,16 @@ DESKTOP_PACKAGE = "apps/desktop/package.json"
 RUST_FILES = frozenset({"Cargo.lock"})
 RUST_PREFIXES = ("apps/desktop/src-tauri/", ".cargo/")
 FRONTEND_PREFIXES = ("apps/desktop/",)
-# engine/native is built and ctest-checked by the Python jobs.
+# native/ is built and ctest-checked by the Python jobs.
 PYTHON_FILES = frozenset({"Makefile"})
 PYTHON_PREFIXES = (
     "packages/",
-    "engine/",
+    "native/",
     "tests/",
     "scripts/",
     "packaging/",
     "tools/",
     "benchmarks/",
-    "resources/",
 )
 
 

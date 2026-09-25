@@ -5,7 +5,7 @@ are read from a table of ``TABLE_INTERVALS + 3`` nodes at ``f = i/N``
 (``i = -1 .. N+1``) with cubic Lagrange interpolation.  The node values
 come from their own Taylor series in a fixed Float64 operation order, never
 from a math library, so every platform and library version builds the same
-table; ``engine/native/src/Lanczos3Table.cpp`` performs the same operations
+table; ``native/src/Lanczos3Table.cpp`` performs the same operations
 in the same order and the two agree value for value (see the identity test).
 
 Why a table: the previous evaluation spent six exact transcendental calls

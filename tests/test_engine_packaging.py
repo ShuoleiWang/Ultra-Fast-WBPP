@@ -159,13 +159,13 @@ def test_resource_policy_excludes_tests_catalogs_raw_frames_and_local_paths() ->
             "astropy/config/data/astropy.cfg",
             "reproject/mosaicking/__init__.py",
             "ufwbpp/py.typed",
-            "_internal/resources/catalogs/astrometry-net-4107-4112-v1.json",
+            "_internal/ufwbpp/solvers/catalog_manifests/astrometry-net-4107-4112-v1.json",
         ]
     )
     rejected = [
         "astropy/tests/data/sample." + "fits",
         "solver/catalogs/index-4200.dat",
-        "_internal/resources/catalogs/unreviewed-manifest.json",
+        "_internal/ufwbpp/solvers/catalog_manifests/unreviewed-manifest.json",
         "../outside/module.py",
         "/" + "Users/private/build/module.py",
         "C:" + "\\Users\\private\\build\\module.py",

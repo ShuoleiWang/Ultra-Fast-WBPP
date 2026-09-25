@@ -13,10 +13,18 @@ from astropy.wcs import Sip, WCS
 import numpy as np
 import pytest
 
-from ufwbpp.workflows.single_target import E2EError, E2ERequest, E2EResult, E2EState, ProgressEvent, ProgressStage, ReviewApproval
+from ufwbpp.workflows.single_target import (
+    E2EError,
+    E2ERequest,
+    E2EResult,
+    E2EState,
+    ProgressStage,
+    ReviewApproval,
+)
+from ufwbpp.workflows.contracts import ProgressEvent
 from ufwbpp.cli import _load_project_request, _verify_expected_source_roles
 from ufwbpp.inventory import inventory_project
-from ufwbpp.mosaic import ReprojectProvider
+from ufwbpp.products.mosaic import ReprojectProvider
 from ufwbpp.workflows.project import (
     ProjectE2EError,
     ProjectE2ERequest,
@@ -29,7 +37,7 @@ from ufwbpp.workflows.project import (
     classify_project_layout,
     run_project_e2e,
 )
-from ufwbpp.solver import (
+from ufwbpp.solvers.base import (
     AstrometricQuality,
     SolutionKind,
     SolverIndexArtifact,

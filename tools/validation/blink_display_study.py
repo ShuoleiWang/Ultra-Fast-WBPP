@@ -20,9 +20,17 @@ from PIL import Image
 
 from lightframeqc.content_hash import file_sha256, stat_identity
 from lightframeqc.readers import read_frame_preview
-from ufwbpp.blink_native_crops import native_atlas, star_positions
-from ufwbpp.blink_diagnostics import DISPLAY_ALGORITHM, DisplayReference, choose_display_reference, detail_transfer, diagnostic_preview, local_noise
-from ufwbpp.blink_previews import _master_preview, PreviewCalibration, calibrate_linear, channel_stretch, compose_to_reference, stretch_to_8bit, warp_to_reference
+from ufwbpp.blink.native_crops import native_atlas, star_positions
+from ufwbpp.blink.diagnostics import DISPLAY_ALGORITHM, DisplayReference, choose_display_reference, detail_transfer, diagnostic_preview, local_noise
+from ufwbpp.blink.imaging import (
+    PreviewCalibration,
+    calibrate_linear,
+    channel_stretch,
+    compose_to_reference,
+    master_preview,
+    stretch_to_8bit,
+    warp_to_reference,
+)
 
 
 def save_image(path: Path, values: np.ndarray, size: tuple[int, int] | None = None) -> None:
@@ -67,7 +75,7 @@ def run(args: argparse.Namespace) -> dict:
             # The production preview helper permits partial calibration. This
             # controlled comparison requires both masters to decode and match.
             for master in (flats[f['filter']], str(args.master_dark)):
-                if _master_preview(master, 2048).shape != preview.data.shape:
+                if master_preview(master, 2048).shape != preview.data.shape:
                     raise ValueError(f"master geometry differs from {path.name}")
             calibrated,ok=calibrate_linear(preview.data,PreviewCalibration(flats[f['filter']],str(args.master_dark),2048))
             if not ok:

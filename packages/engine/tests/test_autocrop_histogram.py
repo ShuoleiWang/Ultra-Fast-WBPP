@@ -5,7 +5,7 @@ import itertools
 import numpy as np
 import pytest
 
-from ufwbpp.pixel_pipeline import _histogram_rectangle
+from ufwbpp.stacking.crop import histogram_rectangle
 
 
 def _exhaustive_rectangle(heights: np.ndarray, row: int):
@@ -26,7 +26,7 @@ def test_histogram_matches_every_small_mask_height(width: int) -> None:
     # Covers zero runs, repeated plateaus, holes, and tied maximum rectangles.
     for values in itertools.product(range(3), repeat=width):
         heights = np.asarray(values, dtype=np.int64)
-        assert _histogram_rectangle(heights, 5) == _exhaustive_rectangle(heights, 5)
+        assert histogram_rectangle(heights, 5) == _exhaustive_rectangle(heights, 5)
 
 
 def test_histogram_random_run_lengths_and_strided_input() -> None:
@@ -36,7 +36,7 @@ def test_histogram_random_run_lengths_and_strided_input() -> None:
         backing = np.empty(len(values) * 2, dtype=np.int64)
         backing[::2] = values
         heights = backing[::2]
-        assert _histogram_rectangle(heights, 200) == _exhaustive_rectangle(heights, 200)
+        assert histogram_rectangle(heights, 200) == _exhaustive_rectangle(heights, 200)
 
 
 def test_crop_mask_histogram_matches_exhaustive_pixel_rectangle() -> None:
@@ -47,7 +47,7 @@ def test_crop_mask_histogram_matches_exhaustive_pixel_rectangle() -> None:
         best = None
         for row_index, row in enumerate(mask):
             heights = np.where(row, heights + 1, 0)
-            candidate = _histogram_rectangle(heights, row_index)
+            candidate = histogram_rectangle(heights, row_index)
             if candidate is not None and (best is None or candidate > best):
                 best = candidate
         candidates = []

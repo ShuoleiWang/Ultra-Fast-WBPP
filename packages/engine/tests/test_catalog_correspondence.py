@@ -20,19 +20,19 @@ from astropy.wcs import WCS
 import numpy as np
 import pytest
 
-import ufwbpp.astrometry_net_backend as astrometry_backend_module
+import ufwbpp.solvers.astrometry_net as astrometry_backend_module
 import ufwbpp.cli as cli_module
-from ufwbpp.astap_backend import (
+from ufwbpp.solvers.astap import (
     AstapSolverBackend,
     verify_execution_receipt,
     verify_solver_execution_result,
 )
-from ufwbpp.astrometry_net_backend import (
+from ufwbpp.solvers.astrometry_net import (
     AstrometryNetSolverBackend,
     discover_astrometry_config,
 )
 from ufwbpp.backends import BackendDescriptor, BackendRegistry, DeviceKind, StageKind
-from ufwbpp.catalog_correspondence import (
+from ufwbpp.solvers.catalog_correspondence import (
     CatalogCorrespondenceError,
     CorrespondenceParameters,
     IndexSummary,
@@ -43,10 +43,10 @@ from ufwbpp.catalog_correspondence import (
     read_index_summary,
     verify_solution,
 )
-from ufwbpp.catalogs import verify_catalog
+from ufwbpp.solvers.catalogs import verify_catalog
 from ufwbpp.planning import solver_backend_science_ready
 from ufwbpp.runtime import RuntimeConfigurationError, select_solver_chain
-from ufwbpp.solver import (
+from ufwbpp.solvers.base import (
     DeclarativeSolverBackend,
     SolveRequest,
     WcsParity,

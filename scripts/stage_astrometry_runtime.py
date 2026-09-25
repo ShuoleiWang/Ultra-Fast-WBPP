@@ -159,7 +159,7 @@ def _check_macho(path: Path) -> None:
 
 def _catalog(catalog_id: str, source: Path) -> Any:
     sys.path.insert(0, str(REPO_ROOT / "packages" / "engine" / "src"))
-    from ufwbpp.catalogs import get_catalog_manifest
+    from ufwbpp.solvers.catalogs import get_catalog_manifest
 
     manifest = get_catalog_manifest(catalog_id)
     for artifact in manifest.artifacts:
@@ -242,7 +242,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     catalog_dir = args.catalog_dir
     if catalog_dir is None:
         sys.path.insert(0, str(REPO_ROOT / "packages" / "engine" / "src"))
-        from ufwbpp.catalogs import default_catalog_root
+        from ufwbpp.solvers.catalogs import default_catalog_root
 
         catalog_dir = default_catalog_root()
     try:

@@ -4,6 +4,66 @@ All notable changes are documented here. The format follows Keep a Changelog and
 
 ## [Unreleased]
 
+### Importing files arranged by PixInsight WBPP
+
+- Lights that PixInsight already calibrated or registered (WBPP's
+  `calibrated/`, `registered/` output) kept IMAGETYP `LIGHT` and were imported
+  as raw Lights without a warning, and would have been calibrated twice. They
+  are now refused with one `PROCESSED_LIGHT` error. Detection uses the XISF
+  properties `PCL:Calibration:*` and `PCL:AlignmentMatrix`, or for FITS WBPP's
+  folders plus the `_c`/`_r` suffixes. Byte-identical copies of a Light are
+  refused as `DUPLICATE_LIGHT`, and `masterLight`/`LN_Reference` products get
+  a warning.
+- Frames without IMAGETYP take their role from plural folder names
+  (`Lights`, `Flats`, `Darks`, `Biases`), and `DarkFlats`/`FlatDarks` and
+  N.I.N.A.'s `DARKFLAT` count as exact-exposure Darks. An unknown role
+  previously blocked the whole import. A frame without FILTER takes its filter
+  from a WBPP `FILTER_<name>` folder.
+- WBPP's DATE/NIGHT/SESSION grouping keywords are recognised. Per-night
+  MasterFlats for one filter are still refused, but the message now names the
+  nights. Raw Flats from several nights are still combined per filter, with a
+  warning naming them.
+- The inventory of the NGC 7331 raw folders is unchanged record for record,
+  and the project's masters are bit-identical.
+
+### Repository and engine layout
+
+- The engine is one subpackage per domain: `workflows/`, `stacking/` (the
+  pixel pipeline and its numerics), `calibration/`, `image_io/`, `selection/`,
+  `quality/`, `blink/`, `solvers/` (with the catalog manifests, formerly
+  `resources/catalogs`, now package data), `products/` and `platform/`. The
+  two largest modules are split along their stages: `pixel_pipeline.py`
+  (4,480 lines) into `stacking/pipeline.py` (547) and eight stage modules,
+  `workflows/single_target.py` (4,267) into 706 lines and eight stage
+  modules. `run_project_e2e` (731 lines) and `run_e2e` (632) now call named
+  stages (113 and 399 lines). Import cycles went from 4 to 1 (the lazy
+  hardware probe). Private names imported across subpackages went from 54 to
+  0: the shared ones got public names. All 68 unused imports are removed.
+  Code that imported the old flat module paths must follow the move; command
+  lines, recipes and receipts are unchanged.
+- The native kernels moved from `engine/native` to `native/`. Delete old
+  `build/native*` directories, because their CMake caches name the old path.
+  The engine now loads only the installed Release library (or
+  `UFWBPP_NATIVE_LIBRARY`); it no longer falls back silently to the
+  unoptimized `build/native` test build, which is 6–7× slower. `make
+  bootstrap` and `make desktop-dev` install the Release kernels.
+- `make doctor` works again; it used to call a command that does not exist.
+  `make clean` now also removes the staged app resources and Tauri's copies
+  of them, so a later build cannot bundle a stale engine or the demo's
+  solver.
+- The dated receipts from `validation/` and `benchmarks/results/` are now in
+  `docs/evidence/`. Six that no document cited are removed. The benchmark
+  scripts suggest `build/` for their reports.
+- The desktop's `views.tsx` (1,799 lines) is split into one file per view
+  under `src/views/`, which also removes its import cycle with
+  `FrameInventory.tsx`.
+- Other cleanup:
+  - two engine tests moved from the root `tests/` into the engine's tests;
+  - the unused Android/iOS icons and the unused Cargo `[workspace.package]`
+    block (which claimed edition 2024) are gone;
+  - the demo's Tauri config is now covered by the bundle contract tests and
+    the CI path table.
+
 ### Self-contained macOS demo build
 
 - `make desktop-build-macos-demo` builds an app that plate-solves on a new Mac
@@ -153,7 +213,7 @@ All notable changes are documented here. The format follows Keep a Changelog and
 - [`benchmarks/trace_run.py`](benchmarks/trace_run.py): a tracer for real runs (`--profile <timer>` samples a timer's calls under cProfile; the trace is written even when the run fails). It executes any engine CLI command in-process with timers around the stages, the native kernels, the FITS/XISF I/O and the numerical steps (the spawned worker processes install the same timers through the `spawn` start method and hand their events back), samples CPU utilisation and resident memory, and writes a Chrome trace-event file for Perfetto plus a per-stage / per-timer summary (wall, CPU of the process and its children, cores busy; inclusive and exclusive time, calls, mean, maximum).
 - Native bilinear debayer (`oaf_native_cpu_debayer_bilinear_v1`), value-identical to the NumPy reference `lightframeqc.cfa.bilinear_debayer`, which now calls it through an accelerator hook when the engine's native library is loaded: 29 ms instead of 1.25 s per 26 MP mosaic, so a one-shot-colour Light costs its three warps and little else in the fused stage (the synthetic 26-frame RGGB project run: 110 s → 79 s).
 - One-shot-colour (Bayer / OSC) input ([recipe](docs/recipes/osc-cfa.md)). A Light with a known Bayer pattern (`RGGB`, `BGGR`, `GRBG`, `GBRG`; header `BAYERPAT`/`CFAPAT` or PixInsight's `PCL:CFASourcePattern`, or a hash-bound confirmation) is processed instead of blocked: screening and registration measure a luminance (block-mean previews use an even block size on mosaics, `lightframeqc.native_psf` stamps and the registration's full-resolution refinement read a bilinear-debayered luminance, so centroids and star shapes are the sensor's, in mosaic coordinates); calibration stays in the mosaic domain with **separate flat scaling factors per colour channel** (`FrameExpression.pattern_scales`: each Bayer channel is divided by the master flat normalized to its own channel median, as PixInsight's "separate CFA flat scaling factors") and same-colour hot-pixel replacement; the calibrated mosaic is debayered (`lightframeqc.cfa.bilinear_debayer`, banded, band-invariant) into R/G/B planes that are registered into three **colour channel groups** named `R`, `G`, `B`, which the rest of the pipeline — normalization, rejection, weights, region maps, shared crop, masters (`OAFCFA`/`OAFCFACH`/`OAFCFAF`), solve, colour product — treats exactly like filter groups; the project layer expands a Bayer Light set into its target's `R`, `G`, `B` panels. With drizzle the channel groups are **Bayer-drizzled**: the calibrated mosaics' own samples of each colour are dropped with the group's normalization, weights and rejection (`DrizzleGroupRequest.channel`, receipt `recipe.cfaChannel`, header `OAFDRZCH`). Masters built by a run inherit `BAYERPAT`; masters must share the Lights' pattern; a Bayer set cannot share a target with mono `R`/`G`/`B` filters (`CFA_CHANNEL_FILTER_COLLISION`). The desktop admits Bayer frames with an explanatory note and its raw-frame confirmation accepts the four patterns. Validation on a synthetic RGGB set built from the 26 real NGC 7331 mono L Lights (channel gains 0.80/1.00/0.65, tinted flat): channel skies equal the mono master times the gains; 1× debayered channels keep 97–99 % of the 4-px star flux with 5–10 % wider stars; the 2× Bayer drizzle recovers 99.5 % of the flux with stars 3 % sharper than the mono Lanczos-3 master. No real OSC data set has been processed yet.
-- Native drizzle integration (`oaf_native_cpu_drizzle_v1`, [`openastroflow_engine.drizzle_native`](packages/engine/src/ufwbpp/drizzle_native.py)) replaces the STScI-based executor. The drizzle of a filter group is a second integration of exactly what the ordinary integration used — the calibrated unregistered Lights, their full-resolution registration matrices, the global-normalization scale/offset/offset grid applied in the same Float32 arithmetic at the registered position, the integration weights (noise, selection and region weight maps) and the per-sample rejection decisions (the accepted-sample masks are recorded by a tile observer during the ordinary integration and sampled at each pixel's registered position, as PixInsight's DrizzleIntegration reads ImageIntegration's rejection maps) — on a `scale` times finer grid. Scales 1–4, drop shrink 0.1–1, square (exact quadrilateral clipping), circular (exact disc area), Gaussian (FWHM = drop width) and point kernels, optional Bayer drizzle into three colour planes (`RGGB`/`BGGR`/`GRBG`/`GBRG`). Output rows are split across threads and every thread visits the input pixels whose drops can touch its rows in row-major order, so the result never depends on the thread count or the band split; each drop is located by the inverse map of the band and the monotone row mapping. Products are one multi-extension FITS per filter (`SCI`, `WHT`, `COVERAGE`) with `OAFDRZ*` header cards and a content-hashed receipt (inputs, transforms, normalization and mask provenance, dither phases, coverage/weight percentiles, timing). The recipe gains `drizzle.kernel`; the CLI `--drizzle-kernel`; the desktop's advanced options offer scale, kernel and drop shrink. Drizzled masters share their grid by construction, so the same-grid solve unification now covers them (tolerances in native pixels, scaled by the drizzle scale). Sampling, dither and coverage evidence is recorded as advisory instead of blocking. NGC 7331 (61 × 26 MP Lights, M3 Pro): 0.68 s per frame at 2×, 50 s for four filters, 178 s for the whole project (97 s without drizzle); against the Lanczos-3 master in native units the half-light radius is 2.5–4.4 % smaller, the effective noise over 4 × 4 native pixels 6–7 % lower, star flux 0.993–0.994 of the ordinary master, coverage 99.95–100 %.
+- Native drizzle integration (`oaf_native_cpu_drizzle_v1`, [`openastroflow_engine.drizzle_native`](packages/engine/src/ufwbpp/stacking/drizzle_native.py)) replaces the STScI-based executor. The drizzle of a filter group is a second integration of exactly what the ordinary integration used — the calibrated unregistered Lights, their full-resolution registration matrices, the global-normalization scale/offset/offset grid applied in the same Float32 arithmetic at the registered position, the integration weights (noise, selection and region weight maps) and the per-sample rejection decisions (the accepted-sample masks are recorded by a tile observer during the ordinary integration and sampled at each pixel's registered position, as PixInsight's DrizzleIntegration reads ImageIntegration's rejection maps) — on a `scale` times finer grid. Scales 1–4, drop shrink 0.1–1, square (exact quadrilateral clipping), circular (exact disc area), Gaussian (FWHM = drop width) and point kernels, optional Bayer drizzle into three colour planes (`RGGB`/`BGGR`/`GRBG`/`GBRG`). Output rows are split across threads and every thread visits the input pixels whose drops can touch its rows in row-major order, so the result never depends on the thread count or the band split; each drop is located by the inverse map of the band and the monotone row mapping. Products are one multi-extension FITS per filter (`SCI`, `WHT`, `COVERAGE`) with `OAFDRZ*` header cards and a content-hashed receipt (inputs, transforms, normalization and mask provenance, dither phases, coverage/weight percentiles, timing). The recipe gains `drizzle.kernel`; the CLI `--drizzle-kernel`; the desktop's advanced options offer scale, kernel and drop shrink. Drizzled masters share their grid by construction, so the same-grid solve unification now covers them (tolerances in native pixels, scaled by the drizzle scale). Sampling, dither and coverage evidence is recorded as advisory instead of blocking. NGC 7331 (61 × 26 MP Lights, M3 Pro): 0.68 s per frame at 2×, 50 s for four filters, 178 s for the whole project (97 s without drizzle); against the Lanczos-3 master in native units the half-light radius is 2.5–4.4 % smaller, the effective noise over 4 × 4 native pixels 6–7 % lower, star flux 0.993–0.994 of the ordinary master, coverage 99.95–100 %.
 - Desktop: the window is redesigned as one project document in the macOS idiom: a toolbar with import actions and the run's activity, a source-list sidebar (project states, sources by target and filter, results), a content area with the frame table, the screening table with decision filters and the target × filter matrix, the processing stages and the result masters, an inspector for the selected frame's evidence, and a bottom launch bar. Light and dark follow the system; a new brand mark and application icon (generated by `apps/desktop/scripts/brand_icon.py`). The workflow state machine, the engine bridge and the accessibility contract are unchanged.
 
 

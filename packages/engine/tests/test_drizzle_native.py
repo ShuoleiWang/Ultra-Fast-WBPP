@@ -11,7 +11,7 @@ import pytest
 from astropy.io import fits
 
 from ufwbpp import native_kernels
-from ufwbpp.drizzle_native import (
+from ufwbpp.stacking.drizzle_native import (
     CFA_PATTERNS,
     DRIZZLE_ALGORITHM,
     SUPPORTED_KERNELS,
@@ -413,7 +413,7 @@ def test_receipt_verification_rejects_tampered_content(tmp_path: Path) -> None:
 
 
 def test_drizzle_discovery_does_not_advertise_a_fake_executor():
-    from ufwbpp.drizzle import drizzle_backends, DrizzleCapabilityProvider
+    from ufwbpp.stacking.drizzle import drizzle_backends, DrizzleCapabilityProvider
     provider = drizzle_backends()[0]
     assert isinstance(provider, DrizzleCapabilityProvider)
     assert not hasattr(provider, "drizzle")

@@ -11,9 +11,9 @@ import numpy as np
 from PIL import Image
 import pytest
 
-import ufwbpp.color_product as color_product_module
+import ufwbpp.products.color as color_product_module
 
-from ufwbpp.color_product import (
+from ufwbpp.products.color import (
     ColorProductError,
     ColorProductRequest,
     build_color_product,
@@ -235,7 +235,7 @@ def test_post_commit_parent_fsync_failure_is_not_reported_as_uncommitted(
             raise OSError("injected parent fsync failure")
         original(path)
 
-    from ufwbpp import publication
+    from ufwbpp.products import publication
     monkeypatch.setattr(color_product_module, "_fsync_directory", fail_second_call)
     monkeypatch.setattr(publication, "_fsync_directory", fail_second_call)
     result = build_color_product(

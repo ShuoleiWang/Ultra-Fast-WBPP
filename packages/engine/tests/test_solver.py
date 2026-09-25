@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from ufwbpp.solver import (
+from ufwbpp.solvers.registry import solver_backends
+from ufwbpp.solvers.base import (
     AstrometricQuality,
     SolutionKind,
     SolverResult,
@@ -11,7 +12,6 @@ from ufwbpp.solver import (
     SolverStatus,
     WcsParity,
     canonical_wcs_sha256,
-    solver_backends,
     validate_solver_result,
     validate_wcs_header,
 )

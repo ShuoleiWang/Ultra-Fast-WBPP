@@ -18,15 +18,8 @@ from astropy.io import fits
 import numpy as np
 import pytest
 
-from ufwbpp.workflows.single_target import (
-    E2EError,
-    E2ERequest,
-    E2EResult,
-    ExplicitDecision,
-    ExplicitSelection,
-    parse_explicit_selection,
-    run_e2e,
-)
+from ufwbpp.workflows.single_target import E2EError, E2ERequest, E2EResult, ExplicitSelection, run_e2e
+from ufwbpp.workflows.contracts import ExplicitDecision, parse_explicit_selection
 from ufwbpp.inventory import inventory_project
 from ufwbpp.workflows.project import ProjectE2EError, ProjectE2ERequest, run_project_e2e
 from ufwbpp.recipe import Recipe
@@ -491,7 +484,7 @@ def _ready_registry():
 
     from ufwbpp.backends import BackendDescriptor, BackendRegistry, DeviceKind, StageKind
     from ufwbpp.planning import RuntimeStageBackend
-    from ufwbpp.solver import SolutionKind, SolverResult, SolverStatus
+    from ufwbpp.solvers.base import SolutionKind, SolverResult, SolverStatus
 
     class ReadySolver:
         @property

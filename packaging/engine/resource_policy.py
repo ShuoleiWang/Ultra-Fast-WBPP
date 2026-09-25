@@ -30,6 +30,9 @@ DISTRIBUTION_NAMES = {
 # Distributions whose metadata must ship because a module reads its own
 # version at import time; none of the current dependencies do.
 REQUIRED_METADATA_DISTRIBUTIONS: tuple[str, ...] = ()
+# Where the checked catalog manifests live inside the engine package (and so
+# inside the frozen engine); only the files listed below may ship from there.
+CATALOG_MANIFEST_DIRECTORY = "ufwbpp/solvers/catalog_manifests"
 CHECKED_CATALOG_RESOURCES = (
     "astap-external-v1.json",
     "astrometry-net-4107-4112-v1.json",
@@ -107,14 +110,10 @@ def resource_exclusion_reason(value: str) -> str | None:
 
     member = normalize_member_path(value)
     lowered = tuple(part.casefold() for part in member.parts)
-    if len(lowered) >= 2 and lowered[-2:] == ("resources", "catalogs"):
+    if lowered[-2:] == ("solvers", "catalog_manifests"):
         return None
-    if (
-        len(lowered) >= 3
-        and lowered[-3:-1] == ("resources", "catalogs")
-        and member.name in CHECKED_CATALOG_RESOURCES
-    ):
-        return None
+    if len(lowered) >= 3 and lowered[-3:-1] == ("solvers", "catalog_manifests"):
+        return None if member.name in CHECKED_CATALOG_RESOURCES else "unreviewed-catalog-manifest"
     if any(part in NON_RUNTIME_PARTS for part in lowered):
         return "non-runtime-resource"
     if any(part in FORBIDDEN_DIRECTORY_PARTS for part in lowered):

@@ -165,11 +165,11 @@ This independent implementation does not claim algorithmic or pixel equivalence 
 | Directory | Responsibility |
 |---|---|
 | `apps/desktop` | React interface and Tauri desktop bridge; it runs the engine's command line ([guide](apps/desktop/README.md)) |
-| `packages/engine` | The `ultra-fast-wbpp` engine (Python package `ufwbpp`): calibration, normalization, integration, drizzle, selection, solvers, CLI |
+| `packages/engine` | The `ultra-fast-wbpp` engine (Python package `ufwbpp`, one subpackage per domain): workflows, stacking (calibration, normalization, integration, drizzle), selection, solvers, products, CLI |
 | `packages/light-frame-qc` | Light measurements, native PSF, quality gate, Blink flags |
 | `packages/registration` | Star detection, transform estimation, warping and common-footprint geometry |
-| `engine/native` | C++ kernels (warp, rejection, reduction, drizzle, debayer, Lanczos table) and Metal |
-| `tools/validation`, `benchmarks` | Master evaluation and tolerance gate; run tracer, kernel benchmarks, selection harnesses |
+| `native` | C++ kernels (warp, rejection, reduction, drizzle, debayer, Lanczos table) and Metal |
+| `tools/validation`, `benchmarks` | Master evaluation and tolerance gate; run tracer, kernel benchmarks, selection harnesses (dated evidence in `docs/evidence`) |
 | `scripts`, `packaging` | Native build chain, engine sidecar packaging, bundle attestation, public-tree and link checks |
 | `docs` | [Index](docs/README.md) · [features](docs/features.md) · [architecture](docs/architecture.md) · [recipes](docs/recipes/README.md) · [validation](docs/validation-matrix.md) · [Windows](docs/windows.md) |
 

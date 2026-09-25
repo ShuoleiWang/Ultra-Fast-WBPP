@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from lightframeqc.cfa import is_cfa_pattern
-from .calibration_policy import STRICT, MONO_STANDARD, same_metadata, cfa_for_workflow, metadata_changes
-
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 import hashlib
@@ -11,7 +8,11 @@ import math
 from pathlib import Path
 from typing import Any
 
+from lightframeqc.cfa import is_cfa_pattern
+from lightframeqc.metadata import session_keywords_of
+
 from .backends import BackendDescriptor, BackendRegistry, DeviceKind, StageKind
+from .calibration.policy import STRICT, MONO_STANDARD, same_metadata, cfa_for_workflow, metadata_changes
 from .hardware import HardwareProfile, detect_hardware
 from .models import (
     AssetRole,
@@ -22,7 +23,7 @@ from .models import (
     json_value,
 )
 from .recipe import Recipe, Requirement, SolverPolicy
-from .solver import solver_backends
+from .solvers.registry import solver_backends
 
 
 class PlanIssueCategory(StrEnum):
@@ -202,8 +203,8 @@ def _runtime_backends() -> tuple[RuntimeStageBackend, ...]:
         return callable(measure_paths) and callable(evaluate_quality_gate)
 
     def calibration_ready() -> bool:
-        from .calibration import read_frame_info
-        from .pixel_pipeline import run_portable_pipeline
+        from .stacking.integration import read_frame_info
+        from .stacking.pipeline import run_portable_pipeline
 
         return callable(read_frame_info) and callable(run_portable_pipeline)
 
@@ -213,8 +214,8 @@ def _runtime_backends() -> tuple[RuntimeStageBackend, ...]:
         return callable(run_registration)
 
     def integration_ready() -> bool:
-        from .metal_integration import integrate_registered_group
-        from .pixel_pipeline import run_portable_pipeline
+        from .stacking.metal_integration import integrate_registered_group
+        from .stacking.pipeline import run_portable_pipeline
 
         return callable(integrate_registered_group) and callable(run_portable_pipeline)
 
@@ -274,7 +275,7 @@ def _runtime_backends() -> tuple[RuntimeStageBackend, ...]:
 
 
 def _native_drizzle_backend() -> RuntimeStageBackend:
-    from .drizzle_native import SUPPORTED_KERNELS, SUPPORTED_SCALES
+    from .stacking.drizzle_native import SUPPORTED_KERNELS, SUPPORTED_SCALES
     from .native_kernels import DRIZZLE_KERNEL_ID, describe_native_kernels, load_native_kernels
 
     kernels = load_native_kernels()
@@ -376,7 +377,7 @@ def _known_same(left: object, right: object, unknown: object = "UNKNOWN") -> boo
     return left == right
 
 
-def _base_compatible(light: FrameAsset, calibration: FrameAsset, workflow: str = STRICT) -> bool:
+def base_compatible(light: FrameAsset, calibration: FrameAsset, workflow: str = STRICT) -> bool:
     return (
         light.status == AssetStatus.READY
         and calibration.status == AssetStatus.READY
@@ -392,14 +393,14 @@ def _base_compatible(light: FrameAsset, calibration: FrameAsset, workflow: str =
     )
 
 
-def _flat_compatible(light: FrameAsset, flat: FrameAsset, workflow: str = STRICT) -> bool:
-    return _base_compatible(light, flat, workflow) and _known_same(light.filter_name, flat.filter_name)
+def flat_compatible(light: FrameAsset, flat: FrameAsset, workflow: str = STRICT) -> bool:
+    return base_compatible(light, flat, workflow) and _known_same(light.filter_name, flat.filter_name)
 
 
-def _dark_compatible(light: FrameAsset, dark: FrameAsset, workflow: str = STRICT) -> bool:
+def dark_compatible(light: FrameAsset, dark: FrameAsset, workflow: str = STRICT) -> bool:
     temperatures_known = light.temperature_celsius is not None and dark.temperature_celsius is not None
     return (
-        _base_compatible(light, dark, workflow)
+        base_compatible(light, dark, workflow)
         and light.exposure_seconds is not None
         and dark.exposure_seconds is not None
         and math.isclose(light.exposure_seconds, dark.exposure_seconds, rel_tol=0.0, abs_tol=1e-6)
@@ -420,7 +421,7 @@ def _calibration_candidates(
     return tuple(asset for asset in (assets or inventory.assets) if asset.role in accepted)
 
 
-def _effective_calibration_assets(
+def effective_calibration_assets(
     inventory: ProjectInventory, recipe: Recipe
 ) -> tuple[tuple[FrameAsset, ...], list[PlanIssue], bool]:
     overrides = recipe.calibration.master_metadata_overrides
@@ -471,10 +472,10 @@ def _effective_calibration_assets(
     )
 
 
-def _calibration_issues(
+def calibration_match_issues(
     inventory: ProjectInventory, recipe: Recipe
 ) -> tuple[list[PlanIssue], bool]:
-    effective_assets, override_issues, valid = _effective_calibration_assets(
+    effective_assets, override_issues, valid = effective_calibration_assets(
         inventory, recipe
     )
     issues: list[PlanIssue] = list(override_issues)
@@ -489,21 +490,21 @@ def _calibration_issues(
             recipe.calibration.flat,
             AssetRole.FLAT,
             AssetRole.MASTER_FLAT,
-            _flat_compatible,
+            flat_compatible,
         ),
         (
             "Dark",
             recipe.calibration.dark,
             AssetRole.DARK,
             AssetRole.MASTER_DARK,
-            _dark_compatible,
+            dark_compatible,
         ),
         (
             "Bias",
             recipe.calibration.bias,
             AssetRole.BIAS,
             AssetRole.MASTER_BIAS,
-            _base_compatible,
+            base_compatible,
         ),
     )
     for label, requirement, raw_role, master_role, compatible in policies:
@@ -522,6 +523,7 @@ def _calibration_issues(
             continue
         unmatched_groups: dict[str, FrameAsset] = {}
         ambiguous_groups: dict[str, FrameAsset] = {}
+        ambiguous_sessions: set[str] = set()
         for light in lights:
             matching = tuple(
                 candidate for candidate in candidates if compatible(light, candidate, recipe.calibration.workflow)
@@ -537,6 +539,9 @@ def _calibration_issues(
             )
             if len(matching_masters) > 1 or (matching_raw and matching_masters):
                 ambiguous_groups.setdefault(light.group_id, light)
+                ambiguous_sessions.update(
+                    session for session in session_keywords_of([candidate.path for candidate in matching_masters]) if session
+                )
         if ambiguous_groups:
             valid = False
             issues.append(
@@ -548,6 +553,13 @@ def _calibration_issues(
                     message=(
                         f"{len(ambiguous_groups)} Light group(s) match both raw and "
                         f"master {label} sources, or more than one supplied master."
+                        + (
+                            f" The MasterFlats belong to different nights or sessions "
+                            f"({', '.join(sorted(ambiguous_sessions))}); per-night Flats are not "
+                            "supported yet: process each night as its own project."
+                            if label == "Flat" and len(ambiguous_sessions) > 1
+                            else ""
+                        )
                     ),
                     details={
                         "requirement": requirement.value,
@@ -743,7 +755,7 @@ def build_plan(
     if quality_issue is not None:
         issues.append(quality_issue)
 
-    calibration_issues, calibration_valid = _calibration_issues(inventory, recipe)
+    calibration_issues, calibration_valid = calibration_match_issues(inventory, recipe)
     issues.extend(calibration_issues)
     contract_valid = contract_valid and calibration_valid
     calibration_stage, calibration_backend_issue = _stage_from_backend(

@@ -8,6 +8,7 @@ NATIVE_RELEASE_BUILD := build/native-release
 NATIVE_INSTALL_PREFIX := packages/engine/src
 NATIVE_RUNTIME_DIR := $(NATIVE_INSTALL_PREFIX)/ufwbpp/native
 MACOS14_BOTTLE_ROOT ?= build/macos14-runtime-libraries
+SIDECAR_STAGE := apps/desktop/src-tauri/resources/ufwbpp-engine
 ASTROMETRY_RUNTIME := apps/desktop/src-tauri/resources/astrometry-net
 HOST_SYSTEM := $(shell uname -s 2>/dev/null)
 
@@ -28,12 +29,12 @@ bootstrap:
 	.venv/bin/python -m pip install -e './packages/light-frame-qc[test]' -e './packages/registration[test]' -e './packages/engine[test,all]' -r packaging/engine/requirements-build.txt
 	.venv/bin/python -m pip check
 	npm --prefix apps/desktop ci
-	$(MAKE) native-build
+	$(MAKE) native-release-install
 
 demo:
 	npm --prefix apps/desktop run demo
 
-desktop-dev: native-build
+desktop-dev: native-release-install
 	npm --prefix apps/desktop run tauri -- dev
 
 test: python-test rust-test frontend-test native-test
@@ -54,7 +55,7 @@ frontend-test:
 	npm --prefix apps/desktop run build
 
 native-configure:
-	$(CMAKE) -S engine/native -B $(NATIVE_BUILD) \
+	$(CMAKE) -S native -B $(NATIVE_BUILD) \
 		-DUFWBPP_BUILD_TESTS=ON -DUFWBPP_ENABLE_METAL=ON
 
 native-build: native-configure
@@ -64,7 +65,7 @@ native-test: native-build
 	ctest --test-dir $(NATIVE_BUILD) --output-on-failure
 
 native-release-configure:
-	$(CMAKE) -S engine/native -B $(NATIVE_RELEASE_BUILD) \
+	$(CMAKE) -S native -B $(NATIVE_RELEASE_BUILD) \
 		-DUFWBPP_BUILD_TESTS=ON -DUFWBPP_ENABLE_METAL=ON \
 		-DCMAKE_BUILD_TYPE=Release
 
@@ -121,10 +122,13 @@ check: source-check
 	$(MAKE) test
 
 doctor:
-	ufwbpp doctor
+	$(PYTHON) -m ufwbpp doctor
 
+# Also the create-only staging folders and Tauri's copies of them, so that a
+# later build cannot bundle a stale engine or the demo's solver.
 clean:
-	$(CMAKE) -E rm -rf build
+	$(CMAKE) -E rm -rf build $(SIDECAR_STAGE) $(ASTROMETRY_RUNTIME) \
+		target/debug/resources target/release/resources
 	$(CMAKE) -E rm -f \
 		$(NATIVE_RUNTIME_DIR)/libufwbpp_native.dylib \
 		$(NATIVE_RUNTIME_DIR)/libufwbpp_native.so \

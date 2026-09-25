@@ -10,8 +10,17 @@ import tempfile
 from typing import Any, Mapping, Sequence
 
 from . import __version__
+from . import platform as platform_services
 from .backends import StageKind
-from .catalogs import (
+from .calibration.preflight import inspect_calibration, load_calibration_request
+from .errors import RuntimeConfigurationError
+from .hardware import detect_hardware
+from .inventory import inventory_manifest_sha256, inventory_project
+from .native_kernels import describe_native_kernels
+from .performance_profile import select_execution_tuning
+from .planning import build_plan, default_registry, solver_backend_science_ready
+from .recipe import Recipe, RecipeError
+from .solvers.catalogs import (
     CatalogError,
     catalog_doctor,
     catalog_list,
@@ -20,14 +29,6 @@ from .catalogs import (
     remove_catalog_plan,
     verify_catalog,
 )
-from . import platform as platform_services
-from .hardware import detect_hardware
-from .native_kernels import describe_native_kernels
-from .performance_profile import select_execution_tuning
-from .inventory import inventory_manifest_sha256, inventory_project
-from .planning import build_plan, default_registry, solver_backend_science_ready
-from .recipe import Recipe, RecipeError
-from .calibration_preflight import inspect_calibration, load_calibration_request
 
 # The E2E pipeline, the solver backends and the quality gate's analysis stack
 # cost about a second to import; the interface's short
@@ -114,7 +115,7 @@ def doctor_payload() -> dict[str, Any]:
         for backend in registry.for_stage(StageKind.SOLVER)
     )
     drizzle_ready = ready(StageKind.DRIZZLE)
-    from .metal_integration import metal_executor_available
+    from .stacking.metal_integration import metal_executor_available
 
     metal_ready = metal_executor_available(hardware)
     # Binary/API probes cannot prove that installed astrometry indexes cover an
@@ -178,8 +179,6 @@ def _load_recipe(path: str | None) -> dict[str, Any]:
 
 
 def _load_project_request(path: str) -> tuple[list[str], str | None, str, Recipe, dict[str, Any]]:
-    from .runtime import RuntimeConfigurationError
-
     try:
         source = Path(path).expanduser().resolve(strict=True)
         raw = json.loads(source.read_text(encoding="utf-8"))
@@ -255,7 +254,7 @@ def _load_project_request(path: str) -> tuple[list[str], str | None, str, Recipe
     # legacy REVIEW selections rather than adding to them.
     options["selection"] = None
     if raw.get("selection") is not None:
-        from .workflows.single_target import parse_explicit_selection
+        from .workflows.contracts import parse_explicit_selection
 
         if selections:
             raise RuntimeConfigurationError(
@@ -271,7 +270,8 @@ def _load_selection_file(path: str | None) -> Any:
 
     if path is None:
         return None
-    from .workflows.single_target import E2EError, parse_explicit_selection
+    from .workflows.single_target import E2EError
+    from .workflows.contracts import parse_explicit_selection
 
     source = Path(path).expanduser()
     try:
@@ -282,7 +282,7 @@ def _load_selection_file(path: str | None) -> Any:
 
 
 def _load_quality_request(path: str) -> list[str]:
-    from .quality_preflight import QualityPreflightError
+    from .quality.preflight import QualityPreflightError
 
     try:
         source = Path(path).expanduser().resolve(strict=True)
@@ -313,7 +313,7 @@ def _load_quality_request(path: str) -> list[str]:
 
 
 def _load_blink_request(path: str) -> Any:
-    from .blink_session import BlinkRequest, BlinkSessionError
+    from .blink.session import BlinkRequest, BlinkSessionError
 
     try:
         source = Path(path).expanduser().resolve(strict=True)
@@ -647,7 +647,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stdout.write(_json(payload, compact=args.compact) + "\n")
             return 0
         if args.command == "quality-check":
-            from .quality_preflight import inspect_light_quality
+            from .quality.preflight import inspect_light_quality
 
             payload = inspect_light_quality(
                 _load_quality_request(args.request_json), workers=args.workers
@@ -655,7 +655,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stdout.write(_json(payload, compact=args.compact) + "\n")
             return 0
         if args.command == "blink-measure":
-            from .blink_session import run_blink_session
+            from .blink.session import run_blink_session
 
             def blink_progress(stage: str, message: str) -> None:
                 if args.progress_json:
@@ -683,7 +683,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
         if args.command == "run":
-            from .workflows.single_target import ProgressEvent, run_e2e
+            from .workflows.single_target import run_e2e
+            from .workflows.contracts import ProgressEvent
             from .workflows.project import project_requires_orchestration, run_project_e2e
             from .runtime import prepare_execution, prepare_project_execution
 
@@ -732,7 +733,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stdout.write(_json(result.serializable()) + "\n")
             return 0 if result.success else 3
         if args.command == "run-project":
-            from .workflows.single_target import ProgressEvent
+            from .workflows.contracts import ProgressEvent
             from .workflows.project import run_project_e2e
             from .runtime import RuntimeConfigurationError, prepare_project_execution
 

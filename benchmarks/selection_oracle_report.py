@@ -16,7 +16,7 @@ The confusion matrix answers "which frames the gate would have excluded that
 the oracle says were worth keeping" (false exclusions) and the converse.
 
     .venv/bin/python benchmarks/selection_oracle_report.py <run-dir>... \
-        --output benchmarks/results/<machine>-selection-oracle-<date>.json
+        --output build/<machine>-selection-oracle-<date>.json
 """
 
 from __future__ import annotations

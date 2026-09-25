@@ -8,8 +8,8 @@ import numpy as np
 from PIL import Image
 import pytest
 
-from ufwbpp.calibration import CalibrationError
-from ufwbpp.preview import render_auto_stretch_preview
+from ufwbpp.stacking.integration import CalibrationError
+from ufwbpp.products.preview import render_auto_stretch_preview
 
 
 def _sha(path: Path) -> str:

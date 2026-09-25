@@ -1,6 +1,7 @@
 """ctypes bridge for the portable multithreaded CPU kernels.
 
-The native library (``engine/native``) exports three kernels that reproduce the
+The native library (the repository's ``native/`` sources, installed as a
+Release build into ``ufwbpp/native``) exports kernels that reproduce the
 NumPy reference arithmetic of the ordinary mono pipeline value for value:
 
 * ``warp_lanczos3``: normalized, domain-bounded 6x6 Lanczos-3 affine warp,
@@ -60,7 +61,7 @@ def _library_filename() -> str:
     return current().native_library_filename()
 
 
-def _candidate_library_paths(explicit: str | os.PathLike[str] | None) -> tuple[Path, ...]:
+def candidate_library_paths(explicit: str | os.PathLike[str] | None) -> tuple[Path, ...]:
     """Return trusted, existing native-library candidates in priority order."""
 
     candidates: list[Path] = []
@@ -69,20 +70,9 @@ def _candidate_library_paths(explicit: str | os.PathLike[str] | None) -> tuple[P
     environment = os.environ.get("UFWBPP_NATIVE_LIBRARY", "").strip()
     if environment:
         candidates.append(Path(environment).expanduser())
-    module = Path(__file__).resolve()
-    name = _library_filename()
-    candidates.append(module.parent / "native" / name)
-    try:
-        repository = module.parents[4]
-    except IndexError:
-        repository = module.parent
-    candidates.extend(
-        (
-            repository / "build" / "native-metal" / name,
-            repository / "build" / "native" / name,
-            repository / "engine" / "native" / "build" / name,
-        )
-    )
+    # Only the installed Release library: the unoptimized test build in
+    # build/native is 6-7x slower and must never serve a real run.
+    candidates.append(Path(__file__).resolve().parent / "native" / _library_filename())
     found = ctypes.util.find_library("ufwbpp_native")
     if found and os.path.isabs(found):
         candidates.append(Path(found))
@@ -1198,7 +1188,7 @@ def load_native_kernels(
         if key in _CACHE:
             return _CACHE[key]
         loaded: NativeKernels | None = None
-        for candidate in _candidate_library_paths(library_path):
+        for candidate in candidate_library_paths(library_path):
             try:
                 loaded = NativeKernels(candidate)
                 break
@@ -1249,7 +1239,7 @@ def describe_native_kernels() -> dict[str, Any]:
         }
     kernels = load_native_kernels()
     if kernels is None:
-        candidates = [str(path) for path in _candidate_library_paths(None)]
+        candidates = [str(path) for path in candidate_library_paths(None)]
         return {
             "loaded": False,
             "reason": (

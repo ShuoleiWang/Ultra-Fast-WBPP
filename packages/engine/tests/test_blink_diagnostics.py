@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 from scipy.ndimage import gaussian_filter
 
-from ufwbpp.blink_diagnostics import DisplayReference, background_grid, diagnostic_preview, detail_transfer, local_noise
+from ufwbpp.blink.diagnostics import DisplayReference, background_grid, diagnostic_preview, detail_transfer, local_noise
 
 
 def star_field(seed=7):
@@ -81,7 +81,7 @@ def test_display_curve_keeps_highlights_ordered_without_a_hard_white_clip():
 
 
 def test_reference_uses_only_registered_measured_candidates():
-    from ufwbpp.blink_diagnostics import choose_display_reference
+    from ufwbpp.blink.diagnostics import choose_display_reference
     frames = [{"index": i, "score": {"candidate": True}, "normalization": {"registered": True}, "metrics": {"transparency": 1, "fwhmNative": 4, "ellipticity": 0.1, "sourceRatio": 1}} for i in range(3)]
     frames[2]["normalization"]["registered"] = False
     assert choose_display_reference(frames, {0: 8, 1: 4, 2: 1}) == 1

@@ -50,11 +50,11 @@ for relative in (
 
 from native_kernels_pipeline import _git_commit, _portable_path, _synthetic_dataset  # noqa: E402
 from ufwbpp import native_kernels  # noqa: E402
-from ufwbpp.calibration import IntegrationParameters  # noqa: E402
+from ufwbpp.stacking.integration import IntegrationParameters  # noqa: E402
 from ufwbpp.workflows.single_target import E2ERequest, IntegrationMode, run_e2e  # noqa: E402
 from ufwbpp.hardware import detect_hardware  # noqa: E402
 from ufwbpp.performance_profile import select_execution_tuning  # noqa: E402
-from ufwbpp.pixel_pipeline import PipelineParameters  # noqa: E402
+from ufwbpp.stacking.parameters import PipelineParameters
 from test_e2e import FakeSolver  # noqa: E402
 
 

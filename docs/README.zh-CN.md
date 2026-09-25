@@ -165,11 +165,11 @@ Blink 已接入[互补显示诊断](blink-display-redesign.md)：共同尺度的
 | 目录 | 职责 |
 |---|---|
 | `apps/desktop` | React 界面与 Tauri 桌面桥接；它调用引擎的命令行（[指南](../apps/desktop/README.md)） |
-| `packages/engine` | `ultra-fast-wbpp` 引擎（Python 包 `ufwbpp`）：校准、归一化、积分、drizzle、筛片、求解器、命令行 |
+| `packages/engine` | `ultra-fast-wbpp` 引擎（Python 包 `ufwbpp`，每个领域一个子包）：工作流、叠加（校准、归一化、积分、drizzle）、筛片、求解器、产品、命令行 |
 | `packages/light-frame-qc` | Light 测量、原生 PSF、质量门禁、Blink 标记 |
 | `packages/registration` | 星点检测、变换估计、重采样与公共覆盖区几何 |
-| `engine/native` | C++ 内核（重采样、拒绝、归约、drizzle、去马赛克、Lanczos 表）与 Metal |
-| `tools/validation`、`benchmarks` | 主图评估与容差门；运行追踪器、内核基准、筛片 harness |
+| `native` | C++ 内核（重采样、拒绝、归约、drizzle、去马赛克、Lanczos 表）与 Metal |
+| `tools/validation`、`benchmarks` | 主图评估与容差门；运行追踪器、内核基准、筛片 harness（带日期的证据在 `docs/evidence`） |
 | `scripts`、`packaging` | 原生构建链、引擎 sidecar 打包、安装包验证、公开树与链接检查 |
 | `docs` | [索引](README.md) · [features](features.md) · [架构](architecture.md) · [配方](recipes/README.md) · [验证](validation-matrix.md) · [Windows](windows.md) |
 

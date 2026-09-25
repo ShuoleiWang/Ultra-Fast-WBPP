@@ -21,7 +21,7 @@ For interface-only work, run `make demo`. The browser preview is explicitly mark
 |---|---|
 | `src/App.tsx` | Window shell: toolbar, sidebar, content views, inspector |
 | `src/Toolbar.tsx`, `src/Sidebar.tsx`, `src/Inspector.tsx` | The macOS-style chrome around the content ([design](../../docs/gui-redesign-plan.md)) |
-| `src/views.tsx` | Import, legacy screening review, processing and result views, launch bar, master forms, solver setup |
+| `src/views/` | One file per content view: `ImportView`, `ScreeningView` (legacy screening review), `RunView`, `ResultView`; `LaunchSettings.tsx` (launch bar and settings), `MasterForm.tsx` (master forms, solver setup) and `common.tsx` (frame tiles, stage labels, alerts shared with `FrameInventory` and the toolbar) |
 | `src/BlinkView.tsx` | Blink & select: channel chips, the shared-viewport stage with compare mode, the chronological filmstrip with night headers, paint-gated playback, keyboard decisions, drop night / undo, mandatory channel confirmation, the launch bar in blink mode ([recipe](../../docs/recipes/blink-screening.md)) |
 | `src/useWorkflow.ts` | Import, Blink session/decisions/review progress, diagnostic evidence, processing state, progress, and timer; `startRun` requires a completed Blink review |
 | `src/workflow/model.ts` | UI-independent decisions: panel matrix, master overrides, `startBlockers` (the one list behind the start button and the launch bar) |

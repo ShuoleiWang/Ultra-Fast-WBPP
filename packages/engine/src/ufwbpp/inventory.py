@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import json
-import os
 import math
+import os
 from pathlib import Path
 import re
 from typing import Iterable
@@ -191,6 +192,54 @@ def inventory_manifest_sha256(inventory: ProjectInventory) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _content_digest(path: str, limit: int | None = None) -> str:
+    digest = hashlib.sha256()
+    remaining = limit
+    with open(path, "rb") as stream:
+        while remaining is None or remaining > 0:
+            block = stream.read(1 << 20 if remaining is None else min(1 << 20, remaining))
+            if not block:
+                break
+            digest.update(block)
+            if remaining is not None:
+                remaining -= len(block)
+    return digest.hexdigest()
+
+
+def _duplicate_lights(assets: list[FrameAsset]) -> dict[int, str]:
+    """Byte-identical copies of a ready Light: index -> the kept original.
+
+    Candidates share size and the first 64 KiB (header and early pixels); only
+    they are hashed in full, so a normal import reads 64 KiB per Light at most
+    once and never a whole frame.
+    """
+
+    by_size: dict[int, list[int]] = {}
+    for index, asset in enumerate(assets):
+        if asset.role == AssetRole.LIGHT and asset.status == AssetStatus.READY and asset.source_stat is not None:
+            by_size.setdefault(asset.source_stat.size_bytes, []).append(index)
+    duplicates: dict[int, str] = {}
+    for indices in by_size.values():
+        if len(indices) < 2:
+            continue
+        by_prefix: dict[str, list[int]] = {}
+        for index in indices:
+            by_prefix.setdefault(_content_digest(assets[index].path, 64 * 1024), []).append(index)
+        for candidates in by_prefix.values():
+            if len(candidates) < 2:
+                continue
+            first_by_content: dict[str, int] = {}
+            for index in candidates:
+                original = first_by_content.setdefault(_content_digest(assets[index].path), index)
+                if original != index:
+                    duplicates[index] = assets[original].path
+    return duplicates
+
+
+def _examples(paths: list[str], count: int = 2) -> str:
+    return ", ".join(Path(path).name for path in paths[:count]) + (", …" if len(paths) > count else "")
+
+
 def inventory_project(
     inputs: str | os.PathLike[str] | Iterable[str | os.PathLike[str]],
     *,
@@ -212,6 +261,8 @@ def inventory_project(
 
     assets: list[FrameAsset] = []
     issues: list[InventoryIssue] = []
+    processed_lights: list[tuple[str, tuple[str, ...]]] = []
+    master_lights: list[str] = []
     for path in paths:
         try:
             source_stat = _source_stat(path)
@@ -252,7 +303,19 @@ def inventory_project(
             continue
 
         role = _ROLE_MAP[metadata.role]
-        status = AssetStatus.CONFLICT if metadata.role_conflicts else AssetStatus.READY
+        # A Light PixInsight already calibrated or registered (WBPP output)
+        # keeps IMAGETYP=LIGHT; processing it again would repeat the dark
+        # subtraction and flat division, so it is refused, never guessed.
+        processed = tuple(metadata.processing) if role == AssetRole.LIGHT else ()
+        conflicts = (
+            *metadata.role_conflicts,
+            *(
+                (f"already {' and '.join(step.lower() for step in processed)} by PixInsight; import the raw Light",)
+                if processed
+                else ()
+            ),
+        )
+        status = AssetStatus.CONFLICT if conflicts else AssetStatus.READY
         observed_at = (
             metadata.observed_at.isoformat() if metadata.observed_at is not None else None
         )
@@ -296,7 +359,7 @@ def inventory_project(
             readout_mode=metadata.readout_mode,
             observed_at=observed_at,
             role_evidence=tuple(metadata.role_evidence),
-            role_conflicts=tuple(metadata.role_conflicts),
+            role_conflicts=conflicts,
             group_id=group_id,
             source_stat=source_stat,
         )
@@ -311,6 +374,10 @@ def inventory_project(
                     details={"evidence": metadata.role_evidence},
                 )
             )
+        elif processed:
+            processed_lights.append((str(path), processed))
+        elif role == AssetRole.MASTER_LIGHT:
+            master_lights.append(str(path))
         elif role == AssetRole.UNKNOWN:
             issues.append(
                 InventoryIssue(
@@ -322,7 +389,61 @@ def inventory_project(
                 )
             )
 
-    if not any(asset.role == AssetRole.LIGHT for asset in assets):
+    if processed_lights:
+        paths = [path for path, _ in processed_lights]
+        issues.append(
+            InventoryIssue(
+                code="PROCESSED_LIGHT",
+                severity=IssueSeverity.ERROR,
+                message=(
+                    f"{len(paths)} Light(s) were already calibrated or registered by PixInsight "
+                    f"(WBPP output such as {_examples(paths)}); import the raw Lights instead"
+                ),
+                path=paths[0],
+                details={
+                    "count": len(paths),
+                    "calibrated": sum("CALIBRATED" in steps for _, steps in processed_lights),
+                    "registered": sum("REGISTERED" in steps for _, steps in processed_lights),
+                    "paths": paths,
+                },
+            )
+        )
+    duplicates = _duplicate_lights(assets)
+    for index, original in duplicates.items():
+        assets[index] = replace(
+            assets[index],
+            status=AssetStatus.CONFLICT,
+            role_conflicts=(*assets[index].role_conflicts, f"byte-identical copy of {original}"),
+        )
+    if duplicates:
+        copies = [assets[index].path for index in sorted(duplicates)]
+        issues.append(
+            InventoryIssue(
+                code="DUPLICATE_LIGHT",
+                severity=IssueSeverity.ERROR,
+                message=(
+                    f"{len(copies)} Light(s) are byte-identical copies of other imported Lights "
+                    f"({_examples(copies)}); remove the copies so no exposure counts twice"
+                ),
+                path=copies[0],
+                details={"copies": {assets[index].path: original for index, original in sorted(duplicates.items())}},
+            )
+        )
+    if master_lights:
+        issues.append(
+            InventoryIssue(
+                code="MASTER_LIGHT_IGNORED",
+                severity=IssueSeverity.WARNING,
+                message=(
+                    f"{len(master_lights)} integrated master Light(s) ({_examples(master_lights)}) are "
+                    "products, not inputs, and are ignored"
+                ),
+                path=master_lights[0],
+                details={"paths": master_lights},
+            )
+        )
+
+    if not any(asset.role == AssetRole.LIGHT and asset.status == AssetStatus.READY for asset in assets):
         issues.append(
             InventoryIssue(
                 code="NO_LIGHTS",

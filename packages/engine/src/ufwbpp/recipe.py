@@ -6,9 +6,9 @@ import math
 import re
 from typing import Any, Mapping
 
-from .calibration import COMBINATIONS, DEFAULT_COMBINATION
-from .calibration_policy import STRICT, WORKFLOWS
+from .calibration.policy import STRICT, WORKFLOWS
 from .selection.parameters import SelectionParameters
+from .stacking.integration import COMBINATIONS, DEFAULT_COMBINATION
 
 
 class RecipeError(ValueError):

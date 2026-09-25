@@ -8,37 +8,24 @@ runtime probes.  Unsupported recipe semantics fail before any pixel work.
 
 from __future__ import annotations
 
-from lightframeqc.content_hash import file_sha256
-from lightframeqc.cfa import is_cfa_pattern
-from .calibration_policy import MONO_STANDARD
-
 from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
 from typing import Any, Sequence
 
+from lightframeqc.cfa import is_cfa_pattern
+from lightframeqc.content_hash import file_sha256
+
 from .backends import BackendRegistry, StageKind
-from .calibration import IntegrationParameters
-from .workflows.single_target import (
-    DrizzleOptions,
-    E2ERequest,
-    ExplicitSelection,
-    IntegrationMode,
-    ReviewApproval,
-)
+from .calibration.inputs import MasterMetadataOverride, RawFrameMetadataOverride
+from .calibration.policy import MONO_STANDARD
+from .errors import RuntimeConfigurationError
 from .hardware import CpuFamily, HardwareProfile, detect_hardware
 from .inventory import inventory_manifest_sha256
 from .models import AssetRole, AssetStatus, IssueSeverity, ProjectInventory
 from .path_budget import Layout, check_output_path_budget
 from .performance_profile import select_execution_tuning
-from .pixel_pipeline import (
-    MasterMetadataOverride,
-    PipelineParameters,
-    RawFrameMetadataOverride,
-)
-from .global_normalization import GlobalNormalizationParameters
-from .proper_coaddition import ProperCoadditionParameters
 from .planning import (
     ExecutionPlan,
     build_plan,
@@ -46,16 +33,14 @@ from .planning import (
     solver_backend_science_ready,
 )
 from .recipe import Recipe, Requirement, SolverPolicy
+from .solvers.base import SolverBackend
+from .stacking.integration import IntegrationParameters
+from .stacking.normalization import GlobalNormalizationParameters
+from .stacking.parameters import PipelineParameters
+from .stacking.proper_coaddition import ProperCoadditionParameters
+from .workflows.contracts import DrizzleOptions
 from .workflows.project import ProjectE2ERequest
-from .solver import SolverBackend
-
-
-class RuntimeConfigurationError(RuntimeError):
-    """Stable fail-closed error raised before E2E pixel execution starts."""
-
-    def __init__(self, code: str, message: str) -> None:
-        self.code = code
-        super().__init__(message)
+from .workflows.single_target import E2ERequest, ExplicitSelection, IntegrationMode, ReviewApproval
 
 
 def _recipe_sha256(recipe: Recipe) -> str:
