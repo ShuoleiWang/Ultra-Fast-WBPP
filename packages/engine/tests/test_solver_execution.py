@@ -11,24 +11,24 @@ from astropy.io import fits
 import numpy as np
 import pytest
 
-import ufwbpp.astap_backend as astap_backend_module
-import ufwbpp.astrometry_net_backend as astrometry_backend_module
-from ufwbpp.astap_backend import (
+import ufwbpp.solvers.astap as astap_backend_module
+import ufwbpp.solvers.astrometry_net as astrometry_backend_module
+from ufwbpp.solvers.astap import (
     AstapSolverBackend,
     discover_astap,
     probe_astap,
     verify_execution_receipt,
     verify_solver_execution_result,
 )
-from ufwbpp.astrometry_net_backend import (
+from ufwbpp.solvers.astrometry_net import (
     AstrometryNetSolveProfile,
     AstrometryNetSolverBackend,
     discover_astrometry_config,
     discover_astrometry_net,
     probe_astrometry_net,
 )
-from ufwbpp.catalogs import verify_catalog
-from ufwbpp.solver import SolveRequest, SolverStatus, validate_solver_result
+from ufwbpp.solvers.catalogs import verify_catalog
+from ufwbpp.solvers.base import SolveRequest, SolverStatus, validate_solver_result
 
 
 # Upper bounds for the fake solver processes, not expectations: the tests

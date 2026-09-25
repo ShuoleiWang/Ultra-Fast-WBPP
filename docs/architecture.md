@@ -13,7 +13,7 @@ Tauri Rust: import, settings, process lifecycle, progress, result validation
                        ↓  one engine command per operation:
                        ↓  doctor --json · inventory · calibration-check · quality-check
                        ↓  blink-measure · run-project --request-json … --progress-json · catalog
-Python CLI → workflows.project → workflows.single_target → pixel_pipeline
+Python CLI → workflows.project → workflows.single_target → stacking.pipeline
                        ↓
 FITS/XISF calibration · registration · normalization · rejection/integration
                        ↓
@@ -42,7 +42,7 @@ Rust validates returned files and sky-coordinate evidence → GUI completion
 - [`workflows/single_target.py`](../packages/engine/src/ufwbpp/workflows/single_target.py)
   runs one field as named phases (source validation, screening, registration
   calibration, registration, integration passes, solving, publication);
-  [`pixel_pipeline.py`](../packages/engine/src/ufwbpp/pixel_pipeline.py)
+  [`stacking/pipeline.py`](../packages/engine/src/ufwbpp/stacking/pipeline.py)
   plans a run, builds the calibration masters, calibrates and warps every
   Light and integrates each output group. Python owns most scheduling, image
   I/O and registration; the pipeline is not a fully native C++ or GPU
@@ -80,12 +80,12 @@ backend truth flags are described in
    An explicit selection (`selection-v1`, policy `explicit-v1`, made in the
    desktop's blink view or written by hand and passed as `--selection` or the
    request's `selection` block) names the kept Lights by content digest: the
-   engine's `blink-measure` command (`blink_session.py`) had computed
+   engine's `blink-measure` command (`blink/session.py`) had computed
    per-channel flags with absolute cross-night criteria
    (`lightframeqc.blink_flags`, policy `blink-flags-v1`), a reference frame
    per channel (`lightframeqc.blink_reference`, a PSF-signal-weight proxy)
    and registered, normalised, shared-stretch previews at 1/8 and 1/4 scale
-   (`blink_previews.py`) into a create-only session directory under the
+   (`blink/previews.py`) into a create-only session directory under the
    platform cache root. The run recomputes the gate, the flags and the
    reference from the same functions, replaces the gate's admitted set with
    the selection (a KEEP on an unregistrable frame fails closed), writes
@@ -173,7 +173,7 @@ Work is tiled and bounded by configured memory budgets. These estimates do not
 cap process RSS or the OS file cache.
 
 The three hot loops of the ordinary pipeline run in multithreaded native CPU
-kernels (`engine/native/src/PortableKernels.cpp`, bound through
+kernels (`native/src/PortableKernels.cpp`, bound through
 [`native_kernels.py`](../packages/engine/src/ufwbpp/native_kernels.py)):
 the Lanczos-3 registration warp, the full-stack median/MAD rejection decision
 (v2: the noise part of each pixel's scale is the pooled MAD of its row window
@@ -276,21 +276,35 @@ redistribution permissions are separate; see [licensing](licensing.md).
 - `workflows/contracts.py` owns run requests, explicit selections and progress.
   `workflows/project.py` and `workflows/single_target.py` coordinate runs;
   `workflows/solve.py` owns final solve/geometry verification.
-- `pixel_pipeline.py` is a sequence of stages: `_plan_run` (validate and group
-  every input into a `_RunPlan`), `_build_calibration_masters`,
-  `_plan_light_jobs`, `_calibrate_and_register_lights`, `_integrate_group` per
-  output group, then the receipt and one no-replace publication.
-- `calibration_inputs.py` owns content-bound metadata and generated-master reuse.
-  `image_io/fits.py` owns FITS reading/writing and sampling; `calibration.py`
-  retains expression evaluation and ordinary integration. `PixelTransform`
-  accepts affine and projective matrices.
+- The engine has one subpackage per domain: `workflows/`, `stacking/`,
+  `calibration/`, `image_io/`, `selection/`, `quality/`, `blink/`, `solvers/`,
+  `products/` and `platform/`. Its modules import without cycles, and private
+  helpers are shared only inside a subpackage.
+- `workflows/single_target.run_e2e` calls its stages in the modules of their
+  steps: `sources.py` (validation, hashing, staging), `screening.py`,
+  `registration.py` (registration calibration and transforms),
+  `integration.py` (integration passes, again without frames the
+  counterfactual confirms harmful) and `products.py` (drizzle, candidates,
+  solving); `workflows/project.run_project_e2e` runs shared calibration,
+  target panels, mosaics, channel alignment, colour and publication as stages.
+- `stacking/pipeline.py` is a sequence of stages: `_plan_run` (`run_plan.py`:
+  validate and group every input into a `_RunPlan`),
+  `_build_calibration_masters` (`masters.py`), `_plan_light_jobs` and
+  `_calibrate_and_register_lights` (`lights.py`), the shared crop
+  (`crop.py`), `_integrate_group` per output group (`groups.py`), then the
+  receipt and one no-replace publication.
+- `calibration/inputs.py` owns content-bound metadata and generated-master
+  reuse. `image_io/fits.py` owns FITS reading/writing and sampling;
+  `stacking/integration.py` retains expression evaluation and ordinary
+  integration. `PixelTransform` accepts affine and projective matrices.
 - `integrity.py` owns canonical JSON and SHA-256 forms; `solvers/process.py`
-  owns shared external-process and publication evidence; `publication.py`
-  shares colour/mosaic create-only primitives.
-- `drizzle.py` describes capabilities; `drizzle_native.integrate_drizzle_group`
-  executes the native group contract.
+  owns shared external-process and publication evidence;
+  `products/publication.py` shares colour/mosaic create-only primitives.
+- `stacking/drizzle.py` describes capabilities;
+  `stacking/drizzle_native.integrate_drizzle_group` executes the native group
+  contract.
 - The registration library lives under `packages/registration/src`.
-  `engine/native` contains only native kernels, their ABI, tests and benchmarks.
+  `native/` contains only native kernels, their ABI, tests and benchmarks.
 - Desktop Rust `sidecar/` separates bundle discovery, inspection and blink;
   `project/` separates requests, previews, completion checks, execution and the
   astrometric receipt it re-validates. `workflow/model.ts` holds UI-independent

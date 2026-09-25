@@ -25,7 +25,7 @@ from astropy.io import fits
 from astropy.wcs import WCS
 
 from .. import platform as platform_services
-from ..solver import SolutionKind, SolveRequest, SolverResult, SolverStatus, canonical_wcs_sha256, validate_solver_result, validate_wcs_header
+from .base import SolutionKind, SolveRequest, SolverResult, SolverStatus, canonical_wcs_sha256, validate_solver_result, validate_wcs_header
 
 
 _MAX_CONTROL_FILE_BYTES = 16 * 1024 * 1024

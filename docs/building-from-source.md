@@ -30,7 +30,7 @@ cd Ultra-Fast-WBPP
 make bootstrap BOOTSTRAP_PYTHON=python3.12
 ```
 
-`make bootstrap` creates `.venv` from that interpreter and installs the three Python packages in editable mode with the packaging tools. It then runs `npm ci` for the desktop and builds the native kernels' test configuration. `make test` runs every suite (Python, Rust, frontend and native). For real runs from the command line, also install the optimized kernels with `make native-release-install`, then run `.venv/bin/ultra-fast-wbpp doctor`. The desktop builds below install them anyway.
+`make bootstrap` creates `.venv` from that interpreter and installs the three Python packages in editable mode with the packaging tools. It then runs `npm ci` for the desktop and builds, tests and installs the optimized native kernels (`make native-release-install`). `make test` runs every suite (Python, Rust, frontend and native). Check the result with `.venv/bin/ultra-fast-wbpp doctor`.
 
 ## 2. Build the desktop app
 
@@ -102,7 +102,7 @@ rm -rf build/sidecars/ufwbpp-engine-aarch64-apple-darwin build/sidecars/ufwbpp-e
   apps/desktop/src-tauri/resources/ufwbpp-engine apps/desktop/src-tauri/resources/astrometry-net
 ```
 
-The downloaded bottles in `build/astrometry-bottles` and `build/macos14-runtime-libraries` are kept and re-verified, and the Rust build is incremental. A rebuild takes a few minutes.
+The downloaded bottles in `build/astrometry-bottles` and `build/macos14-runtime-libraries` are kept and re-verified, and the Rust build is incremental. A rebuild takes a few minutes. `make clean` removes these intermediates too, but also the rest of `build/`, including the downloaded bottles.
 
 ## Troubleshooting
 

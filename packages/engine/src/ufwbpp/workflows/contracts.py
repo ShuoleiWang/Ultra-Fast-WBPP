@@ -1,19 +1,21 @@
 """Requests, results and progress for the single-target scientific workflow."""
 from __future__ import annotations
+
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 import hashlib
-import json
 import math
 import re
 from typing import Any, Callable, Mapping
+
 from lightframeqc import DEFAULT_CONFIG, QcConfig
-from lightframeqc.quality_gate import GatePolicy
 from lightframeqc.blink_flags import BlinkFlagPolicy
+from lightframeqc.quality_gate import GatePolicy
+
 from ..integrity import canonical_json_document
-from ..pixel_pipeline import PipelineParameters
 from ..selection import SelectionParameters
-from ..drizzle_native import SUPPORTED_SCALES as DRIZZLE_SCALES_SUPPORTED, SUPPORTED_KERNELS as DRIZZLE_KERNELS_SUPPORTED
+from ..stacking.drizzle_native import SUPPORTED_SCALES as DRIZZLE_SCALES_SUPPORTED, SUPPORTED_KERNELS as DRIZZLE_KERNELS_SUPPORTED
+from ..stacking.parameters import PipelineParameters
 
 
 class IntegrationMode(StrEnum):

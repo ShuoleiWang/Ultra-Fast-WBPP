@@ -11,18 +11,16 @@ from astropy.io import fits
 import numpy as np
 import pytest
 
-from ufwbpp.calibration import CalibrationError, IntegrationParameters
-from ufwbpp.global_normalization import (
+from ufwbpp.stacking.integration import CalibrationError, IntegrationParameters
+from ufwbpp.stacking.normalization import (
     GlobalNormalizationParameters,
     StellarScaleHint,
 )
 from ufwbpp.path_budget import STAGING_SUFFIX
-from ufwbpp.pixel_pipeline import (
-    AffineTransform,
-    MasterMetadataOverride,
-    PipelineParameters,
-    run_portable_pipeline,
-)
+from ufwbpp.stacking.pipeline import run_portable_pipeline
+from ufwbpp.stacking import lights as lights_module
+from ufwbpp.calibration.inputs import MasterMetadataOverride
+from ufwbpp.stacking.parameters import AffineTransform, PipelineParameters
 
 
 def _write_frame(
@@ -142,7 +140,7 @@ def _parameters() -> PipelineParameters:
 def test_parallel_warps_preserve_fits_and_ordered_provenance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import ufwbpp.pixel_pipeline as pipeline
+    import ufwbpp.stacking.pipeline as pipeline
 
     biases, darks, flats, lights, _signal, _response = _dataset(tmp_path / "raw")
     tuning = pipeline.select_execution_tuning(pipeline.detect_hardware())
@@ -212,10 +210,10 @@ def test_parallel_warps_preserve_fits_and_ordered_provenance(
 @pytest.mark.parametrize(("budget_jobs", "cpu_workers", "expected_workers"), [(3, 8, 3), (10, 12, 10), (10, 2, 2)])
 def test_fused_jobs_share_budget_and_keep_result_order(tmp_path, monkeypatch, budget_jobs, cpu_workers, expected_workers):
     from types import SimpleNamespace
-    import ufwbpp.pixel_pipeline as pipeline
+    import ufwbpp.stacking.pipeline as pipeline
     info = SimpleNamespace(shape=(12, 16))
     jobs = [SimpleNamespace(index=i, info=info, transform=AffineTransform.identity(), cfa_pattern=None) for i in range(20)]
-    budget = pipeline._fused_job_bytes(jobs[0], "lanczos-3-clamped") * budget_jobs
+    budget = lights_module._fused_job_bytes(jobs[0], "lanczos-3-clamped") * budget_jobs
     barrier = threading.Barrier(expected_workers)
     seen = []
 
@@ -226,8 +224,8 @@ def test_fused_jobs_share_budget_and_keep_result_order(tmp_path, monkeypatch, bu
             barrier.wait(timeout=5)
         return SimpleNamespace(index=job.index, execution={"warpBackend": "test"})
 
-    monkeypatch.setattr(pipeline, "_process_light_job", process)
-    results, execution = pipeline._calibrate_and_register_frames(
+    monkeypatch.setattr(lights_module, "_process_light_job", process)
+    results, execution = lights_module._calibrate_and_register_frames(
         jobs, master_cache=SimpleNamespace(decoded_bytes=0), max_memory_bytes=budget,
         resampler="lanczos-3-clamped", cpu_workers=cpu_workers, division_floor=1e-6,
     )
@@ -238,7 +236,7 @@ def test_fused_jobs_share_budget_and_keep_result_order(tmp_path, monkeypatch, bu
 
 def test_fused_failure_waits_for_active_writer(monkeypatch):
     from types import SimpleNamespace
-    import ufwbpp.pixel_pipeline as pipeline
+    import ufwbpp.stacking.pipeline as pipeline
     jobs = [SimpleNamespace(index=i, info=SimpleNamespace(shape=(12, 16)), transform=AffineTransform.identity(), cfa_pattern=None) for i in range(2)]
     barrier = threading.Barrier(2)
     failed, release_writer, writer_finished = threading.Event(), threading.Event(), threading.Event()
@@ -252,9 +250,9 @@ def test_fused_failure_waits_for_active_writer(monkeypatch):
         writer_finished.set()
         return SimpleNamespace(execution={"warpBackend": "test"})
 
-    monkeypatch.setattr(pipeline, "_process_light_job", process)
+    monkeypatch.setattr(lights_module, "_process_light_job", process)
     with ThreadPoolExecutor(max_workers=1) as caller:
-        pending = caller.submit(pipeline._calibrate_and_register_frames, jobs,
+        pending = caller.submit(lights_module._calibrate_and_register_frames, jobs,
             master_cache=SimpleNamespace(decoded_bytes=0), max_memory_bytes=1024**2,
             resampler="bilinear", cpu_workers=2, division_floor=1e-6)
         try:
@@ -1120,7 +1118,7 @@ def test_calibration_mismatch_fails_before_publication(
 
 
 def test_master_dark_hot_pixels_are_replaced_before_registration(tmp_path: Path) -> None:
-    from ufwbpp.pixel_pipeline import _hot_pixel_map, _replace_hot_pixels
+    from ufwbpp.stacking.lights import _hot_pixel_map, _replace_hot_pixels
 
     rng = np.random.default_rng(3)
     dark = rng.normal(120.0, 1.0, (64, 80)).astype(np.float32)
@@ -1147,7 +1145,7 @@ def test_master_dark_hot_pixels_are_replaced_before_registration(tmp_path: Path)
 
 
 def test_integration_noise_weights_ignore_sky_gradients(tmp_path: Path) -> None:
-    from ufwbpp.calibration import (
+    from ufwbpp.stacking.integration import (
         FrameExpression,
         IntegrationParameters,
         _normalized_noise_weights,
@@ -1184,7 +1182,7 @@ def test_concurrent_group_integration_matches_the_sequential_run(
     """Groups integrated side by side publish the same masters and the same
     receipt artifact order as one group at a time."""
 
-    import ufwbpp.pixel_pipeline as pipeline
+    import ufwbpp.stacking.pipeline as pipeline
 
     biases, darks, flats, lights, signal_r, _ = _dataset(tmp_path / "raw")
     height, width = signal_r.shape
@@ -1216,7 +1214,7 @@ def test_concurrent_group_integration_matches_the_sequential_run(
     def run(name: str, concurrency: int) -> tuple[dict[str, str], list[tuple[str, str]]]:
         monkeypatch.setattr(pipeline, "_group_concurrency", lambda *_args: concurrency)
         output = tmp_path / name
-        pipeline._run_portable_pipeline_fits(
+        pipeline.run_portable_pipeline_fits(
             bias_files=biases,
             dark_files=darks,
             flat_files=flats,
@@ -1266,8 +1264,8 @@ def _star_lights(root: Path, filter_name: str, count: int, *, seed: int) -> list
 def test_proper_coadd_is_published_per_group_and_independent_of_the_schedule(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import ufwbpp.pixel_pipeline as pipeline
-    from ufwbpp.proper_coaddition import ProperCoadditionParameters
+    import ufwbpp.stacking.pipeline as pipeline
+    from ufwbpp.stacking.proper_coaddition import ProperCoadditionParameters
 
     shape = (192, 224)
     biases = [
@@ -1301,7 +1299,7 @@ def test_proper_coadd_is_published_per_group_and_independent_of_the_schedule(
     def run(name: str, concurrency: int) -> tuple[dict[str, str], dict[str, str], dict[str, object]]:
         monkeypatch.setattr(pipeline, "_group_concurrency", lambda *_args: concurrency)
         output = tmp_path / name
-        result = pipeline._run_portable_pipeline_fits(
+        result = pipeline.run_portable_pipeline_fits(
             bias_files=biases,
             dark_files=darks,
             flat_files=flats,

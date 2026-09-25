@@ -12,7 +12,7 @@ down-weighted; false positives = benign frames that lost weight.
         --lights '/path/DATE_0322/*300.00s*.fits' \
         --master-bias masterBias.xisf --master-dark masterDark.xisf \
         [--flats '/path/DATE_0322/*FLAT*.fits' | --master-flats '/path/masterFlat_*FILTER-R*.xisf'] \
-        --policy unattended-v1 --output benchmarks/results/<name>.json \
+        --policy unattended-v1 --output build/<name>.json \
         --scratch $SCRATCH/defect-injection
 
 The astrometric solve is faked (the repository's FakeSolver), so the run
@@ -46,11 +46,11 @@ for relative in (
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
-from ufwbpp.calibration_policy import MONO_STANDARD  # noqa: E402
+from ufwbpp.calibration.policy import MONO_STANDARD  # noqa: E402
 from ufwbpp.workflows.single_target import E2ERequest, IntegrationMode, run_e2e  # noqa: E402
-from ufwbpp.pixel_pipeline import PipelineParameters  # noqa: E402
+from ufwbpp.stacking.parameters import PipelineParameters
 from ufwbpp.selection import SelectionParameters  # noqa: E402
-from ufwbpp.solver import (  # noqa: E402
+from ufwbpp.solvers.base import (  # noqa: E402
     AstrometricQuality,
     SolutionKind,
     SolverIndexArtifact,

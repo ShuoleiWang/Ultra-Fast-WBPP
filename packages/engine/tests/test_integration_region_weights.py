@@ -9,8 +9,8 @@ from astropy.io import fits
 import numpy as np
 import pytest
 
-from ufwbpp import calibration
-from ufwbpp.calibration import (
+from ufwbpp.stacking import integration as calibration
+from ufwbpp.stacking.integration import (
     CalibrationError,
     FrameExpression,
     IntegrationMapPaths,
@@ -131,7 +131,7 @@ def test_weight_grid_validation_and_receipt_keys(tmp_path: Path) -> None:
 def test_noise_estimate_ignores_the_blanked_region(tmp_path: Path) -> None:
     """A blocked, low-noise area must not inflate the frame's noise weight."""
 
-    from ufwbpp.calibration import _frame_noise_estimates, _open_expression_sources
+    from ufwbpp.stacking.integration import _frame_noise_estimates, _open_expression_sources
     from contextlib import ExitStack
 
     rng = np.random.default_rng(5)

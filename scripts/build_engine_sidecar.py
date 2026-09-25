@@ -963,7 +963,7 @@ def run_engine_doctor(
 
 
 def expected_catalog_ids() -> tuple[str, ...]:
-    catalog_root = REPO_ROOT / "resources" / "catalogs"
+    catalog_root = REPO_ROOT / "packages" / "engine" / "src" / "ufwbpp" / "solvers" / "catalog_manifests"
     identifiers: list[str] = []
     for name in CHECKED_CATALOG_RESOURCES:
         if name.endswith(".schema.json"):

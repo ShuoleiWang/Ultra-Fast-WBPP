@@ -13,14 +13,12 @@ import numpy as np
 import pytest
 from lightframeqc.xisf import XISF
 
-from ufwbpp.calibration import CalibrationError, read_frame_info
-from ufwbpp.global_normalization import GlobalNormalizationParameters
-from ufwbpp.pixel_pipeline import (
-    MasterMetadataOverride,
-    PipelineParameters,
-    run_portable_pipeline,
-)
-from ufwbpp.xisf_pixels import (
+from ufwbpp.stacking.integration import CalibrationError, read_frame_info
+from ufwbpp.stacking.normalization import GlobalNormalizationParameters
+from ufwbpp.stacking.pipeline import run_portable_pipeline
+from ufwbpp.calibration.inputs import MasterMetadataOverride
+from ufwbpp.stacking.parameters import PipelineParameters
+from ufwbpp.image_io.xisf import (
     XisfDecodePolicy,
     _xisf_numeric_domain,
     convert_xisf_to_fits,

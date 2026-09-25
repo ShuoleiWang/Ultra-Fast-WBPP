@@ -4,8 +4,6 @@ Sources stay read-only; callers stage XISF separately and publish new files."""
 
 from __future__ import annotations
 
-from ..calibration_policy import bias_from_header
-
 from dataclasses import dataclass
 import hashlib
 import math
@@ -17,10 +15,12 @@ from typing import Any, Mapping
 
 from astropy.io import fits
 import numpy as np
-from lightframeqc.cfa import CFA_PATTERNS, normalize_pattern as normalize_cfa_pattern
-from lightframeqc.fits_bands import FitsBandReader, close_image_data, open_fits_image_data
 from numpy.typing import NDArray
 
+from lightframeqc.cfa import CFA_PATTERNS, normalize_pattern as normalize_cfa_pattern
+from lightframeqc.fits_bands import FitsBandReader, close_image_data, open_fits_image_data
+
+from ..calibration.policy import bias_from_header
 from ..lanczos_table import TAP_OFFSETS, tap_weights
 from ..platform import remove_file
 
@@ -38,13 +38,13 @@ class CalibrationError(RuntimeError):
         super().__init__(f"{code}: {detail}")
 
 
-def _plain_header_value(value: Any) -> Any:
+def plain_header_value(value: Any) -> Any:
     if isinstance(value, np.generic):
         return value.item()
     return value
 
 
-def _number(header: Mapping[str, Any], *keys: str) -> float | None:
+def header_number(header: Mapping[str, Any], *keys: str) -> float | None:
     for key in keys:
         value = header.get(key)
         if value is None or str(value).strip() == "":
@@ -58,7 +58,7 @@ def _number(header: Mapping[str, Any], *keys: str) -> float | None:
     return None
 
 
-def _text(header: Mapping[str, Any], *keys: str, default: str = "UNKNOWN") -> str:
+def header_text(header: Mapping[str, Any], *keys: str, default: str = "UNKNOWN") -> str:
     for key in keys:
         value = header.get(key)
         if value is not None and str(value).strip():
@@ -87,24 +87,24 @@ def normalize_role(value: Any) -> str:
     }.get(compact, "UNKNOWN")
 
 
-def _numeric_domain_from_header(
+def numeric_domain_from_header(
     header: Mapping[str, Any],
 ) -> tuple[str, float | None, str]:
     declared = str(header.get("OAFNDOM", "")).strip().upper()
-    declared_scale = _number(header, "OAFNSCL")
+    declared_scale = header_number(header, "OAFNSCL")
     if declared:
         if declared_scale is None or declared_scale <= 0:
             return "UNDECLARED", None, "UNRESOLVED"
         return declared, declared_scale, "SELF_DECLARED_HEADER"
-    bitpix_value = _number(header, "BITPIX")
+    bitpix_value = header_number(header, "BITPIX")
     bitpix = int(bitpix_value) if bitpix_value is not None else 0
     raw_bunit = header.get("BUNIT")
     if raw_bunit is not None and str(raw_bunit).strip():
         bunit = re.sub(r"[^A-Z0-9]+", "", str(raw_bunit).upper())
         if bunit not in {"ADU", "DN", "COUNT", "COUNTS", "CODE", "CODES"}:
             return "UNDECLARED", None, "FITS_BUNIT_UNSUPPORTED"
-    bzero = _number(header, "BZERO") or 0.0
-    declared_bscale = _number(header, "BSCALE")
+    bzero = header_number(header, "BZERO") or 0.0
+    declared_bscale = header_number(header, "BSCALE")
     bscale = declared_bscale if declared_bscale is not None else 1.0
     if bitpix in {8, 16, 32, 64} and bscale > 0:
         if bitpix == 8:
@@ -128,15 +128,15 @@ def _numeric_domain_from_header(
     return "UNDECLARED", None, "UNRESOLVED"
 
 
-def _numeric_domain_evidence_from_header(
+def numeric_domain_evidence_from_header(
     header: Mapping[str, Any],
 ) -> tuple[tuple[str, Any], ...]:
-    bitpix_value = _number(header, "BITPIX")
+    bitpix_value = header_number(header, "BITPIX")
     bitpix = int(bitpix_value) if bitpix_value is not None else None
-    bscale = _number(header, "BSCALE")
+    bscale = header_number(header, "BSCALE")
     if bscale is None:
         bscale = 1.0
-    bzero = _number(header, "BZERO")
+    bzero = header_number(header, "BZERO")
     if bzero is None:
         bzero = 0.0
     evidence: dict[str, Any] = {
@@ -341,35 +341,35 @@ class FitsFrame:
             numeric_domain,
             normalized_unit_scale,
             numeric_domain_authority,
-        ) = _numeric_domain_from_header(header)
-        shared_bin = _number(header, "BINNING")
-        bin_x = _number(header, "XBINNING", "CCDBINX") or shared_bin
-        bin_y = _number(header, "YBINNING", "CCDBINY") or shared_bin
+        ) = numeric_domain_from_header(header)
+        shared_bin = header_number(header, "BINNING")
+        bin_x = header_number(header, "XBINNING", "CCDBINX") or shared_bin
+        bin_y = header_number(header, "YBINNING", "CCDBINY") or shared_bin
         return FrameInfo(
             path=str(self.path),
             role=normalize_role(header.get("IMAGETYP", header.get("IMAGETYPE"))),
             shape=self.shape,
-            filter_name=_text(header, "FILTER", "INSFLNAM", "FILTERID"),
-            exposure_seconds=_number(header, "EXPTIME", "EXPOSURE", "EXPOSURETIME"),
-            temperature_celsius=_number(
+            filter_name=header_text(header, "FILTER", "INSFLNAM", "FILTERID"),
+            exposure_seconds=header_number(header, "EXPTIME", "EXPOSURE", "EXPOSURETIME"),
+            temperature_celsius=header_number(
                 header, "CCD-TEMP", "CCD_TEMP", "SENSORT", "SENSOR-T", "CAMTEMP"
             ),
-            camera=_text(header, "INSTRUME", "CAMERA", "DETECTOR"),
-            gain=_number(header, "GAIN", "EGAIN", "CAMGAIN"),
-            offset=_number(header, "OFFSET", "CAMOFFSET"),
+            camera=header_text(header, "INSTRUME", "CAMERA", "DETECTOR"),
+            gain=header_number(header, "GAIN", "EGAIN", "CAMGAIN"),
+            offset=header_number(header, "OFFSET", "CAMOFFSET"),
             binning_x=int(bin_x) if bin_x is not None else None,
             binning_y=int(bin_y) if bin_y is not None else None,
-            cfa_pattern=_text(
+            cfa_pattern=header_text(
                 header, "BAYERPAT", "BAYERPATN", "CFAPAT", "CFAPATTERN"
             ),
-            readout_mode=_text(
+            readout_mode=header_text(
                 header, "READOUTM", "READOUT", "READMODE", "READOUTMODE"
             ),
-            target=_text(header, "OBJECT", "OBJNAME", "TARGET"),
+            target=header_text(header, "OBJECT", "OBJNAME", "TARGET"),
             numeric_domain=numeric_domain,
             normalized_unit_scale=normalized_unit_scale,
             numeric_domain_authority=numeric_domain_authority,
-            numeric_domain_evidence=_numeric_domain_evidence_from_header(header),
+            numeric_domain_evidence=numeric_domain_evidence_from_header(header),
             bias_included=bias_from_header(header),
         )
 
@@ -448,7 +448,7 @@ class FitsFrame:
     ) -> NDArray[np.float32]:
         """Sample a bounded coordinate tile without decoding the full image."""
 
-        return _sample_bilinear_from(self, x_coordinates, y_coordinates)
+        return sample_bilinear_from(self, x_coordinates, y_coordinates)
 
     def sample_lanczos3_clamped(
         self,
@@ -457,14 +457,14 @@ class FitsFrame:
     ) -> NDArray[np.float32]:
         """Sample with a normalized, bounded six-tap Lanczos-3 kernel.
 
-        See :func:`_sample_lanczos3_clamped_from` for the contract; the same
+        See :func:`sample_lanczos3_clamped_from` for the contract; the same
         implementation serves file-backed and in-memory frames.
         """
 
-        return _sample_lanczos3_clamped_from(self, x_coordinates, y_coordinates)
+        return sample_lanczos3_clamped_from(self, x_coordinates, y_coordinates)
 
 
-class _MemoryFrame:
+class MemoryFrame:
     """In-memory Float32 physical image with the FitsFrame sampling interface.
 
     Fused calibration keeps a calibrated Light in memory and registers it
@@ -487,7 +487,7 @@ class _MemoryFrame:
         self.info = info
         self.path = Path(path) if path is not None else Path(info.path)
 
-    def __enter__(self) -> _MemoryFrame:
+    def __enter__(self) -> MemoryFrame:
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
@@ -524,17 +524,17 @@ class _MemoryFrame:
         x_coordinates: NDArray[Any],
         y_coordinates: NDArray[Any],
     ) -> NDArray[np.float32]:
-        return _sample_bilinear_from(self, x_coordinates, y_coordinates)
+        return sample_bilinear_from(self, x_coordinates, y_coordinates)
 
     def sample_lanczos3_clamped(
         self,
         x_coordinates: NDArray[Any],
         y_coordinates: NDArray[Any],
     ) -> NDArray[np.float32]:
-        return _sample_lanczos3_clamped_from(self, x_coordinates, y_coordinates)
+        return sample_lanczos3_clamped_from(self, x_coordinates, y_coordinates)
 
 
-def _sample_bilinear_from(
+def sample_bilinear_from(
     frame: Any,
     x_coordinates: NDArray[Any],
     y_coordinates: NDArray[Any],
@@ -588,7 +588,7 @@ def _sample_bilinear_from(
     return result
 
 
-def _sample_lanczos3_clamped_from(
+def sample_lanczos3_clamped_from(
     frame: Any,
     x_coordinates: NDArray[Any],
     y_coordinates: NDArray[Any],
@@ -725,7 +725,7 @@ def read_frame_info(path: str | os.PathLike[str]) -> FrameInfo:
         return frame.info
 
 
-def _fits_header(
+def fits_header(
     shape: tuple[int, int], metadata: Mapping[str, Any] | None
 ) -> tuple[fits.Header, bytes]:
     height, width = shape
@@ -741,7 +741,7 @@ def _fits_header(
         if not key or key in {"SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2"}:
             continue
         if value is not None:
-            header[key] = _plain_header_value(value)
+            header[key] = plain_header_value(value)
     encoded = header.tostring(endcard=True, padding=True).encode("ascii")
     return header, encoded
 
@@ -785,7 +785,7 @@ class FitsFloatWriter:
         if height < 1 or width < 1:
             raise ValueError("output shape must be positive")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        _, encoded = _fits_header(self.shape, self.metadata)
+        _, encoded = fits_header(self.shape, self.metadata)
         data_bytes = height * width * np.dtype(">f4").itemsize
         self._padding = (-data_bytes) % FITS_BLOCK_BYTES
         self._data_offset = len(encoded)
@@ -847,7 +847,7 @@ class FitsFloatWriter:
         self.close()
 
 
-def _atomic_publish_file(temporary: Path, destination: Path) -> None:
+def atomic_publish_file(temporary: Path, destination: Path) -> None:
     try:
         os.link(temporary, destination)
     except FileExistsError as error:
@@ -859,7 +859,7 @@ def _atomic_publish_file(temporary: Path, destination: Path) -> None:
     remove_file(temporary, missing_ok=False)
 
 
-def _temporary_output(destination: Path) -> Path:
+def temporary_output(destination: Path) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, name = tempfile.mkstemp(
         prefix=f".{destination.name}.", suffix=".partial", dir=destination.parent

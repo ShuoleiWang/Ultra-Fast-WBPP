@@ -87,7 +87,7 @@ def test_desktop_sidecar_uses_one_fresh_release_native_chain_locally_and_in_ci()
     # script (configure -> build -> ctest -> install), never ad-hoc cmake lines.
     assert "python scripts/build_native_runtime.py" in workflow
     assert "--build-dir build/native-release" in workflow
-    assert "cmake -S engine/native -B build/native-release" not in workflow
+    assert "cmake -S native -B build/native-release" not in workflow
     script = (REPOSITORY / "scripts" / "build_native_runtime.py").read_text(encoding="utf-8")
     assert '"-DCMAKE_BUILD_TYPE=Release"' in script
     assert '"--config", "Release"' in script
@@ -101,6 +101,24 @@ def test_desktop_sidecar_uses_one_fresh_release_native_chain_locally_and_in_ci()
         assert f'"{library_name}"' in script
     ci_workflow = (REPOSITORY / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "python scripts/build_native_runtime.py" in ci_workflow
+
+
+def test_demo_build_only_adds_the_solver_and_never_reaches_a_release() -> None:
+    demo = json.loads((TAURI_ROOT / "tauri.demo.conf.json").read_text(encoding="utf-8"))
+    # The demo is the macOS prerelease build plus the bundled solver runtime.
+    assert {key for key in demo if key != "$schema"} == {"bundle"}
+    assert demo["bundle"] == {"resources": {"resources/astrometry-net": "resources/astrometry-net"}}
+    makefile = (REPOSITORY / "Makefile").read_text(encoding="utf-8")
+    assert (
+        "npm --prefix apps/desktop run tauri:build:macos-prerelease -- "
+        "--config src-tauri/tauri.demo.conf.json"
+    ) in makefile
+    # Astrometry.net is GPL as distributed and the index terms are unresolved:
+    # no workflow may build or publish the demo.
+    for workflow in sorted((REPOSITORY / ".github" / "workflows").glob("*.yml")):
+        text = workflow.read_text(encoding="utf-8")
+        assert "tauri.demo.conf.json" not in text, workflow.name
+        assert "desktop-build-macos-demo" not in text, workflow.name
 
 
 def test_tag_workflow_only_prepares_a_draft_release() -> None:
@@ -171,7 +189,12 @@ def test_tauri_config_validates_against_the_installed_cli_schema() -> None:
 
     base = json.loads((TAURI_ROOT / "tauri.conf.json").read_text(encoding="utf-8"))
     prerelease = json.loads((TAURI_ROOT / "tauri.prerelease.conf.json").read_text(encoding="utf-8"))
-    for name, config in (("tauri.conf.json", base), ("tauri.prerelease.conf.json", merged(base, prerelease))):
+    demo = json.loads((TAURI_ROOT / "tauri.demo.conf.json").read_text(encoding="utf-8"))
+    for name, config in (
+        ("tauri.conf.json", base),
+        ("tauri.prerelease.conf.json", merged(base, prerelease)),
+        ("tauri.demo.conf.json", merged(merged(base, prerelease), demo)),
+    ):
         errors = [
             f"{'/'.join(str(part) for part in error.path)}: {error.message}"
             for error in validator.iter_errors(config)

@@ -12,7 +12,7 @@
       * VS 2022 Build Tools    (Microsoft.VisualStudio.2022.BuildTools)
                                with the "Desktop development with C++" workload
                                (MSVC v143, Windows SDK) -- the only supported
-                               compiler for engine/native on Windows
+                               compiler for native on Windows
       * uv                     (astral-sh.uv)               fast venv/pip
       * rustup                 (Rustlang.Rustup)            only with -WithRust
 

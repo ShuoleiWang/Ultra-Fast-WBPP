@@ -37,7 +37,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 from numpy.typing import NDArray
 
-from ..calibration import evaluate_weight_grid_rows
+from ..stacking.integration import evaluate_weight_grid_rows
 
 REGION_WEIGHT_ALGORITHM = "region-weights-grid-v1"
 

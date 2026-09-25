@@ -1,7 +1,7 @@
 import type { Translator, UiLanguage } from "./i18n";
 import { BrandMark, FilesIcon, FolderIcon, InspectorIcon } from "./icons";
 import type { useWorkflow } from "./useWorkflow";
-import { stageLabel } from "./views";
+import { stageLabel } from "./views/common";
 
 type Workflow = ReturnType<typeof useWorkflow>;
 

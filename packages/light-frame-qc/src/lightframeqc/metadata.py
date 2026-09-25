@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import math
+import os
 import re
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 from astropy.coordinates import Angle
 import astropy.units as u
@@ -37,26 +38,48 @@ _FILTER_ALIASES = {
 
 _ROLE_ALIASES = {
     "LIGHT": FrameRole.LIGHT,
+    "LIGHTS": FrameRole.LIGHT,
     "LIGHTFRAME": FrameRole.LIGHT,
     "LIGHTFRAMES": FrameRole.LIGHT,
     "FLAT": FrameRole.RAW_FLAT,
+    "FLATS": FrameRole.RAW_FLAT,
     "FLATFRAME": FrameRole.RAW_FLAT,
     "FLATFRAMES": FrameRole.RAW_FLAT,
     "RAWFLAT": FrameRole.RAW_FLAT,
     "MASTERFLAT": FrameRole.MASTER_FLAT,
     "DARK": FrameRole.DARK,
+    "DARKS": FrameRole.DARK,
     "DARKFRAME": FrameRole.DARK,
     "DARKFRAMES": FrameRole.DARK,
+    # A Flat-Dark (N.I.N.A. IMAGETYP DARKFLAT, WBPP "Dark Flat") is a Dark at
+    # the Flats' exposure; darks are matched by exact exposure, so it
+    # calibrates the Flats and can never reach a Light.
+    "DARKFLAT": FrameRole.DARK,
+    "DARKFLATS": FrameRole.DARK,
+    "FLATDARK": FrameRole.DARK,
+    "FLATDARKS": FrameRole.DARK,
     "MASTERDARK": FrameRole.MASTER_DARK,
+    "MASTERDARKFLAT": FrameRole.MASTER_DARK,
+    "MASTERFLATDARK": FrameRole.MASTER_DARK,
     "BIAS": FrameRole.BIAS,
+    "BIASES": FrameRole.BIAS,
     "BIASFRAME": FrameRole.BIAS,
     "BIASFRAMES": FrameRole.BIAS,
     "ZERO": FrameRole.BIAS,
+    "ZEROS": FrameRole.BIAS,
     "ZEROFRAME": FrameRole.BIAS,
     "MASTERBIAS": FrameRole.MASTER_BIAS,
     "MASTERZERO": FrameRole.MASTER_BIAS,
     "MASTERLIGHT": FrameRole.MASTER_LIGHT,
 }
+
+# Folders WBPP writes its intermediate frames to, and the suffixes it appends
+# (_c calibrated, _cc cosmetized, _d debayered, _r registered).
+_WBPP_PROCESSED_FOLDERS = frozenset({"CALIBRATED", "COSMETIZED", "DEBAYERED", "REGISTERED"})
+_WBPP_PROCESSED_SUFFIX = re.compile(r"(?:_c(?:_cc)?(?:_d)?(?:_r)?|_cc(?:_d)?(?:_r)?|_d(?:_r)?|_r)$", re.IGNORECASE)
+# WBPP grouping keywords that name an observing night or session, written as
+# KEY_value or KEY-value in a folder or file name (DATE_0322, NIGHT-2).
+_SESSION_KEYWORD = re.compile(r"(?:^|[^A-Z0-9])(DATE|NIGHT|SESSION)[_-]([A-Z0-9][A-Z0-9.\-]*)")
 
 
 def _header_lookup(header: dict[str, Any], names: Iterable[str]) -> Any | None:
@@ -114,6 +137,8 @@ def infer_frame_role_from_path(path: str) -> FrameRole:
 
     file_compact = re.sub(r"[^A-Z0-9]+", "", Path(path).stem.upper())
     for marker, role in (
+        ("MASTERFLATDARK", FrameRole.MASTER_DARK),
+        ("MASTERDARKFLAT", FrameRole.MASTER_DARK),
         ("MASTERFLAT", FrameRole.MASTER_FLAT),
         ("MASTERDARK", FrameRole.MASTER_DARK),
         ("MASTERBIAS", FrameRole.MASTER_BIAS),
@@ -262,7 +287,73 @@ def infer_filter_from_path(path: str) -> str:
         match = re.search(pattern, name)
         if match:
             return normalize_filter(match.group(1))
+    # WBPP's grouping-keyword folders (FILTER_Ha/, ..._FILTER-L_mono/).
+    for component in reversed(Path(path).parts[-4:-1]):
+        match = re.search(r"(?:^|[_\- ])FILTER[_\-]([A-Z0-9+]+)", component.upper())
+        if match:
+            return normalize_filter(match.group(1))
     return "UNKNOWN"
+
+
+def session_keywords_from_path(path: str, *, root: str | None = None) -> str | None:
+    """WBPP grouping keywords naming a night or session, e.g. ``DATE=0322``.
+
+    WBPP reads ``KEY_value`` / ``KEY-value`` tokens from folder and file
+    names and calibrates each group with its own Flats. The engine reports
+    them; it does not separate calibration by them yet. Only components below
+    ``root`` are read, so a shared ancestor such as ``one_night_trip/`` is not
+    mistaken for a keyword. The deepest value of each keyword wins; ``None``
+    when the path names none.
+    """
+
+    parts = Path(path).parts
+    if root is not None:
+        root_parts = Path(root).parts
+        if parts[: len(root_parts)] == root_parts:
+            parts = parts[len(root_parts):]
+    values: dict[str, str] = {}
+    for component in (*parts[:-1], Path(path).stem):
+        for match in _SESSION_KEYWORD.finditer(component.upper()):
+            values[match.group(1)] = match.group(2)
+    return ";".join(f"{key}={value}" for key, value in sorted(values.items())) or None
+
+
+def session_keywords_of(paths: Sequence[str]) -> list[str | None]:
+    """:func:`session_keywords_from_path` for frames compared with each other:
+    only the folders below their common ancestor can tell them apart."""
+
+    try:
+        root = os.path.commonpath(list(paths)) if len(paths) > 1 else None
+    except ValueError:  # different drives on Windows
+        root = None
+    return [session_keywords_from_path(path, root=root) for path in paths]
+
+
+def processing_markers(header: dict[str, Any], path: str) -> list[str]:
+    """What PixInsight already did to this frame: CALIBRATED and/or REGISTERED.
+
+    XISF output carries ``PCL:Calibration:*`` and ``PCL:AlignmentMatrix``
+    properties (recorded by the reader as ``XISF:PROCESSING``). FITS output
+    has no such properties, so WBPP's folder layout (``calibrated/``,
+    ``registered/``, …) together with its file suffix is used instead.
+    """
+
+    markers = {
+        item.strip().upper()
+        for item in str(_header_lookup(header, ("XISF:PROCESSING",)) or "").split(",")
+        if item.strip()
+    }
+    folders = {part.upper() for part in Path(path).parts[-4:-1]}
+    suffix = _WBPP_PROCESSED_SUFFIX.search(Path(path).stem)
+    if suffix and folders & _WBPP_PROCESSED_FOLDERS:
+        steps = suffix.group(0).lower().split("_")
+        if "c" in steps:
+            markers.add("CALIBRATED")
+        if "r" in steps:
+            markers.add("REGISTERED")
+        if not markers:
+            markers.add("CALIBRATED")
+    return sorted(markers)
 
 
 def infer_exposure_from_path(path: str) -> float | None:
@@ -289,6 +380,7 @@ def infer_target_from_path(path: str) -> str:
 def normalize_metadata(metadata: FrameMetadata) -> FrameMetadata:
     header = metadata.header
     _normalize_role(metadata)
+    metadata.processing = processing_markers(header, metadata.path)
     filter_value = _header_lookup(header, ("FILTER", "INSFLNAM", "FILTERID"))
     metadata.filter_name = normalize_filter(filter_value)
     if metadata.filter_name == "UNKNOWN":

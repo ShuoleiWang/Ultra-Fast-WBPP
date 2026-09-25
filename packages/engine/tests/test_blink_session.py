@@ -9,7 +9,7 @@ import numpy as np
 from PIL import Image
 import pytest
 
-from ufwbpp.blink_previews import (
+from ufwbpp.blink.imaging import (
     apply_stf,
     screen_transfer,
     block_mean,
@@ -17,7 +17,7 @@ from ufwbpp.blink_previews import (
     stretch_to_8bit,
     warp_to_reference,
 )
-from ufwbpp.blink_session import (
+from ufwbpp.blink.session import (
     BlinkRequest,
     BlinkSessionError,
     run_blink_session,

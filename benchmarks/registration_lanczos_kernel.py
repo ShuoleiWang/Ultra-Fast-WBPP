@@ -1,6 +1,6 @@
 """Small CPU-only before/after Lanczos benchmark; no pipeline or app launch.
 
-Pass a saved pre-change calibration.py or an earlier benchmark JSON report
+Pass a saved pre-change stacking/integration.py or an earlier benchmark JSON report
 with --baseline-source. Reports retain the original function for replay.
 Both functions read the same FITS data and require identical Float32 results.
 """
@@ -19,7 +19,7 @@ import time
 from astropy.io import fits
 import numpy as np
 
-from ufwbpp import calibration
+from ufwbpp.stacking import integration as calibration
 
 
 def load_baseline(path: Path):

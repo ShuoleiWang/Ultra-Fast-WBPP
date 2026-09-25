@@ -1,11 +1,6 @@
 """Final plate-solving coordination, WCS agreement and solved-state verification."""
 
 from __future__ import annotations
-from ..integrity import sha256_digest
-from .contracts import IntegrationMode, E2EError
-
-
-from ..platform import remove_file
 
 from dataclasses import dataclass, field
 import math
@@ -15,16 +10,13 @@ import re
 import stat
 from typing import Any, Mapping, Sequence
 
-
 from astropy.io import fits
 from astropy.wcs import WCS
 import numpy as np
 
-
-from ..solvers.process import (
-    verify_solver_execution_result,
-)
-from ..solver import (
+from ..integrity import sha256_digest
+from ..platform import remove_file
+from ..solvers.base import (
     SolveRequest,
     SolverBackend,
     SolverResult,
@@ -33,6 +25,10 @@ from ..solver import (
     validate_wcs_header,
     wcs_parity,
 )
+from ..solvers.process import (
+    verify_solver_execution_result,
+)
+from .contracts import IntegrationMode, E2EError
 
 
 

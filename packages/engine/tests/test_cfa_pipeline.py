@@ -24,21 +24,22 @@ from lightframeqc.cfa import (
 from lightframeqc.native_psf import open_native_image
 from lightframeqc.readers import read_frame_preview
 from ufwbpp_registration.pipeline import read_full_image
-from ufwbpp.calibration import (
+from ufwbpp.stacking.integration import (
     FitsFrame,
     FrameExpression,
     _canonical_expression,
     _expression_rows,
     _expression_sampled_rows,
 )
-from ufwbpp.drizzle_native import (
+from ufwbpp.stacking.drizzle_native import (
     DrizzleError,
     DrizzleFrame,
     DrizzleGroupRequest,
     drizzle_group,
     verify_drizzle_receipt,
 )
-from ufwbpp.workflows.single_target import DrizzleOptions, E2ERequest, E2EState, IntegrationMode, run_e2e
+from ufwbpp.workflows.single_target import E2ERequest, E2EState, IntegrationMode, run_e2e
+from ufwbpp.workflows.contracts import DrizzleOptions
 from ufwbpp.native_kernels import load_native_kernels
 from ufwbpp.workflows.project import ProjectE2EError, classify_project_layout
 from ufwbpp.inventory import inventory_project

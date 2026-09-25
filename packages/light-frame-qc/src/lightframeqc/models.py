@@ -212,6 +212,9 @@ class FrameMetadata:
     role: FrameRole = FrameRole.UNKNOWN
     role_evidence: list[str] = field(default_factory=list)
     role_conflicts: list[str] = field(default_factory=list)
+    # PixInsight processing already applied (CALIBRATED, REGISTERED); a raw
+    # Light has none.
+    processing: list[str] = field(default_factory=list)
     cfa_pattern: str = "UNKNOWN"
     readout_mode: str = "UNKNOWN"
     binning_known: bool = False

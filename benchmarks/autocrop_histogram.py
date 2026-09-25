@@ -11,7 +11,8 @@ import time
 
 import numpy as np
 
-from ufwbpp import pixel_pipeline as pipeline
+from ufwbpp.stacking import pipeline
+from ufwbpp.stacking import crop, parameters
 
 
 def baseline_histogram(heights, row_index):
@@ -55,29 +56,29 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     height, width = args.height, args.width
-    optimized = pipeline._histogram_rectangle
+    optimized = crop.histogram_rectangle
     angle = np.deg2rad(0.44)
-    transforms = [pipeline.AffineTransform.identity()]
+    transforms = [parameters.AffineTransform.identity()]
     for theta, dx, dy in ((angle, 11.3, -7.4), (-angle, -9.2, 6.7)):
         a, b = np.cos(theta), np.sin(theta)
         cx, cy = (width - 1) / 2, (height - 1) / 2
-        transforms.append(pipeline.AffineTransform.from_value(
+        transforms.append(parameters.AffineTransform.from_value(
             ((a, -b, cx - a * cx + b * cy + dx),
              (b, a, cy - b * cx - a * cy + dy), (0, 0, 1))
         ))
-    transforms.append(pipeline.AffineTransform.from_value(
+    transforms.append(parameters.AffineTransform.from_value(
         ((-1, 0, width - 1), (0, -1, height - 1), (0, 0, 1))
     ))
 
     def common_crop(histogram):
-        pipeline._histogram_rectangle = histogram
+        crop.histogram_rectangle = histogram
         try:
-            return pipeline._common_valid_crop(
+            return crop._common_valid_crop(
                 (height, width), transforms, max_memory_bytes=128 << 20,
                 resampler="lanczos-3-clamped",
             )
         finally:
-            pipeline._histogram_rectangle = optimized
+            crop.histogram_rectangle = optimized
 
     finite = np.ones((height, width), dtype=bool)
     finite[:7] = False

@@ -49,7 +49,7 @@ for relative in ("packages/engine/src", "packages/light-frame-qc/src", "packages
         sys.path.insert(0, str(candidate))
 
 from ufwbpp import native_kernels  # noqa: E402
-from ufwbpp.calibration import (  # noqa: E402
+from ufwbpp.stacking.integration import (  # noqa: E402
     FrameExpression,
     IntegrationMapPaths,
     IntegrationParameters,
@@ -58,8 +58,9 @@ from ufwbpp.calibration import (  # noqa: E402
 )
 from ufwbpp.hardware import detect_hardware  # noqa: E402
 from ufwbpp.performance_profile import select_execution_tuning  # noqa: E402
-from ufwbpp import pixel_pipeline as pipeline  # noqa: E402
-from ufwbpp.pixel_pipeline import AffineTransform, PipelineParameters  # noqa: E402
+from ufwbpp.stacking import pipeline
+from ufwbpp.stacking import warp  # noqa: E402
+from ufwbpp.stacking.parameters import AffineTransform, PipelineParameters
 
 
 def _portable_path(path: Path) -> str:
@@ -252,7 +253,7 @@ def benchmark_warp(scratch: Path, shape: tuple[int, int], repeats: int, threads:
             destination = scratch / f"warp-{label}-{index}.fits"
             execution: dict[str, Any] = {}
             started = time.perf_counter()
-            pipeline._register_frame(
+            warp._register_frame(
                 source, destination, transform, info, max_memory_bytes=budget,
                 resampler="lanczos-3-clamped", execution=execution, **kwargs,
             )
@@ -385,7 +386,7 @@ def main() -> int:
     skip = {item.strip() for item in args.skip.split(",") if item.strip()}
     kernels = native_kernels.load_native_kernels()
     if kernels is None:
-        parser.error("native kernels are unavailable; build engine/native first")
+        parser.error("native kernels are unavailable; build native first")
     tuning = select_execution_tuning(detect_hardware())
     threads = tuning.cpu_workers
     report: dict[str, Any] = {

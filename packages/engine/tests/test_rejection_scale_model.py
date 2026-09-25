@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from ufwbpp import native_kernels
-from ufwbpp.calibration import (
+from ufwbpp.stacking.integration import (
     NOISE_WEIGHT_BLOCK_SIZE,
     REJECTION_POOL_HALF_WIDTH,
     FrameExpression,
@@ -148,7 +148,7 @@ def test_block_noise_falls_back_on_tiny_images(tmp_path: Path) -> None:
 
 
 def _decisions(stack: np.ndarray, parameters: IntegrationParameters, pooled: bool):
-    from ufwbpp.calibration import _RejectionSigmaFloor
+    from ufwbpp.stacking.integration import _RejectionSigmaFloor
 
     if pooled:
         frame_sigmas = [

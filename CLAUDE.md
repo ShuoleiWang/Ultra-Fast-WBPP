@@ -4,7 +4,7 @@ Guide for Claude Code sessions in this repository. [`AGENTS.md`](AGENTS.md) is t
 
 ## The project in one paragraph
 
-Ultra-Fast WBPP preprocesses astrophotography Lights into verified, plate-solved linear masters: quality-gated selection, calibration, registration, normalization, rejection/integration, optional drizzle, verified plate solving, receipted publication. Python engine (`packages/engine`, `packages/light-frame-qc`, `packages/registration`), C++/Metal kernels (`engine/native`), Tauri 2 + React desktop (`apps/desktop`) that runs the engine's command line (`ultra-fast-wbpp`, bundled as the `ufwbpp-engine` sidecar). macOS Apple Silicon and Windows x64. Alpha. Independent implementation, no PixInsight code; masters are compared with PixInsight WBPP masters by the standard in `docs/master-evaluation-standard.md`. What the project does and the evidence for it: [`docs/features.md`](docs/features.md).
+Ultra-Fast WBPP preprocesses astrophotography Lights into verified, plate-solved linear masters: quality-gated selection, calibration, registration, normalization, rejection/integration, optional drizzle, verified plate solving, receipted publication. Python engine (`packages/engine`, `packages/light-frame-qc`, `packages/registration`), C++/Metal kernels (`native`), Tauri 2 + React desktop (`apps/desktop`) that runs the engine's command line (`ultra-fast-wbpp`, bundled as the `ufwbpp-engine` sidecar). macOS Apple Silicon and Windows x64. Alpha. Independent implementation, no PixInsight code; masters are compared with PixInsight WBPP masters by the standard in `docs/master-evaluation-standard.md`. What the project does and the evidence for it: [`docs/features.md`](docs/features.md).
 
 ## Working agreement
 
@@ -34,7 +34,7 @@ make desktop-dev | make demo | CARGO_PROFILE_RELEASE_STRIP=none make desktop-bui
 
 ## Gotchas (details in AGENTS.md)
 
-- `build/native` is the unoptimized test build; install only from `build/native-release`. A run that is 6–7× too slow has the debug library installed.
+- `build/native` is the unoptimized test build; install only from `build/native-release` (the engine loads only the installed library). A run that is 6–7× too slow has the debug library installed.
 - Master hashes are per OS; rebuild the baseline from a worktree of the base commit after an OS upgrade. Windows vs macOS: tolerance gate only.
 - macOS 27 / Xcode 27: release builds need `CARGO_PROFILE_RELEASE_STRIP=none`.
 - QC measurements can fail silently: check provenance fields (`fwhmSource`, error keys) on real frames.
@@ -45,20 +45,26 @@ make desktop-dev | make demo | CARGO_PROFILE_RELEASE_STRIP=none make desktop-bui
 
 ## Where to look
 
-`docs/README.md` (documentation map) · `docs/architecture.md` (execution path, boundaries, science) · `docs/features.md` (advantages and evidence) · `docs/validation-matrix.md` (what is and is not validated) · `docs/recipes/` (user guides) · `benchmarks/README.md` (measurement tools) · `apps/desktop/README.md` (desktop code map) · `engine/native/README.md` (kernel contracts) · `CHANGELOG.md` (what changed, with numbers).
+`docs/README.md` (documentation map) · `docs/architecture.md` (execution path, boundaries, science) · `docs/features.md` (advantages and evidence) · `docs/validation-matrix.md` (what is and is not validated) · `docs/recipes/` (user guides) · `benchmarks/README.md` (measurement tools) · `apps/desktop/README.md` (desktop code map) · `native/README.md` (kernel contracts) · `CHANGELOG.md` (what changed, with numbers).
 
 ## Module layout and naming
 
-`workflows/project.py` runs a project and calls `workflows/single_target.py`
-once per target; `workflows/solve.py` owns solving and WCS verification,
-`workflows/contracts.py` the request/selection/progress types. The run
-functions and `pixel_pipeline._run_portable_pipeline_fits` are sequences of
-named stages; put new work in a stage, not inline. `integrity.py` holds the
-canonical JSON and SHA-256 forms every digest uses; `calibration_inputs.py`
-content-bound master metadata; `image_io/fits.py` FITS primitives;
-`solvers/process.py` shared solver execution; `publication.py` create-only
-colour/mosaic publication. The desktop asks the engine's `doctor --json` for
-its capabilities; there is no separate worker protocol.
+The engine is one subpackage per domain: `workflows/`, `stacking/`,
+`calibration/`, `image_io/`, `selection/`, `quality/`, `blink/`, `solvers/`,
+`products/`, `platform/`. `workflows/project.py` runs a project and calls
+`workflows/single_target.py` once per target; `workflows/solve.py` owns
+solving and WCS verification, `workflows/contracts.py` the
+request/selection/progress types. The run functions and
+`stacking/pipeline.run_portable_pipeline_fits` are sequences of named stages
+that live in the module of their step (`workflows/screening.py`,
+`workflows/integration.py`, `stacking/masters.py`, `stacking/groups.py`, ...);
+put new work in a stage, not inline. `integrity.py` holds the canonical JSON
+and SHA-256 forms every digest uses; `calibration/inputs.py` content-bound
+master metadata; `image_io/fits.py` FITS primitives; `solvers/process.py`
+shared solver execution; `products/publication.py` create-only colour/mosaic
+publication. Private helpers are shared only inside a subpackage, and the
+modules import without cycles. The desktop asks the engine's `doctor --json`
+for its capabilities; there is no separate worker protocol.
 
 Code identifiers use `ufwbpp` (Python packages, `ufwbpp_native_*`, `UFWBPP_*`
 variables); user-visible names spell out Ultra-Fast WBPP. The `OAF*` FITS

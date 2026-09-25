@@ -10,7 +10,7 @@ from astropy.wcs import WCS
 import numpy as np
 import pytest
 
-from ufwbpp.mosaic import (
+from ufwbpp.products.mosaic import (
     MOSAIC_STATE,
     MosaicError,
     MosaicRequest,

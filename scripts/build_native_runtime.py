@@ -5,7 +5,7 @@ One implementation for every platform (CI, release, developer machines):
 
     python scripts/build_native_runtime.py --build-dir build/native-release
 
-configures ``engine/native`` as a Release build with the strict flags that the
+configures ``native`` as a Release build with the strict flags that the
 CMake project applies (``/W4 /WX /fp:strict`` on MSVC, ``-Werror -fno-fast-math
 -ffp-contract=off`` elsewhere), builds it, runs ``ctest`` and installs the
 shared library into ``packages/engine/src/ufwbpp/
@@ -60,7 +60,7 @@ except ModuleNotFoundError:  # direct ``python scripts/...`` execution
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-NATIVE_SOURCE = REPO_ROOT / "engine" / "native"
+NATIVE_SOURCE = REPO_ROOT / "native"
 INSTALL_PREFIX = REPO_ROOT / "packages" / "engine" / "src"
 RUNTIME_DIR = INSTALL_PREFIX / "ufwbpp" / "native"
 LIBRARY_NAMES = (
@@ -211,7 +211,7 @@ def static_crt_violation(import_facts: dict[str, Any] | None) -> str | None:
         + ", ".join(offenders)
         + "); it must be built with MSVC_RUNTIME_LIBRARY=MultiThreaded (/MT) so the "
         "frozen engine runs on machines without the VC++ redistributable. Rebuild "
-        "from a clean build directory after checking engine/native/CMakeLists.txt."
+        "from a clean build directory after checking native/CMakeLists.txt."
     )
 
 

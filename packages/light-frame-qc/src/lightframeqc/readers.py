@@ -527,8 +527,16 @@ def _xisf_header_dict(image_metadata: Mapping[str, Any]) -> dict[str, Any]:
 
     properties = image_metadata.get("XISFProperties", {})
     property_values: dict[str, Any] = {}
+    processing: set[str] = set()
     if isinstance(properties, Mapping):
         for identifier, description in properties.items():
+            # PixInsight's own record of processing already applied; the
+            # alignment matrix is an array, so note it before values are
+            # filtered to scalars.
+            if str(identifier).startswith("PCL:Calibration:"):
+                processing.add("CALIBRATED")
+            elif str(identifier) == "PCL:AlignmentMatrix":
+                processing.add("REGISTERED")
             if not isinstance(description, Mapping) or "value" not in description:
                 continue
             value = description["value"]
@@ -555,6 +563,8 @@ def _xisf_header_dict(image_metadata: Mapping[str, Any]) -> dict[str, Any]:
     for identifier, value in property_values.items():
         header.setdefault(identifier, value)
 
+    if processing:
+        header["XISF:PROCESSING"] = ",".join(sorted(processing))
     header["XISF:SAMPLEFORMAT"] = _plain_value(image_metadata.get("sampleFormat"))
     header["XISF:COLORSPACE"] = _plain_value(image_metadata.get("colorSpace"))
     if image_metadata.get("imageType") is not None:

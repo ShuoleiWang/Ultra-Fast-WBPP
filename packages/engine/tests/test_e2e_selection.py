@@ -106,7 +106,8 @@ def test_confirmed_harmful_frame_triggers_a_second_integration_pass(
 ) -> None:
     """A frame the counterfactual confirms harmful is removed and the group integrated again."""
 
-    import ufwbpp.workflows.single_target as e2e_module
+    import ufwbpp.workflows.integration as integration_module
+    import ufwbpp.workflows.screening as screening_module
     from ufwbpp.selection import policy as policy_module
 
     # Two candidates: at most one of them can be the group's normalization
@@ -123,7 +124,7 @@ def test_confirmed_harmful_frame_triggers_a_second_integration_pass(
             for item in annotated
         ]
 
-    monkeypatch.setattr(e2e_module, "annotate_with_counterfactual", rigged_annotate)
+    monkeypatch.setattr(integration_module, "annotate_with_counterfactual", rigged_annotate)
     output = tmp_path / "second-pass"
     request = replace(
         _request(synthetic_project, output),
@@ -165,7 +166,7 @@ def test_region_weight_maps_weight_samples_and_are_recorded(
 
     import numpy as np
 
-    import ufwbpp.workflows.single_target as e2e_module
+    import ufwbpp.workflows.screening as screening_module
     from ufwbpp.selection.region import RegionWeightMap
 
     target = str(synthetic_project["lights"][3].resolve(strict=True))
@@ -179,7 +180,7 @@ def test_region_weight_maps_weight_samples_and_are_recorded(
             )
         }
 
-    monkeypatch.setattr(e2e_module, "region_weight_maps", synthetic_maps)
+    monkeypatch.setattr(screening_module, "region_weight_maps", synthetic_maps)
     plain_output = tmp_path / "plain"
     mapped_output = tmp_path / "mapped"
     base = _request(synthetic_project, plain_output)

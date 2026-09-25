@@ -39,7 +39,7 @@ cargo test --workspace --locked
 .venv/bin/python -m pytest -q packages/light-frame-qc/tests packages/registration/tests packages/engine/tests tests
 npm --prefix apps/desktop test
 npm --prefix apps/desktop run build
-cmake -S engine/native -B build/native -DUFWBPP_BUILD_TESTS=ON
+cmake -S native -B build/native -DUFWBPP_BUILD_TESTS=ON
 cmake --build build/native --parallel
 ctest --test-dir build/native --output-on-failure
 make source-check

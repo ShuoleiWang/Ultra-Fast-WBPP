@@ -7,7 +7,7 @@ import pytest
 
 from ufwbpp.cli import main
 from ufwbpp.hardware import detect_hardware
-from ufwbpp.metal_integration import metal_executor_available
+from ufwbpp.stacking.metal_integration import metal_executor_available
 
 
 def test_cli_doctor_distinguishes_executors_from_catalog_coverage(capsys) -> None:
@@ -62,7 +62,7 @@ def test_cli_inventory_and_plan(
 
 
 def test_metal_readiness_needs_apple_silicon_and_a_real_executor(monkeypatch) -> None:
-    import ufwbpp.metal_integration as metal
+    import ufwbpp.stacking.metal_integration as metal
 
     linux = detect_hardware(system="Linux", machine="x86_64", cpu_brand="x86_64")
     assert metal_executor_available(linux) is False

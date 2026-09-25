@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+from ufwbpp.stacking import masters as masters_module
+from ufwbpp.workflows import common as common_module
+from ufwbpp.workflows import products as products_module
+from ufwbpp.workflows import registration as registration_module
+from ufwbpp.workflows import screening as screening_module
+from ufwbpp.workflows import sources as sources_module
+from ufwbpp.stacking import records as records_module
+
 from dataclasses import replace
 import hashlib
 import json
@@ -23,30 +31,15 @@ if str(REGISTRATION_SOURCE) not in sys.path:
     sys.path.insert(0, str(REGISTRATION_SOURCE))
 
 from ufwbpp.native_kernels import load_native_kernels
-from ufwbpp.workflows.single_target import (
-    DrizzleOptions,
-    E2ERequest,
-    E2EState,
-    IntegrationMode,
-    ProgressEvent,
-    ReviewApproval,
-    run_e2e,
-)
-from ufwbpp.workflows.single_target import (
-    E2EError,
-    _SolverHints,
-    _build_registration_masters,
-    _drizzle_sampling_evidence,
-    _inferred_solver_hints,
-    _register_lights,
-    _share_safe_receipt_core,
-    _share_safe_string,
-    _solve_one,
-    _SourceIdentity,
-    _unify_same_grid_solutions,
-    _validate_cross_filter_wcs,
-)
-from ufwbpp.solver import (
+from ufwbpp.workflows.single_target import E2ERequest, E2EState, IntegrationMode, ReviewApproval, run_e2e
+from ufwbpp.workflows.contracts import DrizzleOptions, ProgressEvent
+from ufwbpp.workflows.single_target import E2EError, _unify_same_grid_solutions, _validate_cross_filter_wcs
+from ufwbpp.workflows.solve import _SolverHints, _solve_one
+from ufwbpp.workflows.registration import _build_registration_masters, _register_lights
+from ufwbpp.workflows.screening import _drizzle_sampling_evidence, _inferred_solver_hints
+from ufwbpp.workflows.sharing import _share_safe_receipt_core, _share_safe_string
+from ufwbpp.workflows.sources import _SourceIdentity
+from ufwbpp.solvers.base import (
     AstrometricQuality,
     SolutionKind,
     SolverResult,
@@ -54,12 +47,9 @@ from ufwbpp.solver import (
     SolverStatus,
     WcsParity,
 )
-from ufwbpp.pixel_pipeline import (
-    MasterMetadataOverride,
-    PipelineParameters,
-    RawFrameMetadataOverride,
-    run_portable_pipeline,
-)
+from ufwbpp.stacking.pipeline import run_portable_pipeline
+from ufwbpp.calibration.inputs import MasterMetadataOverride, RawFrameMetadataOverride
+from ufwbpp.stacking.parameters import PipelineParameters
 from ufwbpp.workflows.project import _build_shared_calibration
 
 
@@ -648,16 +638,16 @@ def test_single_field_generated_master_reuse_matches_raw_rebuild_pixel_oracle(
     synthetic_project: dict[str, tuple[Path, ...]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import ufwbpp.workflows.single_target as e2e_module
-    import ufwbpp.pixel_pipeline as pixel_module
+    import ufwbpp.workflows.integration as integration_module
+    import ufwbpp.stacking.pipeline as pixel_module
 
     e2e_master_integrations: list[str] = []
     e2e_master_sources: list[str] = []
     pixel_master_integrations: list[str] = []
     captured: dict[str, Any] = {}
-    original_e2e_integrate = e2e_module.integrate_expressions
-    original_pixel_integrate = pixel_module.integrate_expressions
-    original_pixel_run = e2e_module._run_portable_pipeline_fits
+    original_e2e_integrate = registration_module.integrate_expressions
+    original_pixel_integrate = masters_module.integrate_expressions
+    original_pixel_run = integration_module.run_portable_pipeline_fits
 
     def count_e2e_integrations(expressions: Any, output: Path, **kwargs: Any) -> Any:
         materialized = tuple(expressions)
@@ -691,9 +681,9 @@ def test_single_field_generated_master_reuse_matches_raw_rebuild_pixel_oracle(
         captured["trusted"] = kwargs["_trusted_generated_calibration"]
         return original_pixel_run(**kwargs)
 
-    monkeypatch.setattr(e2e_module, "integrate_expressions", count_e2e_integrations)
-    monkeypatch.setattr(pixel_module, "integrate_expressions", count_pixel_integrations)
-    monkeypatch.setattr(e2e_module, "_run_portable_pipeline_fits", capture_pixel_run)
+    monkeypatch.setattr(registration_module, "integrate_expressions", count_e2e_integrations)
+    monkeypatch.setattr(masters_module, "integrate_expressions", count_pixel_integrations)
+    monkeypatch.setattr(integration_module, "run_portable_pipeline_fits", capture_pixel_run)
 
     source_bytes_before = _all_source_bytes(synthetic_project)
     output = tmp_path / "reuse-e2e"
@@ -791,7 +781,7 @@ def test_single_field_generated_master_handoff_detects_tampering(
     target: str,
     expected_code: str,
 ) -> None:
-    import ufwbpp.workflows.single_target as e2e_module
+    import ufwbpp.workflows.integration as integration_module
 
     project = synthetic_project
     if target == "source":
@@ -807,7 +797,7 @@ def test_single_field_generated_master_handoff_detects_tampering(
                 values.append(destination)
             copied[role] = tuple(values)
         project = copied
-    original = e2e_module._run_portable_pipeline_fits
+    original = integration_module.run_portable_pipeline_fits
 
     def tamper_before_consume(**kwargs: Any) -> Any:
         trusted = kwargs["_trusted_generated_calibration"]
@@ -825,7 +815,7 @@ def test_single_field_generated_master_handoff_detects_tampering(
         return original(**kwargs)
 
     monkeypatch.setattr(
-        e2e_module, "_run_portable_pipeline_fits", tamper_before_consume
+        integration_module, "run_portable_pipeline_fits", tamper_before_consume
     )
     output = tmp_path / f"tampered-{target}"
     with pytest.raises(E2EError) as raised:
@@ -842,8 +832,7 @@ def test_e2e_reuses_identity_bound_digests_and_excludes_review_light(
     synthetic_project: dict[str, tuple[Path, ...]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import ufwbpp.workflows.single_target as e2e_module
-    import ufwbpp.pixel_pipeline as pixel_module
+    import ufwbpp.stacking.pipeline as pixel_module
 
     all_sources = tuple(
         path for values in synthetic_project.values() for path in values
@@ -863,8 +852,8 @@ def test_e2e_reuses_identity_bound_digests_and_excludes_review_light(
             ),
         ),
     )
-    original_e2e_hash = e2e_module.sha256_digest
-    original_pixel_hash = pixel_module._hash_file
+    original_e2e_hash = sources_module.sha256_digest
+    original_pixel_hash = records_module.hash_calibration_file
     e2e_source_hashes: list[str] = []
     pixel_source_hashes: list[str] = []
 
@@ -880,10 +869,13 @@ def test_e2e_reuses_identity_bound_digests_and_excludes_review_light(
             pixel_source_hashes.append(canonical)
         return original_pixel_hash(path)
 
-    monkeypatch.setattr(e2e_module, "sha256_digest", count_e2e)
-    from ufwbpp import calibration_inputs
-    monkeypatch.setattr(pixel_module, "_hash_file", count_pixel)
-    monkeypatch.setattr(calibration_inputs, "_hash_file", count_pixel)
+    monkeypatch.setattr(common_module, "sha256_digest", count_e2e)
+    monkeypatch.setattr(sources_module, "sha256_digest", count_e2e)
+    monkeypatch.setattr(registration_module, "sha256_digest", count_e2e)
+    monkeypatch.setattr(products_module, "sha256_digest", count_e2e)
+    from ufwbpp.calibration import inputs as calibration_inputs
+    monkeypatch.setattr(records_module, "hash_calibration_file", count_pixel)
+    monkeypatch.setattr(calibration_inputs, "hash_calibration_file", count_pixel)
     result = run_e2e(request, solver_backends=(FakeSolver(),))
 
     assert result.success is True
@@ -1525,7 +1517,7 @@ def test_single_admitted_light_stops_before_calibration_and_preserves_qc(
     import ufwbpp.workflows.single_target as e2e_module
     from lightframeqc.models import GateDisposition
 
-    original_gate = e2e_module.evaluate_quality_gate
+    original_gate = screening_module.evaluate_quality_gate
 
     def one_admitted(results, measurements, policy):
         original_gate(results, measurements, policy)
@@ -1535,7 +1527,7 @@ def test_single_admitted_light_stops_before_calibration_and_preserves_qc(
     def calibration_must_not_start(*args, **kwargs):
         pytest.fail("Calibration must not start when only one Light is admitted")
 
-    monkeypatch.setattr(e2e_module, "evaluate_quality_gate", one_admitted)
+    monkeypatch.setattr(screening_module, "evaluate_quality_gate", one_admitted)
     monkeypatch.setattr(e2e_module, "_build_registration_masters", calibration_must_not_start)
     output = tmp_path / "one-admitted"
     result = run_e2e(_request(synthetic_project, output), solver_backends=(FailingSolver(),))
@@ -2006,7 +1998,7 @@ def test_standard_public_project_with_pi_masters_and_missing_metadata(
     from ufwbpp.recipe import Recipe
     from ufwbpp.runtime import build_e2e_request
     from ufwbpp.workflows.project import ProjectE2ERequest, run_project_e2e
-    from ufwbpp.calibration_preflight import inspect_calibration
+    from ufwbpp.calibration.preflight import inspect_calibration
 
     paths: list[Path] = []
     for index, source in enumerate(synthetic_project["lights"][:8]):

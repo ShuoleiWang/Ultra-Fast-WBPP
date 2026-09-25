@@ -11,6 +11,7 @@ Start with the [project README](../README.md) (also in [简体中文](README.zh-
 | [recipes/README.md](recipes/README.md) | Which recipe to start from for your data, and the built-in contracts |
 | [building-from-source.md](building-from-source.md) | Build the engine, the desktop app or a self-contained demo app from a clone; check the result and share it |
 | [validation-matrix.md](validation-matrix.md) | The register of what is validated, on which hardware, and what is explicitly not |
+| [evidence/](evidence/) | The dated, share-safe receipts and benchmark reports the validation matrix and the benchmarks page cite; new results are not committed |
 | [../CONTRIBUTING.md](../CONTRIBUTING.md), [../AGENTS.md](../AGENTS.md), [../CLAUDE.md](../CLAUDE.md) | How to develop here: setup, rules, checks. `AGENTS.md` is the full guide (read by Codex), `CLAUDE.md` the Claude Code session guide |
 
 ## User guides (recipes)
@@ -37,7 +38,7 @@ Start with the [project README](../README.md) (also in [简体中文](README.zh-
 |---|---|
 | [master-evaluation-standard.md](master-evaluation-standard.md) | How a master is judged against the PixInsight WBPP master of the same data (metrics, tolerances, verdicts); implemented by `tools/validation/evaluate_masters.py` |
 | [../benchmarks/README.md](../benchmarks/README.md), [../tools/validation/README.md](../tools/validation/README.md) | The measurement tools (tracer, kernel and stage benchmarks) with the retained numbers, and the acceptance tools (evaluator, tolerance gate) |
-| [../engine/native/README.md](../engine/native/README.md) | Native kernel contracts: value identity with the NumPy reference, parity gates, thread invariance |
+| [../native/README.md](../native/README.md) | Native kernel contracts: value identity with the NumPy reference, parity gates, thread invariance |
 | [../packages/engine/docs/backend-contracts.md](../packages/engine/docs/backend-contracts.md) | Backend truth flags (`available`, `executionReady`) and what `doctor` reports; the desktop's command-line route is documented in architecture.md |
 | [../apps/desktop/README.md](../apps/desktop/README.md) | Desktop code map and checks |
 | [../packages/engine/README.md](../packages/engine/README.md), [../packages/light-frame-qc/README.md](../packages/light-frame-qc/README.md) (Chinese), [../packages/registration/README.md](../packages/registration/README.md) | The engine CLI, the quality-control package, the registration library |

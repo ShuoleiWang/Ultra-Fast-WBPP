@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 from lightframeqc.fits_bands import FITS_READER_ENVIRONMENT, FitsBandReader
-from ufwbpp.calibration import (
+from ufwbpp.stacking.integration import (
     CalibrationError,
     FitsFrame,
     FrameExpression,

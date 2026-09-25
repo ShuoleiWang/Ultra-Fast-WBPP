@@ -20,6 +20,7 @@ policy = runpy.run_path(str(spec_dir / "resource_policy.py"))
 filter_entries = policy["filter_pyinstaller_entries"]
 required_metadata_distributions = policy["REQUIRED_METADATA_DISTRIBUTIONS"]
 checked_catalog_resources = policy["CHECKED_CATALOG_RESOURCES"]
+CATALOG_MANIFEST_DIRECTORY = policy["CATALOG_MANIFEST_DIRECTORY"]
 
 launcher = spec_dir / "launcher.py"
 search_paths = [
@@ -39,7 +40,7 @@ if sys.platform == "win32":
     # The native kernel DLL is a real binary on Windows: collecting it as a
     # binary lets PyInstaller walk its import table like every other DLL in
     # the tree instead of copying it blindly as data. The DLL links the C
-    # runtime statically (engine/native/CMakeLists.txt, enforced by
+    # runtime statically (native/CMakeLists.txt, enforced by
     # scripts/build_native_runtime.py --require-static-crt), so that walk finds
     # only Windows system DLLs; the release attestation re-checks the whole
     # frozen tree's PE import closure against a clean machine's DLL set.
@@ -51,7 +52,7 @@ if sys.platform == "win32":
 datas.extend(
     filter_entries(
         [
-            (str(repo_root / "resources" / "catalogs" / name), "resources/catalogs")
+            (str(repo_root / "packages" / "engine" / "src" / CATALOG_MANIFEST_DIRECTORY / name), CATALOG_MANIFEST_DIRECTORY)
             for name in checked_catalog_resources
         ]
     )

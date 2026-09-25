@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import type { Translator } from "./i18n";
 import type { FrameRole, InspectedAsset, RawFrameRole } from "./types";
-import { FrameTile } from "./views";
+import { FrameTile } from "./views/common";
 import type { useWorkflow } from "./useWorkflow";
 
 type Workflow = ReturnType<typeof useWorkflow>;

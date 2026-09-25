@@ -7,7 +7,7 @@ import json
 import pytest
 from astropy.io import fits
 
-from ufwbpp.drizzle import DrizzleBackend, drizzle_backends
+from ufwbpp.stacking.drizzle import DrizzleBackend, drizzle_backends
 from ufwbpp.inventory import inventory_project
 from ufwbpp.planning import PlanIssueCategory, StageState, build_plan
 from ufwbpp.recipe import Recipe, RecipeError

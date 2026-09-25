@@ -13,14 +13,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ufwbpp.calibration import (
+from ufwbpp.stacking.integration import (
     DEFAULT_COMBINATION,
     FrameExpression,
     IntegrationParameters,
     integrate_expressions,
 )
 from ufwbpp.image_io.fits import CalibrationError, FitsFloatWriter, FitsFrame
-from ufwbpp.proper_coaddition import (
+from ufwbpp.stacking.proper_coaddition import (
     PROPER_COADD_ALGORITHM_ID,
     ProperCoadditionParameters,
     measure_frame_psf,
@@ -424,7 +424,7 @@ def test_measured_psf_tracks_the_frame_it_came_from() -> None:
 
 
 def test_psf_stars_are_isolated_from_the_dropped_bright_stars() -> None:
-    from ufwbpp.proper_coaddition import PSF_STAMP_RADIUS, _psf_star_indices
+    from ufwbpp.stacking.proper_coaddition import PSF_STAMP_RADIUS, _psf_star_indices
 
     rng = np.random.default_rng(5)
     # 40 detections, brightest first: the first two are dropped as likely
@@ -444,7 +444,7 @@ def test_psf_stars_are_isolated_from_the_dropped_bright_stars() -> None:
 def test_mask_recorder_reports_unobserved_rows() -> None:
     from types import SimpleNamespace
 
-    from ufwbpp.pixel_pipeline import _RejectionMaskRecorder
+    from ufwbpp.stacking.groups import _RejectionMaskRecorder
 
     recorder = _RejectionMaskRecorder(2, (6, 10))
     recorder(SimpleNamespace(first_row=0, accepted=np.ones((2, 4, 10), dtype=bool)))
@@ -458,7 +458,7 @@ def test_frames_prepared_ahead_give_the_sequential_coadd_bit_for_bit(
 ) -> None:
     import hashlib
 
-    from ufwbpp import proper_coaddition
+    from ufwbpp.stacking import proper_coaddition
 
     expressions = _group(tmp_path, frames=5)
     # A starless frame in the middle falls back to the Moffat of the median

@@ -10,7 +10,7 @@ from typing import Any
 from jsonschema import Draft202012Validator, FormatChecker
 import pytest
 
-from ufwbpp.catalogs import (
+from ufwbpp.solvers.catalogs import (
     CatalogError,
     DownloadResponse,
     catalog_doctor,
@@ -31,7 +31,7 @@ from ufwbpp.cli import main
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-OFFICIAL_MANIFEST_DIR = REPO_ROOT / "resources" / "catalogs"
+OFFICIAL_MANIFEST_DIR = REPO_ROOT / "packages" / "engine" / "src" / "ufwbpp" / "solvers" / "catalog_manifests"
 
 
 def _fixture_manifest(directory: Path, payload: bytes = b"checked-catalog-bytes") -> tuple[Path, str]:
@@ -715,7 +715,7 @@ def test_bundled_catalog_never_replaces_a_different_existing_file(tmp_path: Path
 def test_bundled_catalog_waits_for_a_concurrent_writer(tmp_path: Path) -> None:
     import threading
 
-    from ufwbpp.catalogs import _catalog_lock
+    from ufwbpp.solvers.catalogs import _catalog_lock
 
     environment = _bundled_runtime(tmp_path)
     root = tmp_path / "data" / "catalogs" / "astrometry-net"
@@ -744,7 +744,7 @@ def test_bundled_catalog_waits_for_a_concurrent_writer(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(os.name == "nt", reason="the bundled solver runtime is macOS-only")
 def test_bundled_solver_is_preferred_over_the_host_solver(tmp_path: Path) -> None:
-    from ufwbpp.astrometry_net_backend import discover_astrometry_net
+    from ufwbpp.solvers.astrometry_net import discover_astrometry_net
 
     environment = _bundled_runtime(tmp_path)
     host = tmp_path / "host"

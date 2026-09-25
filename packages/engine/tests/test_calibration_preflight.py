@@ -7,7 +7,7 @@ from pathlib import Path
 from astropy.io import fits
 import pytest
 
-from ufwbpp.calibration_preflight import inspect_calibration
+from ufwbpp.calibration.preflight import inspect_calibration
 from ufwbpp.cli import main
 from ufwbpp.recipe import Recipe
 from conftest import write_frame
@@ -163,3 +163,21 @@ def test_calibration_cli_returns_blocked_report_without_solver_or_pixel_executio
     assert report["schemaVersion"] == 1
     assert report["status"] == "BLOCKED"
     assert "FLAT_MATCH_MISSING" in _codes(report)
+
+
+def test_per_night_master_flats_are_named_as_such_until_they_are_supported(tmp_path: Path) -> None:
+    from ufwbpp.inventory import inventory_project
+    from ufwbpp.planning import build_plan
+
+    for night in ("DATE_A", "DATE_B"):
+        light = write_frame(tmp_path / night / "light.fits", "Light")
+        fits.setval(light, "DATE-OBS", value=f"2026-09-0{1 if night == 'DATE_A' else 2}T20:00:00Z")
+        write_frame(tmp_path / night / "masterFlat_R.fits", "Master Flat", exposure=2)
+
+    report = inspect_calibration([str(tmp_path)])
+
+    (issue,) = [item for item in report["issues"] if item["code"] == "FLAT_SOURCE_AMBIGUOUS"]
+    assert "(DATE=A, DATE=B)" in issue["message"] and "not supported yet" in issue["message"]
+    plan = build_plan(inventory_project([tmp_path]), Recipe())
+    (planned,) = [item for item in plan.issues if item.code == "FLAT_MATCH_AMBIGUOUS"]
+    assert "(DATE=A, DATE=B)" in planned.message

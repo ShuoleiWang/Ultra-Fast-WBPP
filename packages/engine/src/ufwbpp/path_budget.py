@@ -27,6 +27,7 @@ from pathlib import Path
 import re
 from typing import Iterable, Literal
 
+from .errors import RuntimeConfigurationError
 from .platform import PathLimit, current
 from .platform.windows import LONG_PATHS_REGISTRY_KEY
 
@@ -34,10 +35,10 @@ from .platform.windows import LONG_PATHS_REGISTRY_KEY
 # ``tempfile.mkdtemp``/``mkstemp`` insert eight random characters between the
 # prefix and the suffix of every staging name.
 RANDOM_NAME_LENGTH = 8
-# ``<output.parent>/.<output.name>.<8>.pstage`` (``project_e2e.run_project_e2e``).
+# ``<output.parent>/.<output.name>.<8>.pstage`` (``workflows.project.run_project_e2e``).
 PROJECT_STAGING_SUFFIX = ".pstage"
-# ``<output.parent>/.<output.name>.<8>.stage`` (``e2e.run_e2e`` and
-# ``pixel_pipeline.run_portable_pipeline``).
+# ``<output.parent>/.<output.name>.<8>.stage`` (``workflows.single_target.run_e2e``
+# and ``stacking.pipeline.run_portable_pipeline_fits``).
 STAGING_SUFFIX = ".stage"
 # The E2E run names its pipeline root ``work/pixel-pipeline`` but stages it as
 # ``work/.pp.<8>.stage``: the root's name stays readable in receipts while the
@@ -48,7 +49,7 @@ PIXEL_PIPELINE_STAGING_STEM = "pp"
 DETAILS_DIRECTORY = "details"
 RUNS_DIRECTORY = "runs"
 WORK_DIRECTORY = "work"
-# ``calibration._temporary_output`` (``mkstemp``): ``.<name>.<8>.partial``.
+# ``image_io.fits.temporary_output`` (``mkstemp``): ``.<name>.<8>.partial``.
 TEMPORARY_SUFFIX = ".partial"
 
 Layout = Literal["project", "run", "pixels"]
@@ -64,7 +65,7 @@ def name_token(value: str) -> str:
 
 
 def target_key(value: str) -> str:
-    """Lower-case alphanumeric key of a science target (``project_e2e``)."""
+    """Lower-case alphanumeric key of a science target (``workflows.project``)."""
 
     return re.sub(r"[^a-z0-9]+", "", value.casefold())
 
@@ -211,10 +212,6 @@ def check_output_path_budget(
     directory (with the length that still fits) or the long-path policy.
     ``limit`` defaults to the running platform's; tests inject it.
     """
-
-    # The runtime owns the fail-closed error contract and imports this module,
-    # so the error class is resolved here at call time.
-    from .runtime import RuntimeConfigurationError
 
     resolved = Path(output).expanduser().resolve(strict=False)
     targets = tuple(targets)

@@ -7,11 +7,14 @@ from astropy.io import fits
 import numpy as np
 import pytest
 
-from ufwbpp.calibration import (
+from ufwbpp.stacking.integration import (
     CalibrationError, FitsFrame, FrameInfo, read_frame_info,
 )
-from ufwbpp import pixel_pipeline as pipeline
-from ufwbpp.pixel_pipeline import AffineTransform
+from ufwbpp.stacking import pipeline
+from ufwbpp.stacking import crop as crop_module
+from ufwbpp.stacking import groups as groups_module
+from ufwbpp.stacking import warp as warp_module
+from ufwbpp.stacking.parameters import AffineTransform
 
 
 def _write_declared_frame(
@@ -288,7 +291,7 @@ def test_exact_half_turn_preserves_pixels_and_integer_offset_coverage(
     monkeypatch.setattr(FitsFrame, "read_rows", read_chunk)
     monkeypatch.setattr(FitsFrame, "sample_lanczos3_clamped", unexpected_interpolation)
     monkeypatch.setattr(FitsFrame, "sample_bilinear", unexpected_interpolation)
-    stats = pipeline._register_frame(
+    stats = warp_module._register_frame(
         source, destination, transform, info,
         max_memory_bytes=pixels.shape[1] * 32 * 2,
         resampler="lanczos-3-clamped", source_exposure_seconds=120.0,
@@ -319,7 +322,7 @@ def test_exact_half_turn_preserves_pixels_and_integer_offset_coverage(
     assert header.get("OAFRCLMP") is None
     assert header["OAFNDOM"] == info.numeric_domain
     assert header["OAFSRCEX"] == 120.0
-    assert pipeline._registration_provenance(
+    assert warp_module._registration_provenance(
         transform, pixels.shape, "lanczos-3-clamped"
     ) == {
         "resampler": "half-turn-exact",
@@ -328,12 +331,12 @@ def test_exact_half_turn_preserves_pixels_and_integer_offset_coverage(
     if dx == 30:
         assert not read_intervals
         with pytest.raises(CalibrationError, match="AUTOCROP_EMPTY"):
-            pipeline._common_valid_crop(
+            crop_module._common_valid_crop(
                 pixels.shape, [transform], max_memory_bytes=4096,
                 resampler="lanczos-3-clamped",
             )
     else:
-        assert pipeline._common_valid_crop(
+        assert crop_module._common_valid_crop(
             pixels.shape, [AffineTransform.identity(), transform],
             max_memory_bytes=4096, resampler="lanczos-3-clamped",
         ) == (max(0, dy), max(0, dx), min(8, 8 + dy), min(11, 11 + dx))
@@ -363,7 +366,7 @@ def test_exact_half_turn_copies_fits_physical_values(
         hdu.header["BSCALE"], hdu.header["BZERO"] = 0.125, -2.0
     hdu.writeto(source)
     destination = tmp_path / "registered.fits"
-    pipeline._register_frame(
+    warp_module._register_frame(
         source, destination, _half_turn(raw.shape), _registration_info(source),
         max_memory_bytes=raw.shape[1] * 32,
         resampler="lanczos-3-clamped",
@@ -379,8 +382,8 @@ def test_half_turn_roundoff_is_bounded_over_the_whole_image(
     matrix[0, 1], matrix[1, 0] = -np.sin(np.pi), np.sin(np.pi)
     matrix[0, 2] = np.nextafter(matrix[0, 2], np.inf)
     transform = AffineTransform.from_value(matrix)
-    assert pipeline._exact_half_turn_translation(transform, shape) == (10, 7)
-    assert pipeline._common_valid_crop(
+    assert warp_module._exact_half_turn_translation(transform, shape) == (10, 7)
+    assert crop_module._common_valid_crop(
         shape, [transform], max_memory_bytes=4096, resampler="lanczos-3-clamped"
     ) == (0, 0, 8, 11)
     pixels = np.arange(88, dtype=np.float32).reshape(shape)
@@ -391,7 +394,7 @@ def test_half_turn_roundoff_is_bounded_over_the_whole_image(
 
     monkeypatch.setattr(FitsFrame, "sample_lanczos3_clamped", unexpected_interpolation)
     destination = tmp_path / "registered.fits"
-    pipeline._register_frame(
+    warp_module._register_frame(
         source, destination, transform, _registration_info(source),
         max_memory_bytes=4096, resampler="lanczos-3-clamped",
     )
@@ -400,7 +403,7 @@ def test_half_turn_roundoff_is_bounded_over_the_whole_image(
     long_shape = (4, 100_000)
     matrix = _half_turn(long_shape).validated_matrix()
     matrix[1, 0] = np.sin(np.pi)
-    assert pipeline._exact_half_turn_translation(
+    assert warp_module._exact_half_turn_translation(
         AffineTransform.from_value(matrix), long_shape
     ) is None
 
@@ -423,7 +426,7 @@ def test_noninteger_half_turn_uses_one_lanczos_warp(
     else:
         matrix[0, 1] = 1e-10
     transform = AffineTransform.from_value(matrix)
-    assert pipeline._exact_half_turn_translation(transform, shape) is None
+    assert warp_module._exact_half_turn_translation(transform, shape) is None
     source = _write_declared_frame(tmp_path / "input.fits", np.full(shape, 0.125))
     destination = tmp_path / "registered.fits"
     sample = FitsFrame.sample_lanczos3_clamped
@@ -435,10 +438,11 @@ def test_noninteger_half_turn_uses_one_lanczos_warp(
 
     # This contract describes the NumPy reference resampler; the native kernel
     # is covered by its own differential tests.
-    monkeypatch.setattr(pipeline, "load_native_kernels", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(warp_module, "load_native_kernels", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(groups_module, "load_native_kernels", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(FitsFrame, "sample_lanczos3_clamped", sample_once)
     execution: dict = {}
-    pipeline._register_frame(
+    warp_module._register_frame(
         source, destination, transform, _registration_info(source),
         max_memory_bytes=shape[0] * shape[1] * 192, resampler="lanczos-3-clamped",
         execution=execution,
@@ -447,7 +451,7 @@ def test_noninteger_half_turn_uses_one_lanczos_warp(
     assert execution["warpBackend"] == "numpy"
     assert fits.getheader(destination)["OAFRSAMP"] == "LANCZOS-3-CLAMPED"
     assert fits.getheader(destination)["OAFRMARG"] == 2
-    assert pipeline._registration_provenance(
+    assert warp_module._registration_provenance(
         transform, shape, "lanczos-3-clamped"
     )["resampler"] == "lanczos-3-clamped"
 
@@ -457,9 +461,9 @@ def test_exact_half_turn_worker_budget_includes_scaled_copy_buffers(tmp_path: Pa
     source = _write_declared_frame(tmp_path / "input.fits", np.ones(shape))
     info = _registration_info(source)
     transform = _half_turn(shape)
-    assert pipeline._registration_bytes_per_pixel(transform, "lanczos-3-clamped", shape) == 32
+    assert warp_module._registration_bytes_per_pixel(transform, "lanczos-3-clamped", shape) == 32
     with pytest.raises(CalibrationError, match="MEMORY_BUDGET_TOO_SMALL"):
-        pipeline._register_frame(
+        warp_module._register_frame(
             source, tmp_path / "too-small.fits", transform, info,
             max_memory_bytes=shape[1] * 32 - 1, resampler="lanczos-3-clamped",
         )

@@ -6,12 +6,12 @@ from astropy.io import fits
 import numpy as np
 import pytest
 
-from ufwbpp.calibration import (
+from ufwbpp.stacking.integration import (
     CalibrationError,
     FrameExpression,
     write_expression,
 )
-from ufwbpp.global_normalization import (
+from ufwbpp.stacking.normalization import (
     GlobalNormalizationParameters,
     StellarScaleHint,
     fit_registered_group_global_normalization,
@@ -486,7 +486,7 @@ def _tilted_levels(gradients: list[tuple[float, float]], sky: float = 500.0) -> 
 
 
 def test_low_order_target_cancels_opposing_night_gradients() -> None:
-    from ufwbpp.global_normalization import _fit_low_order_target
+    from ufwbpp.stacking.normalization import _fit_low_order_target
 
     # Two nights, one of them observed after a meridian flip: opposite tilts.
     gradients = [(-3.0, -0.6)] * 4 + [(-2.4, 0.6)] * 3 + [(2.6, -0.4)] * 3
@@ -515,7 +515,7 @@ def test_low_order_target_cancels_opposing_night_gradients() -> None:
 
 
 def test_low_order_target_keeps_a_single_night_common_tilt() -> None:
-    from ufwbpp.global_normalization import _fit_low_order_target
+    from ufwbpp.stacking.normalization import _fit_low_order_target
 
     gradients = [(-3.0, -0.6), (-2.8, -0.5), (-3.1, -0.7), (-2.9, -0.4), (-3.0, -0.6), (-2.7, -0.5)]
     levels = _tilted_levels(gradients)

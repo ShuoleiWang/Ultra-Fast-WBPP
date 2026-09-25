@@ -10,14 +10,14 @@ import numpy as np
 import pytest
 
 from ufwbpp.backends import DeviceKind
-from ufwbpp.calibration import (
+from ufwbpp.stacking.integration import (
     FrameExpression,
     IntegrationMapPaths,
     IntegrationParameters,
     integrate_expressions,
 )
 from ufwbpp.hardware import CpuFamily, HardwareProfile
-import ufwbpp.metal_integration as metal
+import ufwbpp.stacking.metal_integration as metal
 from ufwbpp.performance_profile import select_execution_tuning
 
 
@@ -475,7 +475,7 @@ def test_world_writable_native_library_candidate_is_rejected(tmp_path: Path) -> 
     candidate.write_bytes(b"not-a-library")
     candidate.chmod(0o666)
 
-    discovered = metal._candidate_library_paths(candidate)
+    discovered = metal.candidate_library_paths(candidate)
 
     assert candidate.resolve() not in discovered
 

@@ -12,7 +12,8 @@ import re
 
 import pytest
 
-from ufwbpp import pixel_pipeline
+from ufwbpp.stacking import pipeline as pixel_pipeline
+from ufwbpp.stacking import records as records_module
 from ufwbpp.workflows import project as project_e2e, single_target as e2e
 from ufwbpp import platform as platform_services
 from ufwbpp.hardware import detect_hardware
@@ -49,7 +50,7 @@ def test_layout_tokens_match_the_pipeline_rules() -> None:
     # projection uses; a drift here would make the budget wrong.
     for value in ("Ha 3nm", "r", "NGC 7331", "L-Pro", "SII_6.5nm"):
         assert e2e._safe_token(value) == name_token(value)
-        assert pixel_pipeline._safe_token(value) == name_token(value)
+        assert records_module._safe_token(value) == name_token(value)
         assert project_e2e._normalized_token(value) == target_key(value)
     assert name_token("Ha 3nm") == "HA_3NM"
     assert target_key("NGC 7331") == "ngc7331"

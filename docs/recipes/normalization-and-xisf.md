@@ -12,7 +12,7 @@ The v2 bridge preserves and audits XISF `sampleFormat` and `bounds`. Float calib
 
 Uncompressed attachments are streamed by rows. zlib, lz4, and zstd attachments are decoded only after decoded-size, compression-ratio, and peak-working-set checks. zlib uses an output-bounded stream decoder. The XML header is size-bounded before parsing and any `DOCTYPE` or `ENTITY` declaration is rejected. `COMMENT`, `HISTORY`, and `PixInsight:ProcessingHistory` are never copied to staging FITS or public validation evidence because they can contain private source paths.
 
-The sanitized real-file validation record is [validation/xisf-real-masterflat-20260901.json](../../validation/xisf-real-masterflat-20260901.json). It contains geometry and numeric decode checks only—no source path, content hash, raw metadata, or processing history.
+The sanitized real-file validation record is [docs/evidence/xisf-real-masterflat-20260901.json](../evidence/xisf-real-masterflat-20260901.json). It contains geometry and numeric decode checks only—no source path, content hash, raw metadata, or processing history.
 
 ## Content-bound metadata override for old masters
 
