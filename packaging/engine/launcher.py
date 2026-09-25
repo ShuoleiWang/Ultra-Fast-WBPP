@@ -48,6 +48,12 @@ def main() -> int:
             )
         )
         return 0
+    if sys.argv[1:2] == ["__astrometry-helper-v1"]:
+        # solve-field's removelines/uniformize in a self-contained build
+        # (scripts/stage_astrometry_runtime.py); imports numpy only.
+        from ufwbpp.solvers.astrometry_helpers import main as helper_main
+
+        return helper_main(sys.argv[2:])
     from ufwbpp.cli import main as cli_main
 
     return cli_main(sys.argv[1:])

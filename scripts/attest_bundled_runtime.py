@@ -87,7 +87,7 @@ class BundleAttestationError(RuntimeError):
 REPOSITORY = Path(__file__).resolve().parents[1]
 LEGAL_RESOURCE_NAMES = (
     "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "docs/licensing.md",
-    "LICENSES/GPL-3.0.txt", "LICENSES/astroalign-MIT.txt",
+    "LICENSES/GPL-3.0.txt", "LICENSES/astroalign-MIT.txt", "LICENSES/astrometry-net-BSD-3-Clause.txt",
 )
 MACOS_MAXIMUM_DEPLOYMENT_TARGET = (14, 0, 0)
 WINDOWS_TARGET_MACHINES = {

@@ -4,6 +4,24 @@ All notable changes are documented here. The format follows Keep a Changelog and
 
 ## [Unreleased]
 
+### Self-contained macOS demo build
+
+- `make desktop-build-macos-demo` builds an app that plate-solves on a new Mac
+  without Homebrew or a catalog download: Astrometry.net `solve-field` 0.97
+  (macOS 14 bottles, relocated) and the 4107–4112 index set ship inside it, the
+  indexes are installed into the catalog directory on first use through the
+  verified receipt path, and `removelines`/`uniformize` run inside the frozen
+  engine. On an NGC 7331 Light the bundled solver gives the same WCS,
+  correspondences and index identity as the Homebrew solver. The whole NGC 7331
+  project run by the app's engine in a sandbox without Homebrew or an installed
+  catalog (empty home, launchd `PATH`) took 63.0 s on the M3 Pro. Its four
+  masters were bit-identical to the Homebrew-solver baseline. GPL solver and
+  unresolved index terms: private demos only, never published.
+- [Building from source](docs/building-from-source.md) walks a new builder from
+  a clone to the desktop app or the demo app, how to check it and how to share
+  it. `make bootstrap BOOTSTRAP_PYTHON=python3.12` selects the interpreter the
+  macOS build needs, since Homebrew's default `python3` is now 3.14.
+
 ### Opt-in advanced algorithms
 
 - **Proper coaddition (Zackay & Ofek 2017), opt-in and off by default.**

@@ -114,7 +114,7 @@ flowchart LR
 如果不用安装包而是从源码构建，需要 Python 3.11+、Rust 1.88+、Node.js 22+、CMake 3.28+ 以及 [Tauri 开发环境](https://v2.tauri.app/start/prerequisites/)（macOS 14+ Apple Silicon 需要 Xcode；Windows 需要 Visual Studio 2022 Build Tools，可由 [`scripts/windows/bootstrap.ps1`](../scripts/windows/README.md) 安装）。
 
 ```bash
-make bootstrap
+make bootstrap BOOTSTRAP_PYTHON=python3.12
 ```
 
 ```bash
@@ -133,7 +133,7 @@ make desktop-dev
 { "selection": { "policy": "unattended-v1", "priority": "balanced" } }
 ```
 
-`ultra-fast-wbpp doctor --json` 报告硬件、原生内核与求解器就绪状态；`run-project` 是桌面端使用的多目标、多滤镜路径。打包含 Python 运行时的本地 `.app`：`make desktop-build-macos-prerelease`（[发布流程](release-process.md)）。
+`ultra-fast-wbpp doctor --json` 报告硬件、原生内核与求解器就绪状态；`run-project` 是桌面端使用的多目标、多滤镜路径。打包含 Python 运行时的本地 `.app`：`make desktop-build-macos-prerelease`。打包内置 `solve-field` 和索引集、拿到另一台 Mac 上无需任何配置就能运行的自包含演示版：`make desktop-build-macos-demo`。两者的构建、检查和分发步骤见[从源码构建](building-from-source.md)（英文）。
 
 ## 状态与要求
 

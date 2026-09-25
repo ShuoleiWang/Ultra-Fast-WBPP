@@ -9,6 +9,7 @@ Start with the [project README](../README.md) (also in [简体中文](README.zh-
 | [features.md](features.md) | Why Ultra-Fast WBPP: the advantages over PixInsight WBPP, the noteworthy features and the evidence behind each claim, plus what the project does not do |
 | [architecture.md](architecture.md) | How a run executes: desktop → Rust → Python engine → native kernels; data and correctness boundaries; the scientific stages (legacy gate, explicit blink selection, unattended selection); performance; platform layer |
 | [recipes/README.md](recipes/README.md) | Which recipe to start from for your data, and the built-in contracts |
+| [building-from-source.md](building-from-source.md) | Build the engine, the desktop app or a self-contained demo app from a clone; check the result and share it |
 | [validation-matrix.md](validation-matrix.md) | The register of what is validated, on which hardware, and what is explicitly not |
 | [../CONTRIBUTING.md](../CONTRIBUTING.md), [../AGENTS.md](../AGENTS.md), [../CLAUDE.md](../CLAUDE.md) | How to develop here: setup, rules, checks. `AGENTS.md` is the full guide (read by Codex), `CLAUDE.md` the Claude Code session guide |
 

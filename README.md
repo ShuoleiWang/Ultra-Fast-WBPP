@@ -114,7 +114,7 @@ Prebuilt installers are attached to every release on the [Releases page](https:/
 To build from source instead of installing a release you need Python 3.11+, Rust 1.88+, Node.js 22+, CMake 3.28+ and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) (Xcode on macOS 14+ with Apple Silicon; Visual Studio 2022 Build Tools on Windows, installed by [`scripts/windows/bootstrap.ps1`](scripts/windows/README.md)).
 
 ```bash
-make bootstrap
+make bootstrap BOOTSTRAP_PYTHON=python3.12
 ```
 
 ```bash
@@ -133,7 +133,7 @@ The same engine runs from the command line, with the selection policy chosen in 
 { "selection": { "policy": "unattended-v1", "priority": "balanced" } }
 ```
 
-`ultra-fast-wbpp doctor --json` reports the hardware, the native kernels and the solver readiness; `run-project` is the multi-target, multi-filter route the desktop uses. A local `.app` with the Python runtime bundled: `make desktop-build-macos-prerelease` ([release packaging](docs/release-process.md)).
+`ultra-fast-wbpp doctor --json` reports the hardware, the native kernels and the solver readiness; `run-project` is the multi-target, multi-filter route the desktop uses. A local `.app` with the Python runtime bundled: `make desktop-build-macos-prerelease`. A self-contained demo app with `solve-field` and the index set inside, which runs on another Mac without any setup: `make desktop-build-macos-demo`. [Building from source](docs/building-from-source.md) covers both, how to check the result and how to share it.
 
 ## Status and requirements
 

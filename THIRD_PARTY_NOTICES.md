@@ -24,7 +24,9 @@ Original Ultra-Fast WBPP code is licensed under MIT. The Python runtime no longe
 
 ## Optional external workers
 
-ASTAP (MPL-2.0) and Astrometry.net (GPL-3.0-or-later) are separate optional programs. They are not copied into the source tree. A release may bundle one only after a dedicated binary-and-data license audit.
+ASTAP (MPL-2.0) and Astrometry.net (GPL-3.0-or-later) are separate optional programs. They are not copied into the source tree. A release may bundle one only after a dedicated binary-and-data license audit. The self-contained demo build (`make desktop-build-macos-demo`) does bundle Astrometry.net's `solve-field` with GSL, WCSLIB and CFITSIO and the 4107–4112 index files; it is for private demonstration and is never published (see [licensing](docs/licensing.md)).
+
+Two of Astrometry.net's Python helpers, `removelines` and `uniformize`, are ported into `packages/engine/src/ufwbpp/solvers/astrometry_helpers.py`; they keep the Astrometry.net Team's 3-clause BSD notice, reproduced in [LICENSES/astrometry-net-BSD-3-Clause.txt](LICENSES/astrometry-net-BSD-3-Clause.txt).
 
 Catalog databases and index files are not included in the source repository or current bundle plan. Each downloadable catalog has its own manifest with provider, source URL, exact version, SHA-256, license status, citation, and installed scope. A program license does not automatically grant redistribution rights for its catalog data. Astrometry.net index redistribution terms remain unresolved for Ultra-Fast WBPP, so the catalog manager requires an explicit versioned provider-notice acknowledgement and performs a direct checked download into the user's managed data directory; this acknowledgement is not a license grant.
 

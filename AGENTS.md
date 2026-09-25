@@ -47,7 +47,7 @@ Sizes for orientation: about 57 k lines of Python, 9 k lines of C++/Metal (with 
 Prerequisites: Python 3.11+, Rust 1.88+, Node.js 22+, CMake 3.28+, the Tauri prerequisites (Xcode on macOS; VS 2022 Build Tools on Windows, installed by `scripts/windows/bootstrap.ps1`).
 
 ```bash
-make bootstrap          # .venv with the three editable packages, npm ci, test build of the kernels
+make bootstrap BOOTSTRAP_PYTHON=python3.12   # .venv (Homebrew python@3.12 on macOS) with the three editable packages, npm ci, test build of the kernels
 make desktop-dev        # Tauri dev window (uses .venv's engine)
 make demo               # browser demo of the interface, no data
 make test               # python-test rust-test frontend-test native-test
@@ -74,7 +74,7 @@ Engine CLI: `ultra-fast-wbpp doctor --json` (hardware, kernels, solver readiness
 
 Useful environment variables: `UFWBPP_DISABLE_NATIVE_KERNELS=1` (NumPy reference path), `UFWBPP_NATIVE_LIBRARY=<path>` (explicit kernel library), `UFWBPP_QC_CACHE_DIR=off` (no measurement cache, for comparisons), `LIGHTFRAMEQC_PARALLELISM=threads`, `LIGHTFRAMEQC_FITS_READER=memmap`, `UFWBPP_ASTAP=<astap_cli>`, `UFWBPP_ENGINE_EXECUTABLE=<engine>` (desktop debug builds).
 
-Desktop bundle on macOS: `make desktop-build-macos-prerelease` (release kernels → PyInstaller engine → staged sidecar → Tauri). Verify a bundle with `scripts/attest_bundled_runtime.py --app <app> --target aarch64-apple-darwin --output <json>`. On macOS 27 / Xcode 27 build with `CARGO_PROFILE_RELEASE_STRIP=none` in front of the npm command (see gotchas).
+Desktop bundle on macOS: `make desktop-build-macos-prerelease` (release kernels → PyInstaller engine → staged sidecar → Tauri). Verify a bundle with `scripts/attest_bundled_runtime.py --app <app> --target aarch64-apple-darwin --output <json>`. On macOS 27 / Xcode 27 build with `CARGO_PROFILE_RELEASE_STRIP=none` in front of the npm command (see gotchas). `make desktop-build-macos-demo` also stages `solve-field` and the index set into the app (`scripts/stage_astrometry_runtime.py`; private demos only, GPL solver). The walkthrough for other people is [docs/building-from-source.md](docs/building-from-source.md).
 
 ## Before you finish a change
 

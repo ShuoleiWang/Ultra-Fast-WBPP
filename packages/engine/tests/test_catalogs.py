@@ -16,6 +16,7 @@ from ufwbpp.catalogs import (
     catalog_doctor,
     catalog_list,
     get_catalog_manifest,
+    install_bundled_catalog,
     install_catalog,
     installed_set_identity_for_solver_indexes,
     installed_set_snapshot_for_solver_config,
@@ -656,3 +657,105 @@ def test_catalog_cli_exposes_machine_readable_seam_and_stable_terms_error(
     error = json.loads(capsys.readouterr().err)
     assert error["error"]["code"] == "CATALOG_TERMS_NOT_ACCEPTED"
     assert not root.exists()
+
+
+def _bundled_runtime(tmp_path: Path, payload: bytes = b"checked-catalog-bytes") -> dict[str, str]:
+    manifests = tmp_path / "manifests"
+    _fixture_manifest(manifests, payload)
+    manifest = get_catalog_manifest("fake-astrometry-4107", manifests)
+    bundle = tmp_path / "bundle"
+    (bundle / "index").mkdir(parents=True)
+    (bundle / "index" / "index-4107.fits").write_bytes(payload)
+    (bundle / "runtime.json").write_text(
+        json.dumps(
+            {
+                "catalog": {
+                    "catalogId": manifest.catalog_id,
+                    "manifestSha256": manifest.manifest_sha256,
+                    "relativePath": "index",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "UFWBPP_DATA_DIR": str(tmp_path / "data"),
+        "UFWBPP_CATALOG_MANIFEST_DIR": str(manifests),
+        "UFWBPP_BUNDLED_ASTROMETRY_ROOT": str(bundle),
+    }
+
+
+def test_bundled_catalog_installs_once_through_the_verified_receipt_path(tmp_path: Path) -> None:
+    environment = _bundled_runtime(tmp_path)
+    receipt = install_bundled_catalog(environment=environment)
+    root = tmp_path / "data" / "catalogs" / "astrometry-net"
+    assert receipt is not None
+    assert receipt["transportEvidence"][0]["method"] == "existing-file-verification"
+    assert (root / "index-4107.fits").read_bytes() == b"checked-catalog-bytes"
+    assert (root / "astrometry.cfg").read_text(encoding="utf-8").splitlines()[1] == f"add_path {root}"
+    verified = verified_installed_set_identities(environment=environment)
+    assert [item["installedSetIdentity"] for item in verified] == [receipt["installedSetIdentity"]]
+    # A configured catalog directory is left alone.
+    assert install_bundled_catalog(environment=environment) is None
+    assert install_bundled_catalog(environment={**environment, "UFWBPP_BUNDLED_ASTROMETRY_ROOT": ""}) is None
+
+
+def test_bundled_catalog_never_replaces_a_different_existing_file(tmp_path: Path) -> None:
+    environment = _bundled_runtime(tmp_path)
+    root = tmp_path / "data" / "catalogs" / "astrometry-net"
+    root.mkdir(parents=True)
+    (root / "index-4107.fits").write_bytes(b"a different file of other bytes")
+    with pytest.raises(CatalogError) as failure:
+        install_bundled_catalog(environment=environment)
+    assert failure.value.code == "CATALOG_BUNDLE_UNVERIFIED"
+    assert (root / "index-4107.fits").read_bytes() == b"a different file of other bytes"
+    assert not (root / "astrometry.cfg").exists()
+
+
+def test_bundled_catalog_waits_for_a_concurrent_writer(tmp_path: Path) -> None:
+    import threading
+
+    from ufwbpp.catalogs import _catalog_lock
+
+    environment = _bundled_runtime(tmp_path)
+    root = tmp_path / "data" / "catalogs" / "astrometry-net"
+    root.mkdir(parents=True)
+    held = threading.Event()
+    release = threading.Event()
+
+    def writer() -> None:
+        with _catalog_lock(root):
+            held.set()
+            release.wait(5)
+
+    thread = threading.Thread(target=writer)
+    thread.start()
+    held.wait(5)
+    try:
+        with pytest.raises(CatalogError) as busy:
+            install_bundled_catalog(environment=environment, wait_seconds=0)
+        assert busy.value.code == "CATALOG_INSTALL_BUSY"
+        threading.Timer(0.2, release.set).start()
+        assert install_bundled_catalog(environment=environment, wait_seconds=5) is not None
+    finally:
+        release.set()
+        thread.join()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the bundled solver runtime is macOS-only")
+def test_bundled_solver_is_preferred_over_the_host_solver(tmp_path: Path) -> None:
+    from ufwbpp.astrometry_net_backend import discover_astrometry_net
+
+    environment = _bundled_runtime(tmp_path)
+    host = tmp_path / "host"
+    for directory in (host, Path(environment["UFWBPP_BUNDLED_ASTROMETRY_ROOT"]) / "bin"):
+        directory.mkdir(parents=True, exist_ok=True)
+        solver = directory / "solve-field"
+        solver.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        solver.chmod(0o755)
+    environment["PATH"] = str(host)
+    bundled = Path(environment["UFWBPP_BUNDLED_ASTROMETRY_ROOT"]) / "bin" / "solve-field"
+    assert discover_astrometry_net(environment=environment) == str(bundled)
+    assert discover_astrometry_net(environment={**environment, "UFWBPP_BUNDLED_ASTROMETRY_ROOT": ""}) == str(
+        host / "solve-field"
+    )
