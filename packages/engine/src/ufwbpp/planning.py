@@ -6,13 +6,17 @@ import hashlib
 import json
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from lightframeqc.cfa import is_cfa_pattern
-from lightframeqc.metadata import session_keywords_of
 
 from .backends import BackendDescriptor, BackendRegistry, DeviceKind, StageKind
-from .calibration.policy import STRICT, MONO_STANDARD, same_metadata, cfa_for_workflow, metadata_changes
+from .calibration.matching import BIAS as MATCH_BIAS
+from .calibration.matching import DARK as MATCH_DARK
+from .calibration.matching import FLAT as MATCH_FLAT
+from .calibration.matching import LIGHT as MATCH_LIGHT
+from .calibration.matching import CalibrationMatch, FrameTraits, match_calibration
+from .calibration.policy import STRICT, MONO_STANDARD, same_metadata, cfa_for_workflow, metadata_changes, unknown
 from .hardware import HardwareProfile, detect_hardware
 from .models import (
     AssetRole,
@@ -472,12 +476,149 @@ def effective_calibration_assets(
     )
 
 
+def asset_traits(
+    asset: FrameAsset, kind: str, workflow: str, *, bias_included: bool | None = None
+) -> FrameTraits:
+    """An inventory asset as :mod:`ufwbpp.calibration.matching` pairs it."""
+
+    return FrameTraits(
+        path=asset.path,
+        kind=kind,
+        supplied_master=asset.is_master,
+        shape=(asset.height, asset.width, asset.channels) if asset.width and asset.height else None,
+        binning=(asset.binning_x, asset.binning_y),
+        color=cfa_for_workflow(asset.cfa_pattern, workflow),
+        filter_name=asset.filter_name if not unknown(asset.filter_name) else "UNKNOWN",
+        exposure_seconds=asset.exposure_seconds,
+        temperature_celsius=asset.temperature_celsius,
+        camera=asset.camera,
+        gain=asset.gain,
+        offset=asset.offset,
+        readout_mode=asset.readout_mode,
+        keywords=asset.grouping_keywords,
+        bias_included=True if kind == MATCH_DARK and not asset.is_master else bias_included,
+    )
+
+
+def match_inventory_calibration(
+    assets: Sequence[FrameAsset],
+    recipe: Recipe,
+    dark_bias_included: Mapping[str, bool] | None = None,
+) -> CalibrationMatch:
+    """Pair the READY Lights of ``assets`` with the calibration the recipe
+    allows, by WBPP's rules (see :mod:`ufwbpp.calibration.matching`).
+    ``dark_bias_included`` declares, by path, whether a MasterDark includes
+    the Bias; an undeclared one is taken to include it."""
+
+    workflow = recipe.calibration.workflow
+    kinds = (
+        (MATCH_BIAS, AssetRole.BIAS, AssetRole.MASTER_BIAS, recipe.calibration.bias),
+        (MATCH_DARK, AssetRole.DARK, AssetRole.MASTER_DARK, recipe.calibration.dark),
+        (MATCH_FLAT, AssetRole.FLAT, AssetRole.MASTER_FLAT, recipe.calibration.flat),
+    )
+    calibration = [
+        asset_traits(asset, kind, workflow, bias_included=(dark_bias_included or {}).get(asset.path))
+        for kind, raw_role, master_role, requirement in kinds
+        if requirement != Requirement.DISABLED
+        for asset in assets
+        if asset.status == AssetStatus.READY
+        and (asset.role is raw_role or (asset.role is master_role and recipe.calibration.allow_masters))
+    ]
+    lights = [
+        asset_traits(asset, MATCH_LIGHT, workflow)
+        for asset in assets
+        if asset.role == AssetRole.LIGHT and asset.status == AssetStatus.READY
+    ]
+    return match_calibration(lights, calibration)
+
+
+def _wbpp_calibration_issues(
+    assets: Sequence[FrameAsset],
+    recipe: Recipe,
+    dark_bias_included: Mapping[str, bool] | None = None,
+) -> tuple[list[PlanIssue], bool]:
+    """The standard workflow's plan issues: WBPP's pairing, with a refused
+    pairing (size, binning, colour) and a REQUIRED kind without any fitting
+    frame blocking, every other difference WBPP accepts a warning."""
+
+    match = match_inventory_calibration(assets, recipe, dark_bias_included)
+    group_of = {asset.path: asset.group_id for asset in assets}
+    requirements = {
+        MATCH_FLAT: recipe.calibration.flat,
+        MATCH_DARK: recipe.calibration.dark,
+        MATCH_BIAS: recipe.calibration.bias,
+    }
+    missing_codes = {"FLAT_MISSING": MATCH_FLAT, "DARK_MISSING": MATCH_DARK, "BIAS_MISSING": MATCH_BIAS}
+    collected: dict[tuple[str, str, IssueSeverity], set[str]] = {}
+
+    def add(code: str, message: str, severity: IssueSeverity, light: str) -> None:
+        collected.setdefault((code, message, severity), set()).add(group_of.get(light, ""))
+
+    for light, pairing in match.lights.items():
+        for error in pairing.errors:
+            add(error.code, error.message, IssueSeverity.ERROR, light)
+        for warning in pairing.warnings:
+            kind = missing_codes.get(warning.code)
+            if kind is None:
+                add(warning.code, warning.message, IssueSeverity.WARNING, light)
+                continue
+            if requirements[kind] == Requirement.REQUIRED:
+                # The matcher's message ends with what processing would do
+                # without the frame; a required kind blocks instead.
+                cause = warning.message.split(";", 1)[0]
+                add(f"{kind}_MATCH_MISSING", f"{cause}; the recipe requires one", IssueSeverity.ERROR, light)
+            else:
+                add(f"{kind}_MATCH_MISSING", warning.message, IssueSeverity.WARNING, light)
+        refused = {error.code.split("_", 1)[0] for error in pairing.errors}
+        for kind, attribute in ((MATCH_FLAT, "flat"), (MATCH_DARK, "dark"), (MATCH_BIAS, "bias")):
+            if (
+                requirements[kind] == Requirement.REQUIRED
+                and getattr(pairing, attribute) is None
+                and kind not in refused
+                and not any(missing_codes.get(item.code) == kind for item in pairing.warnings)
+            ):
+                add(
+                    f"{kind}_MATCH_MISSING",
+                    f"no {kind.lower()} fits these lights and the recipe requires one",
+                    IssueSeverity.ERROR,
+                    light,
+                )
+    for flat_key, pairing in match.flats.items():
+        for warning in pairing.warnings:
+            collected.setdefault((warning.code, warning.message, IssueSeverity.WARNING), set())
+    issues: list[PlanIssue] = []
+    valid = True
+    for (code, message, severity), groups in sorted(collected.items(), key=lambda item: (item[0][0], item[0][1])):
+        blocking = severity == IssueSeverity.ERROR
+        valid = valid and not blocking
+        issues.append(
+            PlanIssue(
+                code=code,
+                severity=severity,
+                category=PlanIssueCategory.INPUT,
+                stage=StageKind.CALIBRATION,
+                message=message,
+                details={"lightGroups": sorted(group for group in groups if group)},
+                blocks_contract=blocking,
+                blocks_execution=blocking,
+            )
+        )
+    return issues, valid
+
+
 def calibration_match_issues(
-    inventory: ProjectInventory, recipe: Recipe
+    inventory: ProjectInventory,
+    recipe: Recipe,
+    dark_bias_included: Mapping[str, bool] | None = None,
 ) -> tuple[list[PlanIssue], bool]:
     effective_assets, override_issues, valid = effective_calibration_assets(
         inventory, recipe
     )
+    if recipe.calibration.workflow == MONO_STANDARD:
+        # WBPP-compatible pairing (grouping keywords, closest Dark, other
+        # settings reported); the strict workflow below keeps its exact rules.
+        issues, match_valid = _wbpp_calibration_issues(effective_assets, recipe, dark_bias_included)
+        return [*override_issues, *issues], valid and match_valid
     issues: list[PlanIssue] = list(override_issues)
     lights = tuple(
         asset
@@ -523,11 +664,20 @@ def calibration_match_issues(
             continue
         unmatched_groups: dict[str, FrameAsset] = {}
         ambiguous_groups: dict[str, FrameAsset] = {}
-        ambiguous_sessions: set[str] = set()
         for light in lights:
+            # Grouping keywords (NIGHT_1, SESSION_2) pair a Light with its own
+            # night's frames: a different value excludes a candidate and the
+            # most matching keywords win (WBPP), before ambiguity is judged.
+            light_keywords = dict(light.grouping_keywords)
             matching = tuple(
-                candidate for candidate in candidates if compatible(light, candidate, recipe.calibration.workflow)
+                candidate
+                for candidate in candidates
+                if compatible(light, candidate, recipe.calibration.workflow)
+                and all(light_keywords.get(name, value) == value for name, value in candidate.grouping_keywords)
             )
+            if matching:
+                scores = [sum(light_keywords.get(name) == value for name, value in candidate.grouping_keywords) for candidate in matching]
+                matching = tuple(candidate for candidate, score in zip(matching, scores) if score == max(scores))
             if not matching:
                 unmatched_groups.setdefault(light.group_id, light)
                 continue
@@ -539,9 +689,6 @@ def calibration_match_issues(
             )
             if len(matching_masters) > 1 or (matching_raw and matching_masters):
                 ambiguous_groups.setdefault(light.group_id, light)
-                ambiguous_sessions.update(
-                    session for session in session_keywords_of([candidate.path for candidate in matching_masters]) if session
-                )
         if ambiguous_groups:
             valid = False
             issues.append(
@@ -553,13 +700,6 @@ def calibration_match_issues(
                     message=(
                         f"{len(ambiguous_groups)} Light group(s) match both raw and "
                         f"master {label} sources, or more than one supplied master."
-                        + (
-                            f" The MasterFlats belong to different nights or sessions "
-                            f"({', '.join(sorted(ambiguous_sessions))}); per-night Flats are not "
-                            "supported yet: process each night as its own project."
-                            if label == "Flat" and len(ambiguous_sessions) > 1
-                            else ""
-                        )
                     ),
                     details={
                         "requirement": requirement.value,

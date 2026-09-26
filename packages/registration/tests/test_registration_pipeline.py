@@ -285,6 +285,42 @@ class RegistrationGeometryTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(result, np.full((4, 4), 96, dtype=np.float32))
 
+    def test_a_light_with_its_own_masters_ignores_the_filter_lookup(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from astropy.io import fits
+
+        from ufwbpp_registration.pipeline import DetectionConfig, LightMasters, _read_calibrated_preview
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def write(name: str, pixels: np.ndarray, imagetyp: str) -> str:
+                header = fits.Header()
+                header["IMAGETYP"] = imagetyp
+                header["FILTER"] = "L"
+                header["EXPTIME"] = 10.0
+                fits.PrimaryHDU(pixels.astype(np.float32), header=header).writeto(root / name)
+                return str(root / name)
+
+            light = write("light.fits", np.full((32, 32), 110.0), "Light Frame")
+            bias = write("bias.fits", np.full((32, 32), 10.0), "Master Bias")
+            filter_flat = write("flat_filter.fits", np.full((32, 32), 2.0), "Master Flat")
+            night_flat_pixels = np.tile(np.linspace(1.0, 3.0, 32), (32, 1))
+            night_flat = write("flat_night.fits", night_flat_pixels, "Master Flat")
+            plan = CalibrationPlan(
+                bias_path=bias,
+                flat_paths={"L": filter_flat},
+                light_masters={light: LightMasters(bias_path=bias, flat_path=night_flat)},
+            )
+            _, calibrated, _ = _read_calibrated_preview(light, DetectionConfig(), plan, {}, None)
+            expected = 100.0 / (night_flat_pixels / np.median(night_flat_pixels))
+            np.testing.assert_allclose(calibrated, expected.astype(np.float32), rtol=1e-6)
+            without = CalibrationPlan(bias_path=bias, flat_paths={"L": filter_flat})
+            _, calibrated, _ = _read_calibrated_preview(light, DetectionConfig(), without, {}, None)
+            np.testing.assert_allclose(calibrated, np.full((32, 32), 100.0, dtype=np.float32))
+
     def test_normalized_additive_masters_are_scaled_into_integer_light_domain(self) -> None:
         light = np.full((4, 4), 631.0, dtype=np.float32)
         bias = np.full((4, 4), 481.0 / 65535.0, dtype=np.float32)

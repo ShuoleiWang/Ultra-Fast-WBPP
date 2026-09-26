@@ -218,6 +218,8 @@ class FrameMetadata:
     cfa_pattern: str = "UNKNOWN"
     readout_mode: str = "UNKNOWN"
     binning_known: bool = False
+    # WBPP grouping keywords from the path (NIGHT, SESSION, PANEL, ...).
+    grouping_keywords: dict[str, str] = field(default_factory=dict)
     image_count: int = 1
 
     def serializable(self) -> dict[str, Any]:

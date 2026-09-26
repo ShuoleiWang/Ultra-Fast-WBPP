@@ -25,6 +25,7 @@ import shutil
 import tempfile
 from typing import Any, Mapping, Sequence
 
+from lightframeqc.metadata import grouping_keyword_root
 from lightframeqc.parallel import FrameRunner
 
 from ..blink.session import BlinkEvidence
@@ -304,6 +305,25 @@ def run_e2e(
     """
 
     _validate_request(request)
+    if request.pipeline_parameters.grouping_keyword_root is None:
+        # Every stage reads WBPP grouping keywords below the same folder.
+        request = replace(
+            request,
+            pipeline_parameters=replace(
+                request.pipeline_parameters,
+                grouping_keyword_root=grouping_keyword_root(
+                    (
+                        *request.light_files,
+                        *request.flat_files,
+                        *request.dark_files,
+                        *request.bias_files,
+                        *request.master_bias_files,
+                        *request.master_dark_files,
+                        *request.master_flat_files,
+                    )
+                ),
+            ),
+        )
     if not isinstance(solver_backends, Sequence) or not solver_backends:
         raise E2EError("SOLVER_CHAIN_EMPTY", "at least one solver backend is required")
     sources = _validated_sources(request, progress)
@@ -374,7 +394,7 @@ def run_e2e(
 
         _emit(progress, ProgressStage.CALIBRATION, "started", "building registration calibration masters")
         try:
-            calibration_plan, calibration_receipt = _build_registration_masters(
+            calibration = _build_registration_masters(
                 biases=staged_inputs["BIAS"],
                 darks=staged_inputs["DARK"],
                 flats=staged_inputs["FLAT"],
@@ -390,6 +410,7 @@ def run_e2e(
             )
         except CalibrationError as error:
             raise E2EError(error.code, str(error), path=error.path) from error
+        calibration_receipt = calibration.receipt
         _verify_staged_pixel_inputs(staged_input_digests, identities)
         registration_calibration_receipt_path = receipts_dir / "registration-calibration.json"
         # This receipt becomes the content-bound trust anchor for generated
@@ -417,7 +438,7 @@ def run_e2e(
         ]
         registration = _register_lights(
             staged_inputs["LIGHT"],
-            calibration_plan,
+            calibration.plan,
             detection=request.registration_detection,
             registration=request.registration_config,
             workers=request.workers,
@@ -463,7 +484,7 @@ def run_e2e(
             staged_inputs=staged_inputs,
             registration_source_aliases=registration_source_aliases,
             xisf_conversions=xisf_conversions,
-            calibration_plan=calibration_plan,
+            calibration_plan=calibration,
             registration_calibration_receipt_path=registration_calibration_receipt_path,
             work=work,
             receipts_dir=receipts_dir,

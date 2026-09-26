@@ -11,27 +11,33 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 
 from lightframeqc.cfa import CFA_PATTERNS, CHANNEL_NAMES, normalize_pattern as normalize_cfa_pattern
+from lightframeqc.metadata import grouping_keyword_root
 
 from ..calibration.inputs import (
     TrustedGeneratedMaster,
     TrustedGeneratedCalibrationSet,
     apply_master_metadata_overrides,
     apply_raw_frame_metadata_overrides,
+    assert_compatible,
+    frame_traits,
+    required_mismatch,
     trust_private_xisf_numeric_domains,
     master_dark_bias_semantics,
-    assert_compatible,
     validate_trusted_generated_calibration_set,
     source_identity,
-    find_dark,
     SourceIdentityCache,
 )
-from ..calibration.policy import (
-    MONO_STANDARD,
-    apply_mono_workflow,
-    cfa_for_workflow,
-    can_omit_bias,
-    conflicting_profile_fields,
+from ..calibration.matching import (
+    BIAS,
+    DARK,
+    FLAT,
+    LIGHT,
+    CalibrationMatch,
+    MatchIssue,
+    physically_compatible,
 )
+from ..calibration.pairing import dark_group_warnings, light_group_warnings, pair_calibration
+from ..calibration.policy import MONO_STANDARD, apply_mono_workflow, cfa_for_workflow
 from .integration import CalibrationError, FrameInfo, PixelStatistics
 from .normalization import StellarScaleHint
 from .parameters import PipelineParameters, PixelTransform
@@ -326,9 +332,11 @@ class _RunPlan:
     """What a run decides before it writes a pixel.
 
     Canonical inputs, their frame metadata after overrides, the calibration
-    and output groups, each Light's transform/weight/hint bindings and the
-    provenance records the receipt reports.  Building it validates every
-    input combination, so the stages after it only execute.
+    groups and the pairing of every Light and raw Flat group with them (see
+    :mod:`ufwbpp.calibration.matching`), the output groups, each Light's
+    transform/weight/hint bindings and the provenance records the receipt
+    reports.  Building it validates every input combination, so the stages
+    after it only execute.
     """
 
     output: Path
@@ -342,13 +350,14 @@ class _RunPlan:
     bias_info: dict[Path, FrameInfo]
     dark_info: dict[Path, FrameInfo]
     flat_info: dict[Path, FrameInfo]
+    master_bias_info: dict[Path, FrameInfo]
     master_dark_info: dict[Path, FrameInfo]
     master_flat_info: dict[Path, FrameInfo]
     light_info: dict[Path, FrameInfo]
     supplied_dark_bias_included: dict[Path, bool]
-    reference_bias: FrameInfo
-    flat_groups: dict[str, list[Path]]
-    supplied_flats: dict[str, Path]
+    calibration: CalibrationMatch
+    # Calibration warnings and differences within a Light group, for the receipt.
+    warnings: tuple[MatchIssue, ...]
     light_groups: dict[str, list[Path]]
     reference_exposures: dict[str, float]
     light_domain_references: dict[str, FrameInfo]
@@ -359,11 +368,8 @@ class _RunPlan:
     group_channel: dict[str, int | None]
     group_cfa_pattern: dict[str, str | None]
     light_cfa_pattern: dict[str, str | None]
-    dark_groups: dict[float, list[Path]]
-    supplied_darks: dict[float, Path]
-    trusted_bias: TrustedGeneratedMaster | None
-    trusted_darks_by_exposure: dict[float, TrustedGeneratedMaster]
-    trusted_flats_by_filter: dict[str, TrustedGeneratedMaster]
+    # E2E-generated masters by the (kind, group key) they replace.
+    trusted_masters: dict[tuple[str, str], TrustedGeneratedMaster]
     transforms: dict[Path, PixelTransform]
     quality_weights: dict[Path, float]
     region_weight_maps: dict[Path, Any]
@@ -384,19 +390,36 @@ class _RunPlan:
             staging, path, self.source_aliases, self.trusted_by_path, self.source_identity_cache
         )
 
-    def dark_reference(self, exposure: float) -> FrameInfo:
-        """The frame metadata that stands for the master dark of ``exposure``."""
+    def calibration_info(self, path: str | Path) -> FrameInfo:
+        key = Path(path)
+        for infos in (
+            self.bias_info,
+            self.master_bias_info,
+            self.dark_info,
+            self.master_dark_info,
+            self.flat_info,
+            self.master_flat_info,
+        ):
+            if key in infos:
+                return infos[key]
+        raise KeyError(str(path))
 
-        if exposure in self.dark_groups:
-            return self.dark_info[self.dark_groups[exposure][0]]
-        return self.master_dark_info[self.supplied_darks[exposure]]
+    def group_paths(self, kind: str, key: str) -> tuple[Path, ...]:
+        return tuple(Path(member) for member in self.calibration.groups[kind][key].members)
 
-    def dark_bias_included(self, exposure: float, subtract_path: Path) -> bool:
-        if exposure in self.trusted_darks_by_exposure:
-            return bool(self.trusted_darks_by_exposure[exposure].bias_included)
-        if exposure in self.dark_groups:
+    def group_reference(self, kind: str, key: str) -> FrameInfo:
+        """The frame metadata that stands for one calibration group's master."""
+
+        return self.calibration_info(self.calibration.groups[kind][key].members[0])
+
+    def dark_bias_included(self, key: str) -> bool:
+        trusted = self.trusted_masters.get((DARK, key))
+        if trusted is not None:
+            return bool(trusted.bias_included)
+        group = self.calibration.groups[DARK][key]
+        if not group.supplied_master:
             return True
-        return self.supplied_dark_bias_included[subtract_path]
+        return self.supplied_dark_bias_included[Path(group.members[0])]
 
 
 def _plan_run(
@@ -404,7 +427,7 @@ def _plan_run(
     bias_files: Iterable[str | os.PathLike[str]],
     dark_files: Iterable[str | os.PathLike[str]],
     flat_files: Iterable[str | os.PathLike[str]],
-    master_bias_file: str | os.PathLike[str] | None,
+    master_bias_files: Iterable[str | os.PathLike[str]],
     master_dark_files: Iterable[str | os.PathLike[str]],
     master_flat_files: Iterable[str | os.PathLike[str]],
     light_files: Iterable[str | os.PathLike[str]],
@@ -422,18 +445,14 @@ def _plan_run(
     biases = _canonical_inputs(bias_files, "Bias", required=False)
     darks = _canonical_inputs(dark_files, "Dark", required=False)
     flats = _canonical_inputs(flat_files, "Flat", required=False)
-    master_biases = _canonical_inputs(
-        (() if master_bias_file is None else (master_bias_file,)),
-        "MasterBias",
-        required=False,
-    )
+    master_biases = _canonical_inputs(master_bias_files, "MasterBias", required=False)
     master_darks_input = _canonical_inputs(master_dark_files, "MasterDark", required=False)
     master_flats_input = _canonical_inputs(master_flat_files, "MasterFlat", required=False)
     lights = _canonical_inputs(light_files, "Light", required=True)
-    if (biases and master_biases) or (not biases and not master_biases and workflow != MONO_STANDARD):
+    if not biases and not master_biases and workflow != MONO_STANDARD:
         raise CalibrationError(
             "BIAS_SOURCE_AMBIGUOUS",
-            "supply exactly one Bias source mode: raw Bias frames or one MasterBias",
+            "the strict workflow requires raw Bias frames or a MasterBias",
         )
     all_paths = (
         *biases,
@@ -448,6 +467,11 @@ def _plan_run(
         raise CalibrationError("INPUT_ROLE_OVERLAP", "one source appears in multiple roles")
 
     aliases = dict(source_aliases or {})
+    # Grouping keywords are read below one folder for every input of the run
+    # (and of the enclosing E2E run, which passes it down).
+    keyword_root = parameters.grouping_keyword_root or grouping_keyword_root(
+        str(aliases.get(str(path), path)) for path in all_paths
+    )
     source_groups = (
         ("BIAS", biases),
         ("DARK", darks),
@@ -491,13 +515,13 @@ def _plan_run(
         light_info,
     ) = trust_private_xisf_numeric_domains(
         (
-            _read_infos(biases, "BIAS"),
-            _read_infos(darks, "DARK"),
-            _read_infos(flats, "FLAT"),
-            _read_infos(master_biases, "MASTER_BIAS"),
-            _read_infos(master_darks_input, "MASTER_DARK"),
-            _read_infos(master_flats_input, "MASTER_FLAT"),
-            _read_infos(lights, "LIGHT"),
+            _read_infos(biases, "BIAS", aliases, keyword_root),
+            _read_infos(darks, "DARK", aliases, keyword_root),
+            _read_infos(flats, "FLAT", aliases, keyword_root),
+            _read_infos(master_biases, "MASTER_BIAS", aliases, keyword_root),
+            _read_infos(master_darks_input, "MASTER_DARK", aliases, keyword_root),
+            _read_infos(master_flats_input, "MASTER_FLAT", aliases, keyword_root),
+            _read_infos(lights, "LIGHT", aliases, keyword_root),
         ),
         aliases,
     )
@@ -523,31 +547,8 @@ def _plan_run(
     for group in (bias_info, dark_info, flat_info, master_bias_info, master_dark_info, master_flat_info, light_info):
         for path, info in group.items():
             group[path] = apply_mono_workflow(info, workflow)
-    reference_bias = (
-        bias_info[biases[0]] if biases else master_bias_info[master_biases[0]] if master_biases else light_info[lights[0]]
-    )
-    profile_infos = [*bias_info.values(), *master_bias_info.values(), *dark_info.values(), *flat_info.values(), *master_dark_info.values(), *master_flat_info.values(), *light_info.values()]
-    conflicts = conflicting_profile_fields(profile_infos, workflow)
-    if conflicts:
-        raise CalibrationError("CALIBRATION_PROFILE_MISMATCH", "Conflicting known acquisition metadata: " + ", ".join(conflicts))
-    if not biases and not master_biases and not can_omit_bias(
-        (*light_info.values(), *flat_info.values()),
-        [*((info, True) for info in dark_info.values()), *((info, supplied_dark_bias_included[path]) for path, info in master_dark_info.items())],
-        workflow,
-    ):
-        raise CalibrationError("BIAS_REQUIRED_FOR_CALIBRATION", "Bias is required unless every Light and raw Flat has a matching Dark that includes Bias.")
-    for info in (*bias_info.values(), *master_bias_info.values()):
-        assert_compatible(reference_bias, info, workflow=workflow)
-    for info in (
-        *dark_info.values(),
-        *flat_info.values(),
-        *master_dark_info.values(),
-        *master_flat_info.values(),
-        *light_info.values(),
-    ):
-        assert_compatible(reference_bias, info, workflow=workflow)
 
-    flat_groups, supplied_flats, light_groups = _group_flats_and_lights(flat_info, master_flat_info, light_info, workflow)
+    light_groups = _group_lights(light_info, workflow)
     reference_exposures = {
         filter_name: min(float(light_info[path].exposure_seconds) for path in paths)
         for filter_name, paths in light_groups.items()
@@ -558,39 +559,36 @@ def _plan_run(
     output_groups, group_filter, group_channel, group_cfa_pattern, light_cfa_pattern = _output_groups(
         light_groups, light_info, workflow
     )
-    for filter_name, paths in flat_groups.items():
-        reference = flat_info[paths[0]]
-        for path in paths[1:]:
-            assert_compatible(reference, flat_info[path], compare_filter=True, workflow=workflow)
-        if filter_name in supplied_flats:
-            raise CalibrationError(
-                "FLAT_SOURCE_AMBIGUOUS",
-                f"filter {filter_name} has both raw Flats and a supplied MasterFlat",
-            )
-    missing_flats = sorted(set(light_groups) - set(flat_groups) - set(supplied_flats))
-    if missing_flats:
-        raise CalibrationError(
-            "MASTER_FLAT_MISSING",
-            f"no raw Flat group or MasterFlat for Light filters: {', '.join(missing_flats)}",
-        )
+    calibration = pair_calibration(
+        bias_info=bias_info,
+        master_bias_info=master_bias_info,
+        dark_info=dark_info,
+        master_dark_info=master_dark_info,
+        flat_info=flat_info,
+        master_flat_info=master_flat_info,
+        light_info=light_info,
+        supplied_dark_bias_included=supplied_dark_bias_included,
+        workflow=workflow,
+        dark_temperature_tolerance_celsius=parameters.dark_temperature_tolerance_celsius,
+    )
     tokens: dict[str, str] = {}
-    for filter_name in {*flat_groups, *supplied_flats, *light_groups, *output_groups}:
-        token = _safe_token(filter_name)
-        if token in tokens and tokens[token] != filter_name:
+    for name in {*light_groups, *output_groups, *calibration.groups[FLAT]}:
+        token = _safe_token(name)
+        if token in tokens and tokens[token] != name:
             raise CalibrationError(
                 "FILTER_FILENAME_COLLISION",
-                f"filters {tokens[token]!r} and {filter_name!r} share output token {token}",
+                f"groups {tokens[token]!r} and {name!r} share output token {token}",
             )
-        tokens[token] = filter_name
-    dark_groups, supplied_darks = _group_darks(dark_info, master_dark_info, light_info)
-    trusted_bias, trusted_darks_by_exposure, trusted_flats_by_filter = _trusted_generated_coverage(
+        tokens[token] = name
+    warnings = (
+        *calibration.warnings,
+        *light_group_warnings(light_groups, light_info),
+        *dark_group_warnings(calibration, dark_info, parameters.dark_temperature_tolerance_celsius),
+    )
+    trusted_masters = _trusted_generated_coverage(
         trusted_generated,
-        has_raw_bias=bool(biases),
-        reference_bias=reference_bias,
-        dark_info=dark_info,
-        dark_groups=dark_groups,
-        flat_info=flat_info,
-        flat_groups=flat_groups,
+        calibration,
+        {**{str(path): info for path, info in (*bias_info.items(), *dark_info.items(), *flat_info.items())}},
         parameters=parameters,
     )
     resolved_transforms = _resolve_transforms(lights, transforms)
@@ -627,11 +625,11 @@ def _plan_run(
         flat_info=flat_info,
         master_dark_info=master_dark_info,
         master_flat_info=master_flat_info,
+        master_bias_info=master_bias_info,
         light_info=light_info,
         supplied_dark_bias_included=supplied_dark_bias_included,
-        reference_bias=reference_bias,
-        flat_groups=flat_groups,
-        supplied_flats=supplied_flats,
+        calibration=calibration,
+        warnings=warnings,
         light_groups=light_groups,
         reference_exposures=reference_exposures,
         light_domain_references=light_domain_references,
@@ -640,11 +638,7 @@ def _plan_run(
         group_channel=group_channel,
         group_cfa_pattern=group_cfa_pattern,
         light_cfa_pattern=light_cfa_pattern,
-        dark_groups=dark_groups,
-        supplied_darks=supplied_darks,
-        trusted_bias=trusted_bias,
-        trusted_darks_by_exposure=trusted_darks_by_exposure,
-        trusted_flats_by_filter=trusted_flats_by_filter,
+        trusted_masters=trusted_masters,
         transforms=resolved_transforms,
         quality_weights=resolved_quality_weights,
         region_weight_maps=resolved_region_weight_maps,
@@ -655,26 +649,13 @@ def _plan_run(
     )
 
 
-def _group_flats_and_lights(
-    flat_info: Mapping[Path, FrameInfo],
-    master_flat_info: Mapping[Path, FrameInfo],
+def _group_lights(
     light_info: Mapping[Path, FrameInfo],
     workflow: str,
-) -> tuple[dict[str, list[Path]], dict[str, Path], dict[str, list[Path]]]:
-    """Raw Flat groups, supplied MasterFlats and Light groups, all by filter."""
+) -> dict[str, list[Path]]:
+    """Light groups by filter; one group's frames must be stackable together
+    (size, binning, colour and target)."""
 
-    flat_groups: dict[str, list[Path]] = {}
-    for path, info in flat_info.items():
-        flat_groups.setdefault(require_filter(info), []).append(path)
-    supplied_flats: dict[str, Path] = {}
-    for path, info in master_flat_info.items():
-        filter_name = require_filter(info)
-        if filter_name in supplied_flats:
-            raise CalibrationError(
-                "MASTER_FLAT_AMBIGUOUS",
-                f"multiple supplied MasterFlats match filter {filter_name}",
-            )
-        supplied_flats[filter_name] = path
     light_groups: dict[str, list[Path]] = {}
     for path, info in light_info.items():
         if info.exposure_seconds is None or info.exposure_seconds <= 0:
@@ -686,15 +667,27 @@ def _group_flats_and_lights(
         light_groups.setdefault(require_filter(info), []).append(path)
     for filter_name, paths in light_groups.items():
         reference = light_info[paths[0]]
+        reference_traits = frame_traits(reference, LIGHT, supplied_master=False, workflow=workflow)
         for path in paths[1:]:
-            assert_compatible(
-                reference,
-                light_info[path],
-                compare_filter=True,
-                compare_target=True,
-                workflow=workflow,
+            candidate = light_info[path]
+            if workflow != MONO_STANDARD:
+                assert_compatible(
+                    reference, candidate, compare_filter=True, compare_target=True, workflow=workflow
+                )
+            mismatches = physically_compatible(
+                reference_traits, frame_traits(candidate, LIGHT, supplied_master=False, workflow=workflow)
             )
-    return flat_groups, supplied_flats, light_groups
+            if required_mismatch(reference.target, candidate.target):
+                mismatches.append("target")
+            if mismatches:
+                raise CalibrationError(
+                    "CALIBRATION_PROFILE_MISMATCH",
+                    f"Lights of filter {filter_name} cannot be stacked together: "
+                    + ", ".join(mismatches)
+                    + " differ",
+                    path=str(path),
+                )
+    return light_groups
 
 
 def _output_groups(
@@ -755,134 +748,61 @@ def _output_groups(
     return output_groups, group_filter, group_channel, group_cfa_pattern, light_cfa_pattern
 
 
-def _group_darks(
-    dark_info: Mapping[Path, FrameInfo],
-    master_dark_info: Mapping[Path, FrameInfo],
-    light_info: Mapping[Path, FrameInfo],
-) -> tuple[dict[float, list[Path]], dict[float, Path]]:
-    """Raw Dark groups and supplied MasterDarks by exposure; every Light
-    needs an exact exposure match once any Dark is supplied."""
-
-    dark_groups: dict[float, list[Path]] = {}
-    for path, info in dark_info.items():
-        if info.exposure_seconds is None or info.exposure_seconds <= 0:
-            raise CalibrationError(
-                "DARK_EXPOSURE_UNKNOWN", "Dark requires positive EXPTIME", path=str(path)
-            )
-        dark_groups.setdefault(info.exposure_seconds, []).append(path)
-    supplied_darks: dict[float, Path] = {}
-    for path, info in master_dark_info.items():
-        if info.exposure_seconds is None or info.exposure_seconds <= 0:
-            raise CalibrationError(
-                "DARK_EXPOSURE_UNKNOWN",
-                "MasterDark requires positive EXPTIME",
-                path=str(path),
-            )
-        if find_dark(info.exposure_seconds, supplied_darks) is not None:
-            raise CalibrationError(
-                "MASTER_DARK_AMBIGUOUS",
-                "multiple supplied MasterDarks have the same exposure",
-                path=str(path),
-            )
-        if find_dark(info.exposure_seconds, {value: Path() for value in dark_groups}) is not None:
-            raise CalibrationError(
-                "DARK_SOURCE_AMBIGUOUS",
-                "an exposure has both raw Darks and a supplied MasterDark",
-                path=str(path),
-            )
-        supplied_darks[info.exposure_seconds] = path
-    available_dark_exposures = {
-        **{value: Path() for value in dark_groups},
-        **supplied_darks,
-    }
-    if available_dark_exposures:
-        for path, info in light_info.items():
-            if find_dark(info.exposure_seconds, available_dark_exposures) is None:
-                raise CalibrationError(
-                    "DARK_EXPOSURE_MISMATCH",
-                    "no exact raw Dark or MasterDark exposure matches this Light",
-                    path=str(path),
-                )
-    return dark_groups, supplied_darks
-
-
 def _trusted_generated_coverage(
     trusted_generated: Mapping[str, Any] | None,
+    calibration: CalibrationMatch,
+    raw_info: Mapping[str, FrameInfo],
     *,
-    has_raw_bias: bool,
-    reference_bias: FrameInfo,
-    dark_info: Mapping[Path, FrameInfo],
-    dark_groups: Mapping[float, list[Path]],
-    flat_info: Mapping[Path, FrameInfo],
-    flat_groups: Mapping[str, list[Path]],
     parameters: PipelineParameters,
-) -> tuple[
-    TrustedGeneratedMaster | None,
-    dict[float, TrustedGeneratedMaster],
-    dict[str, TrustedGeneratedMaster],
-]:
-    """Map E2E-generated masters onto the raw calibration groups they replace."""
+) -> dict[tuple[str, str], TrustedGeneratedMaster]:
+    """Map E2E-generated masters onto the raw calibration groups they replace.
 
-    trusted_bias = trusted_generated["bias"] if trusted_generated is not None else None
-    trusted_darks_by_exposure: dict[float, TrustedGeneratedMaster] = {}
-    trusted_flats_by_filter: dict[str, TrustedGeneratedMaster] = {}
+    Every raw group a Light or Flat of this run uses must be covered; a
+    generated master of a group no longer used (a night whose Lights the
+    selection removed) is left aside.
+    """
+
     if trusted_generated is None:
-        return trusted_bias, trusted_darks_by_exposure, trusted_flats_by_filter
-    workflow = parameters.calibration_workflow
-    if has_raw_bias != (trusted_bias is not None):
-        raise CalibrationError(
-            "TRUSTED_GENERATED_CALIBRATION_COVERAGE_MISMATCH",
-            "generated MasterBias coverage does not match raw Bias provenance",
-        )
-    for item in trusted_generated["darks"]:
-        exposure = item.frame_info.exposure_seconds
-        if exposure is None or exposure <= 0 or find_dark(
-            exposure, {value: Path() for value in trusted_darks_by_exposure}
-        ) is not None:
-            raise CalibrationError(
-                "TRUSTED_GENERATED_CALIBRATION_COVERAGE_MISMATCH",
-                "generated MasterDark exposures are invalid or ambiguous",
-                path=item.path,
+        return {}
+    covered: dict[tuple[str, str], TrustedGeneratedMaster] = {}
+    for kind, items in ((BIAS, trusted_generated["biases"]), (DARK, trusted_generated["darks"]), (FLAT, trusted_generated["flats"])):
+        for item in items:
+            group = calibration.groups[kind].get(item.group_key or "")
+            if group is None or group.supplied_master or (kind, group.key) in covered:
+                raise CalibrationError(
+                    "TRUSTED_GENERATED_CALIBRATION_COVERAGE_MISMATCH",
+                    f"generated {kind.lower()} master does not name one raw group of this run",
+                    path=item.path,
+                )
+            reference = raw_info[group.members[0]]
+            reasons = physically_compatible(
+                frame_traits(reference, kind, supplied_master=False, workflow=parameters.calibration_workflow),
+                frame_traits(item.frame_info, kind, supplied_master=True, workflow=parameters.calibration_workflow),
             )
-        trusted_darks_by_exposure[float(exposure)] = item
-    for item in trusted_generated["flats"]:
-        filter_name = require_filter(item.frame_info)
-        if filter_name in trusted_flats_by_filter:
-            raise CalibrationError(
-                "TRUSTED_GENERATED_CALIBRATION_COVERAGE_MISMATCH",
-                "generated MasterFlat filters are ambiguous",
-                path=item.path,
-            )
-        trusted_flats_by_filter[filter_name] = item
-    if set(trusted_darks_by_exposure) != set(dark_groups):
+            if kind == FLAT and required_mismatch(reference.filter_name, item.frame_info.filter_name):
+                reasons.append("filter")
+            if kind == DARK and not math.isclose(
+                float(reference.exposure_seconds or 0.0),
+                float(item.frame_info.exposure_seconds or 0.0),
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            ):
+                reasons.append("exposure")
+            if reasons:
+                raise CalibrationError(
+                    "CALIBRATION_PROFILE_MISMATCH",
+                    "generated master differs from its raw group: " + ", ".join(reasons),
+                    path=item.path,
+                )
+            covered[(kind, group.key)] = item
+    used = {(kind, key) for kind in (BIAS, DARK, FLAT) for key in calibration.used(kind)}
+    raw_used = {(kind, key) for kind, key in used if not calibration.groups[kind][key].supplied_master}
+    if not raw_used <= set(covered):
         raise CalibrationError(
             "TRUSTED_GENERATED_CALIBRATION_COVERAGE_MISMATCH",
-            "generated MasterDark coverage does not match raw Dark provenance",
+            "generated masters do not cover every raw calibration group this run uses",
         )
-    if set(trusted_flats_by_filter) != set(flat_groups):
-        raise CalibrationError(
-            "TRUSTED_GENERATED_CALIBRATION_COVERAGE_MISMATCH",
-            "generated MasterFlat coverage does not match raw Flat provenance",
-        )
-    if trusted_bias is not None:
-        assert_compatible(reference_bias, trusted_bias.frame_info, workflow=workflow)
-    for exposure, item in trusted_darks_by_exposure.items():
-        assert_compatible(
-            dark_info[dark_groups[exposure][0]],
-            item.frame_info,
-            compare_exposure=True,
-            compare_temperature=True,
-            temperature_tolerance_celsius=parameters.dark_temperature_tolerance_celsius,
-            workflow=workflow,
-        )
-    for filter_name, item in trusted_flats_by_filter.items():
-        assert_compatible(
-            flat_info[flat_groups[filter_name][0]],
-            item.frame_info,
-            compare_filter=True,
-            workflow=workflow,
-        )
-    return trusted_bias, trusted_darks_by_exposure, trusted_flats_by_filter
+    return covered
 
 
 @dataclass(frozen=True)

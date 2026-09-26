@@ -27,7 +27,7 @@ const EN = {
   notImported: "Not imported",
   calibrationUnverified: "Matching has not yet been verified. Having a calibration file is not proof that it matches.",
   flatSessionWarning:
-    "Headers cannot verify that a Flat shares the same optical path, dust and camera rotation. Review this when combining nights.",
+    "Headers cannot verify that a Flat shares the same optical path, dust and camera rotation. To calibrate each night with its own Flats, keep each night in its own NIGHT_1, NIGHT_2… (or DATE_…) folder, as for WBPP.",
   automaticQuality: "Light quality evidence",
   qualityNotMeasured: "Complete Blink review before processing. The measurement table is optional.",
   qualityChecksHint: "Measures stars, focus, trailing, clouds, field agreement and spatial obstruction evidence.",
@@ -44,7 +44,7 @@ const EN = {
   calibrationReadError: "Calibration check failed: {error}",
   calibrationMissingReason: "No {role} imported; add calibration with matching acquisition settings.",
   calibrationImportedUnmatchedReason:
-    "{role} imported, but no compatible match was found. Check dimensions, filters and any recorded acquisition settings.",
+    "{role} imported, but none fits these Lights. Check dimensions, filters and the grouping keywords (NIGHT_…, DATE_…, SESSION_…) in folder names.",
   calibrationConfirmationPending:
     "{masters} master(s) have unsaved advanced changes. Save or restore the file settings below.",
   openCalibrationConfirmation: "Review advanced changes ↓",
@@ -55,7 +55,18 @@ const EN = {
     "Imported Dark has not passed exposure, temperature and acquisition-parameter checks; complete missing metadata before judging a mismatch.",
   calibrationProfileReason:
     "The recorded acquisition settings conflict; check the affected groups and calibration files.",
-  calibrationAmbiguousReason: "Multiple {role} candidates match; select a single unambiguous set.",
+  calibrationAmbiguousReason: "Several {role} candidates fit equally well.",
+  calibrationSettingsDifferReason:
+    "The {role} was taken with other acquisition settings (camera, gain, offset or readout mode); it is used, as in WBPP.",
+  calibrationDarkExposureDiffersReason:
+    "No Dark of this exposure: the closest one is subtracted unscaled, as WBPP does without dark optimization.",
+  calibrationDarkTemperatureDiffersReason:
+    "The Dark differs from the Lights by more than 3 °C; it is used, as in WBPP.",
+  calibrationIncompatibleReason: "No {role} can calibrate these Lights: size, binning or colour differ.",
+  calibrationLightSettingsReason:
+    "Lights of one target and filter were taken with different settings; they are stacked together, as in WBPP.",
+  calibrationFlatUncalibratedReason: "No Bias or Dark fits these Flats; they are integrated uncalibrated.",
+  roleDefaultedToLight: "No image type in the header or path: taken as a Light, as WBPP does.",
   calibrationBiasReason: "Declare whether Master Dark includes Bias before reuse.",
   calibrationSessionReason: "Cross-date Flat / Light optical-path consistency needs review.",
   calibrationReasonGeneric: "The engine reported {code}; inspect the affected files.",
@@ -707,7 +718,8 @@ const ZH: Record<MessageKey, string> = {
   calibrationCheckHint: "原始校准帧会在处理时先叠成 Master；已有 Master 检查后复用。",
   notImported: "未导入",
   calibrationUnverified: "校准匹配尚未验证；存在校准文件不代表参数匹配。",
-  flatSessionWarning: "头信息无法证明 Flat 的光路、灰尘和相机旋转角一致；跨天合并时仍需核对。",
+  flatSessionWarning:
+    "头信息无法证明 Flat 的光路、灰尘和相机旋转角一致。要让每晚用自己的 Flat，请像 WBPP 一样把每晚放进 NIGHT_1、NIGHT_2…（或 DATE_…）文件夹。",
   automaticQuality: "自动筛选 Light",
   qualityNotMeasured: "处理前需完成 Blink 人工审片，测量结果表可选。",
   qualityChecksHint: "测量星点、焦点、拖线、云层、画面一致性和空间遮挡证据。",
@@ -731,7 +743,8 @@ const ZH: Record<MessageKey, string> = {
   qualityElapsed: "正在筛选 {count} 张 Light · 已用 {seconds} 秒；完成后恢复操作。",
   temperatureUnrecorded: "温度未记录",
   darkTemperatureUnrecorded: "此 Dark 文件未记录温度；这是提示，不会阻止匹配。",
-  calibrationImportedUnmatchedReason: "已导入 {role}，但没有兼容匹配；请核对尺寸、滤镜和文件中已记录的采集参数。",
+  calibrationImportedUnmatchedReason:
+    "已导入 {role}，但没有适合这些 Light 的；请核对尺寸、滤镜和文件夹名中的分组关键字（NIGHT_…、DATE_…、SESSION_…）。",
   calibrationConfirmationPending: "有 {masters} 个 Master 的高级修改尚未保存；请保存或恢复文件设置。",
   openCalibrationConfirmation: "检查高级修改 ↓",
   calibrationCfaReason: "图像头信息未声明这些文件是单色还是 Bayer/CFA。",
@@ -740,7 +753,15 @@ const ZH: Record<MessageKey, string> = {
   calibrationDarkParametersReason:
     "已导入 Dark，但尚未通过曝光、温度和采集参数检查；请先补齐元数据，再判断是否确实不匹配。",
   calibrationProfileReason: "文件中已记录的采集参数存在冲突；请检查对应分组和校准文件。",
-  calibrationAmbiguousReason: "存在多个匹配的 {role} 候选；请保留一组明确的校准输入。",
+  calibrationAmbiguousReason: "有多个同样合适的 {role} 候选。",
+  calibrationSettingsDifferReason:
+    "{role} 的采集参数（相机、增益、偏置或读出模式）与 Light 不同；按 WBPP 的规则照常使用。",
+  calibrationDarkExposureDiffersReason: "没有相同曝光的 Dark：按 WBPP 的规则（不做暗场优化）直接减去曝光最接近的一组。",
+  calibrationDarkTemperatureDiffersReason: "Dark 与 Light 的温差超过 3 °C；按 WBPP 的规则照常使用。",
+  calibrationIncompatibleReason: "没有能校准这些 Light 的 {role}：尺寸、binning 或彩色/黑白不一致。",
+  calibrationLightSettingsReason: "同一目标、同一滤镜的 Light 采集参数不同；按 WBPP 的规则合并叠加。",
+  calibrationFlatUncalibratedReason: "没有适合这些 Flat 的 Bias 或 Dark；Flat 将不经校准直接合成。",
+  roleDefaultedToLight: "文件头和路径都没有帧类型：按 WBPP 的规则当作 Light。",
   calibrationBiasReason: "复用 Master Dark 前，需要声明是否包含 Bias。",
   calibrationSessionReason: "跨日期 Flat / Light 的光路一致性需要核对。",
   calibrationReasonGeneric: "引擎报告 {code}；请检查涉及的文件。",

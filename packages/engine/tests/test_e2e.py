@@ -1276,7 +1276,7 @@ def test_registration_calibration_selects_dark_per_light_exposure(
             ("G", 120.0, 20.0),
         )
     )
-    plan, receipt = _build_registration_masters(
+    calibration = _build_registration_masters(
         biases=biases,
         darks=tuple(darks),
         flats=flats,
@@ -1287,8 +1287,12 @@ def test_registration_calibration_selects_dark_per_light_exposure(
         directory=tmp_path / "multi" / "registration-masters",
         pipeline_parameters=PipelineParameters(),
     )
+    plan, receipt = calibration.plan, calibration.receipt
 
-    assert set(plan.dark_paths) == {60.0, 120.0}
+    assert [Path(plan.masters_for(str(light)).dark_path).name for light in lights] == [
+        "master_dark_60s.fits",
+        "master_dark_120s.fits",
+    ]
     assert set(receipt["registrationDarksByExposure"]) == {"60", "120"}
     analyses = analyze_frames(
         [str(path) for path in lights],

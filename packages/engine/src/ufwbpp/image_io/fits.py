@@ -68,22 +68,31 @@ def header_text(header: Mapping[str, Any], *keys: str, default: str = "UNKNOWN")
 
 def normalize_role(value: Any) -> str:
     compact = re.sub(r"[^A-Z0-9]+", "", str(value or "").upper())
+    # The image-type words WBPP recognises; a Flat-Dark is a Dark.
     return {
         "BIAS": "BIAS",
         "BIASFRAME": "BIAS",
         "ZERO": "BIAS",
         "DARK": "DARK",
         "DARKFRAME": "DARK",
+        "DARKFLAT": "DARK",
+        "FLATDARK": "DARK",
         "FLAT": "FLAT",
         "FLATFRAME": "FLAT",
+        "FLATFIELD": "FLAT",
         "LIGHT": "LIGHT",
         "LIGHTFRAME": "LIGHT",
+        "SCIENCE": "LIGHT",
+        "SCIENCEFRAME": "LIGHT",
         "MASTERBIAS": "MASTER_BIAS",
         "MASTERBIASFRAME": "MASTER_BIAS",
         "MASTERDARK": "MASTER_DARK",
         "MASTERDARKFRAME": "MASTER_DARK",
+        "MASTERDARKFLAT": "MASTER_DARK",
+        "MASTERFLATDARK": "MASTER_DARK",
         "MASTERFLAT": "MASTER_FLAT",
         "MASTERFLATFRAME": "MASTER_FLAT",
+        "MASTERFLATFIELD": "MASTER_FLAT",
     }.get(compact, "UNKNOWN")
 
 
@@ -188,6 +197,8 @@ class FrameInfo:
     numeric_domain_authority: str = "UNRESOLVED"
     numeric_domain_evidence: tuple[tuple[str, Any], ...] = ()
     bias_included: bool | None = None
+    # WBPP grouping keywords (NIGHT, SESSION, PANEL, ...) as sorted pairs.
+    grouping_keywords: tuple[tuple[str, str], ...] = ()
 
     def serializable(self) -> dict[str, Any]:
         return {
@@ -209,6 +220,7 @@ class FrameInfo:
             "numericDomainAuthority": self.numeric_domain_authority,
             "numericDomainEvidence": dict(self.numeric_domain_evidence),
             "biasIncluded": self.bias_included,
+            **({"groupingKeywords": dict(self.grouping_keywords)} if self.grouping_keywords else {}),
         }
 
 

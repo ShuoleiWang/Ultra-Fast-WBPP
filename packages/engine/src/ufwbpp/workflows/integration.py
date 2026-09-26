@@ -174,7 +174,7 @@ def _integrate_admitted_lights(
                 bias_files=staged_inputs["BIAS"],
                 dark_files=staged_inputs["DARK"],
                 flat_files=staged_inputs["FLAT"],
-                master_bias_file=staged_inputs["MASTER_BIAS"][0] if staged_inputs["MASTER_BIAS"] else None,
+                master_bias_files=staged_inputs["MASTER_BIAS"],
                 master_dark_files=staged_inputs["MASTER_DARK"],
                 master_flat_files=staged_inputs["MASTER_FLAT"],
                 light_files=light_subset,

@@ -293,6 +293,13 @@ redistribution permissions are separate; see [licensing](licensing.md).
   `_calibrate_and_register_lights` (`lights.py`), the shared crop
   (`crop.py`), `_integrate_group` per output group (`groups.py`), then the
   receipt and one no-replace publication.
+- `calibration/matching.py` groups calibration frames and pairs every Light
+  and raw Flat group by WBPP's rules (grouping keywords, compatibility,
+  closest exposure); `calibration/pairing.py` applies it to a run (the
+  workflow's refusals and `strict-v1`'s fail-closed checks), and
+  `planning.py` and `calibration/preflight.py` report the same pairing before
+  a run. The masters are built per group and each Light is calibrated with
+  its own pairing, in registration previews and in the pixel pipeline.
 - `calibration/inputs.py` owns content-bound metadata and generated-master
   reuse. `image_io/fits.py` owns FITS reading/writing and sampling;
   `stacking/integration.py` retains expression evaluation and ordinary

@@ -14,7 +14,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from lightframeqc.cfa import is_cfa_pattern
 from lightframeqc.readers import probe_frame_metadata
 
-from ..calibration.inputs import InternalSourceIdentity
+from ..calibration.inputs import InternalSourceIdentity, with_path_metadata
 from ..calibration.policy import apply_mono_workflow, bias_from_header, MONO_STANDARD
 from ..image_io.xisf import convert_xisf_to_fits, preflight_xisf_header
 from ..integrity import sha256_digest
@@ -114,6 +114,7 @@ def _input_frame_info(
             bias_included=bias_from_header(header),
         )
     identity_path = override_identity_path or path
+    info = with_path_metadata(info, identity_path, keyword_root=parameters.grouping_keyword_root)
     if (
         identity_path.suffix.casefold() == ".xisf"
         and path.suffix.casefold() != ".xisf"

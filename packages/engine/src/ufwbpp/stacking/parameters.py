@@ -151,6 +151,11 @@ class PipelineParameters:
     # pipeline directory is transient (the E2E work tree) turns this off and
     # relies on its own fsynced promotion of the final products.
     durable_intermediates: bool = True
+    # The folder WBPP grouping keywords are read below (the common ancestor
+    # of every input of the enclosing run, so all its stages read the same
+    # keywords); ``None`` derives it from the inputs.  A local path derived
+    # from the inputs: not serialized.
+    grouping_keyword_root: str | None = None
 
     def validate(self) -> None:
         if self.calibration_workflow not in WORKFLOWS:

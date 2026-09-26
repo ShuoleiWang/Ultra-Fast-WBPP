@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..calibration.inputs import (
+    with_path_metadata,
     TrustedGeneratedMaster,
     hash_calibration_file,
     file_stat_identity,
@@ -41,10 +43,23 @@ def _canonical_inputs(
     return tuple(sorted(paths, key=lambda path: os.path.normcase(str(path))))
 
 
-def _read_infos(paths: tuple[Path, ...], expected_role: str) -> dict[Path, FrameInfo]:
+def _read_infos(
+    paths: tuple[Path, ...],
+    expected_role: str,
+    source_aliases: Mapping[str, Path] | None = None,
+    keyword_root: str | None = None,
+) -> dict[Path, FrameInfo]:
+    """Frame metadata of ``paths``: the header, completed from the original
+    path as WBPP reads it (see :func:`with_path_metadata`). A frame whose
+    header and path name no role takes the one it was supplied as."""
+
     result: dict[Path, FrameInfo] = {}
     for path in paths:
-        info = read_frame_info(path)
+        info = with_path_metadata(
+            read_frame_info(path), (source_aliases or {}).get(str(path), path), keyword_root=keyword_root
+        )
+        if info.role == "UNKNOWN":
+            info = replace(info, role=expected_role)
         if info.role != expected_role:
             raise CalibrationError(
                 "FRAME_ROLE_MISMATCH",

@@ -113,6 +113,8 @@ class FrameAsset:
     source_stat: SourceStat | None = None
     error_code: str | None = None
     error_message: str | None = None
+    # WBPP grouping keywords from the path (NIGHT, SESSION, PANEL, ...).
+    grouping_keywords: tuple[tuple[str, str], ...] = ()
 
     @property
     def is_master(self) -> bool:
@@ -145,6 +147,9 @@ class FrameAsset:
         value.pop("source_stat", None)
         value["errorCode"] = value.pop("error_code")
         value["errorMessage"] = value.pop("error_message")
+        keywords = value.pop("grouping_keywords")
+        if keywords:
+            value["groupingKeywords"] = {name: text for name, text in keywords}
         return json_value(value, "asset")
 
 

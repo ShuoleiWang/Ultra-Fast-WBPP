@@ -59,8 +59,9 @@ request/selection/progress types. The run functions and
 that live in the module of their step (`workflows/screening.py`,
 `workflows/integration.py`, `stacking/masters.py`, `stacking/groups.py`, ...);
 put new work in a stage, not inline. `integrity.py` holds the canonical JSON
-and SHA-256 forms every digest uses; `calibration/inputs.py` content-bound
-master metadata; `image_io/fits.py` FITS primitives; `solvers/process.py`
+and SHA-256 forms every digest uses; `calibration/matching.py` WBPP's
+calibration grouping and pairing (planning, preflight and the run share it);
+`calibration/inputs.py` content-bound master metadata; `image_io/fits.py` FITS primitives; `solvers/process.py`
 shared solver execution; `products/publication.py` create-only colour/mosaic
 publication. Private helpers are shared only inside a subpackage, and the
 modules import without cycles. The desktop asks the engine's `doctor --json`

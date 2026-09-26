@@ -16,12 +16,7 @@ from numpy.typing import NDArray
 
 from lightframeqc.cfa import CHANNEL_NAMES, bilinear_debayer
 
-from ..calibration.inputs import (
-    assert_compatible,
-    numeric_application_scale,
-    numeric_domain_metadata,
-    find_dark,
-)
+from ..calibration.inputs import numeric_application_scale, numeric_domain_metadata
 from ..path_budget import light_stem
 from ..platform import remove_file
 from .integration import (
@@ -461,8 +456,6 @@ def _plan_light_jobs(
     """One calibrate-and-register job per Light, and the calibration
     details its receipt entry reports."""
 
-    workflow = parameters.calibration_workflow
-    reference_bias = plan.reference_bias
     groups_of_filter: dict[str, list[str]] = {}
     for group_name, source_filter in plan.group_filter.items():
         groups_of_filter.setdefault(source_filter, []).append(group_name)
@@ -471,47 +464,48 @@ def _plan_light_jobs(
     for index, path in enumerate(plan.lights, start=1):
         info = plan.light_info[path]
         filter_name = info.filter_name
-        flat_path = masters.flats[filter_name]
-        flat_reference = (
-            plan.flat_info[plan.flat_groups[filter_name][0]]
-            if filter_name in plan.flat_groups
-            else plan.master_flat_info[plan.supplied_flats[filter_name]]
-        )
-        assert_compatible(info, flat_reference, compare_filter=True, workflow=workflow)
-        dark_match = find_dark(info.exposure_seconds, masters.darks)
-        if dark_match is not None:
-            dark_exposure, subtract_path = dark_match
-            assert_compatible(
-                info,
-                plan.dark_reference(dark_exposure),
-                compare_exposure=True,
-                compare_temperature=True,
-                temperature_tolerance_celsius=parameters.dark_temperature_tolerance_celsius,
-                workflow=workflow,
-            )
-            dark_bias_included = plan.dark_bias_included(dark_exposure, subtract_path)
+        pairing = plan.calibration.lights[str(path)]
+        flat_path = masters.flats[pairing.flat] if pairing.flat is not None else None
+        subtract_path: Path | None
+        if pairing.dark is not None:
+            subtract_path = masters.darks[pairing.dark]
+            dark_bias_included = plan.dark_bias_included(pairing.dark)
             bias_mode = (
                 "INCLUDED_IN_MASTER_DARK"
                 if dark_bias_included
                 else "MASTER_BIAS_AND_BIAS_SUBTRACTED_DARK"
             )
-            subtract_info = masters.dark_domain_info[dark_exposure]
-        else:
-            subtract_path = masters.bias
+            subtract_info: FrameInfo | None = masters.dark_domain_info[pairing.dark]
+        elif pairing.bias is not None:
+            subtract_path = masters.biases[pairing.bias]
             dark_bias_included = True
             bias_mode = "MASTER_BIAS_SUBTRACTED"
-            subtract_info = reference_bias
-        subtract_scale = numeric_application_scale(
-            info,
-            subtract_info,
-            target_label="raw Light",
-            additive_label=("MasterDark" if dark_match is not None else "MasterBias"),
+            subtract_info = masters.bias_domain_info[pairing.bias]
+        else:
+            subtract_path = None
+            dark_bias_included = True
+            bias_mode = "NOT_SUBTRACTED"
+            subtract_info = None
+        subtract_scale = (
+            numeric_application_scale(
+                info,
+                subtract_info,
+                target_label="raw Light",
+                additive_label=("MasterDark" if pairing.dark is not None else "MasterBias"),
+            )
+            if subtract_info is not None
+            else 1.0
         )
-        bias_scale = numeric_application_scale(
-            info,
-            reference_bias,
-            target_label="raw Light",
-            additive_label="MasterBias",
+        separate_bias = not dark_bias_included and pairing.bias is not None
+        bias_scale = (
+            numeric_application_scale(
+                info,
+                masters.bias_domain_info[pairing.bias],
+                target_label="raw Light",
+                additive_label="MasterBias",
+            )
+            if separate_bias
+            else None
         )
         light_output_domain = plan.light_domain_references[filter_name]
         light_domain_scale = numeric_application_scale(
@@ -538,18 +532,20 @@ def _plan_light_jobs(
         )
         expression = FrameExpression(
             source_path=str(path),
-            subtract_path=str(subtract_path),
+            subtract_path=str(subtract_path) if subtract_path is not None else None,
             subtract_scale=subtract_scale,
-            subtract_paths=(str(masters.bias),) if not dark_bias_included else (),
-            subtract_scales=(bias_scale,) if not dark_bias_included else (),
-            divide_path=str(flat_path),
+            subtract_paths=(str(masters.biases[pairing.bias]),) if separate_bias else (),
+            subtract_scales=(bias_scale,) if separate_bias else (),
+            divide_path=str(flat_path) if flat_path is not None else None,
             scale=(
-                masters.flat_application_scales[filter_name]
+                (masters.flat_application_scales[pairing.flat] if pairing.flat is not None else 1.0)
                 * reference_exposure
                 / float(info.exposure_seconds)
                 * light_domain_scale
             ),
-            pattern_scales=masters.flat_pattern_scales.get(filter_name, ()),
+            pattern_scales=(
+                masters.flat_pattern_scales.get(pairing.flat, ()) if pairing.flat is not None else ()
+            ),
         )
         calibrated_metadata = {
             "IMAGETYP": "Calibrated Light",
@@ -567,24 +563,35 @@ def _plan_light_jobs(
             {
                 "source": str(plan.display_path(path)),
                 "filter": filter_name,
-                "subtractedMaster": plan.receipt_reference(dirs.root, subtract_path),
+                "subtractedMaster": (
+                    plan.receipt_reference(dirs.root, subtract_path) if subtract_path is not None else None
+                ),
                 "biasMode": bias_mode,
                 "sourceNumericDomain": info.numeric_domain,
-                "additiveNumericDomain": subtract_info.numeric_domain,
+                "additiveNumericDomain": subtract_info.numeric_domain if subtract_info is not None else None,
                 "additiveApplicationScale": subtract_scale,
                 "additiveApplicationScaleSource": "normalized-unit-domain-ratio",
-                "biasApplicationScale": bias_scale if not dark_bias_included else None,
+                "biasApplicationScale": bias_scale,
                 "outputNumericDomain": light_output_domain.numeric_domain,
                 "sourceToOutputDomainScale": light_domain_scale,
-                "dividedMasterFlat": plan.receipt_reference(dirs.root, flat_path),
-                "flatApplicationNormalization": masters.flat_application_scales[filter_name],
+                "dividedMasterFlat": (
+                    plan.receipt_reference(dirs.root, flat_path) if flat_path is not None else None
+                ),
+                "flatApplicationNormalization": (
+                    masters.flat_application_scales[pairing.flat] if pairing.flat is not None else None
+                ),
                 **(
                     {
                         "cfaPattern": cfa_pattern,
-                        "cfaFlatChannelMedians": list(masters.flat_channel_medians[filter_name]),
-                        "cfaFlatPatternScales": list(masters.flat_pattern_scales[filter_name]),
+                        "cfaFlatChannelMedians": list(masters.flat_channel_medians[pairing.flat]),
+                        "cfaFlatPatternScales": list(masters.flat_pattern_scales[pairing.flat]),
                     }
-                    if cfa_pattern
+                    if cfa_pattern and pairing.flat is not None
+                    else {}
+                ),
+                **(
+                    {"calibrationGroups": {"bias": pairing.bias, "dark": pairing.dark, "flat": pairing.flat}}
+                    if any("|" in (key or "") for key in (pairing.bias, pairing.dark, pairing.flat))
                     else {}
                 ),
                 "exposureNormalization": {
@@ -615,7 +622,7 @@ def _plan_light_jobs(
                 source_exposure_seconds=info.exposure_seconds,
                 hot_pixel_master=(
                     str(subtract_path)
-                    if dark_match is not None and parameters.cosmetic_hot_pixel_sigma is not None
+                    if pairing.dark is not None and parameters.cosmetic_hot_pixel_sigma is not None
                     else None
                 ),
                 hot_pixel_sigma=parameters.cosmetic_hot_pixel_sigma,

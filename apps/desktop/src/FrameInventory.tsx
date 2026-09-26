@@ -466,6 +466,13 @@ function calibrationIssueLabel(code: string, t: Translator, importedRoles: Set<R
       { role },
     );
   if (/^(FLAT|DARK|BIAS)_MATCH_AMBIGUOUS$/.test(code)) return t("calibrationAmbiguousReason", { role });
+  if (/^(FLAT|DARK|BIAS)_SETTINGS_DIFFER$/.test(code)) return t("calibrationSettingsDifferReason", { role });
+  if (/^(FLAT|DARK|BIAS)_INCOMPATIBLE$/.test(code)) return t("calibrationIncompatibleReason", { role });
+  if (code === "DARK_EXPOSURE_DIFFERS") return t("calibrationDarkExposureDiffersReason");
+  if (code === "DARK_TEMPERATURE_DIFFERS") return t("calibrationDarkTemperatureDiffersReason");
+  if (code === "LIGHT_SETTINGS_DIFFER") return t("calibrationLightSettingsReason");
+  if (code === "FLAT_CALIBRATION_MISSING") return t("calibrationFlatUncalibratedReason");
+  if (code === "ROLE_DEFAULTED_TO_LIGHT") return t("roleDefaultedToLight");
   if (code === "CFA_CONFIRMATION_REQUIRED") return t("calibrationCfaReason");
   if (code === "DARK_TEMPERATURE_UNRECORDED") return t("darkTemperatureUnrecorded");
   if (code === "DARK_EXPOSURE_MISMATCH") return t("calibrationDarkParametersReason");
@@ -512,6 +519,10 @@ export function CalibrationGroups({ workflow, t }: { workflow: Workflow; t: Tran
                       {group.matches[role].rawCount} {t("rawInput")}
                     </span>
                     <small>{group.matches[role].masterCount} Master</small>
+                    {/* The groups WBPP's grouping keywords chose (one per night). */}
+                    {group.matches[role].groups?.some((key) => key.includes("|")) ? (
+                      <small>{group.matches[role].groups?.join(" · ")}</small>
+                    ) : null}
                   </td>
                 ))}
                 <td className={group.status === "READY" ? "check-present" : "check-missing"}>

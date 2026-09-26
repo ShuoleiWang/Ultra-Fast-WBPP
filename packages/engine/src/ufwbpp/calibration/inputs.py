@@ -17,7 +17,7 @@ from lightframeqc.cfa import CFA_PATTERNS, normalize_pattern as normalize_cfa_pa
 from lightframeqc.content_hash import file_sha256
 
 from ..stacking.integration import CalibrationError, FrameInfo, read_frame_info
-from .policy import STRICT, MONO_STANDARD, metadata_changes, same_metadata, cfa_for_workflow, resolve_dark_bias
+from .policy import STRICT, MONO_STANDARD, metadata_changes, same_metadata, cfa_for_workflow, resolve_dark_bias, unknown
 
 
 PIPELINE_VERSION = "portable-pixel-pipeline-v1"
@@ -58,10 +58,21 @@ class MasterMetadataOverride:
     bias_included: bool | None = None
     numeric_domain: str | None = None
     normalized_unit_scale: float | None = None
+    # The WBPP grouping keywords of a generated master (its own path names
+    # none); ``None`` keeps the keywords of the master's path.
+    grouping_keywords: tuple[tuple[str, str], ...] | None = None
 
     def validate(self) -> None:
         if re.fullmatch(r"sha256:[0-9a-f]{64}", self.source_sha256) is None:
             raise ValueError("master override source_sha256 must be a lowercase sha256: digest")
+        if self.grouping_keywords is not None:
+            for item in self.grouping_keywords:
+                if (
+                    not isinstance(item, tuple)
+                    or len(item) != 2
+                    or not all(isinstance(part, str) and part.strip() for part in item)
+                ):
+                    raise ValueError("master override grouping_keywords must be (name, value) text pairs")
         for name in ("camera", "filter_name", "cfa_pattern", "readout_mode"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value.strip()):
@@ -117,6 +128,11 @@ class MasterMetadataOverride:
             "biasIncluded": self.bias_included,
             "numericDomain": self.numeric_domain,
             "normalizedUnitScale": self.normalized_unit_scale,
+            **(
+                {"groupingKeywords": dict(self.grouping_keywords)}
+                if self.grouping_keywords is not None
+                else {}
+            ),
         }
 
 
@@ -208,6 +224,8 @@ class TrustedGeneratedMaster:
     frame_info: FrameInfo
     bias_included: bool | None = None
     application_scale: float | None = None
+    # The calibration group (see ufwbpp.calibration.matching) it was built for.
+    group_key: str | None = None
 
     def stat_identity(self) -> dict[str, int]:
         return {
@@ -222,7 +240,7 @@ class TrustedGeneratedMaster:
 class TrustedGeneratedCalibrationSet:
     """In-process trust handoff from E2E registration calibration to pixels."""
 
-    master_bias: TrustedGeneratedMaster | None
+    master_biases: tuple[TrustedGeneratedMaster, ...]
     master_darks: tuple[TrustedGeneratedMaster, ...]
     master_flats: tuple[TrustedGeneratedMaster, ...]
     source_bindings: tuple[TrustedCalibrationSource, ...]
@@ -316,6 +334,8 @@ def apply_master_metadata_overrides(
                     and info.numeric_domain_authority
                     in {"FITS_STORAGE_ENDPOINTS", "TRUSTED_XISF_CONVERSION"}
                 )
+                if override.grouping_keywords is not None:
+                    info = replace(info, grouping_keywords=tuple(sorted(override.grouping_keywords)))
                 updated[path] = replace(
                     info,
                     **metadata_changes(override),
@@ -631,6 +651,7 @@ def capture_trusted_generated_master(
     frame_info: FrameInfo,
     bias_included: bool | None = None,
     application_scale: float | None = None,
+    group_key: str | None = None,
 ) -> TrustedGeneratedMaster:
     canonical = path.expanduser().resolve(strict=True)
     stat_identity = file_stat_identity(canonical)
@@ -645,14 +666,15 @@ def capture_trusted_generated_master(
         frame_info=replace(frame_info, path=str(canonical), role=role),
         bias_included=bias_included,
         application_scale=application_scale,
+        group_key=group_key,
     )
 
 
 def capture_trusted_generated_calibration_set(
     *,
-    master_bias: tuple[Path, FrameInfo] | None,
-    master_darks: Sequence[tuple[Path, FrameInfo, bool]],
-    master_flats: Sequence[tuple[Path, FrameInfo, float]],
+    master_biases: Sequence[tuple[Path, FrameInfo, str]],
+    master_darks: Sequence[tuple[Path, FrameInfo, bool, str]],
+    master_flats: Sequence[tuple[Path, FrameInfo, float, str]],
     source_groups: Sequence[tuple[str, Sequence[Path]]],
     source_identities: Mapping[str, InternalSourceIdentity],
     upstream_receipt_path: Path,
@@ -672,12 +694,9 @@ def capture_trusted_generated_calibration_set(
     binding_tuple = tuple(bindings)
     canonical_receipt = upstream_receipt_path.expanduser().resolve(strict=True)
     receipt_stat = file_stat_identity(canonical_receipt)
-    captured_bias = (
-        capture_trusted_generated_master(
-            master_bias[0], role="MASTER_BIAS", frame_info=master_bias[1]
-        )
-        if master_bias is not None
-        else None
+    captured_biases = tuple(
+        capture_trusted_generated_master(path, role="MASTER_BIAS", frame_info=info, group_key=key)
+        for path, info, key in master_biases
     )
     captured_darks = tuple(
         capture_trusted_generated_master(
@@ -685,8 +704,9 @@ def capture_trusted_generated_calibration_set(
             role="MASTER_DARK",
             frame_info=info,
             bias_included=bias_included,
+            group_key=key,
         )
-        for path, info, bias_included in master_darks
+        for path, info, bias_included, key in master_darks
     )
     captured_flats = tuple(
         capture_trusted_generated_master(
@@ -694,8 +714,9 @@ def capture_trusted_generated_calibration_set(
             role="MASTER_FLAT",
             frame_info=info,
             application_scale=application_scale,
+            group_key=key,
         )
-        for path, info, application_scale in master_flats
+        for path, info, application_scale, key in master_flats
     )
     try:
         upstream_payload = json.loads(canonical_receipt.read_text(encoding="utf-8"))
@@ -717,12 +738,10 @@ def capture_trusted_generated_calibration_set(
             path=str(canonical_receipt),
         )
     for master in (
-        captured_bias,
+        *captured_biases,
         *captured_darks,
         *captured_flats,
     ):
-        if master is None:
-            continue
         try:
             master_relative = Path(master.path).relative_to(
                 canonical_receipt.parent.parent
@@ -748,25 +767,25 @@ def capture_trusted_generated_calibration_set(
                 "generated master is not uniquely bound by the upstream receipt",
                 path=master.path,
             )
-    if captured_bias is not None and upstream_payload.get("masterBias", {}).get(
-        "mode"
-    ) != "BUILT_FROM_RAW":
-        raise CalibrationError(
-            "TRUSTED_GENERATED_CALIBRATION_RECEIPT_MISMATCH",
-            "upstream receipt does not identify the generated MasterBias",
-            path=captured_bias.path,
-        )
+    upstream_biases = upstream_payload.get("masterBiases")
     upstream_darks = upstream_payload.get("masterDarks")
     upstream_flats = upstream_payload.get("masterFlats")
-    if not isinstance(upstream_darks, dict) or not isinstance(upstream_flats, dict):
+    if not all(isinstance(value, dict) for value in (upstream_biases, upstream_darks, upstream_flats)):
         raise CalibrationError(
             "TRUSTED_GENERATED_CALIBRATION_RECEIPT_INVALID",
-            "upstream receipt lacks Dark or Flat semantic records",
+            "upstream receipt lacks Bias, Dark or Flat semantic records",
             path=str(canonical_receipt),
         )
+    for master in captured_biases:
+        record = upstream_biases.get(master.group_key)
+        if not isinstance(record, dict) or record.get("mode") != "BUILT_FROM_RAW":
+            raise CalibrationError(
+                "TRUSTED_GENERATED_CALIBRATION_RECEIPT_MISMATCH",
+                "upstream receipt does not identify the generated MasterBias",
+                path=master.path,
+            )
     for master in captured_darks:
-        exposure = master.frame_info.exposure_seconds
-        record = upstream_darks.get(format(float(exposure), ".9g")) if exposure else None
+        record = upstream_darks.get(master.group_key)
         if (
             not isinstance(record, dict)
             or record.get("mode") != "BUILT_FROM_RAW"
@@ -778,7 +797,7 @@ def capture_trusted_generated_calibration_set(
                 path=master.path,
             )
     for master in captured_flats:
-        record = upstream_flats.get(master.frame_info.filter_name)
+        record = upstream_flats.get(master.group_key)
         if (
             not isinstance(record, dict)
             or record.get("mode") != "BUILT_FROM_RAW"
@@ -790,7 +809,7 @@ def capture_trusted_generated_calibration_set(
                 path=master.path,
             )
     return TrustedGeneratedCalibrationSet(
-        master_bias=captured_bias,
+        master_biases=captured_biases,
         master_darks=captured_darks,
         master_flats=captured_flats,
         source_bindings=binding_tuple,
@@ -1037,15 +1056,7 @@ def validate_trusted_generated_calibration_set(
             "TRUSTED_GENERATED_CALIBRATION_SOURCE_DRIFT",
             "generated calibration set is not bound to this exact input manifest",
         )
-    masters = tuple(
-        item
-        for item in (
-            trusted.master_bias,
-            *trusted.master_darks,
-            *trusted.master_flats,
-        )
-        if item is not None
-    )
+    masters = (*trusted.master_biases, *trusted.master_darks, *trusted.master_flats)
     paths: dict[str, TrustedGeneratedMaster] = {}
     for master in masters:
         canonical = validate_trusted_generated_master(master)
@@ -1059,7 +1070,7 @@ def validate_trusted_generated_calibration_set(
         paths[key] = master
     return {
         "byPath": paths,
-        "bias": trusted.master_bias,
+        "biases": tuple(trusted.master_biases),
         "darks": tuple(trusted.master_darks),
         "flats": tuple(trusted.master_flats),
     }
@@ -1113,3 +1124,82 @@ def find_dark(
             return dark_exposure, path
     return None
 
+
+
+# The engine's role names for what a path says (WBPP's image-type words).
+_PATH_ROLES = {
+    "LIGHT": "LIGHT",
+    "RAW_FLAT": "FLAT",
+    "DARK": "DARK",
+    "BIAS": "BIAS",
+    "MASTER_FLAT": "MASTER_FLAT",
+    "MASTER_DARK": "MASTER_DARK",
+    "MASTER_BIAS": "MASTER_BIAS",
+}
+
+
+def with_path_metadata(
+    info: FrameInfo,
+    original_path: str | os.PathLike[str],
+    *,
+    keyword_root: str | None = None,
+) -> FrameInfo:
+    """``info`` completed from its original path, as WBPP reads one.
+
+    The header decides; the path fills a role, filter, exposure, binning or
+    Bayer pattern the header lacks (WBPP's smart naming), and supplies the
+    grouping keywords (NIGHT_1, SESSION-2, PANEL_3) calibration is paired by,
+    read below ``keyword_root`` (see ``grouping_keyword_root``). A generated
+    master keeps the keywords its metadata override declares.
+    """
+
+    from lightframeqc.metadata import path_metadata
+
+    found = path_metadata(str(original_path), keyword_root=keyword_root)
+    changes: dict[str, Any] = {}
+    if found.keywords and not info.grouping_keywords:
+        changes["grouping_keywords"] = found.keywords
+    if info.role == "UNKNOWN":
+        role = _PATH_ROLES.get(str(getattr(found.role, "value", found.role)))
+        if role is not None:
+            changes["role"] = role
+    if unknown(info.filter_name) and found.filter_name != "UNKNOWN":
+        changes["filter_name"] = found.filter_name
+    if info.exposure_seconds is None and found.exposure_seconds is not None:
+        changes["exposure_seconds"] = found.exposure_seconds
+    if info.binning_x is None and info.binning_y is None and found.binning is not None:
+        changes["binning_x"] = changes["binning_y"] = found.binning
+    if unknown(info.cfa_pattern) and found.cfa_pattern is not None:
+        changes["cfa_pattern"] = found.cfa_pattern
+    return replace(info, **changes) if changes else info
+
+
+def frame_traits(
+    info: FrameInfo,
+    kind: str,
+    *,
+    supplied_master: bool,
+    workflow: str,
+    bias_included: bool | None = None,
+) -> Any:
+    """``info`` as :mod:`ufwbpp.calibration.matching` pairs it."""
+
+    from .matching import FrameTraits
+
+    return FrameTraits(
+        path=info.path,
+        kind=kind,
+        supplied_master=supplied_master,
+        shape=tuple(info.shape),
+        binning=(info.binning_x, info.binning_y),
+        color=cfa_for_workflow(info.cfa_pattern, workflow),
+        filter_name=str(info.filter_name).strip() if not unknown(info.filter_name) else "UNKNOWN",
+        exposure_seconds=info.exposure_seconds,
+        temperature_celsius=info.temperature_celsius,
+        camera=info.camera,
+        gain=info.gain,
+        offset=info.offset,
+        readout_mode=info.readout_mode,
+        keywords=tuple(info.grouping_keywords),
+        bias_included=bias_included,
+    )
