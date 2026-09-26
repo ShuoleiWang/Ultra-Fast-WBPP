@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 from typing import Iterable
 
+from lightframeqc.metadata import grouping_keyword_root, grouping_keywords_from_path
 from lightframeqc.models import FrameRole
 from lightframeqc.readers import (
     FrameReadError,
@@ -263,6 +264,9 @@ def inventory_project(
     issues: list[InventoryIssue] = []
     processed_lights: list[tuple[str, tuple[str, ...]]] = []
     master_lights: list[str] = []
+    # WBPP grouping keywords are read below the common folder of every frame,
+    # as the run that processes them reads them.
+    keyword_root = grouping_keyword_root(str(path) for path in paths)
     for path in paths:
         try:
             source_stat = _source_stat(path)
@@ -303,6 +307,12 @@ def inventory_project(
             continue
 
         role = _ROLE_MAP[metadata.role]
+        declared = any(item.startswith(("FITS:IMAGETYP=", "XISF:imageType=")) for item in metadata.role_evidence)
+        defaulted = role == AssetRole.UNKNOWN and not declared and not metadata.role_conflicts
+        if defaulted:
+            # WBPP takes a frame whose header and path name no image type for
+            # a Light; an explicit unknown type (FOCUS, PREVIEW) stays unknown.
+            role = AssetRole.LIGHT
         # A Light PixInsight already calibrated or registered (WBPP output)
         # keeps IMAGETYP=LIGHT; processing it again would repeat the dark
         # subtraction and flat division, so it is refused, never guessed.
@@ -362,6 +372,7 @@ def inventory_project(
             role_conflicts=conflicts,
             group_id=group_id,
             source_stat=source_stat,
+            grouping_keywords=grouping_keywords_from_path(str(path), root=keyword_root),
         )
         assets.append(asset)
         if metadata.role_conflicts:
@@ -378,6 +389,15 @@ def inventory_project(
             processed_lights.append((str(path), processed))
         elif role == AssetRole.MASTER_LIGHT:
             master_lights.append(str(path))
+        elif defaulted:
+            issues.append(
+                InventoryIssue(
+                    code="ROLE_DEFAULTED_TO_LIGHT",
+                    severity=IssueSeverity.WARNING,
+                    message="no IMAGETYP and no Light/Flat/Dark/Bias folder or file name: taken as a Light, as WBPP does",
+                    path=str(path),
+                )
+            )
         elif role == AssetRole.UNKNOWN:
             issues.append(
                 InventoryIssue(

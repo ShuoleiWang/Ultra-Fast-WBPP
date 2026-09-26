@@ -54,13 +54,30 @@ def test_standard_preflight_preserves_unknowns_and_strict_still_blocks(tmp_path)
     assert 'CFA_CONFIRMATION_REQUIRED' in {i['code'] for i in strict['issues']}
 
 
-@pytest.mark.parametrize('keyword,value', [('GAIN', 9), ('OFFSET', 99), ('READOUTM', 'OTHER'), ('INSTRUME','OTHER'), ('XBINNING',2), ('FILTER','G'), ('BAYERPAT','RGGB'), ('EXPTIME', 90), ('CCD-TEMP', 20)])
-def test_standard_retains_known_master_conflicts(tmp_path, keyword, value):
+@pytest.mark.parametrize('keyword,value', [('XBINNING', 2), ('FILTER', 'G'), ('BAYERPAT', 'RGGB')])
+def test_standard_refuses_masters_that_cannot_calibrate_the_lights(tmp_path, keyword, value):
     light, masters = _unknown_masters(tmp_path)
-    fits.setval(light, 'CCD-TEMP', value=-10)
     target = masters[2] if keyword == 'FILTER' else masters[1]
     fits.setval(target, keyword, value=value)
     assert not inspect_calibration([str(tmp_path)], _standard_recipe())['calibrationReady']
+
+
+@pytest.mark.parametrize('keyword,value,code', [
+    ('GAIN', 9, 'DARK_SETTINGS_DIFFER'),
+    ('OFFSET', 99, 'DARK_SETTINGS_DIFFER'),
+    ('READOUTM', 'OTHER', 'DARK_SETTINGS_DIFFER'),
+    ('INSTRUME', 'OTHER', 'DARK_SETTINGS_DIFFER'),
+    ('EXPTIME', 90, 'DARK_EXPOSURE_DIFFERS'),
+    ('CCD-TEMP', 20, 'DARK_TEMPERATURE_DIFFERS'),
+])
+def test_standard_pairs_known_master_differences_like_wbpp_and_warns(tmp_path, keyword, value, code):
+    light, masters = _unknown_masters(tmp_path)
+    fits.setval(light, 'CCD-TEMP', value=-10)
+    fits.setval(masters[1], keyword, value=value)
+    report = inspect_calibration([str(tmp_path)], _standard_recipe())
+    assert report['calibrationReady'], report['issues']
+    (warning,) = [item for item in report['issues'] if item['code'] == code]
+    assert warning['severity'] == 'WARNING'
 
 
 def test_unknown_bias_does_not_hide_conflicting_lights(tmp_path):
@@ -68,8 +85,8 @@ def test_unknown_bias_does_not_hide_conflicting_lights(tmp_path):
     second = write_frame(tmp_path/'second.fits', 'Light')
     fits.setval(second, 'GAIN', value=999)
     report = inspect_calibration([str(tmp_path)], _standard_recipe())
-    assert not report['calibrationReady']
-    assert 'CALIBRATION_PROFILE_UNSUPPORTED' in {i['code'] for i in report['issues']}
+    (warning,) = [item for item in report['issues'] if item['code'] == 'LIGHT_SETTINGS_DIFFER']
+    assert warning['severity'] == 'WARNING' and 'gain' in warning['message']
 
 
 def test_sparse_overrides_keep_real_zero_and_unknown_does_not_erase_metadata(tmp_path):
@@ -112,7 +129,7 @@ def test_standard_master_dark_bias_semantics_are_numerically_correct(tmp_path, m
     assert receipt['statistics']['calibration']['masterDark:30']['biasIncluded'] is (mode not in {'false','header-false'})
 
 
-def test_no_bias_is_blocked_when_dark_has_bias_removed(tmp_path):
+def test_no_bias_with_a_bias_removed_dark_is_reported_as_wbpp_would_run_it(tmp_path):
     light, masters = _unknown_masters(tmp_path)
     masters[0].unlink()
     report = inspect_calibration([str(tmp_path)], _standard_recipe(bias='OPTIONAL'))
@@ -120,5 +137,8 @@ def test_no_bias_is_blocked_when_dark_has_bias_removed(tmp_path):
     assert 'BIAS_MATCH_MISSING' not in {i['code'] for i in report['issues']}
     fits.setval(masters[1], 'OAFBIAS', value='SUBTRACTED')
     report = inspect_calibration([str(tmp_path)], _standard_recipe(bias='OPTIONAL'))
+    assert report['calibrationReady'], report['issues']
+    (warning,) = [item for item in report['issues'] if item['code'] == 'BIAS_MATCH_MISSING']
+    assert warning['severity'] == 'WARNING'
+    report = inspect_calibration([str(tmp_path)], _standard_recipe(bias='REQUIRED'))
     assert not report['calibrationReady']
-    assert 'BIAS_REQUIRED_FOR_CALIBRATION' in {i['code'] for i in report['issues']}

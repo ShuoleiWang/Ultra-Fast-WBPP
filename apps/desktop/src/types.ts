@@ -245,7 +245,7 @@ export interface CalibrationInspection {
     lightCount: number;
     observedDates: string[];
     status: "READY" | "BLOCKED";
-    matches: Record<"FLAT" | "DARK" | "BIAS", { rawCount: number; masterCount: number }>;
+    matches: Record<"FLAT" | "DARK" | "BIAS", { rawCount: number; masterCount: number; groups?: string[] }>;
   }>;
   issues: Array<{
     code: string;

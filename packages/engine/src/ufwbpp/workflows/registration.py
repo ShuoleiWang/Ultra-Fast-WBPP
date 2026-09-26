@@ -2,29 +2,31 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from lightframeqc.metadata import grouping_keyword_root
 from lightframeqc.parallel import FrameRunner
 
 from ..calibration.inputs import (
     InternalSourceIdentity,
     apply_master_metadata_overrides,
-    assert_compatible,
-    find_dark,
     master_dark_bias_semantics,
     numeric_application_scale,
     numeric_domain_metadata,
     capture_trusted_generated_calibration_set,
 )
-from ..calibration.policy import MONO_STANDARD, can_omit_bias, conflicting_profile_fields, workflow_receipt
+from ..calibration.matching import BIAS, DARK, FLAT, CalibrationMatch
+from ..calibration.pairing import dark_group_warnings, pair_calibration
+from ..calibration.policy import MONO_STANDARD, workflow_receipt
 from ..image_io.fits import cfa_metadata
 from ..integrity import sha256_digest
 from ..stacking.integration import (
+    CalibrationError,
     FrameExpression,
     FrameInfo,
     integrate_expressions,
@@ -33,7 +35,6 @@ from ..stacking.integration import (
 )
 from ..stacking.normalization import StellarScaleHint
 from ..stacking.parameters import PipelineParameters
-from ..stacking.records import require_filter
 from .common import _safe_token
 from .contracts import E2EError
 from .sources import _input_frame_info, _SourceIdentity
@@ -47,6 +48,18 @@ class _RegistrationProducts:
     run: Any
     receipt: dict[str, Any]
     source_aliases: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _RegistrationCalibration:
+    """What registration calibrates with: every master by calibration group
+    (``(kind, key)``), the pairing that chose them, the per-Light plan the
+    registration library applies and the receipt."""
+
+    plan: Any
+    receipt: dict[str, Any]
+    match: CalibrationMatch
+    masters: dict[tuple[str, str], Path]
 
 
 def _build_registration_masters(
@@ -63,16 +76,28 @@ def _build_registration_masters(
     source_aliases: Mapping[str, Path] | None = None,
     source_identities: Mapping[str, _SourceIdentity] | None = None,
     xisf_conversions: Sequence[Mapping[str, Any]] = (),
-) -> tuple[Any, dict[str, Any]]:
+) -> _RegistrationCalibration:
+    """Build the master of every calibration group the Lights use, paired by
+    WBPP's rules exactly as the pixel pipeline pairs them."""
+
     try:
-        from ufwbpp_registration import CalibrationPlan
+        from ufwbpp_registration import CalibrationPlan, LightMasters
     except ImportError as error:
         raise E2EError(
             "REGISTRATION_BACKEND_UNAVAILABLE",
             "ufwbpp-registration must be installed for E2E execution",
         ) from error
 
+    if pipeline_parameters.grouping_keyword_root is None:
+        pipeline_parameters = replace(
+            pipeline_parameters,
+            grouping_keyword_root=grouping_keyword_root(
+                str((source_aliases or {}).get(str(path), path))
+                for path in (*biases, *darks, *flats, *supplied_biases, *supplied_darks, *supplied_flats, *lights)
+            ),
+        )
     parameters = pipeline_parameters.integration
+    workflow = pipeline_parameters.calibration_workflow
     directory.mkdir(parents=True, exist_ok=False)
     def frame_info(path: Path) -> FrameInfo:
         identity_path = (source_aliases or {}).get(str(path), path)
@@ -95,34 +120,37 @@ def _build_registration_masters(
         ("MASTER_FLAT", supplied_flats),
         ("LIGHT", lights),
     )
+    infos_by_role: dict[str, dict[Path, FrameInfo]] = {}
     for role, paths in grouped_roles:
+        infos_by_role[role] = {}
         for path in paths:
-            actual = normalize_role(frame_info(path).role)
-            if actual != role:
+            info = frame_info(path)
+            actual = normalize_role(info.role)
+            if actual == "UNKNOWN":
+                info = replace(info, role=role)
+            elif actual != role:
                 raise E2EError(
                     "FRAME_ROLE_MISMATCH",
                     f"expected {role}, found {actual}",
                     path=str(path),
                 )
+            infos_by_role[role][path] = info
 
-    if len(supplied_biases) > 1 or (biases and supplied_biases) or (not biases and not supplied_biases and pipeline_parameters.calibration_workflow != MONO_STANDARD):
+    if not biases and not supplied_biases and workflow != MONO_STANDARD:
         raise E2EError(
             "BIAS_SOURCE_AMBIGUOUS",
-            "registration calibration requires raw Biases or one MasterBias",
+            "the strict workflow requires raw Bias frames or a MasterBias",
         )
-    bias_infos = {path: frame_info(path) for path in biases}
-    supplied_bias_infos = {path: frame_info(path) for path in supplied_biases}
-    light_infos = {path: frame_info(path) for path in lights}
-    dark_infos = {path: frame_info(path) for path in darks}
-    supplied_dark_infos = {path: frame_info(path) for path in supplied_darks}
-    flat_infos = {path: frame_info(path) for path in flats}
-    supplied_flat_infos = {path: frame_info(path) for path in supplied_flats}
+    bias_infos = infos_by_role["BIAS"]
+    light_infos = infos_by_role["LIGHT"]
+    dark_infos = infos_by_role["DARK"]
+    flat_infos = infos_by_role["FLAT"]
     (
         supplied_bias_infos,
         supplied_dark_infos,
         supplied_flat_infos,
     ) = apply_master_metadata_overrides(
-        (supplied_bias_infos, supplied_dark_infos, supplied_flat_infos),
+        (infos_by_role["MASTER_BIAS"], infos_by_role["MASTER_DARK"], infos_by_role["MASTER_FLAT"]),
         pipeline_parameters.master_metadata_overrides,
         dict(source_aliases or {}),
     )
@@ -130,22 +158,9 @@ def _build_registration_masters(
         supplied_darks,
         pipeline_parameters.master_metadata_overrides,
         dict(source_aliases or {}),
-        workflow=pipeline_parameters.calibration_workflow,
+        workflow=workflow,
     )
-    all_infos = [*bias_infos.values(), *supplied_bias_infos.values(), *dark_infos.values(), *supplied_dark_infos.values(), *flat_infos.values(), *supplied_flat_infos.values(), *light_infos.values()]
-    conflicts = conflicting_profile_fields(all_infos, pipeline_parameters.calibration_workflow)
-    if conflicts:
-        raise E2EError("CALIBRATION_PROFILE_MISMATCH", "Conflicting known acquisition metadata: " + ", ".join(conflicts))
-    if not biases and not supplied_biases and not can_omit_bias(
-        (*light_infos.values(), *flat_infos.values()),
-        [*((info, True) for info in dark_infos.values()), *((info, supplied_dark_bias_included[path]) for path, info in supplied_dark_infos.items())],
-        pipeline_parameters.calibration_workflow,
-    ):
-        raise E2EError("BIAS_REQUIRED_FOR_CALIBRATION", "Bias is required unless every Light and raw Flat has a matching Dark that includes Bias.")
     display = lambda path: (source_aliases or {}).get(str(path), path)  # noqa: E731
-    reference_bias = (
-        bias_infos[biases[0]] if biases else supplied_bias_infos[supplied_biases[0]] if supplied_biases else light_infos[lights[0]]
-    )
     light_numeric_reference = next(iter(light_infos.values()))
     for info in light_infos.values():
         light_domain_scale = numeric_application_scale(
@@ -160,87 +175,124 @@ def _build_registration_masters(
                 "registration requires one common Light numeric domain",
                 path=info.path,
             )
-    for info in (*bias_infos.values(), *light_infos.values()):
-        assert_compatible(reference_bias, info, workflow=pipeline_parameters.calibration_workflow)
-    if biases:
-        master_bias = directory / "master_bias.fits"
+    try:
+        match = pair_calibration(
+            bias_info=bias_infos,
+            master_bias_info=supplied_bias_infos,
+            dark_info=dark_infos,
+            master_dark_info=supplied_dark_infos,
+            flat_info=flat_infos,
+            master_flat_info=supplied_flat_infos,
+            light_info=light_infos,
+            supplied_dark_bias_included=supplied_dark_bias_included,
+            workflow=workflow,
+            dark_temperature_tolerance_celsius=pipeline_parameters.dark_temperature_tolerance_celsius,
+        )
+    except CalibrationError as error:
+        raise E2EError(error.code, str(error), path=error.path) from error
+    info_of: dict[str, FrameInfo] = {
+        str(path): info
+        for group in (bias_infos, supplied_bias_infos, dark_infos, supplied_dark_infos, flat_infos, supplied_flat_infos)
+        for path, info in group.items()
+    }
+
+    def reference(kind: str, key: str) -> FrameInfo:
+        return info_of[match.groups[kind][key].members[0]]
+
+    def members(kind: str, key: str) -> tuple[Path, ...]:
+        return tuple(Path(member) for member in match.groups[kind][key].members)
+
+    def label(key: str) -> str:
+        return f"_{_safe_token(key.split('|', 1)[1])}" if "|" in key else ""
+
+    def supplied_record(kind: str, path: Path, info: FrameInfo, *, used: bool) -> dict[str, Any]:
+        return {
+            "mode": "REUSED_SUPPLIED_MASTER",
+            "path": str(display(path)),
+            "sha256": sha256_digest(display(path)),
+            "calibrationApplied": False,
+            **({"biasIncluded": supplied_dark_bias_included[path]} if kind == DARK else {}),
+            **(
+                {}
+                if kind == FLAT
+                else {"numericDomain": info.numeric_domain, "normalizedUnitScale": info.normalized_unit_scale}
+            ),
+            **({} if used else {"used": False}),
+        }
+
+    masters: dict[tuple[str, str], Path] = {}
+    domain: dict[tuple[str, str], FrameInfo] = {}
+    records: dict[str, dict[str, Any]] = {BIAS: {}, DARK: {}, FLAT: {}}
+    for key, group in sorted(match.groups[BIAS].items()):
+        info = reference(BIAS, key)
+        used = key in match.used(BIAS)
+        if group.supplied_master:
+            records[BIAS][key] = supplied_record(BIAS, Path(group.members[0]), info, used=used)
+            if used:
+                masters[(BIAS, key)] = Path(group.members[0])
+                domain[(BIAS, key)] = info
+            continue
+        if not used:
+            records[BIAS][key] = {"mode": "NOT_USED"}
+            continue
+        master_bias = directory / f"master_bias{label(key)}.fits"
         bias_result = integrate_expressions(
             (
                 FrameExpression(
                     str(path),
                     scale=numeric_application_scale(
-                        reference_bias,
+                        info,
                         bias_infos[path],
                         target_label="MasterBias reference",
                         additive_label="raw Bias",
                     ),
                 )
-                for path in biases
+                for path in members(BIAS, key)
             ),
             master_bias,
             metadata={
                 "IMAGETYP": "Master Bias",
                 "OAFSTATE": "UNSOLVED_WORKING",
-                **cfa_metadata(reference_bias),
-                **numeric_domain_metadata(reference_bias),
+                **cfa_metadata(info),
+                **numeric_domain_metadata(info),
             },
             parameters=parameters,
         )
-        bias_record: dict[str, Any] = {
+        masters[(BIAS, key)] = master_bias
+        domain[(BIAS, key)] = info
+        records[BIAS][key] = {
             "mode": "BUILT_FROM_RAW",
-            "numericDomain": reference_bias.numeric_domain,
-            "normalizedUnitScale": reference_bias.normalized_unit_scale,
+            "numericDomain": info.numeric_domain,
+            "normalizedUnitScale": info.normalized_unit_scale,
             **bias_result.serializable(),
         }
-    elif supplied_biases:
-        master_bias = supplied_biases[0]
-        bias_record = {
-            "mode": "REUSED_SUPPLIED_MASTER",
-            "path": str(display(master_bias)),
-            "sha256": sha256_digest(display(master_bias)),
-            "calibrationApplied": False,
-            "numericDomain": reference_bias.numeric_domain,
-            "normalizedUnitScale": reference_bias.normalized_unit_scale,
-        }
 
-    else:
-        master_bias = None
-        bias_record = {"mode": "NOT_REQUIRED_DARK_INCLUDES_BIAS"}
-
-    dark_groups: dict[float, list[Path]] = {}
-    for path in darks:
-        exposure = dark_infos[path].exposure_seconds
-        if exposure is None or exposure <= 0:
-            raise E2EError("DARK_EXPOSURE_UNKNOWN", "Dark requires positive EXPTIME", path=str(path))
-        dark_groups.setdefault(exposure, []).append(path)
-    master_darks: dict[float, Path] = {}
-    master_dark_domain_info: dict[float, FrameInfo] = {}
-    dark_records: dict[str, Any] = {}
-    for exposure, paths in sorted(dark_groups.items()):
-        reference_dark = dark_infos[paths[0]]
-        for path in paths:
-            assert_compatible(reference_bias, dark_infos[path], workflow=pipeline_parameters.calibration_workflow)
-            assert_compatible(
-                reference_dark,
-                dark_infos[path],
-                compare_exposure=True,
-                compare_temperature=True,
-                temperature_tolerance_celsius=pipeline_parameters.dark_temperature_tolerance_celsius,
-                workflow=pipeline_parameters.calibration_workflow,
-            )
-        destination = directory / f"master_dark_{format(exposure, '.9g').replace('.', 'p')}s.fits"
+    for key, group in sorted(match.groups[DARK].items()):
+        info = reference(DARK, key)
+        used = key in match.used(DARK)
+        if group.supplied_master:
+            records[DARK][key] = supplied_record(DARK, Path(group.members[0]), info, used=used)
+            if used:
+                masters[(DARK, key)] = Path(group.members[0])
+                domain[(DARK, key)] = info
+            continue
+        if not used:
+            records[DARK][key] = {"mode": "NOT_USED"}
+            continue
+        exposure = float(info.exposure_seconds)
+        destination = directory / f"master_dark_{format(exposure, '.9g').replace('.', 'p')}s{label(key)}.fits"
         result = integrate_expressions(
             (
                 FrameExpression(
                     str(path),
                     scale=numeric_application_scale(
-                        reference_dark,
+                        info,
                         dark_infos[path],
                         target_label="MasterDark reference",
                         additive_label="raw Dark",
                     ),
                 )
-                for path in paths
+                for path in members(DARK, key)
             ),
             destination,
             metadata={
@@ -248,131 +300,98 @@ def _build_registration_masters(
                 "EXPTIME": exposure,
                 "OAFSTATE": "UNSOLVED_WORKING",
                 "OAFBIAS": "INCLUDED",
-                **cfa_metadata(reference_dark),
-                **numeric_domain_metadata(reference_dark),
+                **cfa_metadata(info),
+                **numeric_domain_metadata(info),
             },
             parameters=parameters,
         )
-        master_darks[exposure] = destination
-        master_dark_domain_info[exposure] = reference_dark
-        dark_records[format(exposure, ".9g")] = {
+        masters[(DARK, key)] = destination
+        domain[(DARK, key)] = info
+        records[DARK][key] = {
             "mode": "BUILT_FROM_RAW",
             "biasIncluded": True,
-            "numericDomain": reference_dark.numeric_domain,
-            "normalizedUnitScale": reference_dark.normalized_unit_scale,
+            "numericDomain": info.numeric_domain,
+            "normalizedUnitScale": info.normalized_unit_scale,
             "applicationScaleToRawDarkReference": 1.0,
             **result.serializable(),
         }
-    for path, info in supplied_dark_infos.items():
-        exposure = info.exposure_seconds
-        if exposure is None or exposure <= 0:
-            raise E2EError(
-                "DARK_EXPOSURE_UNKNOWN",
-                "MasterDark requires positive EXPTIME",
-                path=str(path),
-            )
-        if find_dark(exposure, master_darks) is not None:
-            raise E2EError(
-                "DARK_SOURCE_AMBIGUOUS",
-                "an exposure has both raw Darks and a supplied MasterDark",
-                path=str(path),
-            )
-        master_darks[exposure] = path
-        master_dark_domain_info[exposure] = info
-        dark_records[format(exposure, ".9g")] = {
-            "mode": "REUSED_SUPPLIED_MASTER",
-            "path": str(display(path)),
-            "sha256": sha256_digest(display(path)),
-            "calibrationApplied": False,
-            "biasIncluded": supplied_dark_bias_included[path],
-            "numericDomain": info.numeric_domain,
-            "normalizedUnitScale": info.normalized_unit_scale,
-        }
 
-    flat_groups: dict[str, list[Path]] = {}
-    for path in flats:
-        filter_name = require_filter(flat_infos[path])
-        flat_groups.setdefault(filter_name, []).append(path)
-    supplied_flats_by_filter: dict[str, Path] = {}
-    for path, info in supplied_flat_infos.items():
-        filter_name = require_filter(info)
-        if filter_name in supplied_flats_by_filter:
-            raise E2EError(
-                "MASTER_FLAT_AMBIGUOUS",
-                f"multiple supplied MasterFlats match filter {filter_name}",
-            )
-        if filter_name in flat_groups:
-            raise E2EError(
-                "FLAT_SOURCE_AMBIGUOUS",
-                f"filter {filter_name} has raw Flats and a supplied MasterFlat",
-            )
-        supplied_flats_by_filter[filter_name] = path
-    light_filters = {require_filter(info) for info in light_infos.values()}
-    missing = sorted(light_filters - set(flat_groups) - set(supplied_flats_by_filter))
-    if missing:
-        raise E2EError("MASTER_FLAT_MISSING", "no Flat group for: " + ", ".join(missing))
+    def dark_bias_included(key: str) -> bool:
+        group = match.groups[DARK][key]
+        return True if not group.supplied_master else supplied_dark_bias_included[Path(group.members[0])]
 
-    master_flats: dict[str, Path] = {}
-    flat_records: dict[str, Any] = {}
-    for filter_name, paths in sorted(flat_groups.items()):
+    for key, group in sorted(match.groups[FLAT].items()):
+        info = reference(FLAT, key)
+        used = key in match.used(FLAT)
+        if group.supplied_master:
+            records[FLAT][key] = supplied_record(FLAT, Path(group.members[0]), info, used=used)
+            if used:
+                masters[(FLAT, key)] = Path(group.members[0])
+                domain[(FLAT, key)] = info
+            continue
+        if not used:
+            records[FLAT][key] = {"mode": "NOT_USED"}
+            continue
+        pairing = match.flats[key]
         expressions: list[FrameExpression] = []
         normalizations: list[float] = []
         calibration_sources: list[dict[str, Any]] = []
-        for path in paths:
-            assert_compatible(reference_bias, flat_infos[path], workflow=pipeline_parameters.calibration_workflow)
+        for path in members(FLAT, key):
             flat_info = flat_infos[path]
-            flat_dark_match = find_dark(flat_info.exposure_seconds, master_darks)
-            if flat_dark_match is not None:
-                dark_exposure, subtract_path = flat_dark_match
-                dark_info = (
-                    dark_infos[dark_groups[dark_exposure][0]]
-                    if dark_exposure in dark_groups
-                    else supplied_dark_infos[subtract_path]
-                )
-                assert_compatible(
-                    flat_info,
-                    dark_info,
-                    compare_exposure=True,
-                    compare_temperature=True,
-                    temperature_tolerance_celsius=pipeline_parameters.dark_temperature_tolerance_celsius,
-                    workflow=pipeline_parameters.calibration_workflow,
-                )
-                dark_bias_included = (
-                    True
-                    if dark_exposure in dark_groups
-                    else supplied_dark_bias_included[subtract_path]
-                )
+            subtract_path: Path | None
+            if pairing.dark is not None:
+                subtract_path = masters[(DARK, pairing.dark)]
+                bias_included = dark_bias_included(pairing.dark)
                 calibration_mode = (
                     "MATCHED_BIAS_INCLUDED_DARK"
-                    if dark_bias_included
+                    if bias_included
                     else "MATCHED_BIAS_SUBTRACTED_DARK_PLUS_MASTER_BIAS"
                 )
-                flat_subtract_info = master_dark_domain_info[dark_exposure]
-            else:
-                subtract_path = master_bias
-                dark_bias_included = True
+                subtract_info: FrameInfo | None = domain[(DARK, pairing.dark)]
+            elif pairing.bias is not None:
+                subtract_path = masters[(BIAS, pairing.bias)]
+                bias_included = True
                 calibration_mode = "BIAS"
-                flat_subtract_info = reference_bias
-            flat_subtract_scale = numeric_application_scale(
-                flat_info,
-                flat_subtract_info,
-                target_label="raw Flat",
-                additive_label=(
-                    "MasterDark" if flat_dark_match is not None else "MasterBias"
-                ),
+                subtract_info = domain[(BIAS, pairing.bias)]
+            else:
+                subtract_path = None
+                bias_included = True
+                calibration_mode = "UNCALIBRATED"
+                subtract_info = None
+            subtract_scale = (
+                numeric_application_scale(
+                    flat_info,
+                    subtract_info,
+                    target_label="raw Flat",
+                    additive_label=("MasterDark" if pairing.dark is not None else "MasterBias"),
+                )
+                if subtract_info is not None
+                else 1.0
             )
-            flat_bias_scale = numeric_application_scale(
-                flat_info,
-                reference_bias,
-                target_label="raw Flat",
-                additive_label="MasterBias",
+            separate_bias = not bias_included and pairing.bias is not None
+            bias_scale = (
+                numeric_application_scale(
+                    flat_info,
+                    domain[(BIAS, pairing.bias)],
+                    target_label="raw Flat",
+                    additive_label="MasterBias",
+                )
+                if separate_bias
+                else None
+            )
+            bias_terms: dict[str, Any] = (
+                {
+                    "subtract_paths": (str(masters[(BIAS, pairing.bias)]),),
+                    "subtract_scales": (bias_scale,),
+                }
+                if separate_bias
+                else {}
             )
             expression = FrameExpression(
                 str(path),
-                subtract_path=str(subtract_path),
-                subtract_scale=flat_subtract_scale,
-                subtract_paths=(str(master_bias),) if not dark_bias_included else (),
-                subtract_scales=(flat_bias_scale,) if not dark_bias_included else (),
+                subtract_path=str(subtract_path) if subtract_path is not None else None,
+                subtract_scale=subtract_scale,
+                **bias_terms,
             )
             location = robust_location(
                 expression,
@@ -383,158 +402,111 @@ def _build_registration_masters(
             if not math.isfinite(location) or location <= parameters.division_floor:
                 raise E2EError("FLAT_SIGNAL_INVALID", "Flat has no positive calibrated signal", path=str(path))
             normalizations.append(location)
-            expressions.append(
-                FrameExpression(
-                    str(path),
-                    subtract_path=str(subtract_path),
-                    subtract_scale=flat_subtract_scale,
-                    subtract_paths=(str(master_bias),) if not dark_bias_included else (),
-                    subtract_scales=(flat_bias_scale,) if not dark_bias_included else (),
-                    scale=1.0 / location,
-                )
-            )
+            expressions.append(replace(expression, scale=1.0 / location))
             calibration_sources.append(
                 {
                     "source": str(display(path)),
                     "mode": calibration_mode,
-                    "subtracted": str(subtract_path),
-                    "subtractedSha256": sha256_digest(subtract_path),
+                    "subtracted": str(subtract_path) if subtract_path is not None else None,
+                    "subtractedSha256": sha256_digest(subtract_path) if subtract_path is not None else None,
                     "targetNumericDomain": flat_info.numeric_domain,
-                    "additiveNumericDomain": flat_subtract_info.numeric_domain,
-                    "applicationScale": flat_subtract_scale,
+                    "additiveNumericDomain": subtract_info.numeric_domain if subtract_info is not None else None,
+                    "applicationScale": subtract_scale,
                     "applicationScaleSource": "normalized-unit-domain-ratio",
-                    "biasApplicationScale": (
-                        flat_bias_scale if not dark_bias_included else None
-                    ),
+                    "biasApplicationScale": bias_scale,
                 }
             )
-        destination = directory / f"master_flat_{_safe_token(filter_name)}.fits"
+        destination = directory / f"master_flat_{_safe_token(info.filter_name)}{label(key)}.fits"
         result = integrate_expressions(
             expressions,
             destination,
             metadata={
                 "IMAGETYP": "Master Flat",
-                "FILTER": filter_name,
+                "FILTER": info.filter_name,
                 "OAFSTATE": "UNSOLVED_WORKING",
                 "OAFBIAS": "SUBTRACTED",
                 "OAFNDOM": "DIMENSIONLESS_RESPONSE",
                 "OAFNSCL": 1.0,
-                **cfa_metadata(flat_infos[flat_groups[filter_name][0]]),
+                **cfa_metadata(info),
             },
             parameters=parameters,
         )
-        master_flats[filter_name] = destination
-        flat_records[filter_name] = {
+        masters[(FLAT, key)] = destination
+        domain[(FLAT, key)] = info
+        records[FLAT][key] = {
             "mode": "BUILT_FROM_RAW",
             "applicationScale": 1.0,
             **result.serializable(),
             "normalizations": normalizations,
             "calibrationSources": calibration_sources,
         }
-    for filter_name, path in sorted(supplied_flats_by_filter.items()):
-        master_flats[filter_name] = path
-        flat_records[filter_name] = {
-            "mode": "REUSED_SUPPLIED_MASTER",
-            "path": str(display(path)),
-            "sha256": sha256_digest(display(path)),
-            "calibrationApplied": False,
-        }
 
+    light_masters: dict[str, Any] = {}
+    bias_scales: dict[str, float] = {}
+    dark_scales: dict[str, float] = {}
     for path, light_info in light_infos.items():
-        filter_name = require_filter(light_info)
-        flat_path = master_flats[filter_name]
-        flat_info = (
-            flat_infos[flat_groups[filter_name][0]]
-            if filter_name in flat_groups
-            else supplied_flat_infos[flat_path]
-        )
-        assert_compatible(light_info, flat_info, compare_filter=True, workflow=pipeline_parameters.calibration_workflow)
-        dark_match = find_dark(light_info.exposure_seconds, master_darks)
-        if master_darks and dark_match is None:
-            raise E2EError(
-                "DARK_EXPOSURE_MISMATCH",
-                "no exact MasterDark matches this Light for registration calibration",
-                path=str(path),
-            )
-        if dark_match is not None:
-            exposure, dark_path = dark_match
-            dark_info = (
-                dark_infos[dark_groups[exposure][0]]
-                if exposure in dark_groups
-                else supplied_dark_infos[dark_path]
-            )
-            assert_compatible(
-                light_info,
-                dark_info,
-                compare_exposure=True,
-                compare_temperature=True,
-                temperature_tolerance_celsius=pipeline_parameters.dark_temperature_tolerance_celsius,
-                workflow=pipeline_parameters.calibration_workflow,
-            )
+        pairing = match.lights[str(path)]
+        if pairing.bias is not None:
             numeric_application_scale(
-                light_info,
-                master_dark_domain_info[exposure],
-                target_label="registration Light",
+                light_info, domain[(BIAS, pairing.bias)], target_label="registration Light", additive_label="MasterBias"
+            )
+            bias_scales[pairing.bias] = numeric_application_scale(
+                light_numeric_reference,
+                domain[(BIAS, pairing.bias)],
+                target_label="registration Light domain",
+                additive_label="MasterBias",
+            )
+        if pairing.dark is not None:
+            numeric_application_scale(
+                light_info, domain[(DARK, pairing.dark)], target_label="registration Light", additive_label="MasterDark"
+            )
+            dark_scales[pairing.dark] = numeric_application_scale(
+                light_numeric_reference,
+                domain[(DARK, pairing.dark)],
+                target_label="registration Light domain",
                 additive_label="MasterDark",
             )
-        numeric_application_scale(
-            light_info,
-            reference_bias,
-            target_label="registration Light",
-            additive_label="MasterBias",
+        light_masters[str(path)] = LightMasters(
+            bias_path=str(masters[(BIAS, pairing.bias)]) if pairing.bias is not None else None,
+            dark_path=str(masters[(DARK, pairing.dark)]) if pairing.dark is not None else None,
+            flat_path=str(masters[(FLAT, pairing.flat)]) if pairing.flat is not None else None,
+            dark_includes_bias=dark_bias_included(pairing.dark) if pairing.dark is not None else True,
+            bias_application_scale=bias_scales.get(pairing.bias, 1.0) if pairing.bias is not None else 1.0,
+            dark_application_scale=dark_scales.get(pairing.dark, 1.0) if pairing.dark is not None else 1.0,
         )
-    bias_application_scale = numeric_application_scale(
-        light_numeric_reference,
-        reference_bias,
-        target_label="registration Light domain",
-        additive_label="MasterBias",
-    )
-    dark_application_scales = {
-        exposure: numeric_application_scale(
-            light_numeric_reference,
-            master_dark_domain_info[exposure],
-            target_label="registration Light domain",
-            additive_label="MasterDark",
-        )
-        for exposure in master_darks
-    }
     plan = CalibrationPlan(
-        bias_path=str(master_bias) if master_bias is not None else None,
-        dark_paths={exposure: str(path) for exposure, path in master_darks.items()},
-        dark_bias_included_by_exposure={
-            exposure: (
-                True
-                if exposure in dark_groups
-                else supplied_dark_bias_included[path]
-            )
-            for exposure, path in master_darks.items()
-        },
-        dark_application_scale_by_exposure=dark_application_scales,
-        flat_paths={key: str(value) for key, value in master_flats.items()},
         dark_scale=1.0,
         dark_includes_bias=True,
-        bias_application_scale=bias_application_scale,
         flat_floor_fraction=0.05,
+        light_masters=light_masters,
     )
+    warnings = (*match.warnings, *dark_group_warnings(match, dark_infos, pipeline_parameters.dark_temperature_tolerance_celsius))
+    if not match.groups[BIAS]:
+        compatible_bias = {"mode": "NOT_REQUIRED_DARK_INCLUDES_BIAS"}
+    elif set(match.groups[BIAS]) == {"bias"}:
+        compatible_bias = records[BIAS]["bias"]
+    else:
+        compatible_bias = {"mode": "GROUPED", "groups": sorted(match.groups[BIAS])}
     receipt = {
         "schemaVersion": 1,
         "stage": "registration-calibration-masters",
-        "calibrationPolicy": workflow_receipt(pipeline_parameters.calibration_workflow),
+        "calibrationPolicy": workflow_receipt(workflow),
         "xisfConversions": [dict(item) for item in xisf_conversions],
-        "masterBias": bias_record,
-        "masterDarks": dark_records,
-        "masterFlats": flat_records,
+        "calibrationMatching": {
+            **match.serializable(),
+            "warnings": [issue.serializable() for issue in warnings],
+        },
+        "masterBias": compatible_bias,
+        "masterBiases": records[BIAS],
+        "masterDarks": records[DARK],
+        "masterFlats": records[FLAT],
         "registrationDarksByExposure": {
-            format(exposure, ".9g"): str(path)
-            for exposure, path in sorted(master_darks.items())
+            key: str(masters[(DARK, key)]) for key in sorted(match.used(DARK))
         },
         "registrationNumericDomain": {
             "light": light_numeric_reference.serializable(),
-            "biasApplicationScale": bias_application_scale,
-            "darkApplicationScaleByExposure": {
-                format(exposure, ".9g"): scale
-                for exposure, scale in sorted(dark_application_scales.items())
-            },
+            "biasApplicationScaleByGroup": dict(sorted(bias_scales.items())),
+            "darkApplicationScaleByGroup": dict(sorted(dark_scales.items())),
             "applicationScaleSource": "normalized-unit-domain-ratio",
         },
         "artifacts": [
@@ -543,15 +515,15 @@ def _build_registration_masters(
                 "sha256": sha256_digest(path),
                 "sizeBytes": path.stat().st_size,
             }
-            for path in (master_bias, *master_darks.values(), *master_flats.values()) if path is not None
+            for path in dict.fromkeys(masters.values())
         ],
     }
-    return plan, receipt
+    return _RegistrationCalibration(plan=plan, receipt=receipt, match=match, masters=masters)
 
 
 def _capture_single_field_generated_calibration(
     *,
-    plan: Any,
+    plan: _RegistrationCalibration,
     generated_directory: Path,
     upstream_receipt_path: Path,
     staged_inputs: Mapping[str, tuple[Path, ...]],
@@ -560,8 +532,10 @@ def _capture_single_field_generated_calibration(
     consumer_source_groups: Sequence[tuple[str, Sequence[Path]]],
     internal_source_identities: Mapping[str, InternalSourceIdentity],
 ) -> Any:
-    """Capture the private single-run trust handoff for generated masters."""
+    """Capture the private single-run trust handoff for generated masters:
+    one per raw calibration group registration used, named by its key."""
 
+    del staged_inputs  # the calibration groups name their own members
     generated_root = generated_directory.resolve(strict=True)
 
     def is_generated(path: Path) -> bool:
@@ -579,66 +553,31 @@ def _capture_single_field_generated_calibration(
             override_source_identity=source_identity,
         )
 
-    bias_spec: tuple[Path, FrameInfo] | None = None
-    if staged_inputs["BIAS"]:
-        bias_path = Path(plan.bias_path)
-        if not is_generated(bias_path):
-            raise E2EError(
-                "TRUSTED_GENERATED_CALIBRATION_COVERAGE_MISMATCH",
-                "raw Bias provenance did not produce an internal MasterBias",
-                path=str(bias_path),
-            )
-        bias_spec = (bias_path, source_info(staged_inputs["BIAS"][0]))
-
-    dark_specs: list[tuple[Path, FrameInfo, bool]] = []
-    raw_dark_infos = {path: source_info(path) for path in staged_inputs["DARK"]}
-    raw_dark_exposures = {
-        float(info.exposure_seconds)
-        for info in raw_dark_infos.values()
-        if info.exposure_seconds is not None
-    }
-    for exposure in sorted(raw_dark_exposures):
-        match = find_dark(exposure, {float(key): Path(value) for key, value in plan.dark_paths.items()})
-        if match is None or not is_generated(match[1]):
-            raise E2EError(
-                "TRUSTED_GENERATED_CALIBRATION_COVERAGE_MISMATCH",
-                "raw Dark provenance did not produce an internal MasterDark",
-            )
-        reference = next(
-            info
-            for info in raw_dark_infos.values()
-            if info.exposure_seconds is not None
-            and math.isclose(
-                float(info.exposure_seconds), exposure, rel_tol=0.0, abs_tol=1e-6
-            )
-        )
-        dark_specs.append(
-            (
-                match[1],
-                reference,
-                bool(plan.dark_bias_included_by_exposure[match[0]]),
-            )
-        )
-
-    flat_specs: list[tuple[Path, FrameInfo, float]] = []
-    raw_flat_infos = {path: source_info(path) for path in staged_inputs["FLAT"]}
-    for filter_name in sorted({require_filter(info) for info in raw_flat_infos.values()}):
-        flat_path = Path(plan.flat_paths[filter_name])
-        if not is_generated(flat_path):
-            raise E2EError(
-                "TRUSTED_GENERATED_CALIBRATION_COVERAGE_MISMATCH",
-                "raw Flat provenance did not produce an internal MasterFlat",
-                path=str(flat_path),
-            )
-        reference = next(
-            info for info in raw_flat_infos.values() if require_filter(info) == filter_name
-        )
-        flat_specs.append((flat_path, reference, 1.0))
+    specs: dict[str, list[tuple[Any, ...]]] = {BIAS: [], DARK: [], FLAT: []}
+    for kind in (BIAS, DARK, FLAT):
+        for key in sorted(plan.match.used(kind)):
+            group = plan.match.groups[kind][key]
+            if group.supplied_master:
+                continue
+            master = plan.masters[(kind, key)]
+            if not is_generated(master):
+                raise E2EError(
+                    "TRUSTED_GENERATED_CALIBRATION_COVERAGE_MISMATCH",
+                    f"raw {kind.title()} provenance did not produce an internal master",
+                    path=str(master),
+                )
+            reference = source_info(Path(group.members[0]))
+            if kind == BIAS:
+                specs[kind].append((master, reference, key))
+            elif kind == DARK:
+                specs[kind].append((master, reference, True, key))
+            else:
+                specs[kind].append((master, reference, 1.0, key))
 
     return capture_trusted_generated_calibration_set(
-        master_bias=bias_spec,
-        master_darks=dark_specs,
-        master_flats=flat_specs,
+        master_biases=specs[BIAS],
+        master_darks=specs[DARK],
+        master_flats=specs[FLAT],
         source_groups=consumer_source_groups,
         source_identities=internal_source_identities,
         upstream_receipt_path=upstream_receipt_path,

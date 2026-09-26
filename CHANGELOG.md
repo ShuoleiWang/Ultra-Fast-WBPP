@@ -4,6 +4,47 @@ All notable changes are documented here. The format follows Keep a Changelog and
 
 ## [Unreleased]
 
+### Calibration paired by WBPP's rules
+
+- Folders prepared for PixInsight WBPP calibrate the way WBPP calibrates
+  them. The grouping keywords `DATE`, `NIGHT`, `SESSION` and `PANEL` in
+  folder and file names (WBPP's syntax: `NIGHT_1`, `DATE-2026-03-22`, the
+  innermost occurrence wins) split raw calibration frames into separate
+  masters, and a Light only takes frames without a conflicting value, so
+  each night is flat-fielded with its own Flats. A frame without the keyword
+  fits every night, and the group with the most matching keywords wins.
+  Keywords are read only below the folder that holds all inputs. Before,
+  per-night MasterFlats of one filter were refused and raw Flats of several
+  nights were merged. `PANEL` also splits the Lights into mosaic panels.
+- The desktop workflow (`mono-standard-v1`) pairs as WBPP pairs and reports
+  every compromise as a warning in the plan and in the receipts' new
+  `calibrationMatching` record (every group, which groups each Light was
+  calibrated with): other gain, offset, camera or readout mode (a matching
+  group is preferred), the Dark closest to a Light's exposure subtracted
+  unscaled, a Dark more than 3 °C away, equally good candidates, a missing
+  Bias or Dark, and Lights of one filter taken with different settings.
+  These blocked planning before. A size, binning or colour (mono or Bayer
+  pattern) mismatch is still refused, `flat: REQUIRED` still blocks a Light
+  without a Flat, and `strict-v1` is unchanged.
+- Raw calibration frames are also grouped by gain, offset, camera and
+  readout mode, so two gains give two MasterDarks and each Light takes its
+  own. A raw Flat group takes a Dark within 0.5 s of its exposure when a
+  Bias exists, as in WBPP. Several supplied MasterBias files may coexist, and
+  only the groups some Light uses are built.
+- The path completes what the header lacks, as WBPP's smart naming does:
+  filter, binning, exposure and Bayer pattern (`FILTER_Ha`, `BIN-2`,
+  `EXPOSURE_300`, `300s`, `BAYERPAT_RGGB`); the image types `FlatField`,
+  `Science` and `MasterDarkFlat` are read; and a frame without any type is a
+  Light, as in WBPP, with a `ROLE_DEFAULTED_TO_LIGHT` warning.
+- Synthetic two-night data (night 1 vignetted, night 2 with a 30 % dust
+  spot): every Light calibrated with its own night's Flats matches the signal
+  to within 0.2 % relative spread, while Flats merged over both nights leave
+  more than 10 %. Through registration and integration, night 2's dust is
+  within 2 % of the surrounding background in the solved master. The NGC 7331
+  project, arranged in WBPP `DATE_` folders, gives bit-identical masters.
+- Not yet: other grouping keywords, WBPP's smart-naming override, dark
+  optimization, DSLR RAW files.
+
 ### Importing files arranged by PixInsight WBPP
 
 - Lights that PixInsight already calibrated or registered (WBPP's

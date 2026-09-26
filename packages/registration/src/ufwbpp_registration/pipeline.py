@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
 import math
+import os
 import threading
 import time
 from typing import Any, Iterable, Mapping, Sequence
@@ -42,6 +43,29 @@ Float64Array = NDArray[np.float64]
 
 
 @dataclass(frozen=True, slots=True)
+class LightMasters:
+    """The masters one Light is calibrated with, chosen by the caller (for
+    example a Flat of the Light's own night) instead of by filter/exposure."""
+
+    bias_path: str | None = None
+    dark_path: str | None = None
+    flat_path: str | None = None
+    dark_includes_bias: bool = True
+    bias_application_scale: float = 1.0
+    dark_application_scale: float = 1.0
+
+    def __post_init__(self) -> None:
+        for name in ("bias_application_scale", "dark_application_scale"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+
+
+def _path_key(path: str) -> str:
+    return os.path.normcase(str(Path(path).expanduser().resolve(strict=False)))
+
+
+@dataclass(frozen=True, slots=True)
 class CalibrationPlan:
     """Optional master calibration used before detection or full-image warp.
 
@@ -66,6 +90,18 @@ class CalibrationPlan:
     bias_application_scale: float = 1.0
     flat_floor_fraction: float = 0.05
     light_scale: float | None = None
+    # Per-Light masters by Light path; a listed Light ignores the filter and
+    # exposure lookups above.
+    light_masters: Mapping[str, LightMasters] = field(default_factory=dict)
+
+    def masters_for(self, path: str) -> LightMasters | None:
+        if not self.light_masters:
+            return None
+        key = _path_key(path)
+        for light_path, masters in self.light_masters.items():
+            if _path_key(light_path) == key:
+                return masters
+        return None
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.dark_scale) or self.dark_scale < 0:
@@ -187,7 +223,11 @@ class CalibrationPlan:
     @property
     def enabled(self) -> bool:
         return bool(
-            self.bias_path or self.dark_path or self.dark_paths or self.flat_paths
+            self.bias_path
+            or self.dark_path
+            or self.dark_paths
+            or self.flat_paths
+            or self.light_masters
         )
 
 
@@ -489,20 +529,32 @@ def _read_calibrated_preview(
         _same_preview_geometry(light, item)
         return np.asarray(item.data, dtype=np.float32)
 
-    flat_path = plan.flat_for(filter_name)
-    if plan.flat_paths and flat_path is None:
-        raise ValueError(f"no flat configured for filter {filter_name!r}")
-    bias = master(plan.bias_path)
-    dark = master(plan.dark_for(light.metadata.exposure_seconds))
-    flat = master(flat_path)
-    preview_plan = replace(
-        plan,
-        dark_includes_bias=plan.dark_includes_bias_for(light.metadata.exposure_seconds),
-        dark_scale=(
-            plan.dark_scale
-            * plan.dark_application_scale_for(light.metadata.exposure_seconds)
-        ),
-    )
+    assigned = plan.masters_for(path)
+    if assigned is not None:
+        bias = master(assigned.bias_path)
+        dark = master(assigned.dark_path)
+        flat = master(assigned.flat_path)
+        preview_plan = replace(
+            plan,
+            dark_includes_bias=assigned.dark_includes_bias,
+            bias_application_scale=assigned.bias_application_scale,
+            dark_scale=plan.dark_scale * assigned.dark_application_scale,
+        )
+    else:
+        flat_path = plan.flat_for(filter_name)
+        if plan.flat_paths and flat_path is None:
+            raise ValueError(f"no flat configured for filter {filter_name!r}")
+        bias = master(plan.bias_path)
+        dark = master(plan.dark_for(light.metadata.exposure_seconds))
+        flat = master(flat_path)
+        preview_plan = replace(
+            plan,
+            dark_includes_bias=plan.dark_includes_bias_for(light.metadata.exposure_seconds),
+            dark_scale=(
+                plan.dark_scale
+                * plan.dark_application_scale_for(light.metadata.exposure_seconds)
+            ),
+        )
     calibrated = _calibrate_arrays(
         image,
         bias=bias,

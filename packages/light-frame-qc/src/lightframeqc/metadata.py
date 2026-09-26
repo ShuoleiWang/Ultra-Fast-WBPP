@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import math
 import os
@@ -77,9 +78,24 @@ _ROLE_ALIASES = {
 # (_c calibrated, _cc cosmetized, _d debayered, _r registered).
 _WBPP_PROCESSED_FOLDERS = frozenset({"CALIBRATED", "COSMETIZED", "DEBAYERED", "REGISTERED"})
 _WBPP_PROCESSED_SUFFIX = re.compile(r"(?:_c(?:_cc)?(?:_d)?(?:_r)?|_cc(?:_d)?(?:_r)?|_d(?:_r)?|_r)$", re.IGNORECASE)
-# WBPP grouping keywords that name an observing night or session, written as
-# KEY_value or KEY-value in a folder or file name (DATE_0322, NIGHT-2).
-_SESSION_KEYWORD = re.compile(r"(?:^|[^A-Z0-9])(DATE|NIGHT|SESSION)[_-]([A-Z0-9][A-Z0-9.\-]*)")
+# WBPP grouping keywords recognised without configuration. Each groups the
+# calibration: a calibration frame and a Light are compatible unless they
+# carry different values of one keyword (a frame without the keyword matches
+# every value). PANEL also separates the mosaic panels of one target.
+DEFAULT_GROUPING_KEYWORDS = ("DATE", "NIGHT", "PANEL", "SESSION")
+POST_PROCESSING_KEYWORDS = frozenset({"PANEL"})
+SESSION_KEYWORDS = ("DATE", "NIGHT", "SESSION")
+# WBPP's syntax for a keyword in a folder or file name: the name after a
+# non-alphanumeric character, then "_", "-" or a space, then the value in the
+# characters WBPP accepts; an underscore ends the value (NIGHT_2, DATE-0322).
+_KEYWORD_VALUE = r"[_\- ]([-():. A-Za-z0-9]+)"
+_KEYWORD_PATTERNS: dict[str, re.Pattern[str]] = {}
+# Smart naming: properties a path supplies when the header lacks them.
+_SMART_FILTER = re.compile(r"(?:^|[^A-Za-z0-9])(?:FILTER|INSFLNAM)[_\- ]([A-Za-z0-9+]+)", re.IGNORECASE)
+_SMART_BINNING = re.compile(r"(?:^|[^A-Za-z0-9])(?:XBINNING|BINNING|CCDBINX|BIN)[_\- ]?([1-9])(?:x[1-9])?(?![0-9])", re.IGNORECASE)
+_SMART_EXPOSURE = re.compile(r"(?:^|[^A-Za-z0-9])(?:EXPTIME|EXPOSURE)[_\- ]([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
+_BARE_EXPOSURE = re.compile(r"(?:^|[_\- ])([0-9]+(?:\.[0-9]+)?)s(?:[_\- .]|$)", re.IGNORECASE)
+_SMART_BAYER = re.compile(r"(?:^|[^A-Za-z0-9])BAYERPAT[_\- ]([A-Za-z]{4})(?![A-Za-z])", re.IGNORECASE)
 
 
 def _header_lookup(header: dict[str, Any], names: Iterable[str]) -> Any | None:
@@ -277,45 +293,97 @@ def airmass_from_altitude(altitude_degrees: float | None) -> float | None:
     return 1.0 / denominator
 
 
+def _path_components(path: str) -> tuple[str, ...]:
+    """The folder names and the file stem of ``path``, outermost first."""
+
+    return (*Path(path).parts[:-1], Path(path).stem)
+
+
+def _innermost(pattern: re.Pattern[str], path: str) -> str | None:
+    """The last match of ``pattern`` in the path: the file name before its
+    folders, an inner folder before an outer one."""
+
+    for component in reversed(_path_components(path)):
+        matches = list(pattern.finditer(component))
+        if matches:
+            return matches[-1].group(1)
+    return None
+
+
 def infer_filter_from_path(path: str) -> str:
-    name = Path(path).name.upper()
-    patterns = (
+    # WBPP smart naming (FILTER_Ha, ..._FILTER-L_mono, INSFLNAM-OIII) anywhere
+    # in the path, then a bare filter token of the file name (M31_L_300s).
+    explicit = _innermost(_SMART_FILTER, path)
+    if explicit is not None:
+        return normalize_filter(explicit)
+    match = re.search(
         r"(?:^|[_\- ])(H(?:A|ALPHA)|O(?:III|3)|S(?:II|2)|L|R|G|B)(?:[_\- .]|$)",
-        r"FILTER[_\- ]([A-Z0-9+\-]+)",
+        Path(path).name.upper(),
     )
-    for pattern in patterns:
-        match = re.search(pattern, name)
-        if match:
-            return normalize_filter(match.group(1))
-    # WBPP's grouping-keyword folders (FILTER_Ha/, ..._FILTER-L_mono/).
-    for component in reversed(Path(path).parts[-4:-1]):
-        match = re.search(r"(?:^|[_\- ])FILTER[_\-]([A-Z0-9+]+)", component.upper())
-        if match:
-            return normalize_filter(match.group(1))
-    return "UNKNOWN"
+    return normalize_filter(match.group(1)) if match else "UNKNOWN"
 
 
-def session_keywords_from_path(path: str, *, root: str | None = None) -> str | None:
-    """WBPP grouping keywords naming a night or session, e.g. ``DATE=0322``.
+def infer_binning_from_path(path: str) -> int | None:
+    value = _innermost(_SMART_BINNING, path)
+    return int(value) if value is not None else None
 
-    WBPP reads ``KEY_value`` / ``KEY-value`` tokens from folder and file
-    names and calibrates each group with its own Flats. The engine reports
-    them; it does not separate calibration by them yet. Only components below
-    ``root`` are read, so a shared ancestor such as ``one_night_trip/`` is not
-    mistaken for a keyword. The deepest value of each keyword wins; ``None``
-    when the path names none.
+
+def infer_bayer_pattern_from_path(path: str) -> str | None:
+    value = _innermost(_SMART_BAYER, path)
+    if value is None:
+        return None
+    pattern = normalize_cfa_pattern(value)
+    return pattern if pattern not in {"UNKNOWN", "NONE"} else None
+
+
+def _keyword_pattern(name: str) -> re.Pattern[str]:
+    pattern = _KEYWORD_PATTERNS.get(name)
+    if pattern is None:
+        pattern = re.compile(
+            rf"(?:^|[^A-Za-z0-9])(?:{re.escape(name)}){_KEYWORD_VALUE}", re.IGNORECASE
+        )
+        _KEYWORD_PATTERNS[name] = pattern
+    return pattern
+
+
+def grouping_keywords_from_path(
+    path: str,
+    names: Iterable[str] = DEFAULT_GROUPING_KEYWORDS,
+    *,
+    root: str | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """WBPP grouping keywords written in the path, as sorted (NAME, value).
+
+    Like WBPP, every folder and the file name are read and the innermost
+    value of a keyword wins; names are matched without regard to case and
+    reported in upper case, values are kept as written. ``root`` limits the
+    reading to the folders below it (for messages that compare frames).
     """
 
-    parts = Path(path).parts
+    parts = _path_components(path)
     if root is not None:
         root_parts = Path(root).parts
         if parts[: len(root_parts)] == root_parts:
             parts = parts[len(root_parts):]
     values: dict[str, str] = {}
-    for component in (*parts[:-1], Path(path).stem):
-        for match in _SESSION_KEYWORD.finditer(component.upper()):
-            values[match.group(1)] = match.group(2)
-    return ";".join(f"{key}={value}" for key, value in sorted(values.items())) or None
+    for component in parts:
+        for name in names:
+            for match in _keyword_pattern(name).finditer(component):
+                value = match.group(1).strip()
+                if value:
+                    values[name.upper()] = value
+    return tuple(sorted(values.items()))
+
+
+def session_keywords_from_path(path: str, *, root: str | None = None) -> str | None:
+    """The night or session a path names, e.g. ``DATE=0322``, or ``None``.
+
+    Only the components below ``root`` are read, so a shared ancestor such as
+    ``one_night_trip/`` is not mistaken for a keyword.
+    """
+
+    values = grouping_keywords_from_path(path, SESSION_KEYWORDS, root=root)
+    return ";".join(f"{key}={value}" for key, value in values) or None
 
 
 def session_keywords_of(paths: Sequence[str]) -> list[str | None]:
@@ -357,15 +425,72 @@ def processing_markers(header: dict[str, Any], path: str) -> list[str]:
 
 
 def infer_exposure_from_path(path: str) -> float | None:
+    # The file name first (M31_L_300s, EXPOSURE-300.00s), then its folders
+    # (lights_60s/), as WBPP's smart naming reads both.
     name = Path(path).name
-    for pattern in (
-        r"(?:^|[_\- ])([0-9]+(?:\.[0-9]+)?)s(?:[_\- .]|$)",
-        r"(?:EXPTIME|EXPOSURE)[_\- ]([0-9]+(?:\.[0-9]+)?)",
-    ):
-        match = re.search(pattern, name, re.IGNORECASE)
+    for pattern in (_BARE_EXPOSURE, _SMART_EXPOSURE):
+        match = pattern.search(name)
         if match:
             return _number(match.group(1))
+    for component in reversed(Path(path).parts[:-1]):
+        for pattern in (_SMART_EXPOSURE, _BARE_EXPOSURE):
+            match = pattern.search(component)
+            if match:
+                return _number(match.group(1))
     return None
+
+
+@dataclass(frozen=True)
+class PathMetadata:
+    """What a path says about its frame, in WBPP's conventions.
+
+    Header values take precedence; these fill the ones a header lacks, and
+    ``keywords`` group the calibration (see ``DEFAULT_GROUPING_KEYWORDS``).
+    """
+
+    role: FrameRole
+    filter_name: str
+    exposure_seconds: float | None
+    binning: int | None
+    cfa_pattern: str | None
+    keywords: tuple[tuple[str, str], ...]
+
+
+def path_metadata(
+    path: str,
+    keyword_names: Iterable[str] = DEFAULT_GROUPING_KEYWORDS,
+    *,
+    keyword_root: str | None = None,
+) -> PathMetadata:
+    """``keyword_root`` limits the grouping keywords to the folders below it
+    (see :func:`grouping_keyword_root`)."""
+
+    return PathMetadata(
+        role=infer_frame_role_from_path(path),
+        filter_name=infer_filter_from_path(path),
+        exposure_seconds=infer_exposure_from_path(path),
+        binning=infer_binning_from_path(path),
+        cfa_pattern=infer_bayer_pattern_from_path(path),
+        keywords=grouping_keywords_from_path(path, keyword_names, root=keyword_root),
+    )
+
+
+def grouping_keyword_root(paths: Iterable[str]) -> str | None:
+    """The folder grouping keywords of a set of frames are read below: the
+    common ancestor of their folders.
+
+    A keyword-like folder above every frame (``Night_Sky/``, a test's
+    ``..._night_c0/``) would otherwise name a "night" for the frames that no
+    inner folder overrides, and keep them from the Lights of ``NIGHT_1/``.
+    """
+
+    folders = [os.path.dirname(os.path.abspath(path)) for path in paths]
+    if not folders:
+        return None
+    try:
+        return os.path.commonpath(folders)
+    except ValueError:  # different drives on Windows
+        return None
 
 
 def infer_target_from_path(path: str) -> str:
@@ -406,6 +531,11 @@ def normalize_metadata(metadata: FrameMetadata) -> FrameMetadata:
     )
     metadata.binning_x = binning_x or shared_binning or binning_y or 1
     metadata.binning_y = binning_y or shared_binning or binning_x or 1
+    if not metadata.binning_known:
+        path_binning = infer_binning_from_path(metadata.path)
+        if path_binning is not None:
+            metadata.binning_x = metadata.binning_y = path_binning
+            metadata.binning_known = True
     metadata.camera = (
         _clean_text(_header_lookup(header, ("INSTRUME", "CAMERA", "DETECTOR")))
         or "UNKNOWN"
@@ -432,6 +562,8 @@ def normalize_metadata(metadata: FrameMetadata) -> FrameMetadata:
         )
     )
     if metadata.cfa_pattern == "UNKNOWN":
+        metadata.cfa_pattern = infer_bayer_pattern_from_path(metadata.path) or "UNKNOWN"
+    if metadata.cfa_pattern == "UNKNOWN":
         if metadata.channels > 1:
             metadata.cfa_pattern = "NONE"
         elif re.search(
@@ -446,6 +578,7 @@ def normalize_metadata(metadata: FrameMetadata) -> FrameMetadata:
         _clean_text(_header_lookup(header, ("OBJECT", "OBJNAME", "TARGET")))
         or infer_target_from_path(metadata.path)
     ).upper()
+    metadata.grouping_keywords = dict(grouping_keywords_from_path(metadata.path))
 
     metadata.ra_degrees = _angle_degrees(
         _header_lookup(header, ("OBJCTRA", "RA", "CRVAL1")), hour_angle=True

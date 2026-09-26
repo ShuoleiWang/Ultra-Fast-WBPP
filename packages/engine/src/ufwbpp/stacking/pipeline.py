@@ -100,7 +100,7 @@ def _trusted_reuse_receipt(
                 **({"biasIncluded": item.bias_included} if item.role == "MASTER_DARK" else {}),
                 **({"applicationScale": item.application_scale} if item.role == "MASTER_FLAT" else {}),
             }
-            for item in (trusted.master_bias, *trusted.master_darks, *trusted.master_flats)
+            for item in (*trusted.master_biases, *trusted.master_darks, *trusted.master_flats)
             if item is not None
         ],
     }
@@ -120,6 +120,7 @@ def run_portable_pipeline_fits(
     quality_weights: Mapping[str, float] | None = None,
     stellar_scale_hints: Mapping[str, StellarScaleHint] | None = None,
     parameters: PipelineParameters | None = None,
+    master_bias_files: Iterable[str | os.PathLike[str]] = (),
     _source_aliases: Mapping[str, Path] | None = None,
     _xisf_conversions: Sequence[Mapping[str, Any]] = (),
     _trusted_generated_calibration: TrustedGeneratedCalibrationSet | None = None,
@@ -154,10 +155,14 @@ def run_portable_pipeline_fits(
     sources are not rehashed; a stat mismatch against the seed still fails
     closed as ``SOURCE_CHANGED``.
 
-    A calibration profile may use raw frames or a supplied master, never both
-    for the same bias/filter/exposure identity.  Supplied masters are opened
-    read-only and reused directly; they are never integrated or calibrated a
-    second time.
+    Calibration is grouped and paired the way PixInsight's WBPP does (see
+    :mod:`ufwbpp.calibration.matching`): a Light takes the Bias, Dark and
+    Flat of its own grouping-keyword values (NIGHT, SESSION, ...), a pairing
+    WBPP accepts although the frames differ is reported in the receipt's
+    ``calibrationMatching`` warnings, and frames of another size, binning or
+    colour are never paired.  ``master_bias_file`` and ``master_bias_files``
+    both supply MasterBias files.  Supplied masters are opened read-only and
+    reused directly; they are never integrated or calibrated a second time.
     """
 
     parameters = parameters or PipelineParameters()
@@ -166,7 +171,7 @@ def run_portable_pipeline_fits(
         bias_files=bias_files,
         dark_files=dark_files,
         flat_files=flat_files,
-        master_bias_file=master_bias_file,
+        master_bias_files=(*(() if master_bias_file is None else (master_bias_file,)), *master_bias_files),
         master_dark_files=master_dark_files,
         master_flat_files=master_flat_files,
         light_files=light_files,
@@ -316,6 +321,10 @@ def run_portable_pipeline_fits(
                 {**item.serializable(), "status": "APPLIED_CONTENT_BOUND_DECLARATION"}
                 for item in parameters.master_metadata_overrides
             ],
+            "calibrationMatching": {
+                **plan.calibration.serializable(),
+                "warnings": [issue.serializable() for issue in plan.warnings],
+            },
             "outputs": ledger.artifacts,
             "registration": lights.records,
             "statistics": {
@@ -448,6 +457,7 @@ def run_portable_pipeline(
     quality_weights: Mapping[str, float] | None = None,
     stellar_scale_hints: Mapping[str, StellarScaleHint] | None = None,
     parameters: PipelineParameters | None = None,
+    master_bias_files: Iterable[str | os.PathLike[str]] = (),
 ) -> PipelineResult:
     """Run the portable pipeline with private, content-bound XISF staging."""
 
@@ -469,7 +479,7 @@ def run_portable_pipeline(
         "DARK": _canonical_inputs(dark_files, "Dark", required=False),
         "FLAT": _canonical_inputs(flat_files, "Flat", required=False),
         "MASTER_BIAS": _canonical_inputs(
-            () if master_bias_file is None else (master_bias_file,),
+            (*(() if master_bias_file is None else (master_bias_file,)), *master_bias_files),
             "MasterBias",
             required=False,
         ),
@@ -521,7 +531,7 @@ def run_portable_pipeline(
             bias_files=staged["BIAS"],
             dark_files=staged["DARK"],
             flat_files=staged["FLAT"],
-            master_bias_file=(staged["MASTER_BIAS"][0] if staged["MASTER_BIAS"] else None),
+            master_bias_files=staged["MASTER_BIAS"],
             master_dark_files=staged["MASTER_DARK"],
             master_flat_files=staged["MASTER_FLAT"],
             light_files=staged["LIGHT"],

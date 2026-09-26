@@ -118,8 +118,9 @@ read as a sequence of named stages (`_prepare_shared_calibration`,
 `_plan_run`, `_build_calibration_masters`, `_integrate_group`, ...), each in
 the module of its step (`workflows/screening.py`, `workflows/integration.py`,
 `stacking/masters.py`, `stacking/groups.py`, ...); a new step belongs in a
-stage, not inline. Use `calibration/inputs.py` for content-bound master
-metadata, `image_io/fits.py` for FITS primitives, `solvers/process.py` for
+stage, not inline. Use `calibration/matching.py` for calibration grouping
+and pairing (WBPP's rules; planning, preflight and the run share it),
+`calibration/inputs.py` for content-bound master metadata, `image_io/fits.py` for FITS primitives, `solvers/process.py` for
 shared solver execution, `products/publication.py` for create-only
 colour/mosaic publication, `errors.py` for errors several packages raise and
 `integrity.py` for the byte forms digests are computed over. A private helper

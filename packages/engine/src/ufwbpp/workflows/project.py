@@ -43,9 +43,11 @@ from astropy.wcs import WCS
 import numpy as np
 
 from lightframeqc.cfa import CHANNEL_NAMES, is_cfa_pattern, normalize_pattern as normalize_cfa_pattern
+from lightframeqc.metadata import grouping_keyword_root
 from lightframeqc.source_extraction import cached_extraction_self_test
 
 from ..calibration.inputs import MasterMetadataOverride
+from ..calibration.matching import BIAS, DARK, FLAT
 from ..calibration.policy import MONO_STANDARD, workflow_receipt
 from ..integrity import canonical_json_document, sha256_digest
 from ..models import AssetRole, AssetStatus, FrameAsset, ProjectInventory
@@ -431,6 +433,12 @@ def classify_project_layout(inventory: ProjectInventory) -> ProjectLayout:
                 "LIGHT_NOT_READY", "conflicted or unreadable Light cannot enter a panel", path=asset.path
             )
         target, target_key = _science_target(asset)
+        panel = dict(asset.grouping_keywords).get("PANEL")
+        if panel is not None:
+            # WBPP's PANEL keyword (PANEL_2/): one mosaic panel per value, as
+            # its post-processing grouping integrates them separately.
+            target = f"{target} PANEL {panel}"
+            target_key = _normalized_token(target)
         filter_name, filter_key = _science_filter(asset)
         pattern = normalize_cfa_pattern(asset.cfa_pattern)
         # A Bayer (OSC) Light yields the three colour channel panels R, G and
@@ -813,7 +821,7 @@ def _build_shared_calibration(
     staged, aliases, conversions, _ = _stage_e2e_xisf_inputs(
         raw_groups, root / "pixel-inputs", base.pipeline_parameters
     )
-    plan, raw_receipt = _build_registration_masters(
+    calibration = _build_registration_masters(
         biases=staged["BIAS"],
         darks=staged["DARK"],
         flats=staged["FLAT"],
@@ -833,9 +841,7 @@ def _build_shared_calibration(
         # generated masters have no alias and retain their derived identity.
         return str(aliases.get(str(Path(value)), Path(value)))
 
-    master_biases = (master_source(plan.bias_path),) if plan.bias_path is not None else ()
-    master_darks = tuple(master_source(value) for _, value in sorted(plan.dark_paths.items()))
-    master_flats = tuple(master_source(value) for _, value in sorted(plan.flat_paths.items()))
+    raw_receipt = calibration.receipt
     generated_root = (root / "masters").resolve(strict=True)
 
     def raw_info(path: Path) -> Any:
@@ -852,6 +858,7 @@ def _build_shared_calibration(
         *,
         bias_included: bool | None,
         declare_additive_numeric_domain: bool,
+        grouping_keywords: tuple[tuple[str, str], ...],
     ) -> MasterMetadataOverride:
         if reference.temperature_celsius is None and base.pipeline_parameters.calibration_workflow != MONO_STANDARD:
             raise ProjectE2EError(
@@ -886,58 +893,35 @@ def _build_shared_calibration(
                 if declare_additive_numeric_domain
                 else None
             ),
+            grouping_keywords=grouping_keywords,
         )
 
+    # Every master a Light of the project uses, one per calibration group:
+    # a generated one carries its group's metadata and grouping keywords in a
+    # content-bound override, a supplied one keeps its own path.
     trusted_generated: list[MasterMetadataOverride] = []
-    bias_path = Path(plan.bias_path).resolve(strict=True) if plan.bias_path is not None else None
-    if bias_path is not None and bias_path.is_relative_to(generated_root):
-        trusted_generated.append(
-            generated_override(
-                bias_path,
-                raw_info(staged["BIAS"][0]),
-                bias_included=None,
-                declare_additive_numeric_domain=True,
+    outputs: dict[str, list[str]] = {BIAS: [], DARK: [], FLAT: []}
+    for kind in (BIAS, DARK, FLAT):
+        for key in sorted(calibration.match.used(kind)):
+            group = calibration.match.groups[kind][key]
+            master = calibration.masters[(kind, key)]
+            resolved = master.resolve(strict=True)
+            if group.supplied_master or not resolved.is_relative_to(generated_root):
+                outputs[kind].append(master_source(str(master)))
+                continue
+            outputs[kind].append(str(resolved))
+            trusted_generated.append(
+                generated_override(
+                    resolved,
+                    raw_info(Path(group.members[0])),
+                    bias_included=True if kind == DARK else None,
+                    declare_additive_numeric_domain=kind != FLAT,
+                    grouping_keywords=group.traits.keywords,
+                )
             )
-        )
-    for exposure, value in sorted(plan.dark_paths.items()):
-        path = Path(value).resolve(strict=True)
-        if not path.is_relative_to(generated_root):
-            continue
-        reference_path = next(
-            item
-            for item in staged["DARK"]
-            if math.isclose(
-                float(raw_info(item).exposure_seconds or -1.0),
-                float(exposure),
-                rel_tol=0.0,
-                abs_tol=1e-6,
-            )
-        )
-        trusted_generated.append(
-            generated_override(
-                path,
-                raw_info(reference_path),
-                bias_included=True,
-                declare_additive_numeric_domain=True,
-            )
-        )
-    for filter_name, value in sorted(plan.flat_paths.items()):
-        path = Path(value).resolve(strict=True)
-        if not path.is_relative_to(generated_root):
-            continue
-        reference_path = next(
-            item
-            for item in staged["FLAT"]
-            if raw_info(item).filter_name == filter_name
-        )
-        trusted_generated.append(
-            generated_override(
-                path,
-                raw_info(reference_path),
-                bias_included=None,
-                declare_additive_numeric_domain=False,
-            )
-        )
+    master_biases = tuple(outputs[BIAS])
+    master_darks = tuple(outputs[DARK])
+    master_flats = tuple(outputs[FLAT])
     receipt = {
         "schemaVersion": 1,
         "stage": "shared-calibration-library",
@@ -2215,6 +2199,30 @@ def run_project_e2e(
 ) -> ProjectE2EResult:
     """Run a complete multi-target project and commit one final directory."""
 
+    base = request.e2e_request
+    if base.pipeline_parameters.grouping_keyword_root is None:
+        # The shared calibration and every target run read WBPP grouping
+        # keywords below the same folder: the ancestor of all project inputs.
+        request = replace(
+            request,
+            e2e_request=replace(
+                base,
+                pipeline_parameters=replace(
+                    base.pipeline_parameters,
+                    grouping_keyword_root=grouping_keyword_root(
+                        (
+                            *base.light_files,
+                            *base.flat_files,
+                            *base.dark_files,
+                            *base.bias_files,
+                            *base.master_bias_files,
+                            *base.master_dark_files,
+                            *base.master_flat_files,
+                        )
+                    ),
+                ),
+            ),
+        )
     output, evidence, layout, mosaic_provider, sources, explicit_selection, run_digests = _check_project_request(
         request, solver_backends, mosaic_provider
     )

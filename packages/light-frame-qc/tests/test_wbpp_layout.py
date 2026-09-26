@@ -3,9 +3,14 @@ from __future__ import annotations
 import numpy as np
 
 from lightframeqc.metadata import (
+    grouping_keywords_from_path,
+    infer_bayer_pattern_from_path,
+    infer_binning_from_path,
+    infer_exposure_from_path,
     infer_filter_from_path,
     infer_frame_role_from_path,
     parse_frame_role,
+    path_metadata,
     processing_markers,
     session_keywords_from_path,
     session_keywords_of,
@@ -42,6 +47,34 @@ def test_session_keywords_follow_wbpp_grouping_names() -> None:
     assert session_keywords_from_path("/data/UPDATE_1/light.fits") is None
     # A shared ancestor is not a keyword of the frames compared below it.
     assert session_keywords_of(["/trips/one_night_trip/DATE_A/f.fits", "/trips/one_night_trip/DATE_B/f.fits"]) == ["DATE=A", "DATE=B"]
+
+
+def test_grouping_keywords_follow_wbpp_syntax_anywhere_in_the_path() -> None:
+    assert grouping_keywords_from_path("/data/NIGHT_1/Flats/f.fits") == (("NIGHT", "1"),)
+    # "_", "-" or a space; names in any case, values as written.
+    assert grouping_keywords_from_path("/data/night 2/L_SESSION-12Feb_001.fits") == (
+        ("NIGHT", "2"),
+        ("SESSION", "12Feb"),
+    )
+    # The innermost value wins; an underscore ends a value.
+    assert grouping_keywords_from_path("/d/NIGHT_1/sub/NIGHT_3/l.fits") == (("NIGHT", "3"),)
+    assert grouping_keywords_from_path("/d/DATE_2024-03-22_moon/l.fits") == (("DATE", "2024-03-22"),)
+    assert grouping_keywords_from_path("/m/PANEL_2/Lights/l.fits") == (("PANEL", "2"),)
+    # A word that merely contains a keyword, or a N.I.N.A. target folder, is none.
+    assert grouping_keywords_from_path("/d/UPDATE_1/NGC 6822_2026-08-17/LIGHT/l.fits") == ()
+
+
+def test_smart_naming_supplies_filter_binning_exposure_and_pattern() -> None:
+    metadata = path_metadata("/w/Light_BIN-2_EXPOSURE-300.00s_FILTER-Ha_BAYERPAT-RGGB/NIGHT_1/a.fits")
+    assert metadata.filter_name == "HA"
+    assert metadata.binning == 2
+    assert metadata.exposure_seconds == 300.0
+    assert metadata.cfa_pattern == "RGGB"
+    assert metadata.keywords == (("NIGHT", "1"),)
+    assert infer_exposure_from_path("/data/lights_60s/img_0001.fits") == 60.0
+    assert infer_binning_from_path("/data/Binning_1x1/img.fits") == 1
+    assert infer_binning_from_path("/data/cabin_2/img.fits") is None
+    assert infer_bayer_pattern_from_path("/data/img.fits") is None
 
 
 def test_processing_markers_from_xisf_properties_and_the_wbpp_layout() -> None:
