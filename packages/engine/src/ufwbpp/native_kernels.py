@@ -40,6 +40,8 @@ from numpy.typing import NDArray
 NATIVE_ABI_VERSION = 1
 DISABLE_ENVIRONMENT_VARIABLE = "UFWBPP_DISABLE_NATIVE_KERNELS"
 WARP_KERNEL_ID = "native-cpu-lanczos3-warp-v3-table2048"
+# The same sampling with coordinates from a node lattice (mosaic canvases).
+LATTICE_WARP_KERNEL_ID = "native-cpu-lanczos3-lattice-warp-v1-table2048"
 MAD_KERNEL_ID = "native-cpu-mad-rejection-v2"
 MEAN_KERNEL_ID = "native-cpu-masked-mean-v1"
 TILE_OFFSET_KERNEL_ID = "native-cpu-tile-offsets-v1"
@@ -129,6 +131,28 @@ class _WarpRequestV2(ctypes.Structure):
         ("source_samples", ctypes.POINTER(ctypes.c_float)),
         ("source_sample_count", ctypes.c_size_t),
         ("inverse", ctypes.c_double * 9),
+        ("domain_scale", ctypes.c_float),
+        ("reserved_scale", ctypes.c_float),
+    ]
+
+
+class _WarpLatticeRequestV1(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32),
+        ("source_width", ctypes.c_uint32),
+        ("source_height", ctypes.c_uint32),
+        ("output_width", ctypes.c_uint32),
+        ("first_row", ctypes.c_uint32),
+        ("row_count", ctypes.c_uint32),
+        ("threads", ctypes.c_uint32),
+        ("lattice_spacing", ctypes.c_uint32),
+        ("lattice_columns", ctypes.c_uint32),
+        ("lattice_rows", ctypes.c_uint32),
+        ("source_samples", ctypes.POINTER(ctypes.c_float)),
+        ("source_sample_count", ctypes.c_size_t),
+        ("lattice_x", ctypes.POINTER(ctypes.c_double)),
+        ("lattice_y", ctypes.POINTER(ctypes.c_double)),
+        ("lattice_node_count", ctypes.c_size_t),
         ("domain_scale", ctypes.c_float),
         ("reserved_scale", ctypes.c_float),
     ]
@@ -436,6 +460,17 @@ class NativeKernels:
             *error_arguments,
         ]
         library.ufwbpp_native_cpu_warp_lanczos3_v2.restype = ctypes.c_int
+        # Optional: the lattice warp of mosaic canvases; older libraries lack
+        # the symbol and callers fall back to the value-identical NumPy path.
+        self.has_lattice_warp = hasattr(library, "ufwbpp_native_cpu_warp_lanczos3_lattice_v1")
+        if self.has_lattice_warp:
+            library.ufwbpp_native_cpu_warp_lanczos3_lattice_v1.argtypes = [
+                ctypes.POINTER(_WarpLatticeRequestV1),
+                ctypes.POINTER(ctypes.c_float),
+                ctypes.c_size_t,
+                *error_arguments,
+            ]
+            library.ufwbpp_native_cpu_warp_lanczos3_lattice_v1.restype = ctypes.c_int
         library.ufwbpp_native_cpu_mad_rejection_v1.argtypes = [
             ctypes.POINTER(_MadRequestV1),
             ctypes.POINTER(ctypes.c_uint8),
@@ -628,6 +663,71 @@ class NativeKernels:
         )
         if status != 0:
             self._raise(error, status, "native Lanczos-3 warp")
+        return destination
+
+    def warp_lanczos3_lattice(
+        self,
+        source: NDArray[np.float32],
+        lattice_x: NDArray[np.float64],
+        lattice_y: NDArray[np.float64],
+        *,
+        spacing: int,
+        first_row: int,
+        row_count: int,
+        output_width: int,
+        domain_scale: float,
+        threads: int | None = None,
+    ) -> NDArray[np.float32]:
+        """Warp one band of output rows through a coordinate lattice.
+
+        ``lattice_x``/``lattice_y`` (``(rows, columns)``) hold the input
+        coordinates of output pixel ``(column*spacing, row*spacing)``; the
+        coordinates between nodes are interpolated bilinearly (see
+        ``stacking.warp._lattice_coordinates``, the NumPy reference).
+        """
+
+        if not self.has_lattice_warp:
+            raise NativeKernelError("native library lacks the lattice warp")
+        source_values = np.ascontiguousarray(source, dtype=np.float32)
+        if source_values.ndim != 2:
+            raise ValueError("warp source must be a two-dimensional image")
+        nodes_x = np.ascontiguousarray(lattice_x, dtype=np.float64)
+        nodes_y = np.ascontiguousarray(lattice_y, dtype=np.float64)
+        if nodes_x.ndim != 2 or nodes_x.shape != nodes_y.shape:
+            raise ValueError("warp lattice must be two arrays of one 2-D shape")
+        if row_count < 1 or output_width < 1 or first_row < 0:
+            raise ValueError("warp band geometry must be positive")
+        height, width = source_values.shape
+        request = _WarpLatticeRequestV1()
+        request.struct_size = ctypes.sizeof(_WarpLatticeRequestV1)
+        request.source_width = int(width)
+        request.source_height = int(height)
+        request.output_width = int(output_width)
+        request.first_row = int(first_row)
+        request.row_count = int(row_count)
+        request.threads = _thread_count(threads)
+        request.lattice_spacing = int(spacing)
+        request.lattice_rows = int(nodes_x.shape[0])
+        request.lattice_columns = int(nodes_x.shape[1])
+        request.source_samples = source_values.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        request.source_sample_count = source_values.size
+        request.lattice_x = nodes_x.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+        request.lattice_y = nodes_y.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+        request.lattice_node_count = nodes_x.size
+        request.domain_scale = float(domain_scale)
+        destination = np.empty((int(row_count), int(output_width)), dtype=np.float32)
+        error = ctypes.create_string_buffer(_ERROR_BYTES)
+        status = int(
+            self._library.ufwbpp_native_cpu_warp_lanczos3_lattice_v1(
+                ctypes.byref(request),
+                destination.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                destination.size,
+                error,
+                ctypes.sizeof(error),
+            )
+        )
+        if status != 0:
+            self._raise(error, status, "native Lanczos-3 lattice warp")
         return destination
 
     def mad_rejection(
@@ -1280,6 +1380,7 @@ __all__ = [
     "RADON_KERNEL_ID",
     "TILE_OFFSET_KERNEL_ID",
     "WARP_KERNEL_ID",
+    "LATTICE_WARP_KERNEL_ID",
     "default_kernel_threads",
     "describe_native_kernels",
     "load_native_kernels",

@@ -4,6 +4,27 @@ All notable changes are documented here. The format follows Keep a Changelog and
 
 ## [Unreleased]
 
+### Mosaics on one canvas
+
+- A project with several panels now plans one canvas before the panels run.
+  - One Light of every panel is solved, and the canvas is a gnomonic projection tangent at the centroid of the panels' union and turned to the median panel orientation; beyond 10° it is stereographic.
+  - Each panel's registration reference is refined into TAN+SIP on catalog stars, and every Light is warped once, from calibrated pixels straight onto the panel's window of the canvas.
+  - The previous mosaic reprojected each panel master bilinearly and then each filter again onto the reference grid, three interpolations in all.
+  - All filters share the canvas, so colour products never resample a channel.
+- Panel masters on the canvas carry the window's WCS, verified on catalog stars; the mosaic is no longer solved blind.
+- Panels are matched per filter in their overlaps, replacing one scalar gain and offset per panel propagated from panel 0:
+  - the scale from star photometry, with each panel's aperture at 2.5 of its own FWHM, an annulus median per star and a robust flux-flux fit;
+  - one plane per panel from the binned overlap differences;
+  - both solved for all overlaps at once, keeping the area-weighted consensus sky.
+- Blending is by inverse variance with an edge taper of up to 256 px. Gates cover overlap photometry (0.3 %), overlap astrometry (0.10 px), background residual, flux conservation and the catalog check of every panel window.
+- Lights of one target that point at separate parts of the sky (more than 0.35 of a field apart) become separate panels.
+- A native Lanczos-3 lattice warp maps output pixels through a 16 px coordinate lattice: 0.078 s per 27 MP output against 0.072 s for the matrix warp. It is value-identical to its NumPy reference and only used on a canvas.
+- Synthetic evidence:
+  - Two panels through the real pipeline, with distortion the solver's TAN ignores: isolated stars of the mosaic lie within 0.05 px (median) of the truth.
+  - Six panels with a bright galaxy core in an overlap: scales within 0.2 %, residual background under 0.25 at a pixel noise of 2, against injected planes of up to 10.
+  - Single-target runs are unchanged: identical master hashes against main on a synthetic per-night project, on the native and Metal paths.
+- Not yet: drizzle onto the canvas, seam routing and a two-scale blend, HDR exposure classes, a joint distortion adjustment, real mosaic data.
+
 ### Calibration paired by WBPP's rules
 
 - Folders prepared for PixInsight WBPP calibrate the way WBPP calibrates

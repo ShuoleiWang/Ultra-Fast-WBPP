@@ -565,6 +565,48 @@ def _read_calibrated_preview(
     return light, calibrated, time.perf_counter() - started
 
 
+def read_calibrated_full_image(path: str, plan: CalibrationPlan | None) -> FloatImage:
+    """One Light at full resolution, calibrated exactly as the registration
+    previews are (the same masters and arithmetic, without the binning)."""
+
+    image = read_full_image(path)
+    if plan is None or not plan.enabled:
+        return np.ascontiguousarray(image, dtype=np.float32)
+
+    def master(master_path: str | None) -> FloatImage | None:
+        if master_path is None:
+            return None
+        values = read_full_image(str(Path(master_path).expanduser().resolve(strict=True)))
+        if values.shape != image.shape:
+            raise ValueError(f"master {Path(master_path).name} has another geometry than the Light")
+        return values
+
+    assigned = plan.masters_for(path)
+    if assigned is not None:
+        bias, dark, flat = master(assigned.bias_path), master(assigned.dark_path), master(assigned.flat_path)
+        full_plan = replace(
+            plan,
+            dark_includes_bias=assigned.dark_includes_bias,
+            bias_application_scale=assigned.bias_application_scale,
+            dark_scale=plan.dark_scale * assigned.dark_application_scale,
+        )
+    else:
+        # The filter and exposure the preview path reads, from a tiny preview.
+        preview = read_frame_preview(path, max_long_edge=64)
+        exposure = preview.metadata.exposure_seconds
+        filter_name = _normalized_filter(preview)
+        flat_path = plan.flat_for(filter_name)
+        if plan.flat_paths and flat_path is None:
+            raise ValueError(f"no flat configured for filter {filter_name!r}")
+        bias, dark, flat = master(plan.bias_path), master(plan.dark_for(exposure)), master(flat_path)
+        full_plan = replace(
+            plan,
+            dark_includes_bias=plan.dark_includes_bias_for(exposure),
+            dark_scale=plan.dark_scale * plan.dark_application_scale_for(exposure),
+        )
+    return _calibrate_arrays(image, bias=bias, dark=dark, flat=flat, plan=full_plan)
+
+
 def detect_stars(image: FloatImage, config: DetectionConfig) -> StarCatalog:
     """Detect and rank stars on a mono Float32 image with SEP."""
 

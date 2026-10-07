@@ -26,7 +26,7 @@ from ufwbpp.recipe import Recipe
 from ufwbpp.runtime import RuntimeConfigurationError, build_e2e_request
 from ufwbpp.selection import SelectionParameters
 from test_e2e import FakeSolver, _header, _request, _write, synthetic_project  # noqa: F401  (fixture re-export)
-from test_project_e2e import FakePanelRunner, FakeReproject, ManagedCopySolver, _project
+from test_project_e2e import FakePanelRunner, FakeReproject, ManagedCopySolver, _mosaic_solver, _project
 
 
 def _digest(path: Path) -> str:
@@ -394,9 +394,9 @@ def test_project_layer_binds_decisions_per_target_run(tmp_path: Path) -> None:
 
     result = run_project_e2e(
         ProjectE2ERequest(inventory, base, base.output_directory),
-        solver_backends=(ManagedCopySolver(),),
+        solver_backends=(_mosaic_solver(),),
         panel_runner=capture,
-        mosaic_provider=FakeReproject().provider(),
+        reproject_provider=FakeReproject().provider(),
     )
     assert result.success is True
     assert len(observed) == 4
@@ -420,9 +420,9 @@ def test_project_layer_binds_decisions_per_target_run(tmp_path: Path) -> None:
     with pytest.raises(ProjectE2EError) as excinfo:
         run_project_e2e(
             ProjectE2ERequest(inventory, replace(stale, explicit_selection=foreign), stale.output_directory),
-            solver_backends=(ManagedCopySolver(),),
+            solver_backends=(_mosaic_solver(),),
             panel_runner=FakePanelRunner(),
-            mosaic_provider=FakeReproject().provider(),
+            reproject_provider=FakeReproject().provider(),
         )
     assert excinfo.value.code == "SELECTION_SOURCE_UNKNOWN"
     with pytest.raises(ProjectE2EError) as excinfo:
@@ -431,9 +431,9 @@ def test_project_layer_binds_decisions_per_target_run(tmp_path: Path) -> None:
                 inventory, stale, stale.output_directory,
                 review_selections=({"sourceSha256": _digest(lights[0]), "gatePolicyDigest": base.gate_policy.canonical_digest()},),
             ),
-            solver_backends=(ManagedCopySolver(),),
+            solver_backends=(_mosaic_solver(),),
             panel_runner=FakePanelRunner(),
-            mosaic_provider=FakeReproject().provider(),
+            reproject_provider=FakeReproject().provider(),
         )
     assert excinfo.value.code == "SELECTION_POLICY_CONFLICT"
 

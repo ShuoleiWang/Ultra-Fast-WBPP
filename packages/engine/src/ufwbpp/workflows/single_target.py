@@ -31,6 +31,7 @@ from lightframeqc.parallel import FrameRunner
 from ..blink.session import BlinkEvidence
 from ..calibration.policy import workflow_receipt
 from ..integrity import canonical_json_document
+from ..mosaic.canvas import CanvasProjection
 from ..path_budget import STAGING_SUFFIX, WORK_DIRECTORY
 from ..platform import remove_tree
 from ..products.preview import render_auto_stretch_preview
@@ -56,6 +57,7 @@ from .contracts import (
     ProgressStage,
     ReviewApproval,
 )
+from .canvas import _catalog_verifier, _place_on_canvas, _verify_canvas_candidates
 from .integration import _integrate_admitted_lights
 from .products import _drizzle_candidates, _ordinary_candidates, _promote_proper_coadds, _solve_candidates
 from .registration import _build_registration_masters, _register_lights
@@ -104,6 +106,17 @@ def _validate_request(request: E2ERequest) -> None:
                 )
     if not isinstance(request.integration_mode, IntegrationMode):
         raise E2EError("INTEGRATION_MODE_INVALID", "unknown integration mode")
+    if request.pipeline_parameters.output_grid is not None:
+        raise E2EError("OUTPUT_GRID_INTERNAL", "a run derives its canvas window itself; pass mosaic_canvas")
+    if request.mosaic_canvas is not None:
+        if not isinstance(request.mosaic_canvas, CanvasProjection):
+            raise E2EError("MOSAIC_CANVAS_INVALID", "mosaic_canvas must be a CanvasProjection")
+        if request.integration_mode is not IntegrationMode.ORDINARY:
+            raise E2EError("MOSAIC_DRIZZLE_UNSUPPORTED", "drizzle onto a mosaic canvas is not supported yet")
+        if request.pipeline_parameters.proper_coaddition.enabled:
+            raise E2EError(
+                "MOSAIC_PROPER_COADDITION_UNSUPPORTED", "proper coaddition of mosaic panels is not supported yet"
+            )
     request.selection.validate()
     request.blink_flags_policy.validate()
     if request.explicit_selection is not None and not isinstance(
@@ -469,6 +482,29 @@ def run_e2e(
         _write_json(receipts_dir / "registration.json", registration.receipt)
         _emit(progress, ProgressStage.REGISTRATION, "completed", f"accepted {len(registration.transforms)} full matrices")
 
+        canvas_receipt: str | None = None
+        # The share of a canvas window no Light can cover (its corners when
+        # the panel is rotated against the canvas) is not a coverage defect.
+        uncovered_window = 0.0
+        if request.mosaic_canvas is not None:
+            # A mosaic panel: its Lights go straight onto its canvas window.
+            _emit(progress, ProgressStage.ASTROMETRY, "progress", "placing the panel on the mosaic canvas")
+            placement = _place_on_canvas(
+                request,
+                registration,
+                calibration.plan,
+                work=work,
+                backends=solver_backends,
+                hints=screening.solver_hints,
+            )
+            request = replace(
+                request,
+                pipeline_parameters=replace(request.pipeline_parameters, output_grid=placement.grid),
+            )
+            canvas_receipt = "receipts/canvas.json"
+            _write_json(staging / canvas_receipt, placement.record)
+            uncovered_window = 1.0 - placement.footprint_fill
+
         (
             drizzle_mode,
             pipeline_result,
@@ -510,21 +546,34 @@ def run_e2e(
                 pipeline_result.master_light_paths,
                 pipeline_root,
                 staging,
-                minimum_coverage_fraction=request.drizzle.minimum_coverage_fraction,
-                maximum_null_fraction=request.drizzle.maximum_null_fraction,
+                minimum_coverage_fraction=max(0.0, request.drizzle.minimum_coverage_fraction - uncovered_window),
+                maximum_null_fraction=min(1.0, request.drizzle.maximum_null_fraction + uncovered_window),
             )
         _write_json(coverage_dir / "coverage.json", coverage)
 
         _emit(progress, ProgressStage.ASTROMETRY, "started", "solving every filter", total=len(candidates))
-        solver_records, product_paths_staged, solved_products, all_solved = _solve_candidates(
-            candidates,
-            products_dir=products_dir,
-            staging=staging,
-            backends=solver_backends,
-            hints=screening.solver_hints,
-            request=request,
-            progress=progress,
-        )
+        if request.pipeline_parameters.output_grid is not None:
+            # A mosaic panel's masters are on the canvas window: its WCS is
+            # known and verified on catalog stars, never solved blind.
+            solver_records, product_paths_staged, solved_products, all_solved = _verify_canvas_candidates(
+                candidates,
+                grid=request.pipeline_parameters.output_grid,
+                products_dir=products_dir,
+                staging=staging,
+                verifier=_catalog_verifier(solver_backends),
+                request=request,
+                progress=progress,
+            )
+        else:
+            solver_records, product_paths_staged, solved_products, all_solved = _solve_candidates(
+                candidates,
+                products_dir=products_dir,
+                staging=staging,
+                backends=solver_backends,
+                hints=screening.solver_hints,
+                request=request,
+                progress=progress,
+            )
         # WCS tolerances are expressed in native pixels; drizzled masters have
         # ``scale`` pixels per native pixel, so the same angular agreement is
         # ``scale`` times as many of their own pixels.
@@ -656,6 +705,7 @@ def run_e2e(
             "registration": {
                 "receipt": "receipts/registration.json",
                 "fullMatrixConvention": "INPUT_TO_OUTPUT",
+                **({"canvas": canvas_receipt} if canvas_receipt is not None else {}),
             },
             "integration": {
                 "pixelPipelineReceipt": "receipts/pixel-pipeline.json",

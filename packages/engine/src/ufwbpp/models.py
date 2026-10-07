@@ -115,6 +115,10 @@ class FrameAsset:
     error_message: str | None = None
     # WBPP grouping keywords from the path (NIGHT, SESSION, PANEL, ...).
     grouping_keywords: tuple[tuple[str, str], ...] = ()
+    # Where the frame points (header RA/Dec, degrees) and its pixel scale
+    # (FOCALLEN/XPIXSZ): what tells the panels of a mosaic apart.
+    pointing: tuple[float, float] | None = None
+    pixel_scale_arcsec: float | None = None
 
     @property
     def is_master(self) -> bool:
@@ -150,6 +154,12 @@ class FrameAsset:
         keywords = value.pop("grouping_keywords")
         if keywords:
             value["groupingKeywords"] = {name: text for name, text in keywords}
+        pointing = value.pop("pointing")
+        if pointing is not None:
+            value["pointing"] = [float(pointing[0]), float(pointing[1])]
+        scale = value.pop("pixel_scale_arcsec")
+        if scale is not None:
+            value["pixelScaleArcsec"] = float(scale)
         return json_value(value, "asset")
 
 

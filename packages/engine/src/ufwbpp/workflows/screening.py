@@ -14,7 +14,7 @@ import numpy as np
 from lightframeqc.analysis import analyze_measurements
 from lightframeqc.config import QcConfig
 from lightframeqc.measure import measure_paths
-from lightframeqc.models import FrameResult, GateDisposition
+from lightframeqc.models import FrameMetadata, FrameResult, GateDisposition
 from lightframeqc.parallel import FrameRunner
 from lightframeqc.quality_gate import GatePolicy, evaluate_quality_gate
 from lightframeqc.source_extraction import NONDETERMINISTIC_WARNING, cached_extraction_self_test
@@ -164,16 +164,16 @@ def _qc_manifest(
 
 def _inferred_solver_hints(
     request: E2ERequest,
-    passed_results: Sequence[FrameResult],
+    passed_metadata: Sequence[FrameMetadata],
 ) -> _SolverHints:
     explicit_coordinates = request.ra_hint_degrees is not None
     coordinate_pairs = [
-        (result.metadata.ra_degrees, result.metadata.dec_degrees)
-        for result in passed_results
-        if result.metadata.ra_degrees is not None
-        and result.metadata.dec_degrees is not None
-        and math.isfinite(result.metadata.ra_degrees)
-        and math.isfinite(result.metadata.dec_degrees)
+        (metadata.ra_degrees, metadata.dec_degrees)
+        for metadata in passed_metadata
+        if metadata.ra_degrees is not None
+        and metadata.dec_degrees is not None
+        and math.isfinite(metadata.ra_degrees)
+        and math.isfinite(metadata.dec_degrees)
     ]
     metadata_center: tuple[float, float] | None = None
     coordinate_spread_degrees: float | None = None
@@ -250,8 +250,8 @@ def _inferred_solver_hints(
         coordinate_evidence["selection"] = "blind"
 
     fov_samples: list[dict[str, Any]] = []
-    for result in passed_results:
-        header = result.metadata.header
+    for metadata in passed_metadata:
+        header = metadata.header
         try:
             focal_length = float(
                 header.get(
@@ -273,8 +273,8 @@ def _inferred_solver_hints(
             )
         except (TypeError, ValueError):
             continue
-        width = result.metadata.width
-        height = result.metadata.height
+        width = metadata.width
+        height = metadata.height
         values = (focal_length, pixel_size_x_um, pixel_size_y_um)
         if (
             focal_length <= 0
@@ -688,7 +688,7 @@ def _screen_lights(
     passed_results = [
         result for result in frame_results if Path(result.path).resolve(strict=True) in passed_set
     ]
-    solver_hints = _inferred_solver_hints(request, passed_results)
+    solver_hints = _inferred_solver_hints(request, [result.metadata for result in passed_results])
     drizzle_sampling = (
         _drizzle_sampling_evidence(passed_results, request.drizzle)
         if request.integration_mode is IntegrationMode.DRIZZLE

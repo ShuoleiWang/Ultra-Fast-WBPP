@@ -539,9 +539,18 @@ def _integrate_group(
             "OAFINTTM": total_exposure,
             "OAFSTATE": OUTPUT_STATE,
             "OAFWCS": "UNSOLVED",
-            "OAFCROP": "AUTO" if parameters.auto_crop else "NONE",
+            "OAFCROP": "AUTO" if parameters.auto_crop and parameters.output_grid is None else "NONE",
             "OAFNFRM": len(paths),
             "OAFNORM": normalization_method,
+            **(
+                {
+                    "OAFGRID": parameters.output_grid.digest[:32],
+                    "OAFGRIDX": parameters.output_grid.canvas_origin[0],
+                    "OAFGRIDY": parameters.output_grid.canvas_origin[1],
+                }
+                if parameters.output_grid is not None
+                else {}
+            ),
             **group_cfa_metadata,
             **domain_metadata,
         },

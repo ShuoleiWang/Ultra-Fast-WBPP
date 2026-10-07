@@ -51,6 +51,7 @@ Start with the [project README](../README.md) (also in [简体中文](README.zh-
 | [frame-selection-plan.md](frame-selection-plan.md) | Analysis and design of unattended selection (2026-09-19). Implemented; the current behaviour is described in [architecture.md](architecture.md#unattended-light-selection) |
 | [frame-selection-implementation.md](frame-selection-implementation.md) | Implementation specification and the round-by-round real-data results (§8) that fixed the thresholds |
 | [gui-redesign-plan.md](gui-redesign-plan.md) | The desktop redesign: diagnosis, design and the implementation record (§8) |
+| [mosaic-plan.md](mosaic-plan.md) | Multi-panel, multi-night mosaics with automatic stitching (2026-10-07): one canvas, one interpolation per frame, global astrometric and photometric networks, HDR-aware blending, gates and validation plan. Phase 1 implemented (§14); the current behaviour is in the [mosaic recipe](recipes/project-mosaic-rgb.md) |
 | [release-readiness.md](release-readiness.md) | Release review of 2026-09-09 (English): what was fixed, what blocks a stable binary release |
 | [security-audit.md](security-audit.md) | Dependency and secret audit snapshot of 2026-09-05 (English) |
 

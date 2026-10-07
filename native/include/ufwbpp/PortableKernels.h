@@ -63,6 +63,28 @@ struct WarpLanczos3Request
    // max(support maximum, domainScale), the lower clamp min(support minimum, 0).
    float domainScale = 0;
    std::uint32_t threads = 1;
+   // Optional coordinate lattice that replaces ``inverse`` (a map no matrix
+   // describes, such as a mosaic canvas through a SIP distortion). Node
+   // (i, j), stored row-major at j*latticeColumns + i, holds the input
+   // coordinates of output pixel (i*latticeSpacing, j*latticeSpacing); a
+   // nonfinite node invalidates every pixel of its cells. Between nodes the
+   // coordinates are interpolated bilinearly in the reference order of the
+   // NumPy resampler (``latticeSpacing`` is a power of two, so the fractions
+   // are exact):
+   //   cellX = min(xOut/spacing, columns - 2), cellY likewise
+   //   fx = (xOut - cellX*spacing)/spacing, fy likewise
+   //   top = n00 + fx*(n10 - n00), bottom = n01 + fx*(n11 - n01)
+   //   xIn = top + fy*(bottom - top), and yIn from the y nodes
+   std::span<const double> latticeX;
+   std::span<const double> latticeY;
+   std::uint32_t latticeSpacing = 0;
+   std::uint32_t latticeColumns = 0;
+   std::uint32_t latticeRows = 0;
+
+   bool HasLattice() const noexcept
+   {
+      return !latticeX.empty() || !latticeY.empty() || latticeSpacing != 0;
+   }
 
    void Validate() const;
    std::size_t OutputPixels() const;

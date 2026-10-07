@@ -217,7 +217,9 @@ def run_portable_pipeline_fits(
             plan.light_groups,
             plan.light_info,
             plan.transforms,
-            enabled=parameters.auto_crop,
+            # A canvas window keeps every partly covered pixel: the mosaic
+            # blend weights them by coverage instead of cropping overlaps.
+            enabled=parameters.auto_crop and parameters.output_grid is None,
             max_memory_bytes=parameters.registration_memory_bytes,
             resampler=parameters.registration_resampler,
         )

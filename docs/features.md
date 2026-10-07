@@ -62,7 +62,8 @@ Where the time goes and how it was removed:
 - **Transient trails found from their whole length.** Each frame's residual against the temporal median is integrated along every line of every dyadic length with a fast Radon transform, so a faint satellite that fades along its track is still detected, and only that frame's samples inside the corridor are dropped ([architecture](architecture.md#scientific-work)).
 - **Normalization that respects the sensor.** Frames are matched to the frame with the flattest large-scale background; when the sky level varies across the group, the sky-proportional part of each frame's background (residual flat-field structure) is separated from the object by regression in the sensor frame, through each frame's registration transform, so a meridian flip does not move it; the master's background tilt is moved to the flattest non-negative mix of the frames' own tilts, so gradients of different nights cancel where they disagree.
 - **Weights that ignore resampling phase.** Frame weights are the inverse variance of 4 × 4 block means, insensitive to the sub-pixel phase of the Lanczos-3 resampling, times the selection confidence and PSF factor.
-- **One grid for every channel.** The filter masters of a run are cropped to one common rectangle; every master is solved independently and the independent solutions verify each other at solver precision before the lowest-RMS one is written to all of them, so RGB/LRGB products are combined without any resampling ([project recipe](recipes/project-mosaic-rgb.md)).
+- **One grid for every channel.** The filter masters of a run are cropped to one common rectangle; every master is solved independently and the independent solutions verify each other at solver precision before the lowest-RMS one is written to all of them, so RGB/LRGB products are combined without any resampling.
+- **Mosaics on one canvas, one interpolation per frame.** The panels of a mosaic share one canvas for every filter. Each panel's Lights are warped once, from calibrated pixels straight onto the canvas, through the panel's own distortion (TAN+SIP fitted on catalog stars). The panels are matched by star photometry and background planes solved for all overlaps at once, never chained panel to panel, and an aperture that follows each panel's seeing keeps the ratios right on a bright galaxy. They are blended by inverse variance with edge tapers ([mosaics](recipes/project-mosaic-rgb.md)).
 
 ## 5. Master quality against PixInsight WBPP
 
@@ -119,7 +120,7 @@ CI runs the Python suite with the Release kernels built, ctest-checked and insta
 ## 11. What it does not do
 
 - It is preprocessing only: linear masters out, no stretching, gradient removal, deconvolution or colour calibration. It is not a PixInsight replacement.
-- Monochrome is validated on real data; one-shot colour and four-panel mosaics are validated on synthetic data only. LocalNormalization has been retired.
+- Monochrome is validated on real data; one-shot colour and mosaics are validated on synthetic data only. LocalNormalization has been retired.
 - Two machines have retained real-data evidence (one M3 Pro, one Ryzen 7 5800H laptop); other Macs and Windows classes run generic profiles. There are no signed or notarized installers yet.
 - The plate solver is external (Astrometry.net `solve-field` with local indexes on macOS, ASTAP plus the managed index set on Windows); nothing is uploaded anywhere.
 - The Metal path is audited and available but not faster than the native CPU kernels for the current workload; there is no GPU compute on Windows.

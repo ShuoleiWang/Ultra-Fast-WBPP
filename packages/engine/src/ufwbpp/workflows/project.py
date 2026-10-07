@@ -59,19 +59,21 @@ from ..products.color import (
     ColorProductResult,
     build_color_product,
 )
-from ..products.mosaic import (
-    MosaicError,
-    MosaicRequest,
-    MosaicResult,
-    ReprojectProvider,
-    build_solved_panel_mosaic,
-)
+from ..products.reprojection import ReprojectProvider
 from ..products.preview import render_auto_stretch_preview
 from ..solvers.base import SolverBackend, canonical_wcs_sha256, validate_wcs_header
 from ..stacking.crop import histogram_rectangle
 from ..stacking.integration import CalibrationError
-from .common import _fsync_directory, _relativize_solver_attempts, _rename_directory_no_replace, _safe_token
+from .canvas import _catalog_verifier
+from .common import _fsync_directory, _rename_directory_no_replace, _safe_token
 from .contracts import ProgressEvent
+from .mosaic import (
+    MosaicGateError,
+    MosaicStageError,
+    _assemble_canvas_mosaics,
+    _panel_product,
+    _plan_mosaic_canvas,
+)
 from .registration import _build_registration_masters
 from .review import bind_review_approval_selections
 from .sharing import _sanitize_shareable_tree, _share_safe_value
@@ -162,6 +164,13 @@ class ProjectLayout:
     @property
     def filter_keys(self) -> tuple[str, ...]:
         return tuple(sorted({panel.filter_key for panel in self.panels}))
+
+    @property
+    def is_mosaic(self) -> bool:
+        """Several targets of one project are the panels of one mosaic: they
+        share one canvas and every filter is assembled on it."""
+
+        return len(self.target_keys) > 1
 
     @property
     def requires_project_orchestration(self) -> bool:
@@ -301,10 +310,6 @@ class ProjectE2ERequest:
     inventory: ProjectInventory
     e2e_request: E2ERequest
     output_directory: str
-    minimum_mosaic_covered_fraction: float = 0.70
-    minimum_pair_overlap_pixels: int = 16
-    minimum_pair_overlap_fraction: float = 0.005
-    maximum_seam_normalized_mad: float = 0.25
     minimum_channel_alignment_coverage: float = 0.98
     channel_wcs_tolerance_pixels: float = 0.05
     # GUI/CLI REVIEW admissions as the reviewer made them: the preflight
@@ -349,7 +354,6 @@ class ProjectE2EResult:
 
 
 PanelRunner = Callable[..., E2EResult]
-MosaicBuilder = Callable[..., MosaicResult]
 ColorBuilder = Callable[..., ColorProductResult]
 
 
@@ -419,11 +423,81 @@ def _science_filter(asset: FrameAsset) -> tuple[str, str]:
     return canonical, _normalized_token(canonical)
 
 
+# Lights of one target whose pointings fall into groups farther apart than
+# this fraction of the field (the shorter side) are separate mosaic panels;
+# adjacent panels of a 10-15 % overlap are 0.85-0.9 of a field apart.
+PANEL_CLUSTER_FIELD_FRACTION = 0.35
+
+
+def _sky_clusters(lights: Sequence[FrameAsset]) -> list[list[FrameAsset]] | None:
+    """Single-linkage clusters of the Lights' pointings, north first; None
+    when a Light has no pointing or the field size is unknown."""
+
+    scales = [asset.pixel_scale_arcsec for asset in lights if asset.pixel_scale_arcsec]
+    if not lights or any(asset.pointing is None for asset in lights) or not scales:
+        return None
+    sides = [min(asset.width, asset.height) for asset in lights if asset.width > 0 and asset.height > 0]
+    if not sides:
+        return None
+    threshold = PANEL_CLUSTER_FIELD_FRACTION * float(np.median(sides)) * float(np.median(scales)) / 3600.0
+    radians = np.deg2rad(np.asarray([asset.pointing for asset in lights], dtype=np.float64))
+    vectors = np.column_stack(
+        (np.cos(radians[:, 1]) * np.cos(radians[:, 0]), np.cos(radians[:, 1]) * np.sin(radians[:, 0]), np.sin(radians[:, 1]))
+    )
+    linked = (vectors @ vectors.T) >= math.cos(math.radians(threshold))
+    label = [-1] * len(lights)
+    clusters: list[list[int]] = []
+    for start in range(len(lights)):
+        if label[start] >= 0:
+            continue
+        label[start] = len(clusters)
+        members, frontier = [start], [start]
+        while frontier:
+            for neighbour in np.flatnonzero(linked[frontier.pop()]):
+                if label[neighbour] < 0:
+                    label[neighbour] = label[start]
+                    members.append(int(neighbour))
+                    frontier.append(int(neighbour))
+        clusters.append(members)
+
+    def centre(members: list[int]) -> tuple[float, float]:
+        mean = vectors[members].sum(axis=0)
+        return math.degrees(math.asin(mean[2] / np.linalg.norm(mean))), math.degrees(math.atan2(mean[1], mean[0])) % 360.0
+
+    ordered = sorted(clusters, key=lambda members: (-round(centre(members)[0], 3), round(centre(members)[1], 3)))
+    return [[lights[index] for index in sorted(members)] for members in ordered]
+
+
 def classify_project_layout(inventory: ProjectInventory) -> ProjectLayout:
-    """Classify READY Lights into deterministic scientific target/filter panels."""
+    """Classify READY Lights into deterministic scientific target/filter panels.
+
+    A target's Lights that point at separate parts of the sky (an unlabelled
+    mosaic) become one panel per pointing cluster."""
 
     if not isinstance(inventory, ProjectInventory):
         raise ProjectE2EError("PROJECT_INVENTORY_INVALID", "inventory has the wrong type")
+    labelled: dict[str, tuple[str, str]] = {}
+    by_target: dict[str, list[FrameAsset]] = {}
+    for asset in inventory.assets:
+        if asset.role is not AssetRole.LIGHT or asset.status is not AssetStatus.READY:
+            continue
+        target, target_key = _science_target(asset)
+        panel = dict(asset.grouping_keywords).get("PANEL")
+        if panel is not None:
+            # WBPP's PANEL keyword (PANEL_2/): one mosaic panel per value, as
+            # its post-processing grouping integrates them separately.
+            target = f"{target} PANEL {panel}"
+            target_key = _normalized_token(target)
+        labelled[asset.path] = (target, target_key)
+        by_target.setdefault(target_key, []).append(asset)
+    for target_key, lights in by_target.items():
+        clusters = _sky_clusters(lights)
+        if clusters is None or len(clusters) == 1:
+            continue
+        for number, members in enumerate(clusters, start=1):
+            for asset in members:
+                target = f"{labelled[asset.path][0]} PANEL {number}"
+                labelled[asset.path] = (target, _normalized_token(target))
     grouped: dict[tuple[str, str], dict[str, Any]] = {}
     for asset in inventory.assets:
         if asset.role is not AssetRole.LIGHT:
@@ -432,13 +506,7 @@ def classify_project_layout(inventory: ProjectInventory) -> ProjectLayout:
             raise ProjectE2EError(
                 "LIGHT_NOT_READY", "conflicted or unreadable Light cannot enter a panel", path=asset.path
             )
-        target, target_key = _science_target(asset)
-        panel = dict(asset.grouping_keywords).get("PANEL")
-        if panel is not None:
-            # WBPP's PANEL keyword (PANEL_2/): one mosaic panel per value, as
-            # its post-processing grouping integrates them separately.
-            target = f"{target} PANEL {panel}"
-            target_key = _normalized_token(target)
+        target, target_key = labelled[asset.path]
         filter_name, filter_key = _science_filter(asset)
         pattern = normalize_cfa_pattern(asset.cfa_pattern)
         # A Bayer (OSC) Light yields the three colour channel panels R, G and
@@ -722,9 +790,6 @@ def _validate_request(request: ProjectE2ERequest) -> tuple[Path, Path, ProjectLa
             )
         seen_selection_digests.add(selection["sourceSha256"])
     numeric = {
-        "minimum_mosaic_covered_fraction": request.minimum_mosaic_covered_fraction,
-        "minimum_pair_overlap_fraction": request.minimum_pair_overlap_fraction,
-        "maximum_seam_normalized_mad": request.maximum_seam_normalized_mad,
         "minimum_channel_alignment_coverage": request.minimum_channel_alignment_coverage,
         "channel_wcs_tolerance_pixels": request.channel_wcs_tolerance_pixels,
     }
@@ -736,8 +801,6 @@ def _validate_request(request: ProjectE2ERequest) -> tuple[Path, Path, ProjectLa
             or float(value) <= 0
         ):
             raise ProjectE2EError("PROJECT_GATE_INVALID", f"{name} must be finite and positive")
-    if request.minimum_mosaic_covered_fraction > 1 or request.minimum_pair_overlap_fraction > 1:
-        raise ProjectE2EError("PROJECT_GATE_INVALID", "coverage fractions cannot exceed 1")
     if not 0.9 <= request.minimum_channel_alignment_coverage <= 1.0:
         raise ProjectE2EError(
             "PROJECT_GATE_INVALID",
@@ -1503,24 +1566,19 @@ class _ColorOutputs(NamedTuple):
 def _check_project_request(
     request: ProjectE2ERequest,
     solver_backends: Sequence[SolverBackend],
-    mosaic_provider: ReprojectProvider | None,
+    reproject_provider: ReprojectProvider | None,
 ) -> tuple[Path, Path, ProjectLayout, ReprojectProvider | None, tuple[Any, ...], Any, dict[str, Any]]:
     """Refuse a request that cannot run before anything is created."""
 
     output, evidence, layout = _validate_request(request)
     if not solver_backends:
         raise ProjectE2EError("SOLVER_CHAIN_EMPTY", "at least one final-solve backend is required")
-    if mosaic_provider is None and (
-        any(sum(panel.filter_key == key for panel in layout.panels) > 1 for key in layout.filter_keys)
-        or {"r", "g", "b"}.issubset(set(layout.filter_keys))
-    ):
-        from ..products.mosaic import load_reproject_provider
+    if reproject_provider is None and not layout.is_mosaic and {"r", "g", "b"}.issubset(set(layout.filter_keys)):
+        from ..products.reprojection import load_reproject_provider
 
-        capability, mosaic_provider = load_reproject_provider()
-        if mosaic_provider is None:
-            raise ProjectE2EError(
-                "MOSAIC_BACKEND_UNAVAILABLE", capability.reason or "reproject is unavailable"
-            )
+        reproject_provider, reason = load_reproject_provider()
+        if reproject_provider is None:
+            raise ProjectE2EError("CHANNEL_ALIGNMENT_BACKEND_UNAVAILABLE", reason or "reproject is unavailable")
 
     output.parent.mkdir(parents=True, exist_ok=True)
     sources = _all_sources(request.e2e_request)
@@ -1561,7 +1619,7 @@ def _check_project_request(
                 "SELECTION_SOURCE_AMBIGUOUS",
                 "selection digests name more than one current Light: " + ", ".join(ambiguous),
             )
-    return output, evidence, layout, mosaic_provider, sources, explicit_selection, run_digests
+    return output, evidence, layout, reproject_provider, sources, explicit_selection, run_digests
 
 
 def _prepare_shared_calibration(run: _ProjectRun) -> _SharedMasters:
@@ -1606,8 +1664,11 @@ def _prepare_shared_calibration(run: _ProjectRun) -> _SharedMasters:
     return _SharedMasters(direct_approved_panel, masters_bias, masters_dark, masters_flat, trusted_generated_master_overrides)
 
 
-def _run_target_panels(run: _ProjectRun, shared: _SharedMasters, explicit_selection: Any, run_digests: dict[str, Any], solver_backends: Sequence[SolverBackend], panel_runner: PanelRunner) -> tuple[dict[str, list[tuple[SciencePanel, Path]]], dict[str, dict[str, Any]]] | ProjectE2EResult:
-    """Run every target once with all of its filters; a failed target run fails the project."""
+def _run_target_panels(run: _ProjectRun, shared: _SharedMasters, explicit_selection: Any, run_digests: dict[str, Any], solver_backends: Sequence[SolverBackend], panel_runner: PanelRunner, canvas: Any = None) -> tuple[dict[str, list[tuple[SciencePanel, Path]]], dict[str, dict[str, Any]]] | ProjectE2EResult:
+    """Run every target once with all of its filters; a failed target run fails the project.
+
+    With ``canvas`` (a mosaic) every target is a panel that integrates straight
+    onto its window of the canvas."""
 
     direct_approved_panel, masters_bias, masters_dark, masters_flat, trusted_generated_master_overrides = shared
     request, evidence, layout, sources, staging, details, records, passed, excluded, project_progress = run.request, run.evidence, run.layout, run.sources, run.staging, run.details, run.records, run.passed, run.excluded, run.project_progress
@@ -1636,11 +1697,15 @@ def _run_target_panels(run: _ProjectRun, shared: _SharedMasters, explicit_select
             if explicit_selection is not None
             else None
         )
+        mosaic_fields = (
+            {"mosaic_canvas": canvas, "mosaic_panel": group.target_key} if canvas is not None else {}
+        )
         if direct_approved_panel:
             sub_request = replace(
                 request.e2e_request,
                 light_files=group.light_files,
                 output_directory=str(sub_output),
+                **mosaic_fields,
             )
         else:
             panel_pipeline_parameters = replace(
@@ -1668,6 +1733,7 @@ def _run_target_panels(run: _ProjectRun, shared: _SharedMasters, explicit_select
                 review_approvals=(),
                 pipeline_parameters=panel_pipeline_parameters,
                 explicit_selection=run_explicit_selection,
+                **mosaic_fields,
             )
             run_selections = [
                 selection for selection in request.review_selections
@@ -1732,108 +1798,169 @@ def _run_target_panels(run: _ProjectRun, shared: _SharedMasters, explicit_select
     return panels_by_filter, panel_quality_by_path
 
 
-def _build_filter_mosaics(run: _ProjectRun, panels_by_filter: dict[str, list[tuple[SciencePanel, Path]]], panel_quality_by_path: dict[str, dict[str, Any]], solver_backends: Sequence[SolverBackend], mosaic_builder: MosaicBuilder, mosaic_provider: ReprojectProvider | None) -> tuple[dict[str, tuple[str, Path]], dict[str, dict[str, Any]]] | ProjectE2EResult:
-    """Mosaic each filter's panels and solve the mosaic afresh; single panels pass through."""
+def _single_panel_products(run: _ProjectRun, panels_by_filter: dict[str, list[tuple[SciencePanel, Path]]], panel_quality_by_path: dict[str, dict[str, Any]]) -> tuple[dict[str, tuple[str, Path]], dict[str, dict[str, Any]]]:
+    """One target: every filter's solved master is its final channel."""
 
-    request, evidence, layout, sources, staging, details, records, passed, excluded, project_progress = run.request, run.evidence, run.layout, run.sources, run.staging, run.details, run.records, run.passed, run.excluded, run.project_progress
     final_sources: dict[str, tuple[str, Path]] = {}
     final_quality: dict[str, dict[str, Any]] = {}
-    mosaic_root = details / "mosaics"
-    mosaic_root.mkdir()
-    mosaic_total = 2 * sum(len(panels) > 1 for panels in panels_by_filter.values())
-    mosaic_completed = 0
-    project_progress.phase("mosaic", 0, mosaic_total, "building and solving filter mosaics" if mosaic_total else "single panels require no mosaic")
     for filter_key, panels in sorted(panels_by_filter.items()):
-        display_filter = panels[0][0].filter_name
-        if len(panels) == 1:
-            final_sources[filter_key] = (display_filter, panels[0][1])
-            final_quality[filter_key] = panel_quality_by_path[str(panels[0][1])]
-            records["mosaics"][filter_key] = {
-                "mode": "SINGLE_SOLVED_PANEL",
-                "panelCount": 1,
-                "freshFinalSolveRequired": False,
-            }
-            continue
-        assert mosaic_provider is not None
-        working_directory = mosaic_root / f"{_safe_token(filter_key)}-working"
-        mosaic = mosaic_builder(
-            MosaicRequest(
-                panel_paths=tuple(str(path) for _, path in panels),
-                output_directory=str(working_directory),
-                minimum_covered_fraction=request.minimum_mosaic_covered_fraction,
-                minimum_pair_overlap_pixels=request.minimum_pair_overlap_pixels,
-                minimum_pair_overlap_fraction=request.minimum_pair_overlap_fraction,
-                maximum_seam_normalized_mad=request.maximum_seam_normalized_mad,
-            ),
-            provider=mosaic_provider,
-        )
-        working = Path(mosaic.mosaic_path).resolve(strict=True)
-        mosaic_completed += 1
-        project_progress.phase("mosaic", mosaic_completed, mosaic_total, f"{display_filter}: mosaic built; fresh solve pending")
-        working_header, _ = _read_image_header(working)
-        if working_header.get("OAFSTATE") != "NEEDS_FINAL_SOLVE" or working_header.get("OAFWCS") != "PROPAGATED":
+        if len(panels) != 1:
             raise ProjectE2EError(
-                "MOSAIC_STATE_INVALID",
-                "working mosaic must remain NEEDS_FINAL_SOLVE/PROPAGATED",
-                path=str(working),
+                "PROJECT_LAYOUT_INVALID", f"filter {filter_key} has {len(panels)} panels outside a mosaic"
             )
-        solved_directory = mosaic_root / f"{_safe_token(filter_key)}-solved"
-        solved_directory.mkdir()
-        solved_path = solved_directory / f"master_light_{_safe_token(display_filter)}_mosaic_wcs.fits"
-        hints = _final_mosaic_hints(working, request.e2e_request)
-        solved, attempts = _solve_one(
-            input_path=working,
-            output_path=solved_path,
-            backends=solver_backends,
-            hints=hints,
-            min_matches=request.e2e_request.min_matches,
-            max_rms_arcsec=request.e2e_request.max_rms_arcsec,
-        )
-        records["mosaics"][filter_key] = {
-            "mode": "SOLVED_PANEL_MOSAIC",
-            "panelCount": len(panels),
-            "workingReceipt": Path(mosaic.receipt_path).relative_to(staging).as_posix(),
-            "workingReceiptSha256": sha256_digest(Path(mosaic.receipt_path)),
-            "workingState": mosaic.state,
-            "propagatedWcsIsFinalSolution": False,
-        }
-        records["finalSolves"][filter_key] = {
-            "status": "SOLVED" if solved else "UNSOLVED",
-            "input": working.relative_to(staging).as_posix(),
-            "output": solved_path.relative_to(staging).as_posix() if solved else None,
-            "hints": hints.serializable(),
-            "attempts": _relativize_solver_attempts(attempts, staging),
-        }
-        if not solved:
-            _verify_sources(sources)
-            return _failure_result(
-                staging=staging,
-                evidence=evidence,
-                code="MOSAIC_FINAL_SOLVE_REQUIRED",
-                message=f"filter {display_filter} mosaic did not pass a fresh final solve",
-                sources=sources,
-                layout=layout,
-                records=records,
-                passed=passed,
-                excluded=excluded,
-            )
-        final_sources[filter_key] = (display_filter, solved_path)
-        accepted_attempt = next(
-            item for item in reversed(attempts) if item.get("accepted") is True
-        )
-        quality = accepted_attempt.get("result", {}).get("astrometricQuality")
-        if not isinstance(quality, Mapping) or quality.get("catalogManaged") is not True:
-            raise ProjectE2EError(
-                "MOSAIC_ASTROMETRY_EVIDENCE_MISSING",
-                "fresh mosaic solve lacks managed catalog evidence",
-            )
-        final_quality[filter_key] = dict(quality)
-        mosaic_completed += 1
-        project_progress.phase("mosaic", mosaic_completed, mosaic_total, f"{display_filter}: fresh mosaic solve verified")
+        panel, path = panels[0]
+        final_sources[filter_key] = (panel.filter_name, path)
+        final_quality[filter_key] = panel_quality_by_path[str(path)]
+        run.records["mosaics"][filter_key] = {"mode": "SINGLE_SOLVED_PANEL", "panelCount": 1}
     return final_sources, final_quality
 
 
-def _align_channels(run: _ProjectRun, final_sources: dict[str, tuple[str, Path]], final_quality: dict[str, dict[str, Any]], mosaic_provider: ReprojectProvider | None) -> _AlignedChannels:
+def _plan_canvas_stage(run: _ProjectRun, solver_backends: Sequence[SolverBackend]) -> Any:
+    """Plan the mosaic canvas from one solved Light of every panel."""
+
+    project_progress = run.project_progress
+    project_progress.phase("mosaic", 0, 1, "solving one Light of every panel to plan the mosaic canvas")
+    try:
+        plan, record = _plan_mosaic_canvas(
+            [(group.target_key, group.light_files) for group, _ in run.layout.target_runs],
+            run.request.e2e_request,
+            solver_backends,
+            run.details,
+        )
+    except MosaicStageError as error:
+        _verify_sources(run.sources)
+        return _failure_result(
+            staging=run.staging,
+            evidence=run.evidence,
+            code=error.code,
+            message=str(error),
+            sources=run.sources,
+            layout=run.layout,
+            records=run.records,
+            passed=run.passed,
+            excluded=run.excluded,
+        )
+    run.records["canvas"] = record
+    return plan
+
+
+def _canvas_mosaic_stage(
+    run: _ProjectRun,
+    panels_by_filter: dict[str, list[tuple[SciencePanel, Path]]],
+    plan: Any,
+    verifier: Any,
+) -> tuple[dict[str, tuple[str, Path]], dict[str, dict[str, Any]]] | ProjectE2EResult:
+    """Every filter's mosaic on the shared canvas, its WCS verified on catalog stars."""
+
+    request, records, project_progress = run.request, run.records, run.project_progress
+    try:
+        panels = {
+            filter_key: (
+                items[0][0].filter_name,
+                [
+                    _panel_product(panel.target_key, panel.filter_name, path, _safe_token(panel.filter_name))
+                    for panel, path in items
+                ],
+            )
+            for filter_key, items in panels_by_filter.items()
+        }
+        mosaic_root = run.details / "mosaics"
+        mosaic_root.mkdir()
+        paths, qualities, receipts, summary = _assemble_canvas_mosaics(
+            plan,
+            panels,
+            mosaic_root,
+            verifier=verifier,
+            minimum_matches=request.e2e_request.min_matches,
+            maximum_rms_arcsec=request.e2e_request.max_rms_arcsec,
+            progress=lambda current, total, message: project_progress.phase("mosaic", current, total, message),
+        )
+    except (MosaicGateError, MosaicStageError) as error:
+        records["mosaics"]["failure"] = {"code": error.code, **getattr(error, "receipt", {})}
+        _verify_sources(run.sources)
+        return _failure_result(
+            staging=run.staging,
+            evidence=run.evidence,
+            code=error.code,
+            message=str(error),
+            sources=run.sources,
+            layout=run.layout,
+            records=records,
+            passed=run.passed,
+            excluded=run.excluded,
+        )
+    records["mosaics"]["canvas"] = summary
+    final_sources: dict[str, tuple[str, Path]] = {}
+    final_quality: dict[str, dict[str, Any]] = {}
+    for filter_key, path in paths.items():
+        receipt = receipts[filter_key]
+        receipt_path = path.parent / "receipt.json"
+        _write_json(receipt_path, receipt)
+        records["mosaics"][filter_key] = {
+            "mode": "CANVAS_MOSAIC",
+            "panelCount": len(panels_by_filter[filter_key]),
+            "verdict": receipt["verdict"],
+            "gates": receipt["gates"],
+            "receipt": receipt_path.relative_to(run.staging).as_posix(),
+            "receiptSha256": sha256_digest(receipt_path),
+        }
+        quality = qualities[filter_key]
+        if quality is None or quality.get("catalogManaged") is not True:
+            _verify_sources(run.sources)
+            return _failure_result(
+                staging=run.staging,
+                evidence=run.evidence,
+                code="MOSAIC_ASTROMETRY_EVIDENCE_MISSING",
+                message=f"{receipt['filter']} mosaic lacks managed catalog verification of its canvas WCS",
+                sources=run.sources,
+                layout=run.layout,
+                records=records,
+                passed=run.passed,
+                excluded=run.excluded,
+            )
+        final_sources[filter_key] = (panels_by_filter[filter_key][0][0].filter_name, path)
+        final_quality[filter_key] = dict(quality)
+    return final_sources, final_quality
+
+
+def _canvas_channels(run: _ProjectRun, final_sources: dict[str, tuple[str, Path]], final_quality: dict[str, dict[str, Any]]) -> _AlignedChannels:
+    """Mosaics of one canvas share every pixel: publish them as they are."""
+
+    staging, records, project_progress = run.staging, run.records, run.project_progress
+    reference_key = next((key for key in ("l", "r", "g", "b") if key in final_sources), sorted(final_sources)[0])
+    reference_filter = final_sources[reference_key][0]
+    mono_paths: dict[str, Path] = {}
+    astrometry_provenance: dict[str, dict[str, Any]] = {}
+    project_progress.phase("alignment", 0, len(final_sources), "mosaics share the canvas grid")
+    for key, (filter_name, source) in sorted(final_sources.items()):
+        destination = staging / f"{_safe_token(filter_name)}.fits"
+        publication = _publish_file(source, destination)
+        provenance = {
+            "type": "CANVAS_CATALOG_VERIFIED",
+            "freshSolveOnThisPixelGrid": False,
+            "catalogVerifiedOnThisPixelGrid": True,
+            "sourceSolution": _astrometry_gui_evidence(source, final_quality[key]),
+            "qualityAppliesTo": "CANVAS_WCS_VERIFIED_ON_THIS_GRID",
+        }
+        records["alignment"][key] = {
+            "filter": filter_name,
+            "mode": "CANVAS_GRID",
+            "referenceFilter": reference_filter,
+            "wcsProvenance": "CANVAS_CATALOG_VERIFIED",
+            "publication": publication,
+            "coverageFraction": 1.0,
+            "source": _source_identity(source),
+            "output": _source_identity(destination),
+            "astrometryProvenance": provenance,
+        }
+        astrometry_provenance[key] = provenance
+        mono_paths[key] = destination
+        project_progress.phase("alignment", len(mono_paths), len(final_sources), f"{filter_name}: on the canvas grid")
+    records["finalCrop"] = {"mode": "CANVAS_UNCROPPED", "applied": False}
+    return _AlignedChannels(reference_key, reference_filter, mono_paths, dict(final_quality), astrometry_provenance)
+
+
+def _align_channels(run: _ProjectRun, final_sources: dict[str, tuple[str, Path]], final_quality: dict[str, dict[str, Any]], reproject_provider: ReprojectProvider | None) -> _AlignedChannels:
     """Put every solved channel on the reference grid and crop them to one rectangle."""
 
     request, staging, records, project_progress = run.request, run.staging, run.records, run.project_progress
@@ -1865,14 +1992,14 @@ def _align_channels(run: _ProjectRun, final_sources: dict[str, tuple[str, Path]]
                 "output": _source_identity(destination),
             }
         else:
-            assert mosaic_provider is not None
+            assert reproject_provider is not None
             alignment = _align_channel(
                 source,
                 reference_path,
                 destination,
                 filter_name=filter_name,
                 reference_filter=reference_filter,
-                provider=mosaic_provider,
+                provider=reproject_provider,
                 tolerance_pixels=request.channel_wcs_tolerance_pixels,
                 minimum_coverage=request.minimum_channel_alignment_coverage,
             )
@@ -1889,8 +2016,8 @@ def _align_channels(run: _ProjectRun, final_sources: dict[str, tuple[str, Path]]
                 "referenceSolution": reference_solution,
                 "sourceSolution": source_solution,
                 "reprojection": {
-                    "backendId": mosaic_provider.backend_id if mosaic_provider else None,
-                    "backendVersion": mosaic_provider.version if mosaic_provider else None,
+                    "backendId": reproject_provider.backend_id if reproject_provider else None,
+                    "backendVersion": reproject_provider.version if reproject_provider else None,
                     "coverageFraction": alignment["coverageFraction"],
                     "sampleCount": alignment["sampleCount"],
                     "maximumNinePointResidualPixelsBeforeAlignment": alignment[
@@ -2068,7 +2195,8 @@ def _verify_and_publish(run: _ProjectRun, panels_by_filter: dict[str, list[tuple
         artifact["finalGate"] = {
             "status": "PASS",
             "managedCatalogRequired": True,
-            "freshMosaicSolve": len(panels_by_filter[key]) > 1,
+            "freshMosaicSolve": False,
+            "canvasCatalogVerified": astrometry_provenance[key]["type"] == "CANVAS_CATALOG_VERIFIED",
             "channelAlignmentPassed": True,
             "freshSolveOnThisPixelGrid": astrometry_provenance[key][
                 "freshSolveOnThisPixelGrid"
@@ -2134,7 +2262,7 @@ def _verify_and_publish(run: _ProjectRun, panels_by_filter: dict[str, list[tuple
                 "mosaicCoverageOverlapSeamPassed": True,
                 "propagatedAlignedChannelsVerified": all(
                     value["type"]
-                    in {"FRESH_SOLVE_UNCHANGED_GRID", "PROPAGATED_VERIFIED"}
+                    in {"FRESH_SOLVE_UNCHANGED_GRID", "PROPAGATED_VERIFIED", "CANVAS_CATALOG_VERIFIED"}
                     for value in astrometry_provenance.values()
                 ),
                 "rgbState": (
@@ -2192,12 +2320,15 @@ def run_project_e2e(
     *,
     solver_backends: Sequence[SolverBackend],
     progress: ProgressCallback | None = None,
-    mosaic_provider: ReprojectProvider | None = None,
+    reproject_provider: ReprojectProvider | None = None,
     panel_runner: PanelRunner = run_e2e,
-    mosaic_builder: MosaicBuilder = build_solved_panel_mosaic,
     color_builder: ColorBuilder = build_color_product,
 ) -> ProjectE2EResult:
-    """Run a complete multi-target project and commit one final directory."""
+    """Run a complete multi-target project and commit one final directory.
+
+    Several targets are the panels of one mosaic: the canvas is planned
+    before they run, each integrates onto its window of it, and every
+    filter's mosaic is assembled there."""
 
     base = request.e2e_request
     if base.pipeline_parameters.grouping_keyword_root is None:
@@ -2223,8 +2354,8 @@ def run_project_e2e(
                 ),
             ),
         )
-    output, evidence, layout, mosaic_provider, sources, explicit_selection, run_digests = _check_project_request(
-        request, solver_backends, mosaic_provider
+    output, evidence, layout, reproject_provider, sources, explicit_selection, run_digests = _check_project_request(
+        request, solver_backends, reproject_provider
     )
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", suffix=PROJECT_STAGING_SUFFIX, dir=output.parent))
     # The published directory holds only the final channels, ``previews`` and
@@ -2247,20 +2378,30 @@ def run_project_e2e(
     run = _ProjectRun(request, output, evidence, layout, sources, staging, details, records, passed, excluded, project_progress)
     try:
         shared = _prepare_shared_calibration(run)
-        targets = _run_target_panels(run, shared, explicit_selection, run_digests, solver_backends, panel_runner)
+        canvas_plan = None
+        if layout.is_mosaic:
+            canvas_plan = _plan_canvas_stage(run, solver_backends)
+            if isinstance(canvas_plan, ProjectE2EResult):
+                return canvas_plan
+        targets = _run_target_panels(
+            run, shared, explicit_selection, run_digests, solver_backends, panel_runner,
+            canvas=canvas_plan.projection if canvas_plan is not None else None,
+        )
         if isinstance(targets, ProjectE2EResult):
             return targets
         panels_by_filter, panel_quality_by_path = targets
-        mosaics = _build_filter_mosaics(
-            run, panels_by_filter, panel_quality_by_path, solver_backends, mosaic_builder, mosaic_provider
-        )
-        if isinstance(mosaics, ProjectE2EResult):
-            return mosaics
-        final_sources, final_quality = mosaics
-        aligned = _align_channels(run, final_sources, final_quality, mosaic_provider)
+        if canvas_plan is not None:
+            mosaics = _canvas_mosaic_stage(run, panels_by_filter, canvas_plan, _catalog_verifier(solver_backends))
+            if isinstance(mosaics, ProjectE2EResult):
+                return mosaics
+            final_sources, final_quality = mosaics
+            aligned = _canvas_channels(run, final_sources, final_quality)
+        else:
+            final_sources, final_quality = _single_panel_products(run, panels_by_filter, panel_quality_by_path)
+            aligned = _align_channels(run, final_sources, final_quality, reproject_provider)
         color = _render_previews_and_color(run, final_sources, aligned, color_builder)
         return _verify_and_publish(run, panels_by_filter, final_sources, aligned, color)
-    except (ProjectE2EError, E2EError, MosaicError, ColorProductError, CalibrationError, OSError) as error:
+    except (ProjectE2EError, E2EError, ColorProductError, CalibrationError, OSError) as error:
         if not staging.exists():
             raise
         code = getattr(error, "code", "PROJECT_EXECUTION_FAILED")

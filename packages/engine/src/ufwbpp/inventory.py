@@ -7,7 +7,7 @@ import math
 import os
 from pathlib import Path
 import re
-from typing import Iterable
+from typing import Any, Iterable, Mapping
 
 from lightframeqc.metadata import grouping_keyword_root, grouping_keywords_from_path
 from lightframeqc.models import FrameRole
@@ -124,6 +124,27 @@ def _group_id(
         "readoutMode": readout_mode,
     }
     return _digest(payload)
+
+
+def _pointing(metadata: Any) -> tuple[float, float] | None:
+    ra, dec = metadata.ra_degrees, metadata.dec_degrees
+    if ra is None or dec is None or not (math.isfinite(ra) and math.isfinite(dec)) or abs(dec) > 90.0:
+        return None
+    return float(ra) % 360.0, float(dec)
+
+
+def _pixel_scale_arcsec(header: Mapping[str, Any]) -> float | None:
+    """206.265 * pixel size (um) / focal length (mm); FITS XPIXSZ describes
+    the effective (binned) pixel."""
+
+    try:
+        focal_length = float(header.get("FOCALLEN", header.get("FOCAL", 0.0)) or 0.0)
+        pixel_size = float(header.get("XPIXSZ", header.get("PIXSIZE1", header.get("PIXSIZE", 0.0))) or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(focal_length) and math.isfinite(pixel_size)) or focal_length <= 0 or pixel_size <= 0:
+        return None
+    return 206.264806 * pixel_size / focal_length
 
 
 def _temperature_celsius(header: dict[str, object]) -> float | None:
@@ -373,6 +394,8 @@ def inventory_project(
             group_id=group_id,
             source_stat=source_stat,
             grouping_keywords=grouping_keywords_from_path(str(path), root=keyword_root),
+            pointing=_pointing(metadata),
+            pixel_scale_arcsec=_pixel_scale_arcsec(metadata.header),
         )
         assets.append(asset)
         if metadata.role_conflicts:

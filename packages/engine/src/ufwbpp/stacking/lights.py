@@ -35,7 +35,7 @@ from .integration import (
     _validate_expression_shapes,
 )
 from .masters import _CalibrationMasters
-from .parameters import OUTPUT_STATE, PipelineParameters, PixelTransform
+from .parameters import OUTPUT_STATE, OutputGrid, PipelineParameters, PixelTransform
 from .records import _safe_token
 from .run_plan import _RunLedger, _RunPlan, _StagingDirs
 from .warp import (
@@ -239,6 +239,7 @@ def _process_light_job(
     native_threads: int,
     division_floor: float,
     durable: bool = True,
+    grid: OutputGrid | None = None,
 ) -> _LightJobResult:
     expression = _canonical_expression(job.expression)
     sources: dict[str, Any] = {}
@@ -299,10 +300,11 @@ def _process_light_job(
     occupied = calibrated.nbytes + (planes.nbytes if planes is not None else 0)
     # The calibrated image already occupies its share; leave the rest of the
     # worker budget to warp tiles, but always allow at least one NumPy row.
+    output_width = grid.width if grid is not None else calibrated.shape[1]
     warp_budget = max(
         max_memory_bytes - occupied,
-        calibrated.shape[1]
-        * _registration_bytes_per_pixel(job.transform, resampler, calibrated.shape),
+        output_width
+        * _registration_bytes_per_pixel(job.transform, resampler, calibrated.shape, grid),
     )
     registered: list[_RegisteredOutput] = []
     for destination in job.destinations:
@@ -331,6 +333,7 @@ def _process_light_job(
             native_threads=native_threads,
             execution=execution,
             durable=durable,
+            grid=grid,
         )
         registered.append(
             _RegisteredOutput(
@@ -351,11 +354,11 @@ def _process_light_job(
     )
 
 
-def _fused_job_bytes(job: _LightJob, resampler: str) -> int:
+def _fused_job_bytes(job: _LightJob, resampler: str, grid: OutputGrid | None = None) -> int:
     height, width = job.info.shape
-    per_row = width * max(
+    per_row = (grid.width if grid is not None else width) * max(
         NATIVE_WARP_BYTES_PER_PIXEL,
-        _registration_bytes_per_pixel(job.transform, resampler, job.info.shape),
+        _registration_bytes_per_pixel(job.transform, resampler, job.info.shape, grid),
     )
     # A Bayer Light also holds its three debayered planes while it is warped.
     planes = 3 * height * width * 4 if job.cfa_pattern is not None else 0
@@ -368,8 +371,9 @@ def _fused_worker_count(
     max_memory_bytes: int,
     resampler: str,
     cpu_workers: int,
+    grid: OutputGrid | None = None,
 ) -> int:
-    largest = max((_fused_job_bytes(job, resampler) for job in jobs), default=1)
+    largest = max((_fused_job_bytes(job, resampler, grid) for job in jobs), default=1)
     return max(1, min(cpu_workers, len(jobs), max_memory_bytes // max(1, largest)))
 
 
@@ -383,6 +387,7 @@ def _calibrate_and_register_frames(
     division_floor: float,
     durable: bool = True,
     kernel_threads: int | None = None,
+    grid: OutputGrid | None = None,
 ) -> tuple[tuple[_LightJobResult, ...], dict[str, Any]]:
     """Calibrate and register every Light with one shared memory budget.
 
@@ -398,6 +403,7 @@ def _calibrate_and_register_frames(
         max_memory_bytes=max_memory_bytes,
         resampler=resampler,
         cpu_workers=cpu_workers,
+        grid=grid,
     )
     thread_budget = cpu_workers if kernel_threads is None else max(1, int(kernel_threads))
     native_threads = max(1, thread_budget // workers)
@@ -419,6 +425,7 @@ def _calibrate_and_register_frames(
             native_threads=tail_threads if index >= tail_start else native_threads,
             division_floor=division_floor,
             durable=durable,
+            grid=grid,
         )
 
     if workers == 1:
@@ -664,6 +671,7 @@ def _calibrate_and_register_lights(
         kernel_threads=execution_tuning.kernel_threads,
         division_floor=parameters.integration.division_floor,
         durable=parameters.durable_intermediates,
+        grid=parameters.output_grid,
     )
     wall_seconds = time.perf_counter() - started
     del master_cache
@@ -675,7 +683,7 @@ def _calibrate_and_register_lights(
     ):
         transform = job.transform
         resampling = _registration_provenance(
-            transform, job.info.shape, parameters.registration_resampler
+            transform, job.info.shape, parameters.registration_resampler, parameters.output_grid
         )
         if job.calibrated_path is not None:
             calibrated[path] = job.calibrated_path
@@ -709,7 +717,7 @@ def _calibrate_and_register_lights(
             )
         records[str(plan.display_path(path))] = {
             "transformInputToOutput": transform.serializable(),
-            "identity": transform.is_identity,
+            "identity": transform.is_identity and parameters.output_grid is None,
             **resampling,
             "qualityWeight": plan.quality_weights[path],
             "calibration": {
