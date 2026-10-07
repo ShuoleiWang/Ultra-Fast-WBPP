@@ -1208,14 +1208,64 @@ void TestLanczos3TableIsDeterministicAndAccurate()
 // vectorized lanes): every pixel on its own, row-major taps, Float32 sum,
 // std::min/std::max bounds and clamp.  The kernel must reproduce it bit for
 // bit on every path (vector lanes, their exact fallback, scalar edges).
+float ReferenceSample( const std::vector<float>& source, std::uint32_t width,
+                       std::uint32_t height, double inputX, double inputY, float domainScale )
+{
+   const double xLimit = static_cast<double>( width ) - 3.0;
+   const double yLimit = static_cast<double>( height ) - 3.0;
+   if ( !( std::isfinite( inputX ) && std::isfinite( inputY ) && inputX >= 2.0
+           && inputX <= xLimit && inputY >= 2.0 && inputY <= yLimit ) )
+      return Nan;
+   const double xFloorValue = std::floor( inputX );
+   const double yFloorValue = std::floor( inputY );
+   const std::int64_t xFloor = static_cast<std::int64_t>( xFloorValue );
+   const std::int64_t yFloor = static_cast<std::int64_t>( yFloorValue );
+   float xWeights[6], yWeights[6];
+   detail::Lanczos3TableWeights( inputX - xFloorValue, xWeights );
+   detail::Lanczos3TableWeights( inputY - yFloorValue, yWeights );
+   float samples = 0.0F;
+   bool valid = true;
+   float supportMinimum = std::numeric_limits<float>::infinity();
+   float supportMaximum = -std::numeric_limits<float>::infinity();
+   for ( int j = 0; j < 6; ++j )
+   {
+      std::int64_t yIndex = yFloor + (j - 2);
+      if ( j == 5 )
+         yIndex = std::min<std::int64_t>( yIndex, height - 1 );
+      for ( int i = 0; i < 6; ++i )
+      {
+         std::int64_t xIndex = xFloor + (i - 2);
+         if ( i == 5 )
+            xIndex = std::min<std::int64_t>( xIndex, width - 1 );
+         const float combined = yWeights[j]*xWeights[i];
+         const float neighbor = source[static_cast<std::size_t>( yIndex*width + xIndex )];
+         if ( combined != 0.0F && std::isfinite( neighbor ) )
+         {
+            supportMinimum = std::min( supportMinimum, neighbor );
+            supportMaximum = std::max( supportMaximum, neighbor );
+            samples = samples + neighbor*combined;
+         }
+         else
+         {
+            if ( combined != 0.0F )
+               valid = false;
+            samples = samples + 0.0F;
+         }
+      }
+   }
+   if ( !valid )
+      return Nan;
+   const float lower = std::min( supportMinimum, 0.0F );
+   const float upper = std::max( supportMaximum, domainScale );
+   return std::min( std::max( samples, lower ), upper );
+}
+
 std::vector<float> ReferenceWarp( const std::vector<float>& source, std::uint32_t width,
                                   std::uint32_t height, const AffineInverse& inverse,
                                   std::uint32_t firstRow, std::uint32_t rowCount,
                                   std::uint32_t outputWidth, float domainScale )
 {
    std::vector<float> output( static_cast<std::size_t>( rowCount )*outputWidth );
-   const double xLimit = static_cast<double>( width ) - 3.0;
-   const double yLimit = static_cast<double>( height ) - 3.0;
    for ( std::uint32_t localRow = 0; localRow < rowCount; ++localRow )
    {
       const double outputY = static_cast<double>( firstRow + localRow );
@@ -1236,61 +1286,30 @@ std::vector<float> ReferenceWarp( const std::vector<float>& source, std::uint32_
             inputX = inputX/w;
             inputY = inputY/w;
          }
-         float& result = output[static_cast<std::size_t>( localRow )*outputWidth + column];
-         if ( !( std::isfinite( inputX ) && std::isfinite( inputY ) && inputX >= 2.0
-                 && inputX <= xLimit && inputY >= 2.0 && inputY <= yLimit ) )
-         {
-            result = Nan;
-            continue;
-         }
-         const double xFloorValue = std::floor( inputX );
-         const double yFloorValue = std::floor( inputY );
-         const std::int64_t xFloor = static_cast<std::int64_t>( xFloorValue );
-         const std::int64_t yFloor = static_cast<std::int64_t>( yFloorValue );
-         float xWeights[6], yWeights[6];
-         detail::Lanczos3TableWeights( inputX - xFloorValue, xWeights );
-         detail::Lanczos3TableWeights( inputY - yFloorValue, yWeights );
-         float samples = 0.0F;
-         bool valid = true;
-         float supportMinimum = std::numeric_limits<float>::infinity();
-         float supportMaximum = -std::numeric_limits<float>::infinity();
-         for ( int j = 0; j < 6; ++j )
-         {
-            std::int64_t yIndex = yFloor + (j - 2);
-            if ( j == 5 )
-               yIndex = std::min<std::int64_t>( yIndex, height - 1 );
-            for ( int i = 0; i < 6; ++i )
-            {
-               std::int64_t xIndex = xFloor + (i - 2);
-               if ( i == 5 )
-                  xIndex = std::min<std::int64_t>( xIndex, width - 1 );
-               const float combined = yWeights[j]*xWeights[i];
-               const float neighbor = source[static_cast<std::size_t>( yIndex*width + xIndex )];
-               if ( combined != 0.0F && std::isfinite( neighbor ) )
-               {
-                  supportMinimum = std::min( supportMinimum, neighbor );
-                  supportMaximum = std::max( supportMaximum, neighbor );
-                  samples = samples + neighbor*combined;
-               }
-               else
-               {
-                  if ( combined != 0.0F )
-                     valid = false;
-                  samples = samples + 0.0F;
-               }
-            }
-         }
-         if ( !valid )
-         {
-            result = Nan;
-            continue;
-         }
-         const float lower = std::min( supportMinimum, 0.0F );
-         const float upper = std::max( supportMaximum, domainScale );
-         result = std::min( std::max( samples, lower ), upper );
+         output[static_cast<std::size_t>( localRow )*outputWidth + column] =
+            ReferenceSample( source, width, height, inputX, inputY, domainScale );
       }
    }
    return output;
+}
+
+// The lattice coordinates of one output pixel in the documented reference
+// order (WarpLanczos3Request).
+double ReferenceLatticeValue( const std::vector<double>& nodes, std::uint32_t columns,
+                              std::uint32_t rows, std::uint32_t spacing,
+                              std::uint32_t outputX, std::uint32_t outputY )
+{
+   const std::uint32_t cellX = std::min( outputX/spacing, columns - 2 );
+   const std::uint32_t cellY = std::min( outputY/spacing, rows - 2 );
+   const double fx = static_cast<double>( outputX - cellX*spacing )/static_cast<double>( spacing );
+   const double fy = static_cast<double>( outputY - cellY*spacing )/static_cast<double>( spacing );
+   const double n00 = nodes[static_cast<std::size_t>( cellY )*columns + cellX];
+   const double n10 = nodes[static_cast<std::size_t>( cellY )*columns + cellX + 1];
+   const double n01 = nodes[static_cast<std::size_t>( cellY + 1 )*columns + cellX];
+   const double n11 = nodes[static_cast<std::size_t>( cellY + 1 )*columns + cellX + 1];
+   const double top = n00 + fx*(n10 - n00);
+   const double bottom = n01 + fx*(n11 - n01);
+   return top + fy*(bottom - top);
 }
 
 void TestWarpMatchesTheScalarReferenceBitForBit()
@@ -1377,6 +1396,173 @@ void TestWarpMatchesTheScalarReferenceBitForBit()
             Require( std::memcmp( actual.data(), expected.data(), actual.size()*sizeof( float ) ) == 0,
                      "warp: every path reproduces the scalar reference bit for bit" );
          }
+}
+
+// A lattice warp samples exactly where the documented node interpolation
+// puts each output pixel (bit for bit on every path), is thread and band
+// invariant, follows an affine map it was built from to rounding, and turns a
+// nonfinite node into NaN over the cells that use it.
+void TestLatticeWarpMatchesTheReferenceInterpolation()
+{
+   const std::uint32_t width = 203;
+   const std::uint32_t height = 71;
+   std::mt19937 generator( 2027 );
+   std::uniform_real_distribution<float> sky( 0.01F, 0.2F );
+   std::vector<float> source( static_cast<std::size_t>( width )*height );
+   for ( float& value : source )
+      value = sky( generator );
+   std::uniform_int_distribution<std::size_t> anywhere( 0, source.size() - 1 );
+   for ( int k = 0; k < 20; ++k )
+      source[anywhere( generator )] = Nan;
+
+   const std::uint32_t outputWidth = 190;
+   const std::uint32_t outputHeight = 66;
+   const std::uint32_t spacing = 16;
+   const std::uint32_t columns = (outputWidth - 1 + spacing - 1)/spacing + 1;
+   const std::uint32_t rows = (outputHeight - 1 + spacing - 1)/spacing + 1;
+   // A rotation plus a cubic "distortion" no matrix can describe.
+   const double angle = 1.3*3.141592653589793/180.0;
+   const double c = std::cos( angle );
+   const double s = std::sin( angle );
+   std::vector<double> nodesX( static_cast<std::size_t>( columns )*rows );
+   std::vector<double> nodesY( nodesX.size() );
+   for ( std::uint32_t j = 0; j < rows; ++j )
+      for ( std::uint32_t i = 0; i < columns; ++i )
+      {
+         const double x = static_cast<double>( i*spacing );
+         const double y = static_cast<double>( j*spacing );
+         const double u = (x - 95.0)/95.0;
+         const double v = (y - 33.0)/33.0;
+         const std::size_t node = static_cast<std::size_t>( j )*columns + i;
+         nodesX[node] = c*x - s*y + 4.25 + 1.5*u*u*u;
+         nodesY[node] = s*x + c*y + 2.75 - 0.8*v*v*v;
+      }
+   const auto run = [&]( std::uint32_t firstRow, std::uint32_t rowCount, std::uint32_t threads )
+   {
+      WarpLanczos3Request request;
+      request.source = source;
+      request.sourceWidth = width;
+      request.sourceHeight = height;
+      request.outputWidth = outputWidth;
+      request.firstRow = firstRow;
+      request.rowCount = rowCount;
+      request.domainScale = 1.0F;
+      request.threads = threads;
+      request.latticeX = nodesX;
+      request.latticeY = nodesY;
+      request.latticeSpacing = spacing;
+      request.latticeColumns = columns;
+      request.latticeRows = rows;
+      std::vector<float> destination( request.OutputPixels() );
+      WarpLanczos3Clamped( request, destination );
+      return destination;
+   };
+   const std::vector<float> single = run( 0, outputHeight, 1 );
+   for ( std::uint32_t y = 0; y < outputHeight; ++y )
+      for ( std::uint32_t x = 0; x < outputWidth; ++x )
+      {
+         const double inputX = ReferenceLatticeValue( nodesX, columns, rows, spacing, x, y );
+         const double inputY = ReferenceLatticeValue( nodesY, columns, rows, spacing, x, y );
+         const float expected = ReferenceSample( source, width, height, inputX, inputY, 1.0F );
+         const float actual = single[static_cast<std::size_t>( y )*outputWidth + x];
+         Require( std::memcmp( &actual, &expected, sizeof( float ) ) == 0 || (std::isnan( actual ) && std::isnan( expected )),
+                  "lattice warp: every pixel reproduces the reference interpolation bit for bit" );
+      }
+   const std::vector<float> threaded = run( 0, outputHeight, 4 );
+   Require( std::memcmp( single.data(), threaded.data(), single.size()*sizeof( float ) ) == 0,
+            "lattice warp: thread count does not change values" );
+   std::vector<float> banded = run( 0, 23, 2 );
+   const std::vector<float> rest = run( 23, outputHeight - 23, 3 );
+   banded.insert( banded.end(), rest.begin(), rest.end() );
+   Require( std::memcmp( single.data(), banded.data(), single.size()*sizeof( float ) ) == 0,
+            "lattice warp: bands assemble the full output" );
+
+   // A lattice built from an affine map follows the matrix warp to rounding.
+   AffineInverse affine;
+   affine.m00 = c;
+   affine.m01 = -s;
+   affine.m02 = 4.25;
+   affine.m10 = s;
+   affine.m11 = c;
+   affine.m12 = 2.75;
+   for ( std::uint32_t j = 0; j < rows; ++j )
+      for ( std::uint32_t i = 0; i < columns; ++i )
+      {
+         const double x = static_cast<double>( i*spacing );
+         const double y = static_cast<double>( j*spacing );
+         const std::size_t node = static_cast<std::size_t>( j )*columns + i;
+         nodesX[node] = affine.m00*x + affine.m01*y + affine.m02;
+         nodesY[node] = affine.m10*x + affine.m11*y + affine.m12;
+      }
+   const std::vector<float> fromLattice = run( 0, outputHeight, 2 );
+   const std::vector<float> fromMatrix =
+      ReferenceWarp( source, width, height, affine, 0, outputHeight, outputWidth, 1.0F );
+   for ( std::size_t k = 0; k < fromLattice.size(); ++k )
+   {
+      if ( std::isnan( fromMatrix[k] ) || std::isnan( fromLattice[k] ) )
+         continue;
+      Require( std::fabs( fromLattice[k] - fromMatrix[k] ) <= 1.0e-5F,
+               "lattice warp: an affine lattice follows the matrix warp" );
+   }
+
+   // A nonfinite node invalidates the cells around it, and only those.
+   const std::size_t poisoned = static_cast<std::size_t>( 2 )*columns + 5;
+   nodesX[poisoned] = std::numeric_limits<double>::quiet_NaN();
+   const std::vector<float> holed = run( 0, outputHeight, 1 );
+   Require( std::isnan( holed[static_cast<std::size_t>( 2*spacing )*outputWidth + 5*spacing] ),
+            "lattice warp: the poisoned node itself is NaN" );
+   Require( std::isnan( holed[static_cast<std::size_t>( 2*spacing - 3 )*outputWidth + 5*spacing - 3] ),
+            "lattice warp: a pixel of a cell using the node is NaN" );
+   const float far = holed[static_cast<std::size_t>( 30 )*outputWidth + 150];
+   Require( std::memcmp( &far, &fromLattice[static_cast<std::size_t>( 30 )*outputWidth + 150], sizeof( float ) ) == 0,
+            "lattice warp: cells away from the node are unchanged" );
+
+   WarpLanczos3Request bad;
+   bad.source = source;
+   bad.sourceWidth = width;
+   bad.sourceHeight = height;
+   bad.outputWidth = outputWidth;
+   bad.rowCount = outputHeight;
+   bad.domainScale = 1.0F;
+   bad.latticeX = nodesX;
+   bad.latticeY = nodesY;
+   bad.latticeSpacing = 12;
+   bad.latticeColumns = columns;
+   bad.latticeRows = rows;
+   std::vector<float> destination( bad.OutputPixels() );
+   RequireThrows<std::invalid_argument>(
+      [&]() { WarpLanczos3Clamped( bad, destination ); },
+      "lattice warp rejects a spacing that is not a power of two" );
+   bad.latticeSpacing = spacing;
+   bad.outputWidth = outputWidth + spacing;
+   std::vector<float> wider( bad.OutputPixels() );
+   RequireThrows<std::invalid_argument>(
+      [&]() { WarpLanczos3Clamped( bad, wider ); },
+      "lattice warp rejects a lattice that does not cover the output" );
+
+   UfwbppNativeWarpLanczos3LatticeRequestV1 abi{};
+   abi.struct_size = sizeof( abi );
+   abi.source_width = width;
+   abi.source_height = height;
+   abi.output_width = outputWidth;
+   abi.first_row = 0;
+   abi.row_count = outputHeight;
+   abi.threads = 2;
+   abi.lattice_spacing = spacing;
+   abi.lattice_columns = columns;
+   abi.lattice_rows = rows;
+   abi.source_samples = source.data();
+   abi.source_sample_count = source.size();
+   abi.lattice_x = nodesX.data();
+   abi.lattice_y = nodesY.data();
+   abi.lattice_node_count = nodesX.size();
+   abi.domain_scale = 1.0F;
+   std::vector<float> viaAbi( static_cast<std::size_t>( outputWidth )*outputHeight );
+   char error[256] = {};
+   Require( ufwbpp_native_cpu_warp_lanczos3_lattice_v1( &abi, viaAbi.data(), viaAbi.size(), error, sizeof( error ) ) == 0,
+            std::string( "lattice warp C ABI call failed: " ) + error );
+   Require( std::memcmp( viaAbi.data(), holed.data(), holed.size()*sizeof( float ) ) == 0,
+            "lattice warp: the C ABI reproduces the kernel" );
 }
 
 // The reference arithmetic of calibration._add_offset_grid_rows, one pixel
@@ -1570,6 +1756,7 @@ int main()
       TestWarpNanSupportAndDomainClamp();
       TestWarpValidationRejectsBadGeometry();
       TestWarpMatchesTheScalarReferenceBitForBit();
+      TestLatticeWarpMatchesTheReferenceInterpolation();
       TestMadRejectionMatchesReferenceSemantics();
       TestMadRejectionScaleModelMatchesReferenceRule();
       TestMaskedMeanAccumulatesInFrameOrder();

@@ -594,6 +594,13 @@ def _plan_run(
     resolved_transforms = _resolve_transforms(lights, transforms)
     resolved_quality_weights = _resolve_quality_weights(lights, quality_weights)
     resolved_region_weight_maps = _resolve_region_weight_maps(lights, region_weight_maps)
+    if resolved_region_weight_maps and parameters.output_grid is not None:
+        # Region maps are node grids in the reference frame's normalized
+        # coordinates; a canvas window is not that frame.
+        raise CalibrationError(
+            "MOSAIC_REGION_WEIGHTS_UNSUPPORTED",
+            "selection region weight maps are not supported on a mosaic canvas window yet",
+        )
     resolved_stellar_scale_hints = _resolve_stellar_scale_hints(
         lights, light_info, stellar_scale_hints, aliases, identity_cache
     )

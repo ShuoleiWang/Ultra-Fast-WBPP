@@ -138,7 +138,7 @@ make desktop-dev
 ## 状态与要求
 
 - **积极开发中的 alpha。** 真实素材流程在一台 M3 Pro（macOS）与一台 Ryzen 7 5800H 笔记本（Windows 11）上验证；其他机器运行未测量的通用配置。本地构建为 ad-hoc 签名，未公证；Windows 安装包未签名。已验证与未验证事项的清单见 [validation-matrix.md](validation-matrix.md)。
-- **单色已在真实数据上验证；彩色相机仅在合成数据上验证。** Bayer（RGGB/BGGR/GRBG/GBRG）Light 按马赛克校准、去马赛克为 R/G/B 通道主图并合成 RGB（[配方](recipes/osc-cfa.md)），但尚未处理过真实的 OSC 数据集。马赛克需要真实数据验证。默认归一化包含空间背景校正，原 LocalNormalization 选项已下线。
+- **单色已在真实数据上验证；彩色相机仅在合成数据上验证。** Bayer（RGGB/BGGR/GRBG/GBRG）Light 按马赛克校准、去马赛克为 R/G/B 通道主图并合成 RGB（[配方](recipes/osc-cfa.md)），但尚未处理过真实的 OSC 数据集。马赛克（所有面板共用一张画布、每帧只插值一次、按重叠区星测光匹配；[配方](recipes/project-mosaic-rgb.md)）只在合成数据上验证过。默认归一化包含空间背景校正，原 LocalNormalization 选项已下线。
 - **筛片。** 桌面端强制 Blink 人工审片，采用哪些帧由用户决定。标记规则和参考帧规则来自一个六晚数据集，不能保证识别所有缺陷。命令行默认仍为 `legacy-gate`；带反事实与区域权重的无人值守策略仍是命令行配方选项。
 
 Blink 已接入[互补显示诊断](blink-display-redesign.md)：共同尺度的星场视图保留变暗和噪声，背景差异显示空间变化，对应原生像素星区将星形与亮度分开比较。预览使用已导入且完整的 Flat + Dark/Bias；缺少校准或无法对比时会明确提示。只读对照工具复用同一套算法。 右侧检查器会自动换行长文件名与校准提示，内容按实际高度排版并纵向滚动。

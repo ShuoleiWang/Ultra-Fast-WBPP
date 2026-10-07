@@ -441,7 +441,7 @@ def test_solver_hints_derive_nina_fov_and_ignore_conflicting_user_constraints(
         for offset in (-0.01, 0.0, 0.01)
     )
 
-    hints = _inferred_solver_hints(request, frames)
+    hints = _inferred_solver_hints(request, [frame.metadata for frame in frames])
 
     assert hints.ra_degrees == pytest.approx(282.14, abs=1e-6)
     assert hints.dec_degrees == pytest.approx(-7.40)
@@ -474,7 +474,7 @@ def test_solver_hints_retain_consistent_explicit_nina_constraints(tmp_path: Path
         )
     )
 
-    hints = _inferred_solver_hints(request, (frame,))
+    hints = _inferred_solver_hints(request, (frame.metadata,))
 
     assert hints.ra_degrees == 282.15
     assert hints.dec_degrees == -7.41

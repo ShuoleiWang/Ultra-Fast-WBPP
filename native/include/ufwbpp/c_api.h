@@ -223,6 +223,41 @@ UFWBPP_NATIVE_API int ufwbpp_native_cpu_warp_lanczos3_v2(
    char* error_message,
    size_t error_message_capacity );
 
+// The lattice variant maps output pixels through a coordinate lattice instead
+// of a matrix: node (i, j), row-major at j*lattice_columns + i, holds the
+// input coordinates of output pixel (i*lattice_spacing, j*lattice_spacing),
+// and the coordinates between nodes are interpolated bilinearly (see
+// PortableKernels.h WarpLanczos3Request). lattice_spacing is a power of two
+// and the lattice must cover columns [0, output_width) and rows
+// [0, first_row + row_count). The sampling is that of version 2.
+typedef struct UfwbppNativeWarpLanczos3LatticeRequestV1
+{
+   uint32_t struct_size;
+   uint32_t source_width;
+   uint32_t source_height;
+   uint32_t output_width;
+   uint32_t first_row;
+   uint32_t row_count;
+   uint32_t threads;
+   uint32_t lattice_spacing;
+   uint32_t lattice_columns;
+   uint32_t lattice_rows;
+   const float* source_samples;
+   size_t source_sample_count;
+   const double* lattice_x;
+   const double* lattice_y;
+   size_t lattice_node_count;
+   float domain_scale;
+   float reserved_scale;
+} UfwbppNativeWarpLanczos3LatticeRequestV1;
+
+UFWBPP_NATIVE_API int ufwbpp_native_cpu_warp_lanczos3_lattice_v1(
+   const UfwbppNativeWarpLanczos3LatticeRequestV1* request,
+   float* destination,
+   size_t destination_capacity,
+   char* error_message,
+   size_t error_message_capacity );
+
 typedef struct UfwbppNativeMadRejectionRequestV1
 {
    uint32_t struct_size;

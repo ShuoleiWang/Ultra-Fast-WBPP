@@ -121,8 +121,10 @@ backend truth flags are described in
 6. Solve every channel product independently; masters that share a grid
    verify each other's solutions at solver precision and then carry one of
    them, so the project copies them onto the reference grid without any
-   resampling. Only mosaics of separately solved panels are reprojected. The
-   actual common finite footprint is cropped before RGB/LRGB and previews.
+   resampling. The actual common finite footprint is cropped before RGB/LRGB
+   and previews. The panels of a mosaic never reach this step on their own
+   grids: each is integrated straight onto its window of one shared canvas
+   (see "Mosaics" below).
 7. Record input, algorithm, output and solve evidence; validate the result.
 
 Quality screening, relative normalization and background-gradient removal are
@@ -286,7 +288,24 @@ redistribution permissions are separate; see [licensing](licensing.md).
   `integration.py` (integration passes, again without frames the
   counterfactual confirms harmful) and `products.py` (drizzle, candidates,
   solving); `workflows/project.run_project_e2e` runs shared calibration,
-  target panels, mosaics, channel alignment, colour and publication as stages.
+  the mosaic canvas plan (`workflows/mosaic.py`), target panels, the canvas
+  mosaics, channel alignment, colour and publication as stages.
+- Mosaics (`mosaic/`): `canvas.py` plans one gnomonic canvas (stereographic
+  beyond 10°) from one solved Light per panel, tangent at the centroid of the
+  panels' union and turned to the median panel orientation, and turns a
+  panel's window of it into the pipeline's `OutputGrid`: a 16 px lattice of
+  registration-reference coordinates through the canvas projection and the
+  reference's TAN+SIP. `workflows/canvas.py` (the stage between registration
+  and integration of a panel run) solves the calibrated reference and fits
+  that TAN+SIP on catalog stars (`astrometry.py`), so every Light is warped
+  once, from calibrated pixels onto the canvas, by the native lattice warp
+  (`ufwbpp_native_cpu_warp_lanczos3_lattice_v1`, value-identical to its NumPy
+  reference). The window's WCS is verified on catalog stars instead of being
+  solved blind. `photometry.py` matches the panels of a filter in their
+  overlaps (one robust network for all scales from star photometry, one for
+  the additive planes with an area-weighted minimum-norm gauge), `blend.py`
+  blends them by inverse variance with edge tapers, and `assemble.py` gates
+  the result and verifies the canvas WCS of every panel window.
 - `stacking/pipeline.py` is a sequence of stages: `_plan_run` (`run_plan.py`:
   validate and group every input into a `_RunPlan`),
   `_build_calibration_masters` (`masters.py`), `_plan_light_jobs` and

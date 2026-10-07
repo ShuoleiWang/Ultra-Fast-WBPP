@@ -35,6 +35,11 @@ types, evaluation order, `nanmedian` even-count semantics, and NaN policy, so
 value-identical pixels, masks, and counts from both paths (only the sign of an
 exact zero may differ). They are exposed through the C ABI as
 `ufwbpp_native_cpu_warp_lanczos3_v2` (v1 keeps the affine-only layout),
+`ufwbpp_native_cpu_warp_lanczos3_lattice_v1` (the same sampling through a
+power-of-two coordinate lattice, bilinear between nodes in the order of
+`stacking.warp._lattice_coordinates`; mosaic canvases; kernel id
+`native-cpu-lanczos3-lattice-warp-v1-table2048`, an optional symbol that
+older libraries lack),
 `ufwbpp_native_cpu_mad_rejection_v2` (v1 keeps the per-pixel MAD layout; v2 adds
 the row-pooled MAD and per-frame noise factors of the rejection scale model,
 and reproduces v1 exactly when neither is requested),

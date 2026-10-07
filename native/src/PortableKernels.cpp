@@ -469,6 +469,29 @@ void WarpLanczos3Request::Validate() const
    if ( !std::isfinite( domainScale ) || domainScale <= 0.0F )
       throw std::invalid_argument(
          "Lanczos-3 warp requires a finite positive numeric domain scale" );
+   if ( HasLattice() )
+   {
+      if ( latticeSpacing == 0 || (latticeSpacing & (latticeSpacing - 1)) != 0 )
+         throw std::invalid_argument(
+            "Lanczos-3 warp lattice spacing must be a power of two" );
+      if ( latticeColumns < 2 || latticeRows < 2 )
+         throw std::invalid_argument(
+            "Lanczos-3 warp lattice needs at least 2x2 nodes" );
+      const std::size_t nodes = CheckedMultiply(
+         latticeColumns, latticeRows, "Lanczos-3 warp lattice size overflow" );
+      if ( latticeX.size() != nodes || latticeY.size() != nodes )
+         throw std::invalid_argument(
+            "Lanczos-3 warp lattice node count differs from its geometry" );
+      const std::uint64_t spanX =
+         static_cast<std::uint64_t>( latticeColumns - 1 )*latticeSpacing;
+      const std::uint64_t spanY =
+         static_cast<std::uint64_t>( latticeRows - 1 )*latticeSpacing;
+      if ( spanX < static_cast<std::uint64_t>( outputWidth ) - 1
+        || spanY < static_cast<std::uint64_t>( firstRow ) + rowCount - 1 )
+         throw std::invalid_argument(
+            "Lanczos-3 warp lattice does not cover the output band" );
+      return;
+   }
    const double coefficients[] = {
       inverse.m00, inverse.m01, inverse.m02,
       inverse.m10, inverse.m11, inverse.m12,
@@ -496,6 +519,13 @@ void WarpLanczos3Clamped( const WarpLanczos3Request& request,
 
    const AffineInverse inverse = request.inverse;
    const bool projective = !inverse.IsAffine();
+   const bool lattice = request.HasLattice();
+   const std::size_t latticeSpacing = request.latticeSpacing;
+   const double latticeSpacingValue = static_cast<double>( request.latticeSpacing );
+   const std::size_t latticeColumns = request.latticeColumns;
+   const std::size_t latticeRows = request.latticeRows;
+   const double* latticeX = request.latticeX.data();
+   const double* latticeY = request.latticeY.data();
    const std::uint32_t width = request.sourceWidth;
    const std::uint32_t height = request.sourceHeight;
    // Python: width - 3.0 (exact Float64 for every practical image size).
@@ -519,8 +549,41 @@ void WarpLanczos3Clamped( const WarpLanczos3Request& request,
             const double yRowTerm = inverse.m11*outputY;
             const double wRowTerm = inverse.m21*outputY;
             float* row = output + localRow*outputWidth;
+            // Lattice rows bracketing this output row (see WarpLanczos3Request).
+            std::size_t cellRow = 0;
+            double fy = 0.0;
+            if ( lattice )
+            {
+               const std::size_t y = request.firstRow + localRow;
+               cellRow = std::min( y/latticeSpacing, latticeRows - 2 );
+               fy = static_cast<double>( y - cellRow*latticeSpacing )/latticeSpacingValue;
+            }
+            const double* x0Nodes = lattice ? latticeX + cellRow*latticeColumns : nullptr;
+            const double* x1Nodes = lattice ? x0Nodes + latticeColumns : nullptr;
+            const double* y0Nodes = lattice ? latticeY + cellRow*latticeColumns : nullptr;
+            const double* y1Nodes = lattice ? y0Nodes + latticeColumns : nullptr;
             const auto inputCoordinate = [&]( std::size_t column, double& inputX, double& inputY )
             {
+               if ( lattice )
+               {
+                  const std::size_t cell = std::min( column/latticeSpacing, latticeColumns - 2 );
+                  const double fx = static_cast<double>( column - cell*latticeSpacing )/latticeSpacingValue;
+                  const auto interpolate = [&]( const double* top, const double* bottom )
+                  {
+                     double upper = top[cell + 1] - top[cell];
+                     upper = fx*upper;
+                     upper = top[cell] + upper;
+                     double lower = bottom[cell + 1] - bottom[cell];
+                     lower = fx*lower;
+                     lower = bottom[cell] + lower;
+                     double value = lower - upper;
+                     value = fy*value;
+                     return upper + value;
+                  };
+                  inputX = interpolate( x0Nodes, x1Nodes );
+                  inputY = interpolate( y0Nodes, y1Nodes );
+                  return;
+               }
                const double outputX = static_cast<double>( column );
                inputX = inverse.m00*outputX;
                inputX = inputX + xRowTerm;

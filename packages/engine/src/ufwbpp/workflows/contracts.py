@@ -13,6 +13,7 @@ from lightframeqc.blink_flags import BlinkFlagPolicy
 from lightframeqc.quality_gate import GatePolicy
 
 from ..integrity import canonical_json_document
+from ..mosaic.canvas import CanvasProjection
 from ..selection import SelectionParameters
 from ..stacking.drizzle_native import SUPPORTED_SCALES as DRIZZLE_SCALES_SUPPORTED, SUPPORTED_KERNELS as DRIZZLE_KERNELS_SUPPORTED
 from ..stacking.parameters import PipelineParameters
@@ -408,6 +409,10 @@ class E2ERequest:
     same_grid_wcs_tolerance_pixels: float = 1.0
     registration_detection: Any = field(default=None, repr=False, compare=False)
     registration_config: Any = field(default=None, repr=False, compare=False)
+    # A mosaic panel run: the project's canvas, onto whose window this run
+    # resamples its Lights (once), and the panel it is.
+    mosaic_canvas: CanvasProjection | None = None
+    mosaic_panel: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

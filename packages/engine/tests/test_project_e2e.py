@@ -13,6 +13,8 @@ from astropy.wcs import Sip, WCS
 import numpy as np
 import pytest
 
+from mosaic_synthetic import TruthSolver, make_sky, render, true_header, truth_cards
+from ufwbpp.mosaic.canvas import canvas_window, frame_boundary, window_grid
 from ufwbpp.workflows.single_target import (
     E2EError,
     E2ERequest,
@@ -24,7 +26,7 @@ from ufwbpp.workflows.single_target import (
 from ufwbpp.workflows.contracts import ProgressEvent
 from ufwbpp.cli import _load_project_request, _verify_expected_source_roles
 from ufwbpp.inventory import inventory_project
-from ufwbpp.products.mosaic import ReprojectProvider
+from ufwbpp.products.reprojection import ReprojectProvider
 from ufwbpp.workflows.project import (
     ProjectE2EError,
     ProjectE2ERequest,
@@ -164,27 +166,48 @@ def test_rotated_overlapping_channel_still_requires_full_resolution_coverage(tmp
     assert not (tmp_path / "partial-B.fits").exists()
 
 
+PANEL_SHAPE = (160, 160)
+PANEL_SCALE = 2.0
+PANEL_STEP = 80
+SKY = make_sky((150.0, 20.0), 0.12, 450, flux_range=(3.6, 4.6))
+
+
+def _panel_truth(target_index: int) -> dict[str, Any]:
+    column, row = target_index % 2, target_index // 2
+    dx = (column - 0.5) * PANEL_STEP * PANEL_SCALE / 3600.0
+    dy = (row - 0.5) * PANEL_STEP * PANEL_SCALE / 3600.0
+    centre = (150.0 + dx / np.cos(np.deg2rad(20.0)), 20.0 + dy)
+    return true_header(centre, PANEL_SHAPE, scale_arcsec=PANEL_SCALE, rotation_degrees=0.3)
+
+
 def _project(tmp_path: Path, *, filters: tuple[str, ...] = ("R", "G", "B")) -> tuple[Any, E2ERequest, list[Path]]:
+    """Four mosaic panels (2x2, 48 px overlaps); the Lights carry their
+    panel's true solution, which :class:`TruthSolver` reads back."""
+
     lights: list[Path] = []
     for target_index in range(4):
+        truth = _panel_truth(target_index)
         for filter_name in filters:
             for sequence in range(3):
+                header = _science_header(f"dunpai{target_index + 1}", filter_name)
+                for key, value in truth_cards(truth).items():
+                    header[key] = value
                 lights.append(
                     _write(
                         tmp_path / "input" / f"dunpai{target_index + 1}" / filter_name / f"light-{sequence}.fits",
-                        np.full((8, 8), 100 + 10 * target_index + sequence, dtype=np.uint16),
-                        _science_header(f"dunpai{target_index + 1}", filter_name),
+                        np.full(PANEL_SHAPE, 100 + 10 * target_index + sequence, dtype=np.uint16),
+                        header,
                     )
                 )
     master_bias = _write(
         tmp_path / "input" / "masters" / "master-bias.fits",
-        np.zeros((8, 8), dtype=np.float32),
+        np.zeros(PANEL_SHAPE, dtype=np.float32),
         _science_header("calibration", "NONE", role="Master Bias"),
     )
     master_flats = [
         _write(
             tmp_path / "input" / "masters" / f"master-flat-{filter_name}.fits",
-            np.ones((8, 8), dtype=np.float32),
+            np.ones(PANEL_SHAPE, dtype=np.float32),
             _science_header("calibration", filter_name, role="Master Flat"),
         )
         for filter_name in filters
@@ -199,16 +222,37 @@ def _project(tmp_path: Path, *, filters: tuple[str, ...] = ("R", "G", "B")) -> t
         output_directory=str(tmp_path / "product"),
         ra_hint_degrees=150.0,
         dec_hint_degrees=20.0,
-        field_of_view_degrees=0.014,
+        field_of_view_degrees=PANEL_SHAPE[1] * PANEL_SCALE / 3600.0,
         search_radius_degrees=2.0,
     )
     return inventory, request, lights
 
 
+def _mosaic_solver(**kwargs: Any) -> TruthSolver:
+    return TruthSolver(SKY, scale_arcsec=PANEL_SCALE, **kwargs)
+
+
 class FakePanelRunner:
-    def __init__(self, *, drift_source: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        drift_source: Path | None = None,
+        sip: bool = False,
+        invalid_corner_filter: str | None = None,
+        misplaced_panel: str | None = None,
+        master_shape: tuple[int, int] = (8, 8),
+        rotate_filter: str | None = None,
+    ) -> None:
         self.calls = 0
         self.drift_source = drift_source
+        # Masters with a SIP solution, one channel with an invalid corner
+        # pixel, a canvas panel whose master is not on its window, and one
+        # channel solved 1 degree off the others.
+        self.sip = sip
+        self.invalid_corner_filter = invalid_corner_filter
+        self.misplaced_panel = misplaced_panel
+        self.master_shape = master_shape
+        self.rotate_filter = rotate_filter
 
     def __call__(self, request: E2ERequest, **_kwargs: Any) -> E2EResult:
         # One run carries every filter of one target; every filter master of
@@ -227,8 +271,21 @@ class FakePanelRunner:
         quality = _managed_quality().serializable()
         products: list[Path] = []
         astrometry: dict[str, Any] = {}
-        for filter_name in sorted(filters):
-            solved_header = _output_wcs(crpix=(7.5 - start_x, 7.5 - start_y)).to_header(relax=True)
+        if request.mosaic_canvas is not None:
+            products, astrometry = self._canvas_products(request, output, sorted(filters), target, target_index, quality)
+        for filter_name in sorted(filters) if request.mosaic_canvas is None else ():
+            solved_wcs = _output_wcs(crpix=(7.5 - start_x, 7.5 - start_y))
+            if filter_name == self.rotate_filter:
+                angle = np.deg2rad(1.0)
+                rotation = np.asarray([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+                solved_wcs.wcs.cd = rotation @ solved_wcs.wcs.cd
+            if self.sip:
+                a = np.zeros((3, 3))
+                b = np.zeros((3, 3))
+                a[2, 0], b[0, 2] = 2e-4, -3e-4
+                solved_wcs.sip = Sip(a, b, None, None, solved_wcs.wcs.crpix)
+                solved_wcs.wcs.ctype = ["RA---TAN-SIP", "DEC--TAN-SIP"]
+            solved_header = solved_wcs.to_header(relax=True)
             solved_header["IMAGETYP"] = "Master Light"
             solved_header["OBJECT"] = target
             solved_header["FILTER"] = filter_name
@@ -237,7 +294,7 @@ class FakePanelRunner:
             product = output / "products" / filter_name / f"master_light_{filter_name}_wcs.fits"
             product.parent.mkdir(parents=True)
             value = {"R": 10.0, "G": 8.0, "B": 6.0, "L": 12.0}.get(filter_name, 5.0)
-            local_y, local_x = np.indices((8, 8), dtype=np.float32)
+            local_y, local_x = np.indices(self.master_shape, dtype=np.float32)
             sky_signal = (
                 value
                 + 0.15 * (local_x + start_x)
@@ -245,9 +302,12 @@ class FakePanelRunner:
             )
             panel_gain = 1.0 + 0.10 * target_index
             panel_offset = 2.0 * target_index
+            master = (sky_signal * panel_gain + panel_offset).astype(np.float32)
+            if filter_name == self.invalid_corner_filter:
+                master[0, -1] = np.nan
             fits.writeto(
                 product,
-                (sky_signal * panel_gain + panel_offset).astype(np.float32),
+                master,
                 solved_header,
                 checksum=True,
             )
@@ -263,6 +323,7 @@ class FakePanelRunner:
                 ],
             }
         receipt = output / "receipt.json"
+        receipt.parent.mkdir(parents=True, exist_ok=True)
         # One excluded frame per target with a review preview, as the real
         # run records it, so the project receipt's aggregation is exercised.
         review = output / "qc" / "review" / "0000-excluded.png"
@@ -302,13 +363,65 @@ class FakePanelRunner:
         )
 
 
+    def _canvas_products(
+        self,
+        request: E2ERequest,
+        output: Path,
+        filters: list[str],
+        target: str,
+        target_index: int,
+        quality: dict[str, Any],
+    ) -> tuple[list[Path], dict[str, Any]]:
+        """The masters of a canvas run: rendered from the true sky on the
+        panel's window of the canvas, as a real run resamples them."""
+
+        canvas = request.mosaic_canvas
+        truth = _panel_truth(target_index)
+        from ufwbpp.mosaic.canvas import celestial_wcs
+
+        boundary = frame_boundary(PANEL_SHAPE, inset=2.5)
+        ra, dec = celestial_wcs(truth).all_pix2world(boundary[:, 0], boundary[:, 1], 0)
+        origin, shape = canvas_window(canvas, np.asarray(ra), np.asarray(dec), margin=1)
+        grid = window_grid(canvas, origin, shape, truth, PANEL_SHAPE)
+        (output / "receipts").mkdir(parents=True, exist_ok=True)
+        (output / "receipts" / "canvas.json").write_text(
+            json.dumps({"window": grid.serializable(), "panel": request.mosaic_panel}), encoding="utf-8"
+        )
+        (output / "coverage").mkdir(exist_ok=True)
+        rng = np.random.default_rng(target_index)
+        products: list[Path] = []
+        astrometry: dict[str, Any] = {}
+        for filter_name in filters:
+            brightness = {"R": 1.0, "G": 0.8, "B": 0.6, "L": 1.2}.get(filter_name, 0.7)
+            gain = brightness * (1.0 + 0.1 * target_index)
+            image = render(SKY, grid.wcs, shape, fwhm=2.2 + 0.2 * target_index, background=200.0 + 5.0 * target_index, noise=1.0, rng=rng, gain=gain)
+            header = fits.Header()
+            for key, value in grid.wcs.items():
+                header[key] = value
+            header["IMAGETYP"] = "Master Light"
+            header["OBJECT"] = target
+            header["FILTER"] = filter_name
+            header["EXPTIME"] = 60.0
+            header["OAFSTATE"] = "SOLVED"
+            header["OAFWCS"] = "SOLVED"
+            header["OAFGRID"] = grid.digest[:32] if request.mosaic_panel != self.misplaced_panel else "0" * 32
+            product = output / "products" / filter_name / f"master_light_{filter_name}_wcs.fits"
+            product.parent.mkdir(parents=True)
+            fits.writeto(product, image.astype(np.float32), header, checksum=True)
+            for map_name, value in (("coverageFraction", 1.0), ("acceptedSampleCount", 10.0)):
+                fits.writeto(output / "coverage" / f"{filter_name}_{map_name}.fits", np.full(shape, value, dtype=np.float32))
+            products.append(product)
+            astrometry[filter_name] = {
+                "status": "SOLVED",
+                "output": str(product.relative_to(output)),
+                "attempts": [{"accepted": True, "result": {"astrometricQuality": quality}}],
+            }
+        return products, astrometry
+
+
 class FakeReproject:
     def __init__(self, *, sparse_coverage: bool = False) -> None:
         self.sparse_coverage = sparse_coverage
-
-    def find_optimal(self, inputs: Any, **_kwargs: Any) -> tuple[WCS, tuple[int, int]]:
-        assert len(inputs) == 4
-        return _output_wcs(), (14, 14)
 
     def interp(
         self,
@@ -332,36 +445,8 @@ class FakeReproject:
         assert return_footprint
         return science, footprint
 
-    def coadd(
-        self,
-        inputs: Any,
-        output_wcs: WCS,
-        *,
-        shape_out: tuple[int, int],
-        **_kwargs: Any,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        total = np.zeros(shape_out, dtype=np.float64)
-        coverage = np.zeros(shape_out, dtype=np.float32)
-        for input_data in inputs:
-            science, footprint = self.interp(
-                input_data, output_wcs, shape_out=shape_out
-            )
-            selected = footprint > 0
-            total[selected] += science[selected]
-            coverage[selected] += footprint[selected]
-        output = np.full(shape_out, np.nan, dtype=np.float32)
-        selected = coverage > 0
-        output[selected] = (total[selected] / coverage[selected]).astype(np.float32)
-        return output, coverage
-
     def provider(self) -> ReprojectProvider:
-        return ReprojectProvider(
-            backend_id="fake-reproject",
-            version="1",
-            find_optimal_celestial_wcs=self.find_optimal,
-            reproject_and_coadd=self.coadd,
-            reproject_function=self.interp,
-        )
+        return ReprojectProvider(backend_id="fake-reproject", version="1", reproject_function=self.interp)
 
 
 class ManagedCopySolver:
@@ -372,12 +457,10 @@ class ManagedCopySolver:
         *,
         fail: bool = False,
         wrong_filter: str | None = None,
-        rotate_filter: str | None = None,
         sip: bool = False,
     ) -> None:
         self.fail = fail
         self.wrong_filter = wrong_filter
-        self.rotate_filter = rotate_filter
         self.sip = sip
 
     def solve(self, request: Any) -> SolverResult:
@@ -393,27 +476,6 @@ class ManagedCopySolver:
             header = hdul[0].header.copy()
             if self.wrong_filter is not None and str(header.get("FILTER")) == self.wrong_filter:
                 header["CRVAL1"] = float(header["CRVAL1"]) + 1.0
-            if self.rotate_filter is not None and str(header.get("FILTER")) == self.rotate_filter:
-                angle = np.deg2rad(1.0)
-                matrix = np.asarray(WCS(header).celestial.pixel_scale_matrix)
-                rotation = np.asarray(
-                    [[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]]
-                )
-                rotated = rotation @ matrix
-                for key in (
-                    "PC1_1",
-                    "PC1_2",
-                    "PC2_1",
-                    "PC2_2",
-                    "CDELT1",
-                    "CDELT2",
-                ):
-                    if key in header:
-                        del header[key]
-                header["CD1_1"] = rotated[0, 0]
-                header["CD1_2"] = rotated[0, 1]
-                header["CD2_1"] = rotated[1, 0]
-                header["CD2_2"] = rotated[1, 1]
             if self.sip:
                 celestial = WCS(header, naxis=2)
                 a = np.zeros((3, 3))
@@ -441,7 +503,7 @@ class ManagedCopySolver:
         return bool(result.evidence.get("verified")) and Path(result.output_path or "").is_file()
 
 
-def test_four_panel_rgb_project_runs_mosaics_fresh_solves_and_color(tmp_path: Path) -> None:
+def test_four_panel_rgb_project_assembles_canvas_mosaics_and_color(tmp_path: Path) -> None:
     inventory, base, _lights = _project(tmp_path)
     layout = classify_project_layout(inventory)
     assert layout.target_keys == ("dunpai1", "dunpai2", "dunpai3", "dunpai4")
@@ -459,10 +521,10 @@ def test_four_panel_rgb_project_runs_mosaics_fresh_solves_and_color(tmp_path: Pa
 
     result = run_project_e2e(
         ProjectE2ERequest(inventory, base, base.output_directory),
-        solver_backends=(ManagedCopySolver(),),
+        solver_backends=(_mosaic_solver(),),
         panel_runner=progressing_runner,
         progress=events.append,
-        mosaic_provider=FakeReproject().provider(),
+        reproject_provider=FakeReproject().provider(),
     )
 
     assert result.success is True
@@ -485,18 +547,23 @@ def test_four_panel_rgb_project_runs_mosaics_fresh_solves_and_color(tmp_path: Pa
     assert phases == {"prepare", "mosaic", "alignment", "color", "verify", "publish"}
     assert next(event for event in events if event.project_stage == "alignment").current == 0
     assert result.color_product_path is not None
-    with fits.open(result.color_product_path) as hdul:
-        assert hdul[0].data.shape == (3, 14, 14)
-        assert hdul[0].header["OAFSTATE"] == "SOLVED"
     receipt = json.loads(Path(result.receipt_path).read_text(encoding="utf-8"))
+    canvas_box = receipt["execution"]["mosaics"]["canvas"]["canvasBox"]
+    with fits.open(result.color_product_path) as hdul:
+        # Every channel is on the one canvas: the colour cube spans it.
+        assert hdul[0].data.shape == (3, canvas_box[3] - canvas_box[1], canvas_box[2] - canvas_box[0])
+        assert hdul[0].header["OAFSTATE"] == "SOLVED"
     assert receipt["execution"]["sourceExtraction"]["deterministic"] is True
     assert receipt["execution"]["sharedCalibration"]["rawIntegrationCount"] == 0
-    assert all(
-        item["workingState"] == "NEEDS_FINAL_SOLVE"
-        and item["propagatedWcsIsFinalSolution"] is False
-        for item in receipt["execution"]["mosaics"].values()
-    )
-    assert all(item["status"] == "SOLVED" for item in receipt["execution"]["finalSolves"].values())
+    assert receipt["execution"]["canvas"]["canvas"]["projection"] == "TAN"
+    for key in ("r", "g", "b"):
+        mosaic = receipt["execution"]["mosaics"][key]
+        assert mosaic["mode"] == "CANVAS_MOSAIC" and mosaic["panelCount"] == 4
+        assert mosaic["gates"]["photometry"] in {"PASS", "WARN"}
+        assert mosaic["gates"]["canvasWcs"] == "PASS"
+        assert receipt["execution"]["alignment"][key]["mode"] == "CANVAS_GRID"
+    # The mosaics are never solved blind: the canvas WCS is verified.
+    assert receipt["execution"]["finalSolves"] == {}
     serialized = Path(result.receipt_path).read_text(encoding="utf-8")
     assert str(tmp_path) not in serialized
     assert "device" not in serialized.casefold()
@@ -575,7 +642,7 @@ def test_single_panel_review_approval_preserves_exact_raw_request(tmp_path: Path
 
     result = run_project_e2e(
         ProjectE2ERequest(inventory, base, base.output_directory),
-        solver_backends=(ManagedCopySolver(),),
+        solver_backends=(_mosaic_solver(),),
         panel_runner=capture,
     )
 
@@ -609,9 +676,9 @@ def test_review_selections_are_bound_per_target_run_in_a_multi_panel_project(tmp
 
     result = run_project_e2e(
         ProjectE2ERequest(inventory, base, base.output_directory, review_selections=selections),
-        solver_backends=(ManagedCopySolver(),),
+        solver_backends=(_mosaic_solver(),),
         panel_runner=capture,
-        mosaic_provider=FakeReproject().provider(),
+        reproject_provider=FakeReproject().provider(),
     )
 
     assert result.success is True
@@ -633,7 +700,7 @@ def test_review_selections_are_bound_per_target_run_in_a_multi_panel_project(tmp
         review_selections=(*selections, {"sourceSha256": "sha256:" + "f" * 64, "gatePolicyDigest": policy}),
     )
     with pytest.raises(ProjectE2EError) as excinfo:
-        run_project_e2e(stale, solver_backends=(ManagedCopySolver(),), panel_runner=FakePanelRunner(), mosaic_provider=FakeReproject().provider())
+        run_project_e2e(stale, solver_backends=(_mosaic_solver(),), panel_runner=FakePanelRunner(), reproject_provider=FakeReproject().provider())
     assert excinfo.value.code == "REVIEW_APPROVAL_SOURCE_AMBIGUOUS"
 
     malformed_base = replace(base, output_directory=str(tmp_path / "product-malformed"))
@@ -642,7 +709,7 @@ def test_review_selections_are_bound_per_target_run_in_a_multi_panel_project(tmp
         review_selections=({"sourceSha256": digest(chosen[0]), "gatePolicyDigest": policy, "extra": "x"},),
     )
     with pytest.raises(ProjectE2EError) as excinfo:
-        run_project_e2e(malformed, solver_backends=(ManagedCopySolver(),), panel_runner=FakePanelRunner(), mosaic_provider=FakeReproject().provider())
+        run_project_e2e(malformed, solver_backends=(_mosaic_solver(),), panel_runner=FakePanelRunner(), reproject_provider=FakeReproject().provider())
     assert excinfo.value.code == "REVIEW_SELECTION_INVALID"
 
 
@@ -650,9 +717,9 @@ def test_published_layout_is_channels_previews_receipt_and_details(tmp_path: Pat
     inventory, base, _ = _project(tmp_path, filters=("R", "G", "B", "L"))
     result = run_project_e2e(
         ProjectE2ERequest(inventory, base, base.output_directory),
-        solver_backends=(ManagedCopySolver(),),
+        solver_backends=(_mosaic_solver(),),
         panel_runner=FakePanelRunner(),
-        mosaic_provider=FakeReproject().provider(),
+        reproject_provider=FakeReproject().provider(),
     )
     assert result.success is True
     output = Path(result.output_directory)
@@ -684,12 +751,12 @@ def test_published_layout_is_channels_previews_receipt_and_details(tmp_path: Pat
     # A channel whose grid is final is the solved master itself, not a copy:
     # same storage, header untouched.
     alignment = receipt["execution"]["alignment"]
-    assert alignment["l"]["mode"] == "REFERENCE_SOLVED_GRID"
+    assert alignment["l"]["mode"] == "CANVAS_GRID"
     assert alignment["l"]["publication"] == "HARDLINK"
     assert alignment["l"]["referenceFilter"] == "L"
-    solved_l = output / receipt["execution"]["finalSolves"]["l"]["output"]
-    assert (output / "L.fits").stat().st_ino == solved_l.stat().st_ino
-    assert "OAFALGN" not in fits.getheader(output / "L.fits")
+    mosaic_l = output / "details" / "mosaics" / "l" / "mosaic_L.fits"
+    assert (output / "L.fits").stat().st_ino == mosaic_l.stat().st_ino
+    assert fits.getheader(output / "L.fits")["OAFWCSPR"] == "CANVAS_CATALOG_VERIFIED"
     assert (output / "LRGB.fits").stat().st_ino == (output / "details/color/LRGB.fits").stat().st_ino
     assert receipt["execution"]["color"]["publication"] == {
         "linearRgb": "HARDLINK", "previewTiff": "HARDLINK", "previewPng": "HARDLINK",
@@ -747,9 +814,9 @@ def test_missing_rgb_channel_publishes_solved_mono_only(tmp_path: Path) -> None:
     inventory, base, _ = _project(tmp_path, filters=("R", "G"))
     result = run_project_e2e(
         ProjectE2ERequest(inventory, base, base.output_directory),
-        solver_backends=(ManagedCopySolver(),),
+        solver_backends=(_mosaic_solver(),),
         panel_runner=FakePanelRunner(),
-        mosaic_provider=FakeReproject().provider(),
+        reproject_provider=FakeReproject().provider(),
     )
     assert result.success is True
     assert result.code == "PROJECT_MONO_SUCCEEDED"
@@ -763,9 +830,9 @@ def test_luminance_channel_participates_in_lrgb_instead_of_being_ignored(tmp_pat
     inventory, base, _ = _project(tmp_path, filters=("R", "G", "B", "L"))
     result = run_project_e2e(
         ProjectE2ERequest(inventory, base, base.output_directory),
-        solver_backends=(ManagedCopySolver(),),
+        solver_backends=(_mosaic_solver(),),
         panel_runner=FakePanelRunner(),
-        mosaic_provider=FakeReproject().provider(),
+        reproject_provider=FakeReproject().provider(),
     )
     assert result.success is True
     with fits.open(result.color_product_path or "") as hdul:
@@ -776,48 +843,12 @@ def test_luminance_channel_participates_in_lrgb_instead_of_being_ignored(tmp_pat
     assert receipt["finalProducts"]["luminanceParticipated"] is True
 
 
-def test_reprojected_channel_uses_reference_quality_and_declares_propagated_provenance(
-    tmp_path: Path,
-) -> None:
-    inventory, base, _ = _project(tmp_path, filters=("R", "G", "B"))
-    result = run_project_e2e(
-        ProjectE2ERequest(inventory, base, base.output_directory),
-        solver_backends=(ManagedCopySolver(rotate_filter="G"),),
-        panel_runner=FakePanelRunner(),
-        mosaic_provider=FakeReproject().provider(),
-    )
-    assert result.success is True
-    receipt = json.loads(Path(result.receipt_path).read_text(encoding="utf-8"))
-    green_alignment = receipt["execution"]["alignment"]["g"]
-    assert green_alignment["mode"] == "REPROJECTED_INDEPENDENT_SOLVE"
-    provenance = green_alignment["astrometryProvenance"]
-    assert provenance["type"] == "PROPAGATED_VERIFIED"
-    assert provenance["freshSolveOnThisPixelGrid"] is False
-    assert provenance["qualityAppliesTo"] == "REFERENCE_SOLVED_WCS_PROPAGATED_TO_VERIFIED_GRID"
-    assert provenance["reprojection"]["sampleCount"] == 9
-    assert provenance["reprojection"]["maximumNinePointResidualPixelsBeforeAlignment"] > 0.05
-    assert provenance["reprojection"]["maximumNinePointResidualPixelsAfterAlignment"] <= 0.05
-
-    artifacts = receipt["finalProducts"]["guiArtifacts"]
-    red = next(item for item in artifacts if item.get("filter") == "R")
-    green = next(item for item in artifacts if item.get("filter") == "G")
-    rgb = next(item for item in artifacts if item["kind"] == "LINEAR_RGB_FITS")
-    assert green["astrometry"]["wcsSha256"] == red["astrometry"]["wcsSha256"]
-    assert green["astrometry"]["wcsSha256"] == provenance["referenceSolution"]["wcsSha256"]
-    assert green["astrometry"]["wcsSha256"] != provenance["sourceSolution"]["wcsSha256"]
-    assert green["finalGate"]["freshSolveOnThisPixelGrid"] is False
-    assert green["finalGate"]["propagatedReferenceWcsVerified"] is True
-    assert rgb["astrometryProvenance"]["type"] == "PROPAGATED_VERIFIED"
-    assert rgb["astrometryProvenance"]["freshSolveOnRgbCube"] is False
-    assert rgb["finalGate"]["propagatedReferenceWcsVerified"] is True
-
-
 def test_raw_calibration_library_is_integrated_once_for_all_panels(tmp_path: Path) -> None:
     inventory, supplied_base, _ = _project(tmp_path, filters=("R",))
     raw_biases = tuple(
         _write(
             tmp_path / "input" / "raw-bias" / f"bias-{index}.fits",
-            np.full((8, 8), 100 + index - 1, dtype=np.uint16),
+            np.full(PANEL_SHAPE, 100 + index - 1, dtype=np.uint16),
             _science_header("calibration", "NONE", role="Bias"),
         )
         for index in range(3)
@@ -825,7 +856,7 @@ def test_raw_calibration_library_is_integrated_once_for_all_panels(tmp_path: Pat
     raw_flats = tuple(
         _write(
             tmp_path / "input" / "raw-flat" / f"flat-{index}.fits",
-            np.full((8, 8), 1100 + index, dtype=np.uint16),
+            np.full(PANEL_SHAPE, 1100 + index, dtype=np.uint16),
             _science_header("calibration", "R", role="Flat"),
         )
         for index in range(3)
@@ -841,9 +872,9 @@ def test_raw_calibration_library_is_integrated_once_for_all_panels(tmp_path: Pat
 
     result = run_project_e2e(
         ProjectE2ERequest(inventory, base, base.output_directory),
-        solver_backends=(ManagedCopySolver(),),
+        solver_backends=(_mosaic_solver(),),
         panel_runner=FakePanelRunner(),
-        mosaic_provider=FakeReproject().provider(),
+        reproject_provider=FakeReproject().provider(),
     )
 
     assert result.success is True
@@ -923,9 +954,9 @@ def test_panel_exception_detail_reaches_project_result(tmp_path: Path) -> None:
 
     result = run_project_e2e(
         ProjectE2ERequest(inventory, base, base.output_directory),
-        solver_backends=(ManagedCopySolver(),),
+        solver_backends=(_mosaic_solver(),),
         panel_runner=failed_panel,
-        mosaic_provider=FakeReproject().provider(),
+        reproject_provider=FakeReproject().provider(),
     )
     receipt = json.loads(Path(result.receipt_path).read_text())
     assert not result.success
@@ -961,9 +992,9 @@ def test_panel_qc_failure_preserves_reason_and_evidence(tmp_path: Path) -> None:
 
     result = run_project_e2e(
         ProjectE2ERequest(inventory, base, base.output_directory),
-        solver_backends=(ManagedCopySolver(),),
+        solver_backends=(_mosaic_solver(),),
         panel_runner=failed_panel,
-        mosaic_provider=FakeReproject().provider(),
+        reproject_provider=FakeReproject().provider(),
     )
     assert result.code == "QC_INSUFFICIENT_LIGHTS"
     assert result.serializable()["message"] == detail
@@ -976,65 +1007,105 @@ def test_panel_qc_failure_preserves_reason_and_evidence(tmp_path: Path) -> None:
     assert (sub_receipt.parent / "qc" / "manifest.json").is_file()
 
 
-def test_low_mosaic_coverage_and_final_solver_failure_publish_unsolved_only(tmp_path: Path) -> None:
-    inventory, base, _ = _project(tmp_path / "coverage", filters=("R",))
-    coverage = run_project_e2e(
-        ProjectE2ERequest(inventory, base, base.output_directory),
-        solver_backends=(ManagedCopySolver(),),
-        panel_runner=FakePanelRunner(),
-        mosaic_provider=FakeReproject(sparse_coverage=True).provider(),
-    )
-    assert coverage.success is False
-    assert coverage.code in {
-        "MOSAIC_COVERAGE_GATE_FAILED",
-        "MOSAIC_OVERLAP_SEAM_GATE_FAILED",
-        "MOSAIC_SEAM_EVIDENCE_INVALID",
-    }
-    assert not Path(base.output_directory).exists()
-    assert Path(coverage.evidence_directory or "").is_dir()
+def test_mosaic_failures_publish_unsolved_only(tmp_path: Path) -> None:
+    """A canvas WCS the catalog does not confirm, or a panel nobody can
+    place, publishes evidence and never a success tree."""
 
-    inventory2, base2, _ = _project(tmp_path / "solver", filters=("R",))
-    solver = run_project_e2e(
+    inventory, base, _ = _project(tmp_path / "catalog", filters=("R",))
+    solver = _mosaic_solver()
+
+    def refusing(*_args: Any) -> dict[str, Any]:
+        return {**_managed_quality().serializable(), "matchedStars": 2}
+
+    solver.canvas_verifier = refusing
+    unverified = run_project_e2e(
+        ProjectE2ERequest(inventory, base, base.output_directory),
+        solver_backends=(solver,),
+        panel_runner=FakePanelRunner(),
+    )
+    assert unverified.success is False
+    assert unverified.code == "MOSAIC_GATE_FAILED"
+    assert not Path(base.output_directory).exists()
+    assert Path(unverified.evidence_directory or "").is_dir()
+
+    inventory2, base2, _ = _project(tmp_path / "survey", filters=("R",))
+    unplaced = run_project_e2e(
         ProjectE2ERequest(inventory2, base2, base2.output_directory),
         solver_backends=(ManagedCopySolver(fail=True),),
         panel_runner=FakePanelRunner(),
-        mosaic_provider=FakeReproject().provider(),
     )
-    assert solver.success is False
-    assert solver.code == "MOSAIC_FINAL_SOLVE_REQUIRED"
+    assert unplaced.success is False
+    assert unplaced.code == "MOSAIC_SURVEY_UNSOLVED"
     assert not Path(base2.output_directory).exists()
 
 
-def test_wrong_channel_wcs_and_source_drift_fail_without_success_tree(tmp_path: Path) -> None:
-    inventory, base, _ = _project(tmp_path / "wrong-wcs")
-    wrong = run_project_e2e(
+def test_misplaced_panel_master_and_source_drift_fail_without_success_tree(tmp_path: Path) -> None:
+    inventory, base, _ = _project(tmp_path / "misplaced", filters=("R",))
+    misplaced = run_project_e2e(
         ProjectE2ERequest(inventory, base, base.output_directory),
-        solver_backends=(ManagedCopySolver(wrong_filter="G"),),
-        panel_runner=FakePanelRunner(),
-        mosaic_provider=FakeReproject().provider(),
+        solver_backends=(_mosaic_solver(),),
+        panel_runner=FakePanelRunner(misplaced_panel="dunpai3"),
     )
-    assert wrong.success is False
-    assert wrong.code in {"CHANNEL_WCS_GROSS_MISMATCH", "SOLVER_CENTER_OUTSIDE_HINT_RADIUS"}
+    assert misplaced.success is False
+    assert misplaced.code == "MOSAIC_PANEL_WINDOW_MISMATCH"
     assert not Path(base.output_directory).exists()
 
     inventory2, base2, lights = _project(tmp_path / "drift", filters=("R",))
     drift = run_project_e2e(
         ProjectE2ERequest(inventory2, base2, base2.output_directory),
-        solver_backends=(ManagedCopySolver(),),
+        solver_backends=(_mosaic_solver(),),
         panel_runner=FakePanelRunner(drift_source=lights[0]),
-        mosaic_provider=FakeReproject().provider(),
+        reproject_provider=FakeReproject().provider(),
     )
     assert drift.success is False
     assert drift.code == "SOURCE_CHANGED"
     assert not Path(base2.output_directory).exists()
 
 
+def _single_target_project(tmp_path: Path, filters: tuple[str, ...]) -> tuple[Any, E2ERequest]:
+    lights = [
+        _write(
+            tmp_path / "input" / "dunpai1" / filter_name / f"light-{sequence}.fits",
+            np.full((8, 8), 100 + sequence, dtype=np.uint16),
+            _science_header("dunpai1", filter_name),
+        )
+        for filter_name in filters
+        for sequence in range(3)
+    ]
+    master_bias = _write(
+        tmp_path / "input" / "masters" / "master-bias.fits",
+        np.zeros((8, 8), dtype=np.float32),
+        _science_header("calibration", "NONE", role="Master Bias"),
+    )
+    master_flats = [
+        _write(
+            tmp_path / "input" / "masters" / f"master-flat-{filter_name}.fits",
+            np.ones((8, 8), dtype=np.float32),
+            _science_header("calibration", filter_name, role="Master Flat"),
+        )
+        for filter_name in filters
+    ]
+    request = E2ERequest(
+        light_files=tuple(str(path) for path in lights),
+        flat_files=(),
+        bias_files=(),
+        master_bias_files=(str(master_bias),),
+        master_flat_files=tuple(str(path) for path in master_flats),
+        output_directory=str(tmp_path / "product"),
+        ra_hint_degrees=150.0,
+        dec_hint_degrees=20.0,
+        field_of_view_degrees=0.014,
+        search_radius_degrees=2.0,
+    )
+    return inventory_project([tmp_path / "input"]), request
+
+
 def test_rgb_sip_cube_publishes_spatial_gui_astrometry(tmp_path: Path) -> None:
-    inventory, base, _ = _project(tmp_path)
+    inventory, base = _single_target_project(tmp_path, ("R", "G", "B"))
     result = run_project_e2e(
         ProjectE2ERequest(inventory, base, base.output_directory),
-        solver_backends=(ManagedCopySolver(sip=True),),
-        panel_runner=FakePanelRunner(), mosaic_provider=FakeReproject().provider(),
+        solver_backends=(ManagedCopySolver(),),
+        panel_runner=FakePanelRunner(sip=True), reproject_provider=FakeReproject().provider(),
     )
     assert result.success is True
     assert result.code == "PROJECT_COLOR_SUCCEEDED"
@@ -1046,10 +1117,46 @@ def test_rgb_sip_cube_publishes_spatial_gui_astrometry(tmp_path: Path) -> None:
     artifacts = receipt["finalProducts"]["guiArtifacts"]
     rgb = next(item for item in artifacts if item["kind"] == "LINEAR_RGB_FITS")
     red = next(item for item in artifacts if item["kind"] == "SOLVED_MONO_FITS" and item["filter"] == "R")
-    assert rgb["astrometry"]["imageShape"] == [14, 14]
+    assert rgb["astrometry"]["imageShape"] == [8, 8]
     for key in ("centerRaDegrees", "centerDecDegrees", "pixelScaleArcsec", "rotationDegrees", "wcsSha256"):
         assert rgb["astrometry"][key] == red["astrometry"][key]
     assert receipt["finalProducts"]["resultGate"]["status"] == "PASS"
+
+
+def test_reprojected_channel_uses_reference_quality_and_declares_propagated_provenance(
+    tmp_path: Path,
+) -> None:
+    inventory, base = _single_target_project(tmp_path, ("R", "G", "B"))
+    result = run_project_e2e(
+        ProjectE2ERequest(inventory, base, base.output_directory),
+        solver_backends=(ManagedCopySolver(),),
+        panel_runner=FakePanelRunner(rotate_filter="G"),
+        reproject_provider=FakeReproject().provider(),
+    )
+    assert result.success is True
+    receipt = json.loads(Path(result.receipt_path).read_text(encoding="utf-8"))
+    green_alignment = receipt["execution"]["alignment"]["g"]
+    assert green_alignment["mode"] == "REPROJECTED_INDEPENDENT_SOLVE"
+    provenance = green_alignment["astrometryProvenance"]
+    assert provenance["type"] == "PROPAGATED_VERIFIED"
+    assert provenance["freshSolveOnThisPixelGrid"] is False
+    assert provenance["qualityAppliesTo"] == "REFERENCE_SOLVED_WCS_PROPAGATED_TO_VERIFIED_GRID"
+    assert provenance["reprojection"]["sampleCount"] == 9
+    assert provenance["reprojection"]["maximumNinePointResidualPixelsBeforeAlignment"] > 0.05
+    assert provenance["reprojection"]["maximumNinePointResidualPixelsAfterAlignment"] <= 0.05
+
+    artifacts = receipt["finalProducts"]["guiArtifacts"]
+    red = next(item for item in artifacts if item.get("filter") == "R")
+    green = next(item for item in artifacts if item.get("filter") == "G")
+    rgb = next(item for item in artifacts if item["kind"] == "LINEAR_RGB_FITS")
+    assert green["astrometry"]["wcsSha256"] == red["astrometry"]["wcsSha256"]
+    assert green["astrometry"]["wcsSha256"] == provenance["referenceSolution"]["wcsSha256"]
+    assert green["astrometry"]["wcsSha256"] != provenance["sourceSolution"]["wcsSha256"]
+    assert green["finalGate"]["freshSolveOnThisPixelGrid"] is False
+    assert green["finalGate"]["propagatedReferenceWcsVerified"] is True
+    assert rgb["astrometryProvenance"]["type"] == "PROPAGATED_VERIFIED"
+    assert rgb["astrometryProvenance"]["freshSolveOnRgbCube"] is False
+    assert rgb["finalGate"]["propagatedReferenceWcsVerified"] is True
 
 
 def test_unexpected_final_metadata_error_preserves_completed_products_and_diagnostic(
@@ -1065,8 +1172,8 @@ def test_unexpected_final_metadata_error_preserves_completed_products_and_diagno
     monkeypatch.setattr(project_module, "_astrometry_gui_evidence", fail_rgb_metadata)
     result = run_project_e2e(
         ProjectE2ERequest(inventory, base, base.output_directory),
-        solver_backends=(ManagedCopySolver(),), panel_runner=FakePanelRunner(),
-        mosaic_provider=FakeReproject().provider(),
+        solver_backends=(_mosaic_solver(),), panel_runner=FakePanelRunner(),
+        reproject_provider=FakeReproject().provider(),
     )
     assert result.success is False
     assert result.code == "PROJECT_UNEXPECTED_FAILURE"
@@ -1106,8 +1213,8 @@ def test_unexpected_error_keeps_private_diagnostics_if_evidence_writer_also_fail
     monkeypatch.setattr(project_module, "_failure_result", failed_evidence)
     result = run_project_e2e(
         ProjectE2ERequest(inventory, base, base.output_directory),
-        solver_backends=(ManagedCopySolver(),), panel_runner=failed_panel,
-        mosaic_provider=FakeReproject().provider(),
+        solver_backends=(_mosaic_solver(),), panel_runner=failed_panel,
+        reproject_provider=FakeReproject().provider(),
     )
     assert result.success is False
     assert result.code == "PROJECT_UNEXPECTED_FAILURE"
@@ -1211,26 +1318,19 @@ def test_final_crop_retained_fraction_guard_does_not_modify_channels(tmp_path: P
 
 
 def test_project_crops_final_alignment_edges_before_rgb_and_gui_hashes(tmp_path: Path) -> None:
-    inventory, base, _ = _project(tmp_path, filters=("R", "G", "B", "L"))
-    fake = FakeReproject()
-
-    def corner_footprint(*args: Any, **kwargs: Any) -> tuple[np.ndarray, np.ndarray]:
-        science, footprint = fake.interp(*args, **kwargs)
-        science[0, -1], footprint[0, -1] = np.nan, 0
-        return science, footprint
-
+    inventory, base = _single_target_project(tmp_path, ("R", "G", "B", "L"))
     result = run_project_e2e(
         ProjectE2ERequest(inventory, base, base.output_directory),
-        solver_backends=(ManagedCopySolver(rotate_filter="G", sip=True),),
-        panel_runner=FakePanelRunner(),
-        mosaic_provider=replace(fake.provider(), reproject_function=corner_footprint),
+        solver_backends=(ManagedCopySolver(),),
+        panel_runner=FakePanelRunner(sip=True, invalid_corner_filter="G", master_shape=(10, 10)),
+        reproject_provider=FakeReproject().provider(),
     )
     assert result.success is True
     receipt = json.loads(Path(result.receipt_path).read_text())
     crop = receipt["execution"]["finalCrop"]
     assert crop["applied"] is True
-    assert crop["bounds"] == dict(top=1, left=0, bottom=14, right=14)
-    assert crop["outputImageShape"] == [13, 14]
+    assert crop["bounds"] == dict(top=1, left=0, bottom=10, right=10)
+    assert crop["outputImageShape"] == [9, 10]
     assert crop["invalidPixelsBeforeCrop"] == dict(b=0, g=1, l=0, r=0)
     wcs_hashes = set()
     artifacts = [item for item in receipt["finalProducts"]["guiArtifacts"]
@@ -1239,13 +1339,45 @@ def test_project_crops_final_alignment_edges_before_rgb_and_gui_hashes(tmp_path:
     for artifact in artifacts:
         path = Path(result.output_directory) / artifact["path"]
         assert artifact["sha256"] == "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-        assert artifact["astrometry"]["imageShape"] == [13, 14]
+        assert artifact["astrometry"]["imageShape"] == [9, 10]
         assert artifact["astrometryProvenance"]["type"] == "PROPAGATED_VERIFIED"
         wcs_hashes.add(artifact["astrometry"]["wcsSha256"])
         with fits.open(path) as hdul:
-            assert hdul[0].data.shape[-2:] == (13, 14)
+            assert hdul[0].data.shape[-2:] == (9, 10)
             assert np.isfinite(hdul[0].data).all()
     assert len(wcs_hashes) == 1
     for alignment in receipt["execution"]["alignment"].values():
         path = Path(result.output_directory) / alignment["output"]["path"].removeprefix("artifact/")
         assert alignment["output"]["sha256"] == "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_an_unlabelled_mosaic_is_split_into_panels_by_where_its_lights_point(tmp_path: Path) -> None:
+    def light(name: str, ra: float, dec: float, *, pointing: bool = True) -> None:
+        header = _science_header("M31", "L")
+        header["FOCALLEN"] = 400.0
+        header["XPIXSZ"] = 3.76  # 1.94 arcsec per pixel: a 64 px field is 2.1 arcmin
+        if pointing:
+            header["RA"] = ra
+            header["DEC"] = dec
+        _write(tmp_path / "input" / "M31" / f"{name}.fits", np.full((64, 64), 100, dtype=np.uint16), header)
+
+    # Two pointings 1.6 arcmin apart (0.75 field), each dithered by seconds.
+    for index in range(3):
+        light(f"east-{index}", 10.70 + 0.0003 * index, 41.27)
+        light(f"west-{index}", 10.70 - 0.0355, 41.27 + 0.0002 * index)
+    layout = classify_project_layout(inventory_project([tmp_path / "input"]))
+    assert layout.is_mosaic and len(layout.target_keys) == 2
+    assert {panel.target for panel in layout.panels} == {"M31 PANEL 1", "M31 PANEL 2"}
+    assert all(len(panel.light_files) == 3 for panel in layout.panels)
+    by_target = {panel.target: {Path(path).name.split("-")[0] for path in panel.light_files} for panel in layout.panels}
+    assert sorted(map(sorted, by_target.values())) == [["east"], ["west"]]
+
+    # A single field's dithers stay one target, and a Light without a
+    # pointing keeps the labels as they are.
+    single = tmp_path / "single"
+    for index in range(3):
+        header = _science_header("NGC7331", "L")
+        header["FOCALLEN"], header["XPIXSZ"] = 400.0, 3.76
+        header["RA"], header["DEC"] = 339.27 + 0.001 * index, 34.41
+        _write(single / "input" / f"light-{index}.fits", np.full((64, 64), 100, dtype=np.uint16), header)
+    assert not classify_project_layout(inventory_project([single / "input"])).is_mosaic

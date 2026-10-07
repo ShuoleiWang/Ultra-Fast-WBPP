@@ -10,7 +10,7 @@ A recipe is a versioned scientific contract, not a loose collection of GUI toggl
 | Undersampled mono with measured dithers | [Drizzle](drizzle.md) | Native 1×–4× drizzle of the ordinary integration's inputs; NGC 7331 2× real-data run recorded |
 | Strong gradients/transparency changes | [XISF and normalization](normalization-and-xisf.md) | Stellar scale and guarded background correction; no PixInsight-equivalence claim |
 | Required final celestial WCS | [Astrometry](astrometry.md) then [offline catalogs](offline-solver-catalogs.md) | Real managed Astrometry.net solve; solver/indexes are user-installed and no field is guaranteed before it solves |
-| Four mono-camera panels with R/G/B or L/R/G/B | [Four-panel RGB/LRGB](project-mosaic-rgb.md) | Synthetic 4-panel execution; shared raw-Dark reuse and `PROPAGATED_VERIFIED` post-reprojection WCS provenance regressions pass; no retained real-data mosaic acceptance yet |
+| Several panels, nights and filters of one mosaic | [Mosaics](project-mosaic-rgb.md) | Synthetic only: a two-panel run through the real pipeline with optical distortion, a six-panel set with a bright galaxy across an overlap; no real mosaic yet |
 | One-shot colour (Bayer) | [OSC / CFA](osc-cfa.md) | Synthetic RGGB set built from real mono Lights: channel photometry exact, 1× debayer widens stars 5–10 %, 2× Bayer drizzle recovers full resolution; no real OSC data yet |
 
 ## Built-in contracts
@@ -18,7 +18,7 @@ A recipe is a versioned scientific contract, not a loose collection of GUI toggl
 - **Balanced mono** — ordinary weighted integration for mono L/R/G/B or narrowband data. This is the default when sampling and dithering do not justify Drizzle.
 - **Drizzle mono** — 1×–4× output scale with an explicit kernel (square, circular, gaussian, point), drop shrink, the integration's own weights, normalization and rejection masks, and science/weight/coverage products; sampling and coverage evidence is advisory.
 - **Narrowband** — per-filter measurement/normalization without comparing brightness between filters; designed for Ha/OIII/SII and arbitrary named filters.
-- **Mosaic panel** — solves panel masters independently, reprojects same-filter panels, solves each resulting mosaic again, then aligns solved filters for color output.
+- **Mosaic** — plans one canvas for every panel and filter, integrates each panel's Lights once onto its window of it, matches the panels by overlap-star photometry and background planes solved for all overlaps at once, blends them by inverse variance and verifies the canvas WCS on catalog stars.
 - **One-shot colour** — Bayer Lights are calibrated as mosaics with per-channel flat scaling, debayered into R/G/B channel groups and, with drizzle, Bayer-drizzled from the mosaic samples; the recipe is the Balanced or Drizzle recipe of the mono case.
 
 ## Opt-in extras

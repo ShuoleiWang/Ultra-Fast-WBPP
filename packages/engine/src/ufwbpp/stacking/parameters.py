@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 import math
 from typing import Any, Mapping, Sequence
 
@@ -12,6 +13,7 @@ from numpy.typing import NDArray
 from ..calibration.inputs import MasterMetadataOverride, RawFrameMetadataOverride
 from ..calibration.policy import STRICT, WORKFLOWS, workflow_receipt
 from ..image_io.xisf import XisfDecodePolicy
+from ..integrity import canonical_json_document
 from .drizzle_native import DrizzleGroupInputs
 from .integration import CalibrationError, IntegrationParameters
 from .metal_integration import SUPPORTED_BACKENDS
@@ -105,6 +107,121 @@ class PixelTransform:
 AffineTransform = PixelTransform
 
 
+OUTPUT_GRID_ALGORITHM = "canvas-window-lattice-v1"
+
+
+@dataclass(frozen=True, eq=False)
+class OutputGrid:
+    """The output pixel grid of one mosaic panel: a window of the canvas.
+
+    Every Light of the run is resampled straight onto this grid instead of
+    the registration reference's own grid, so a panel master needs no second
+    interpolation to join the mosaic.  ``reference_x``/``reference_y``
+    (``(rows, columns)``, row-major) hold the registration-reference pixel
+    coordinates (zero-based) of window pixel ``(column*spacing,
+    row*spacing)``; a node outside the reference's mapping is NaN.  A Light
+    registered to the reference by ``transform`` is sampled at
+    ``transform^-1(reference(x, y))``: exactly at the nodes, bilinearly
+    between them (the lattice warp).  ``canvas_origin`` is the window's
+    zero-based ``(x, y)`` offset on the canvas and ``wcs`` the window's
+    celestial WCS cards (the canvas projection with CRPIX shifted to the
+    window).
+    """
+
+    width: int
+    height: int
+    spacing: int
+    reference_x: NDArray[np.float64]
+    reference_y: NDArray[np.float64]
+    canvas_origin: tuple[int, int]
+    wcs: Mapping[str, Any]
+
+    def validate(self) -> None:
+        if not (isinstance(self.width, int) and isinstance(self.height, int)) or self.width < 6 or self.height < 6:
+            raise ValueError("output_grid must be at least 6x6 pixels")
+        if (
+            not isinstance(self.spacing, int)
+            or isinstance(self.spacing, bool)
+            or self.spacing < 1
+            or self.spacing & (self.spacing - 1)
+        ):
+            raise ValueError("output_grid spacing must be a power of two")
+        expected = self.node_shape
+        for name, nodes in (("reference_x", self.reference_x), ("reference_y", self.reference_y)):
+            if not isinstance(nodes, np.ndarray) or nodes.dtype != np.float64 or nodes.shape != expected:
+                raise ValueError(f"output_grid {name} must be a float64 array of shape {expected}")
+            if np.isinf(nodes).any():
+                raise ValueError(f"output_grid {name} may hold NaN but no infinite node")
+        if not np.isfinite(self.reference_x).any():
+            raise ValueError("output_grid maps no window pixel into the reference frame")
+        if not np.array_equal(np.isnan(self.reference_x), np.isnan(self.reference_y)):
+            raise ValueError("output_grid nodes must be NaN in both coordinates or neither")
+        if len(self.canvas_origin) != 2 or not all(isinstance(value, int) for value in self.canvas_origin):
+            raise ValueError("output_grid canvas_origin must be two integers")
+        for key in ("CTYPE1", "CTYPE2", "CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2"):
+            if key not in self.wcs:
+                raise ValueError(f"output_grid wcs lacks {key}")
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return self.height, self.width
+
+    @property
+    def node_shape(self) -> tuple[int, int]:
+        return (
+            (self.height - 1 + self.spacing - 1) // self.spacing + 1,
+            (self.width - 1 + self.spacing - 1) // self.spacing + 1,
+        )
+
+    @property
+    def digest(self) -> str:
+        """SHA-256 of the geometry, the node coordinates and the WCS."""
+
+        hasher = hashlib.sha256()
+        hasher.update(
+            canonical_json_document(
+                {
+                    "algorithm": OUTPUT_GRID_ALGORITHM,
+                    "width": self.width,
+                    "height": self.height,
+                    "spacing": self.spacing,
+                    "canvasOrigin": list(self.canvas_origin),
+                    "wcs": {key: self.wcs[key] for key in sorted(self.wcs)},
+                }
+            )
+        )
+        for nodes in (self.reference_x, self.reference_y):
+            hasher.update(np.ascontiguousarray(nodes, dtype="<f8").tobytes())
+        return hasher.hexdigest()
+
+    def frame_lattice(self, transform: PixelTransform) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """The input coordinates of a Light at the nodes: the inverse of its
+        input-to-reference ``transform`` applied to the reference nodes, in
+        the warp's reference order (``((m00*x) + (m01*y)) + m02``, then the
+        projective division)."""
+
+        inverse = np.linalg.inv(transform.validated_matrix())
+        x, y = self.reference_x, self.reference_y
+        input_x = inverse[0, 0] * x + inverse[0, 1] * y + inverse[0, 2]
+        input_y = inverse[1, 0] * x + inverse[1, 1] * y + inverse[1, 2]
+        if not (inverse[2, 0] == 0.0 and inverse[2, 1] == 0.0 and inverse[2, 2] == 1.0):
+            denominator = inverse[2, 0] * x + inverse[2, 1] * y + inverse[2, 2]
+            input_x = input_x / denominator
+            input_y = input_y / denominator
+        return np.ascontiguousarray(input_x), np.ascontiguousarray(input_y)
+
+    def serializable(self) -> dict[str, Any]:
+        return {
+            "algorithm": OUTPUT_GRID_ALGORITHM,
+            "width": self.width,
+            "height": self.height,
+            "latticeSpacing": self.spacing,
+            "canvasOrigin": list(self.canvas_origin),
+            "wcs": {key: self.wcs[key] for key in sorted(self.wcs)},
+            "sha256": self.digest,
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class PipelineParameters:
     calibration_workflow: str = STRICT
@@ -156,10 +273,22 @@ class PipelineParameters:
     # keywords); ``None`` derives it from the inputs.  A local path derived
     # from the inputs: not serialized.
     grouping_keyword_root: str | None = None
+    # A mosaic panel's canvas window: every Light is resampled onto it
+    # instead of onto the registration reference's own grid (no shared crop;
+    # drizzle and proper coaddition are not available on it yet).
+    output_grid: OutputGrid | None = None
 
     def validate(self) -> None:
         if self.calibration_workflow not in WORKFLOWS:
             raise ValueError("unsupported calibration_workflow")
+        if self.output_grid is not None:
+            if not isinstance(self.output_grid, OutputGrid):
+                raise ValueError("output_grid must be an OutputGrid")
+            self.output_grid.validate()
+            if self.capture_drizzle_inputs:
+                raise ValueError("drizzle onto a mosaic canvas window is not supported yet")
+            if self.proper_coaddition.enabled:
+                raise ValueError("proper coaddition on a mosaic canvas window is not supported yet")
         if self.cosmetic_hot_pixel_sigma is not None and (
             isinstance(self.cosmetic_hot_pixel_sigma, bool)
             or not math.isfinite(self.cosmetic_hot_pixel_sigma)
@@ -244,6 +373,7 @@ class PipelineParameters:
             ),
             "cosmeticHotPixelSigma": self.cosmetic_hot_pixel_sigma,
             "durableIntermediates": self.durable_intermediates,
+            **({"outputGrid": self.output_grid.serializable()} if self.output_grid is not None else {}),
         }
 
 

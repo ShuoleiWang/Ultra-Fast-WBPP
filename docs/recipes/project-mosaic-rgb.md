@@ -1,40 +1,64 @@
-# NINA multi-panel mosaic to solved RGB/LRGB
+# Mosaics: several panels, nights and filters on one canvas
 
-Use this recipe when NINA `OBJECT` values identify panels such as `dunpai1`, `dunpai2`, `dunpai3`, and `dunpai4`.
+Use this recipe when a project covers more sky than one frame: panels named by N.I.N.A. (`OBJECT` values such as `M 31 Panel 3`), WBPP `PANEL_3/` folders, or Lights of one target that simply point at different parts of the sky. Panels may differ in filters, in the number of nights and in how each night was calibrated.
 
-> **Pre-1.0 boundary:** this is a development recipe with synthetic four-panel × RGB coverage only. Synthetic shared-calibration, seam-correction, and post-reprojection WCS-provenance regressions pass; retained real multi-panel/color acceptance remains pending. Do not treat the current module as an unattended scientific support claim.
+> **Pre-1.0 boundary:** canvas mosaics are validated on synthetic data only: a two-panel run through the real pipeline with optical distortion, and a six-panel set with a bright galaxy crossing an overlap. No real mosaic has been processed yet. The design and its open phases are in [mosaic-plan.md](../mosaic-plan.md) (Chinese).
 
 ```bash
 ultra-fast-wbpp run-project \
-  /data/dunpai1 /data/dunpai2 /data/dunpai3 /data/dunpai4 /data/calibration \
-  --output /data/Ultra-Fast-WBPP-Shield-final --progress-json
+  /data/M31_Panel_1 /data/M31_Panel_2 /data/M31_Panel_3 /data/calibration \
+  --output /data/M31-mosaic --progress-json
 ```
 
-GUI and scripted callers should prefer `run-project --request-json request.json`. The v1 object contains `sources[]` (`sourceId`, `hostPath`, `expectedRole`, `recursive`), `outputDirectory`, the complete Recipe v1 object, optional `solverHints`, and `execution.workers`. Header/path role evidence must agree with every `expectedRole`.
+## What a run does
 
-The required transaction contract is:
+1. **Panels.** Lights become panels by their `OBJECT` name, by a WBPP `PANEL` keyword in their path, or, when a target's Lights point at groups of the sky farther apart than 0.35 of a field (header `RA`/`DEC`, `FOCALLEN`, `XPIXSZ`), by those pointing groups (`M31 PANEL 1`, `M31 PANEL 2`, north first).
+2. **Canvas.** One Light of every panel is plate-solved. The canvas is one gnomonic projection shared by every panel and filter:
+   - its tangent point is the centroid of the panels' combined footprint;
+   - its axes follow the median panel orientation, so the canvas is as small as the panels allow;
+   - its pixel scale is the panels' scale; panels of different cameras take the finest scale, with a warning;
+   - beyond 10° it is stereographic.
 
-1. Hash every source and classify READY Lights by scientific `target × filter`.
-2. Integrate raw Bias/Dark/Flat groups once into a shared calibration library, or reuse supplied masters. Every supplied MasterDark requires a SHA-bound `biasIncluded` boolean in `masterMetadataOverrides`.
-3. Run QC, shared-master calibration, registration, integration/Drizzle, and a managed-catalog solve independently for every panel.
-4. For each multi-panel filter, reproject only SOLVED panels, fit a bounded gain/offset relation on exact pairwise overlaps, propagate a deterministic correction from reference panel 0 across the connected overlap graph, and apply those corrections before coaddition. Corrected overlaps are checked again without fitting away residual offsets; a disconnected, extreme-gain, or seam-failing graph stops the run. Backend `match_background` is disabled to prevent an unaudited second normalization. The working mosaic remains `NEEDS_FINAL_SOLVE` with `OAFWCS=PROPAGATED`.
-5. Plate-solve every working mosaic again. Propagated WCS never satisfies the final gate.
-6. Align independently solved filters to one solved reference grid. R/G/B creates linear RGB FITS and color-preserving 16-bit TIFF/PNG. L, when present, participates in LRGB. Missing channels publish clearly labelled solved mono only.
-7. Re-hash the original sources and publish the complete output with one create-only atomic rename. Failure publishes only `<output>.unsolved`.
+   Panels that do not overlap into one mosaic, or a canvas above 2^30 pixels, stop the run before any panel is processed.
+3. **Panels on the canvas.** Each panel runs the ordinary pipeline: screening, per-night calibration, registration, normalization and rejection.
+   - Its registration reference is solved and refined into TAN+SIP on catalog stars (at least 30 matches). Pure TAN solutions leave the optical distortion in the frame corners, which are exactly where panels overlap.
+   - Every Light is then resampled once, from its calibrated pixels straight onto its panel's window of the canvas. The window is an integer offset of the canvas lattice, so no master is ever resampled again and every filter of every panel shares one pixel grid.
+   - A panel master's WCS is the canvas window. It is verified against catalog stars, not solved blind.
+4. **Matching.** For each filter, the panels are matched in their overlaps.
+   - **Scale.** One scale per panel comes from the stars both panels measured. Each panel's aperture follows its own seeing (2.5 FWHM), each star's background is the median of its own annulus, and a robust flux-flux fit absorbs the additive part. All overlaps are solved at once instead of panel by panel.
+   - **Background.** One plane per panel comes from the binned overlap differences, keeping the area-weighted consensus sky. Sky shared by the panels, such as a halo or IFN, is never removed. Bins where the scale's uncertainty times the local brightness could reach a tenth of the noise are left out; on a bright galaxy they give an independent scale check instead.
+5. **Blending.** Every pixel is the inverse-variance weighted mean of the panels covering it. A panel fades in over at most 256 px (0.4 of its narrowest overlap) instead of starting with a step. The blend writes the mosaic and its NOISE, COVERAGE and MASK planes.
+6. **Gates.** A FAIL stops publication; WARN is recorded.
 
-The published directory reads at a glance:
+   | Gate | PASS | WARN |
+   |---|---|---|
+   | Corrected overlap-star flux ratio, per overlap | within 0.3 % | within 1 % |
+   | Overlap-star offset RMS between panels | at most 0.10 px | at most 0.25 px |
+   | Residual background difference | at most 0.1 bin σ | at most 0.3 bin σ |
+   | Flux conservation of overlap stars in the mosaic | 0.5 % | 2 % |
+   | Canvas WCS, verified on catalog stars in every panel's window | required | — |
+
+7. **Colour.** The filters' mosaics share the canvas, so RGB/LRGB composition never resamples a channel. Channels without coverage are NaN there.
+
+## The published directory
 
 ```
-NGC7331_2026-09-18_2335/      # desktop: <target>_<date>_<time>; the CLI uses --output as given
-  L.fits  R.fits  G.fits  B.fits   # one solved master per channel, named after it
-  LRGB.fits                        # linear color cube (RGB.fits without L)
-  previews/                        # L.png ... LRGB.png, LRGB.tiff
+M31-mosaic/
+  L.fits  R.fits  G.fits  B.fits   # one mosaic per filter, on the shared canvas
+  LRGB.fits                        # linear colour cube (RGB.fits without L)
+  previews/
   receipt.json
-  details/                         # shared-calibration/, runs/<target>/, mosaics/, color/
+  details/                         # shared-calibration/, runs/<panel>/, mosaics/<filter>/, color/
 ```
 
-PixInsight names an opened image after its file stem, so `L.fits` opens as the view `L` and PixelMath can address the channels as `L`, `R`, `G`, `B` directly. A channel whose grid is already final (the reference channel, an exactly aligned channel) is the run-level master itself, hard-linked from `details/`, so the top level costs no extra disk; `execution.alignment.<key>.publication` records `HARDLINK`, `COPY` (a volume without hard links) or `CROPPED_COPY` (the common finite-support crop rewrote it).
+`details/mosaics/<filter>/receipt.json` records every panel's scale and plane, every overlap's star count, ratio and astrometric offset, the background residuals, the extended-structure scale checks, flux conservation, the blend statistics and each window's catalog verification. `details/runs/<panel>/receipts/canvas.json` records the panel's reference solution, its distortion fit (order, matched stars, residuals at the edges and in the middle) and its canvas window.
 
-The outer receipt includes a share-safe panel matrix, hashes of shared-calibration and child receipts, mosaic/final-solve/alignment evidence, and `finalProducts.guiArtifacts[]` with relative path, SHA-256, size, final gate, and managed astrometric quality. Published JSON contains no absolute host path or inode/device/mtime values.
+## Not available yet
+
+- Drizzle onto the canvas.
+- Seam routing around bright stars and cores, and a two-scale blend.
+- Short and long exposure classes merged per pixel (HDR) and saturation maps.
+- A bundle adjustment of all panels' distortion.
+- Selection region weight maps and proper coaddition on canvas windows; these combinations are refused.
 
 A Bayer (one-shot-colour) Light set is one target's R, G and B panels: the pixel pipeline debayers each Light into the three channel groups (see [OSC / CFA](osc-cfa.md)); Bayer-as-mono processing never happens, and a Bayer set cannot share a target with mono R/G/B Lights.

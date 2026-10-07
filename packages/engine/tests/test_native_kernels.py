@@ -37,7 +37,7 @@ from ufwbpp.stacking import pipeline
 from ufwbpp.stacking import groups as groups_module
 from ufwbpp.stacking import records as records_module
 from ufwbpp.stacking import warp as warp_module
-from ufwbpp.stacking.parameters import AffineTransform, PipelineParameters
+from ufwbpp.stacking.parameters import AffineTransform, OutputGrid, PipelineParameters
 
 
 KERNELS = native_kernels.load_native_kernels()
@@ -453,6 +453,109 @@ def test_native_projective_warp_places_stars_where_the_homography_says() -> None
     affine_only = (forward[:2] @ np.column_stack((truth, np.ones(len(truth)))).T).T
     assert np.max(np.abs(affine_only[inside] - expected[inside])) > 0.8
     assert np.max(np.abs(errors)) < 0.05
+
+
+def _canvas_window(shape: tuple[int, int], spacing: int = 8) -> OutputGrid:
+    """A window 6 px wider and 4 px taller than ``shape`` whose nodes map
+    into the reference through a rotation and a cubic distortion (no matrix
+    describes it), with NaN nodes in one corner."""
+
+    height, width = shape[0] + 4, shape[1] + 6
+    rows = (height - 1 + spacing - 1) // spacing + 1
+    columns = (width - 1 + spacing - 1) // spacing + 1
+    y, x = np.mgrid[:rows, :columns].astype(np.float64) * spacing
+    angle = np.deg2rad(0.8)
+    u = (x - width / 2.0) / width
+    reference_x = np.cos(angle) * x - np.sin(angle) * y - 2.5 + 1.2 * u**3
+    reference_y = np.sin(angle) * x + np.cos(angle) * y - 1.75 - 0.6 * u**3
+    reference_x[-1, -1] = reference_y[-1, -1] = np.nan
+    return OutputGrid(
+        width=width,
+        height=height,
+        spacing=spacing,
+        reference_x=reference_x,
+        reference_y=reference_y,
+        canvas_origin=(100, 40),
+        wcs={"CTYPE1": "RA---TAN", "CTYPE2": "DEC--TAN", "CRVAL1": 10.0, "CRVAL2": 41.0, "CRPIX1": 1.0, "CRPIX2": 1.0},
+    )
+
+
+@requires_native
+@pytest.mark.parametrize("case", ["fractional-translation", "small-rotation"])
+def test_native_lattice_warp_onto_a_canvas_window_matches_numpy_bitwise(
+    tmp_path: Path, case: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shape = (37, 53)
+    rng = np.random.default_rng(5)
+    pixels = rng.normal(0.4, 0.05, shape).astype(np.float32)
+    pixels[:, 20] = 2.5
+    pixels[15, 30] = np.nan
+    source = _declared_frame(tmp_path / "source.fits", pixels, 1.0)
+    info = replace(
+        read_frame_info(source),
+        normalized_unit_scale=1.0,
+        numeric_domain_authority="CONTENT_BOUND_OVERRIDE",
+    )
+    grid = _canvas_window(shape)
+    grid.validate()
+    transform = _warp_transforms(shape)[case]
+    budget = shape[0] * shape[1] * 512
+    numpy_execution: dict = {}
+    monkeypatch.setattr(warp_module, "load_native_kernels", lambda *_a, **_k: None)
+    warp_module._register_frame(
+        source, tmp_path / "numpy.fits", transform, info,
+        max_memory_bytes=budget, resampler="lanczos-3-clamped",
+        execution=numpy_execution, grid=grid,
+    )
+    monkeypatch.undo()
+    native_execution: dict = {}
+    warp_module._register_frame(
+        source, tmp_path / "native.fits", transform, info,
+        max_memory_bytes=budget, resampler="lanczos-3-clamped",
+        native_threads=3, execution=native_execution, grid=grid,
+    )
+    assert numpy_execution["warpKernel"] == warp_module.NUMPY_LATTICE_WARP_KERNEL_ID
+    assert native_execution["warpKernel"] == native_kernels.LATTICE_WARP_KERNEL_ID
+    numpy_values = fits.getdata(tmp_path / "numpy.fits")
+    native_values = fits.getdata(tmp_path / "native.fits")
+    assert native_values.shape == grid.shape
+    assert np.array_equal(numpy_values, native_values, equal_nan=True)
+    assert np.count_nonzero(np.isfinite(native_values)) > native_values.size // 2
+    header = fits.getheader(tmp_path / "native.fits")
+    assert header["OAFGRID"] == grid.digest[:32] and (header["OAFGRIDX"], header["OAFGRIDY"]) == (100, 40)
+
+
+@requires_native
+def test_a_lattice_from_an_affine_map_samples_where_the_matrix_warp_does(tmp_path: Path) -> None:
+    """Window pixel (x, y) must land on the reference pixel the nodes say:
+    with an exact-translation lattice and an identity transform the window
+    is the reference shifted by whole pixels."""
+
+    shape = (37, 53)
+    rng = np.random.default_rng(6)
+    pixels = rng.normal(0.4, 0.05, shape).astype(np.float32)
+    source = _declared_frame(tmp_path / "source.fits", pixels, 1.0)
+    info = replace(
+        read_frame_info(source),
+        normalized_unit_scale=1.0,
+        numeric_domain_authority="CONTENT_BOUND_OVERRIDE",
+    )
+    spacing = 4
+    height, width = 30, 40
+    rows = (height - 1 + spacing - 1) // spacing + 1
+    columns = (width - 1 + spacing - 1) // spacing + 1
+    y, x = np.mgrid[:rows, :columns].astype(np.float64) * spacing
+    grid = OutputGrid(
+        width=width, height=height, spacing=spacing,
+        reference_x=x + 5.0, reference_y=y + 3.0, canvas_origin=(0, 0),
+        wcs={"CTYPE1": "RA---TAN", "CTYPE2": "DEC--TAN", "CRVAL1": 0.0, "CRVAL2": 0.0, "CRPIX1": 1.0, "CRPIX2": 1.0},
+    )
+    warp_module._register_frame(
+        source, tmp_path / "window.fits", AffineTransform.identity(), info,
+        max_memory_bytes=shape[0] * shape[1] * 512, resampler="lanczos-3-clamped", grid=grid,
+    )
+    # Integer coordinates take the source pixel exactly.
+    assert np.array_equal(fits.getdata(tmp_path / "window.fits"), pixels[3:33, 5:45])
 
 
 @requires_native

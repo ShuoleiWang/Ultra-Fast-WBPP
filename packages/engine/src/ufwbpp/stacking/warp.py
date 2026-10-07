@@ -12,7 +12,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ..calibration.inputs import numeric_domain_metadata
-from ..native_kernels import WARP_KERNEL_ID, load_native_kernels
+from ..native_kernels import LATTICE_WARP_KERNEL_ID, WARP_KERNEL_ID, load_native_kernels
 from ..platform import remove_file
 from .integration import (
     CalibrationError,
@@ -22,7 +22,7 @@ from .integration import (
     PixelStatistics,
     MemoryFrame,
 )
-from .parameters import OUTPUT_STATE, PixelTransform
+from .parameters import OUTPUT_STATE, OutputGrid, PixelTransform
 
 
 # v3: tap weights come from the deterministic 2048-interval table
@@ -36,6 +36,12 @@ LANCZOS3_REGISTRATION_ALGORITHM = (
 
 
 NUMPY_WARP_KERNEL_ID = "numpy-lanczos3-warp-v3-table2048"
+NUMPY_LATTICE_WARP_KERNEL_ID = "numpy-lanczos3-lattice-warp-v1-table2048"
+
+
+# The NumPy lattice path also holds the interpolated coordinate rows and the
+# four node gathers of each coordinate.
+LATTICE_COORDINATE_BYTES_PER_PIXEL = 96
 
 
 # Native warp per output row: Float32 band, finite mask, statistics selection
@@ -62,6 +68,46 @@ def _inverse_coordinates(
         input_x = input_x / denominator
         input_y = input_y / denominator
     return input_x, input_y
+
+
+def _lattice_coordinates(
+    nodes_x: NDArray[np.float64],
+    nodes_y: NDArray[np.float64],
+    spacing: int,
+    first_row: int,
+    row_count: int,
+    width: int,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """The input coordinates of an output band from a node lattice.
+
+    Node ``(row, column)`` holds the input coordinates of output pixel
+    ``(column*spacing, row*spacing)``.  Between nodes the coordinates are
+    interpolated bilinearly in the order the native lattice warp reproduces
+    value for value (``spacing`` is a power of two, so the fractions are
+    exact): ``top = n00 + fx*(n10 - n00)``, ``bottom = n01 + fx*(n11 -
+    n01)``, ``value = top + fy*(bottom - top)``.
+    """
+
+    rows, columns = nodes_x.shape
+    output_y = np.arange(first_row, first_row + row_count, dtype=np.int64)
+    output_x = np.arange(width, dtype=np.int64)
+    cell_y = np.minimum(output_y // spacing, rows - 2)
+    cell_x = np.minimum(output_x // spacing, columns - 2)
+    fy = ((output_y - cell_y * spacing).astype(np.float64) / float(spacing))[:, None]
+    fx = ((output_x - cell_x * spacing).astype(np.float64) / float(spacing))[None, :]
+    row_index = cell_y[:, None]
+    column_index = cell_x[None, :]
+
+    def interpolate(nodes: NDArray[np.float64]) -> NDArray[np.float64]:
+        top = nodes[row_index, column_index] + fx * (
+            nodes[row_index, column_index + 1] - nodes[row_index, column_index]
+        )
+        bottom = nodes[row_index + 1, column_index] + fx * (
+            nodes[row_index + 1, column_index + 1] - nodes[row_index + 1, column_index]
+        )
+        return top + fy * (bottom - top)
+
+    return interpolate(nodes_x), interpolate(nodes_y)
 
 
 def _exact_half_turn_translation(
@@ -100,8 +146,17 @@ def _exact_half_turn_translation(
 
 
 def _registration_provenance(
-    transform: PixelTransform, shape: tuple[int, int], resampler: str
+    transform: PixelTransform,
+    shape: tuple[int, int],
+    resampler: str,
+    grid: OutputGrid | None = None,
 ) -> dict[str, str]:
+    if grid is not None:
+        # Every Light, the reference included, is resampled onto the window.
+        algorithm = (
+            LANCZOS3_REGISTRATION_ALGORITHM if resampler == "lanczos-3-clamped" else "bilinear-2x2-v1"
+        )
+        return {"resampler": resampler, "resamplerAlgorithm": f"{algorithm}+{grid.serializable()['algorithm']}"}
     if transform.is_identity:
         actual, algorithm = "identity-exact", "identity-exact-copy-v1"
     elif _exact_half_turn_translation(transform, shape) is not None:
@@ -122,11 +177,23 @@ def _registration_metadata(
     *,
     resampler: str,
     source_exposure_seconds: float | None = None,
+    grid: OutputGrid | None = None,
 ) -> dict[str, Any]:
-    actual_resampler = _registration_provenance(transform, info.shape, resampler)[
-        "resampler"
-    ]
+    actual_resampler = (
+        resampler
+        if grid is not None
+        else _registration_provenance(transform, info.shape, resampler)["resampler"]
+    )
     uses_lanczos = actual_resampler == "lanczos-3-clamped"
+    canvas = (
+        {
+            "OAFGRID": grid.digest[:32],
+            "OAFGRIDX": grid.canvas_origin[0],
+            "OAFGRIDY": grid.canvas_origin[1],
+        }
+        if grid is not None
+        else {}
+    )
     return {
         "IMAGETYP": "Registered Light",
         "FILTER": info.filter_name,
@@ -142,13 +209,19 @@ def _registration_metadata(
         "OAFRCLMP": "DOMAIN_UNION_SUPPORT" if uses_lanczos else None,
         "OAFRMARG": 2 if uses_lanczos else 0,
         "OAFSRCEX": source_exposure_seconds,
+        **canvas,
         **numeric_domain_metadata(info),
     }
 
 
 def _registration_bytes_per_pixel(
-    transform: PixelTransform, resampler: str, shape: tuple[int, int]
+    transform: PixelTransform,
+    resampler: str,
+    shape: tuple[int, int],
+    grid: OutputGrid | None = None,
 ) -> int:
+    if grid is not None:
+        return (192 if resampler == "lanczos-3-clamped" else 112) + LATTICE_COORDINATE_BYTES_PER_PIXEL
     if transform.is_identity:
         return 24
     if _exact_half_turn_translation(transform, shape) is not None:
@@ -194,6 +267,7 @@ def _register_frame(
     native_threads: int | None = None,
     execution: dict[str, Any] | None = None,
     durable: bool = True,
+    grid: OutputGrid | None = None,
 ) -> PixelStatistics:
     """Resample one calibrated Light (file or in-memory) into a new FITS.
 
@@ -202,14 +276,25 @@ def _register_frame(
     available and the budget holds the decoded source; otherwise the NumPy
     reference resampler runs on bounded coordinate tiles.  Both produce
     value-identical output.  ``execution`` receives the backend actually used.
+
+    With ``grid`` (a mosaic panel's canvas window) the output takes the
+    window's shape and every Light, the reference included, is sampled
+    through the window's coordinate lattice composed with the inverse of its
+    ``transform``: one interpolation from the calibrated Light to the canvas.
     """
 
     matrix = transform.validated_matrix()
     inverse = np.linalg.inv(matrix)
+    lattice: tuple[NDArray[np.float64], NDArray[np.float64]] | None = (
+        grid.frame_lattice(transform) if grid is not None else None
+    )
     with _open_registration_source(source) as frame:
         height, width = frame.shape
-        is_identity = transform.is_identity
-        half_turn = _exact_half_turn_translation(transform, frame.shape)
+        output_height, output_width = grid.shape if grid is not None else (height, width)
+        is_identity = transform.is_identity and grid is None
+        half_turn = (
+            _exact_half_turn_translation(transform, frame.shape) if grid is None else None
+        )
         kernels = None
         source_values: NDArray[np.float32] | None = None
         domain_scale = frame.info.normalized_unit_scale
@@ -227,27 +312,29 @@ def _register_frame(
             and domain_scale > 0.0
         ):
             kernels = load_native_kernels()
+        if kernels is not None and lattice is not None and not getattr(kernels, "has_lattice_warp", False):
+            kernels = None
         if kernels is not None:
             decoded_bytes = 0 if isinstance(frame, MemoryFrame) else height * width * 4
-            native_row_bytes = width * NATIVE_WARP_BYTES_PER_PIXEL
+            native_row_bytes = output_width * NATIVE_WARP_BYTES_PER_PIXEL
             if decoded_bytes + native_row_bytes <= max_memory_bytes:
                 warp_backend = "native-cpu"
                 tile_rows = max(
                     1,
-                    min(height, (max_memory_bytes - decoded_bytes) // native_row_bytes),
+                    min(output_height, (max_memory_bytes - decoded_bytes) // native_row_bytes),
                 )
             else:
                 kernels = None
         if warp_backend != "native-cpu":
             bytes_per_pixel = _registration_bytes_per_pixel(
-                transform, resampler, frame.shape
+                transform, resampler, frame.shape, grid
             )
-            bytes_per_row = width * bytes_per_pixel
+            bytes_per_row = output_width * bytes_per_pixel
             if bytes_per_row > max_memory_bytes:
                 raise CalibrationError(
                     "MEMORY_BUDGET_TOO_SMALL", "one registration row exceeds memory budget"
                 )
-            tile_rows = max(1, min(height, max_memory_bytes // bytes_per_row))
+            tile_rows = max(1, min(output_height, max_memory_bytes // bytes_per_row))
         temporary = destination.with_name(f".{destination.name}.partial")
         if temporary.exists() or os.path.lexists(temporary):
             raise CalibrationError(
@@ -262,23 +349,46 @@ def _register_frame(
         try:
             with FitsFloatWriter(
                 temporary,
-                frame.shape,
+                (output_height, output_width),
                 _registration_metadata(
                     info,
                     transform,
                     resampler=resampler,
                     source_exposure_seconds=source_exposure_seconds,
+                    grid=grid,
                 ),
                 durable=durable,
             ) as writer:
                 if warp_backend == "native-cpu":
                     source_values = frame.full_values()
-                for y0 in range(0, height, tile_rows):
-                    y1 = min(height, y0 + tile_rows)
+                for y0 in range(0, output_height, tile_rows):
+                    y1 = min(output_height, y0 + tile_rows)
                     if is_identity:
                         values = frame.read_rows(y0, y1)
                     elif half_turn is not None:
                         values = _read_half_turn_rows(frame, y0, y1, half_turn)
+                    elif lattice is not None and grid is not None:
+                        if warp_backend == "native-cpu":
+                            assert kernels is not None and source_values is not None
+                            values = kernels.warp_lanczos3_lattice(
+                                source_values,
+                                lattice[0],
+                                lattice[1],
+                                spacing=grid.spacing,
+                                first_row=y0,
+                                row_count=y1 - y0,
+                                output_width=output_width,
+                                domain_scale=float(domain_scale),
+                                threads=native_threads,
+                            )
+                        else:
+                            input_x, input_y = _lattice_coordinates(
+                                lattice[0], lattice[1], grid.spacing, y0, y1 - y0, output_width
+                            )
+                            if resampler == "lanczos-3-clamped":
+                                values = frame.sample_lanczos3_clamped(input_x, input_y)
+                            else:
+                                values = frame.sample_bilinear(input_x, input_y)
                     elif warp_backend == "native-cpu":
                         assert kernels is not None and source_values is not None
                         values = kernels.warp_lanczos3(
@@ -327,9 +437,9 @@ def _register_frame(
             {
                 "warpBackend": warp_backend,
                 "warpKernel": (
-                    WARP_KERNEL_ID
+                    (LATTICE_WARP_KERNEL_ID if grid is not None else WARP_KERNEL_ID)
                     if warp_backend == "native-cpu"
-                    else NUMPY_WARP_KERNEL_ID
+                    else (NUMPY_LATTICE_WARP_KERNEL_ID if grid is not None else NUMPY_WARP_KERNEL_ID)
                     if warp_backend == "numpy" and resampler == "lanczos-3-clamped"
                     else warp_backend
                 ),

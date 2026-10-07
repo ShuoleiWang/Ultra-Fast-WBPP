@@ -633,6 +633,64 @@ extern "C" int ufwbpp_native_cpu_warp_lanczos3_v2(
       "unknown native warp failure" );
 }
 
+extern "C" int ufwbpp_native_cpu_warp_lanczos3_lattice_v1(
+   const UfwbppNativeWarpLanczos3LatticeRequestV1* request,
+   float* destination,
+   size_t destination_capacity,
+   char* error_message,
+   size_t error_message_capacity )
+{
+   if ( request == nullptr || destination == nullptr )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "request and destination are required" );
+      return UFWBPP_NATIVE_INVALID_ARGUMENT;
+   }
+   if ( request->struct_size != sizeof( UfwbppNativeWarpLanczos3LatticeRequestV1 )
+     || request->source_samples == nullptr
+     || request->lattice_x == nullptr
+     || request->lattice_y == nullptr )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "lattice warp C ABI structure version or input buffer is invalid" );
+      return UFWBPP_NATIVE_INVALID_ARGUMENT;
+   }
+   const size_t pixels =
+      static_cast<size_t>( request->output_width )*request->row_count;
+   if ( pixels == 0 || destination_capacity < pixels )
+   {
+      CopyError( error_message, error_message_capacity,
+                 "destination capacity is smaller than the requested band" );
+      return UFWBPP_NATIVE_BUFFER_TOO_SMALL;
+   }
+   return GuardedKernelCall(
+      [&]()
+      {
+         using namespace ufwbpp::native;
+         WarpLanczos3Request native;
+         native.source = std::span<const float>(
+            request->source_samples, request->source_sample_count );
+         native.sourceWidth = request->source_width;
+         native.sourceHeight = request->source_height;
+         native.outputWidth = request->output_width;
+         native.firstRow = request->first_row;
+         native.rowCount = request->row_count;
+         native.domainScale = request->domain_scale;
+         native.threads = request->threads;
+         native.latticeX = std::span<const double>(
+            request->lattice_x, request->lattice_node_count );
+         native.latticeY = std::span<const double>(
+            request->lattice_y, request->lattice_node_count );
+         native.latticeSpacing = request->lattice_spacing;
+         native.latticeColumns = request->lattice_columns;
+         native.latticeRows = request->lattice_rows;
+         WarpLanczos3Clamped(
+            native, std::span<float>( destination, destination_capacity ) );
+      },
+      error_message, error_message_capacity,
+      "unknown native lattice warp failure" );
+}
+
 extern "C" int ufwbpp_native_cpu_mad_rejection_v1(
    const UfwbppNativeMadRejectionRequestV1* request,
    uint8_t* accepted,
