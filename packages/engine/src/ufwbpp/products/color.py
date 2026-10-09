@@ -587,6 +587,12 @@ def build_color_product(
         for name in (*_CHANNELS[1:], *(("L",) if "L" in channels else ()))
     ]
     rgb = np.stack([channels[name].data for name in _CHANNELS]).astype(np.float32, copy=False)
+    # A colour pixel needs all three channels: where a mosaic's filters
+    # cover different panels, the cube is NaN outside their common support.
+    common = np.isfinite(rgb).all(axis=0)
+    partial = int(np.count_nonzero(~common & np.isfinite(rgb).any(axis=0)))
+    if partial:
+        rgb = np.where(common[None], rgb, np.float32(np.nan))
     luminance_evidence: dict[str, Any] | None = None
     if "L" in channels:
         rgb, luminance_evidence = _matched_luminance_rgb(rgb, channels["L"].data)
@@ -616,7 +622,11 @@ def build_color_product(
             "createdAt": datetime.now(timezone.utc).isoformat(),
             "state": "SOLVED",
             "inputs": [channels[name].identity for name in (*_CHANNELS, *(("L",) if "L" in channels else ()))],
-            "geometry": {"shape": list(reference.shape), "channelOrder": list(_CHANNELS)},
+            "geometry": {
+                "shape": list(reference.shape),
+                "channelOrder": list(_CHANNELS),
+                "pixelsWithoutAllThreeChannels": partial,
+            },
             "wcs": {
                 "state": "SOLVED",
                 "referenceChannel": "R",

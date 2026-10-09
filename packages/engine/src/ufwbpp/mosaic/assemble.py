@@ -53,6 +53,8 @@ RESIDUAL_PASS_SIGMA = 0.1
 RESIDUAL_WARN_SIGMA = 0.3
 FLUX_PASS = 0.005
 FLUX_WARN = 0.02
+# Seeing assumed for a panel with no measured overlap star.
+DEFAULT_FWHM_PIXELS = 3.0
 
 Verifier = Callable[[np.ndarray, Mapping[str, Any], Path], Mapping[str, Any]]
 
@@ -205,6 +207,14 @@ def assemble_filter(
             continue
         for key in (edge.left, edge.right):
             widths[key] = min(widths.get(key, math.inf), float(edge.width))
+    seeing: dict[str, list[float]] = {}
+    for edge in edges:
+        for key, value in ((edge.left, edge.fwhm_left), (edge.right, edge.fwhm_right)):
+            if value > 0:
+                seeing.setdefault(key, []).append(value)
+    # A panel without measured overlap stars takes the widest seeing seen.
+    widest = max((max(values) for values in seeing.values()), default=DEFAULT_FWHM_PIXELS)
+    fwhm = {panel.key: float(np.median(seeing[panel.key])) if panel.key in seeing else widest for panel in panels}
     reference = next(panel for panel in panels if panel.key == scales.reference)
     header: dict[str, Any] = {
         **projection.header((x0, y0)),
@@ -225,6 +235,7 @@ def assemble_filter(
         scales,
         planes,
         noises=noises,
+        fwhm=fwhm,
         overlap_widths=widths,
         canvas_box=canvas_box,
         header=header,
@@ -299,6 +310,7 @@ def assemble_filter(
                 "logScaleError": scales.log_scale_errors[panel.key],
                 "plane": list(planes.coefficients[panel.key]),
                 "noise": noises[panel.key],
+                "fwhmPixels": fwhm[panel.key],
                 "exposureSeconds": panel.exposure_seconds,
             }
             for panel in panels
