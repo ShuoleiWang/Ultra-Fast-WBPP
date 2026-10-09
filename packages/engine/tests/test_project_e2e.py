@@ -6,7 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Mapping
 
 from astropy.io import fits
 from astropy.wcs import Sip, WCS
@@ -180,14 +180,22 @@ def _panel_truth(target_index: int) -> dict[str, Any]:
     return true_header(centre, PANEL_SHAPE, scale_arcsec=PANEL_SCALE, rotation_degrees=0.3)
 
 
-def _project(tmp_path: Path, *, filters: tuple[str, ...] = ("R", "G", "B")) -> tuple[Any, E2ERequest, list[Path]]:
+def _project(
+    tmp_path: Path,
+    *,
+    filters: tuple[str, ...] = ("R", "G", "B"),
+    missing: Mapping[int, tuple[str, ...]] | None = None,
+) -> tuple[Any, E2ERequest, list[Path]]:
     """Four mosaic panels (2x2, 48 px overlaps); the Lights carry their
-    panel's true solution, which :class:`TruthSolver` reads back."""
+    panel's true solution, which :class:`TruthSolver` reads back.
+    ``missing`` names the filters a panel (by index) was not shot in."""
 
     lights: list[Path] = []
     for target_index in range(4):
         truth = _panel_truth(target_index)
         for filter_name in filters:
+            if filter_name in (missing or {}).get(target_index, ()):
+                continue
             for sequence in range(3):
                 header = _science_header(f"dunpai{target_index + 1}", filter_name)
                 for key, value in truth_cards(truth).items():
@@ -569,6 +577,35 @@ def test_four_panel_rgb_project_assembles_canvas_mosaics_and_color(tmp_path: Pat
     assert "device" not in serialized.casefold()
     assert "inode" not in serialized.casefold()
     assert "mtime" not in serialized.casefold()
+
+
+def test_filters_shot_on_some_panels_cover_those_panels_and_colour_needs_all_three(tmp_path: Path) -> None:
+    # Panel 2 has no G or B and panel 4 no R or B: L covers four panels, R
+    # and G three each, B two (the fixture's overlaps with enough stars run
+    # 2-1-3-4).
+    inventory, base, _lights = _project(tmp_path, filters=("L", "R", "G", "B"), missing={1: ("G", "B"), 3: ("R", "B")})
+    result = run_project_e2e(
+        ProjectE2ERequest(inventory, base, base.output_directory),
+        solver_backends=(_mosaic_solver(),),
+        panel_runner=FakePanelRunner(),
+    )
+    assert result.success is True, result
+    receipt = json.loads(Path(result.receipt_path).read_text(encoding="utf-8"))
+    mosaics = receipt["execution"]["mosaics"]
+    assert {key: mosaics[key]["panelCount"] for key in ("l", "r", "g", "b")} == {"l": 4, "r": 3, "g": 3, "b": 2}
+    output = Path(result.output_directory)
+    planes = {name: fits.getdata(output / f"{name}.fits") for name in ("L", "R", "G", "B")}
+    assert len({plane.shape for plane in planes.values()}) == 1
+    finite = {name: np.isfinite(plane) for name, plane in planes.items()}
+    # Each filter covers the panels shot in it.
+    assert (finite["B"] <= finite["R"]).all() and (finite["B"] <= finite["G"]).all() and (finite["R"] <= finite["L"]).all()
+    assert finite["L"].sum() > finite["R"].sum() > finite["B"].sum()
+    # A colour pixel needs all three channels: the cube is NaN outside
+    # their common support, even where L or one channel has data.
+    common = finite["R"] & finite["G"] & finite["B"]
+    cube = fits.getdata(result.color_product_path)
+    assert np.array_equal(np.isfinite(cube).all(axis=0), common)
+    assert not np.isfinite(cube[:, ~common]).any()
 
 
 def test_project_progress_weights_lights_and_does_not_credit_failure_cleanup(tmp_path: Path) -> None:

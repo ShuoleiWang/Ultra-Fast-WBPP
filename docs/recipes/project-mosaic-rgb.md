@@ -27,7 +27,10 @@ ultra-fast-wbpp run-project \
 4. **Matching.** For each filter, the panels are matched in their overlaps.
    - **Scale.** One scale per panel comes from the stars both panels measured. Each panel's aperture follows its own seeing (2.5 FWHM), each star's background is the median of its own annulus, and a robust flux-flux fit absorbs the additive part. All overlaps are solved at once instead of panel by panel.
    - **Background.** One plane per panel comes from the binned overlap differences, keeping the area-weighted consensus sky. Sky shared by the panels, such as a halo or IFN, is never removed. Bins where the scale's uncertainty times the local brightness could reach a tenth of the noise are left out; on a bright galaxy they give an independent scale check instead.
-5. **Blending.** Every pixel is the inverse-variance weighted mean of the panels covering it. A panel fades in over at most 256 px (0.4 of its narrowest overlap) instead of starting with a step. The blend writes the mosaic and its NOISE, COVERAGE and MASK planes.
+5. **Blending.** Every pixel is the inverse-variance weighted mean of the panels covering it. A panel fades in over at most 256 px (0.4 of its narrowest overlap) instead of starting with a step.
+   - Bright stars and galaxy cores in an overlap are the exception. Panels of different seeing hold different profiles of them, and their mean would match neither. Such a blob takes its small scales from the panel with the larger weight at its peak, while its large scales stay averaged.
+   - A blob grows from every peak above 50 σ over the region where the panels differ, and it fades into the blend over 8 px. MASK bit 4 marks it.
+   - The blend writes the mosaic and its NOISE, COVERAGE and MASK planes.
 6. **Gates.** A FAIL stops publication; WARN is recorded.
 
    | Gate | PASS | WARN |
@@ -38,7 +41,10 @@ ultra-fast-wbpp run-project \
    | Flux conservation of overlap stars in the mosaic | 0.5 % | 2 % |
    | Canvas WCS, verified on catalog stars in every panel's window | required | — |
 
-7. **Colour.** The filters' mosaics share the canvas, so RGB/LRGB composition never resamples a channel. Channels without coverage are NaN there.
+7. **Colour.** The filters' mosaics share the canvas, so RGB/LRGB composition never resamples a channel.
+   - A filter shot on only some panels covers those panels and is NaN elsewhere.
+   - The colour cube keeps only the pixels where R, G and B all have data; L may cover more.
+   - A filter whose panels do not overlap with enough common stars (8 per overlap) cannot be matched and stops the run.
 
 ## The published directory
 
@@ -56,8 +62,6 @@ M31-mosaic/
 ## Not available yet
 
 - Drizzle onto the canvas.
-- Seam routing around bright stars and cores, and a two-scale blend.
-- Short and long exposure classes merged per pixel (HDR) and saturation maps.
 - A bundle adjustment of all panels' distortion.
 - Selection region weight maps and proper coaddition on canvas windows; these combinations are refused.
 

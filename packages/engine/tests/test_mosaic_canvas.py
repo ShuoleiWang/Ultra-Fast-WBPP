@@ -11,6 +11,7 @@ import pytest
 from scipy import ndimage
 
 from mosaic_synthetic import true_header
+from ufwbpp.mosaic import protect
 from ufwbpp.mosaic.assemble import assemble_filter
 from ufwbpp.mosaic.astrometry import fit_tan_sip
 from ufwbpp.mosaic.canvas import (
@@ -175,3 +176,93 @@ def test_six_panels_are_matched_by_one_network_and_blended_without_a_background_
         if usable[i : i + 64, j : j + 64].sum() > 500
     ]
     assert np.sqrt(np.mean(np.square(binned))) < 0.25  # pixel noise 2.0; the injected planes reach 10
+
+
+def _two_seeings(root: Path) -> tuple[list[PanelImage], list[tuple[int, int]], tuple[int, int]]:
+    """Two panels of one sky that overlap by 300 px, one seen at FWHM 2.5 px
+    and one at 4.5 px: bright stars and a galaxy core in the overlap, a
+    bright star outside it in each panel, fainter stars everywhere."""
+
+    rng = np.random.default_rng(13)
+    height, width, step = 360, 640, 340
+    canvas_w = step + width
+    points = np.zeros((height, canvas_w))
+    faint = 400
+    sx, sy = rng.uniform(5, canvas_w - 5, faint), rng.uniform(5, height - 5, faint)
+    np.add.at(points, (np.round(sy).astype(int), np.round(sx).astype(int)), 10 ** rng.uniform(2.0, 2.8, faint))
+    # Stars across two decades of flux for the overlap photometry.
+    medium = 150
+    mx, my = rng.uniform(5, canvas_w - 5, medium), rng.uniform(5, height - 5, medium)
+    np.add.at(points, (np.round(my).astype(int), np.round(mx).astype(int)), 10 ** rng.uniform(2.8, 4.2, medium))
+    bright = [(x, y) for y in (60, 150, 240) for x in (400, 490, 580)]
+    for x, y in (*bright, (150, 180), (830, 180)):
+        points[y, x] += 60000.0
+    yy, xx = np.mgrid[:height, :canvas_w].astype(float)
+    r = np.hypot(xx - 490, yy - 310)
+    sky = points + 20000.0 * np.exp(-r / 4.0)
+    panels = []
+    for key, x0, fwhm, scale, offset in (("A", 0, 2.5, 1.0, 3.0), ("B", step, 4.5, 0.9, -2.0)):
+        image = (ndimage.gaussian_filter(sky, fwhm / 2.3548) + 100.0)[:, x0 : x0 + width] * scale + offset
+        image += rng.normal(0.0, 2.0, image.shape)
+        path, coverage = root / f"{key}.fits", root / f"{key}_coverage.fits"
+        fits.writeto(path, image.astype(np.float32))
+        fits.writeto(coverage, np.ones((height, width), np.float32))
+        panels.append(PanelImage(key, path, (x0, 0), (height, width), 300.0, coverage, None))
+    return panels, [*bright, (490, 310)], (canvas_w, height)
+
+
+def _second_moment_fwhm(image: np.ndarray, x: int, y: int) -> float:
+    """FWHM from the second moment within 8 px, above the median of the
+    9-12 px annulus."""
+
+    cut = image[y - 12 : y + 13, x - 12 : x + 13].astype(float)
+    yy, xx = np.mgrid[-12:13, -12:13]
+    r2 = xx**2 + yy**2
+    light = cut - np.median(cut[(r2 >= 81) & (r2 <= 144)])
+    inner = r2 <= 64
+    return 2.3548 * math.sqrt(float(np.sum(light[inner] * r2[inner]) / (2.0 * np.sum(light[inner]))))
+
+
+def test_bright_stars_and_cores_in_an_overlap_keep_one_panels_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    panels, sources, (width, height) = _two_seeings(tmp_path)
+    projection = CanvasProjection("TAN", (10.0, 41.0), (1.0, 1.0), ((-1 / 3600, 0.0), (0.0, 1 / 3600)))
+
+    def assemble(name: str):
+        output = tmp_path / name
+        output.mkdir()
+        return assemble_filter("L", panels, projection=projection, canvas_box=(0, 0, width, height), output_directory=output, verifier=None)
+
+    protected = assemble("protected")
+    monkeypatch.setattr(protect, "PROTECT_PEAK_SIGMA", math.inf)
+    mean = assemble("mean")
+    receipt = protected.receipt
+    assert receipt["gates"]["photometry"] == "PASS" and receipt["gates"]["fluxConservation"] == "PASS"
+    assert receipt["blend"]["protectedSet"]["blobsLeftToTheMean"] == 0
+    science, noise = fits.getdata(protected.science_path).astype(float), fits.getdata(protected.noise_path).astype(float)
+    mask = fits.getdata(protected.mask_path).astype(int)
+    plain, plain_noise = fits.getdata(mean.science_path).astype(float), fits.getdata(mean.noise_path).astype(float)
+    # Off the protected set the blend is the inverse-variance mean, bit for
+    # bit, and the bright stars outside the overlap are not protected.
+    outside = (mask & 4) == 0
+    assert np.array_equal(science[outside], plain[outside], equal_nan=True)
+    assert np.array_equal(noise[outside], plain_noise[outside], equal_nan=True)
+    assert not mask[180, 150] & 4 and not mask[180, 830] & 4
+    raw = {panel.key: fits.getdata(panel.path) for panel in panels}
+    corrected_noise = {item["key"]: item["scale"] * item["noise"] for item in receipt["panels"]}
+    for x, y in sources:
+        own = {"A": _second_moment_fwhm(raw["A"], x, y), "B": _second_moment_fwhm(raw["B"], x - 340, y)}
+        kept, mixed = _second_moment_fwhm(science, x, y), _second_moment_fwhm(plain, x, y)
+        chosen = min(own, key=lambda key: abs(kept / own[key] - 1.0))
+        # The mosaic holds one panel's profile (the stars' FWHM 2.5 or 4.5
+        # px, the core's width with either seeing); the plain mean is a mix.
+        assert kept == pytest.approx(own[chosen], rel=0.005)
+        assert min(own.values()) < mixed < max(own.values()) and abs(mixed / own[chosen] - 1.0) > 0.008
+        assert mask[y, x] & 4
+        assert noise[y, x] == pytest.approx(corrected_noise[chosen], rel=0.02)
+        # The panel with the larger weight at the peak: in the middle row, A
+        # where B fades in and B where A fades out.
+        if (x, y) == (400, 150):
+            assert chosen == "A"
+        if (x, y) == (580, 150):
+            assert chosen == "B"
+

@@ -4,6 +4,19 @@ All notable changes are documented here. The format follows Keep a Changelog and
 
 ## [Unreleased]
 
+### Mosaic blend keeps each bright star and core from one panel
+
+- In an overlap, panels of different seeing hold different profiles of a bright star or galaxy core, and their mean is neither. The blend now takes such a blob's small scales from one panel while its large scales stay averaged:
+  - the small scales are the image minus a σ = 16 px normalized Gaussian low band;
+  - the panel is the one with the larger blend weight at the blob's peak;
+  - a blob grows from every high-band peak above 50 σ over the region where the panels' small scales differ significantly, and fades into the blend over 8 px.
+- Everywhere else the mosaic is the inverse-variance mean, bit for bit. MASK bit 4 marks the protected pixels and the receipt lists the blobs.
+- Synthetic evidence:
+  - Two panels at FWHM 2.5 and 4.5 px. Nine bright stars and a galaxy core in the overlap keep the chosen panel's width within 0.5 %; the plain mean gave widths of 3.25–3.81 px. Flux conservation moved from 0.47 % to 0.19 %.
+  - A 44 MP two-panel canvas with about 300 protected blobs: the blend takes 2.4 s instead of 1.4 s.
+- A filter shot on only some panels makes a mosaic of those panels on the shared canvas. The colour cube keeps only the pixels where R, G and B all have data, and the colour receipt counts the rest; L may cover more. A filter whose panels do not overlap with enough common stars still stops the run.
+- Single-target runs are unchanged: on the NGC 7331 reference project the four masters are byte-identical to main, and so are the LRGB pixels.
+
 ### Mosaics on one canvas
 
 - A project with several panels now plans one canvas before the panels run.
@@ -23,7 +36,7 @@ All notable changes are documented here. The format follows Keep a Changelog and
   - Two panels through the real pipeline, with distortion the solver's TAN ignores: isolated stars of the mosaic lie within 0.05 px (median) of the truth.
   - Six panels with a bright galaxy core in an overlap: scales within 0.2 %, residual background under 0.25 at a pixel noise of 2, against injected planes of up to 10.
   - Single-target runs are unchanged: identical master hashes against main on a synthetic per-night project, on the native and Metal paths.
-- Not yet: drizzle onto the canvas, seam routing and a two-scale blend, HDR exposure classes, a joint distortion adjustment, real mosaic data.
+- Not yet: drizzle onto the canvas, a joint distortion adjustment, real mosaic data. Merging short and long exposures (HDR) is not planned: bright cores are protected by the blend instead.
 
 ### Calibration paired by WBPP's rules
 

@@ -26,7 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from astropy.io import fits
 import numpy as np
@@ -67,24 +67,40 @@ class PanelImage:
 
         return self.origin[0], self.origin[1], self.origin[0] + self.shape[1], self.origin[1] + self.shape[0]
 
-    def _read(self, path: Path, x0: int, y0: int, x1: int, y1: int) -> NDArray[np.float32]:
+    def _read(
+        self, path: Path, x0: int, y0: int, x1: int, y1: int, opened: Mapping[Path, Any] | None = None
+    ) -> NDArray[np.float32]:
         bx0, by0, _, _ = self.box
+        if opened is not None and path in opened:
+            return np.array(opened[path][0].data[y0 - by0 : y1 - by0, x0 - bx0 : x1 - bx0], dtype=np.float32)
         with fits.open(path, mode="readonly", memmap=True) as hdul:
             return np.array(hdul[0].data[y0 - by0 : y1 - by0, x0 - bx0 : x1 - bx0], dtype=np.float32)
 
-    def read(self, x0: int, y0: int, x1: int, y1: int) -> NDArray[np.float32]:
-        """Canvas box of the master; NaN where the panel has no valid sample."""
+    def read(
+        self, x0: int, y0: int, x1: int, y1: int, *, opened: Mapping[Path, Any] | None = None
+    ) -> NDArray[np.float32]:
+        """Canvas box of the master; NaN where the panel has no valid sample.
+        ``opened`` maps a plane's path to its open HDU list, for many small
+        reads."""
 
-        values = self._read(self.path, x0, y0, x1, y1)
+        values = self._read(self.path, x0, y0, x1, y1, opened)
         if self.coverage_path is not None:
-            coverage = self._read(self.coverage_path, x0, y0, x1, y1)
+            coverage = self._read(self.coverage_path, x0, y0, x1, y1, opened)
             values[~(np.isfinite(coverage) & (coverage >= MINIMUM_COVERAGE_FRACTION))] = np.nan
         return values
 
-    def counts(self, x0: int, y0: int, x1: int, y1: int) -> NDArray[np.float32] | None:
+    def counts(
+        self, x0: int, y0: int, x1: int, y1: int, *, opened: Mapping[Path, Any] | None = None
+    ) -> NDArray[np.float32] | None:
         if self.count_path is None:
             return None
-        return self._read(self.count_path, x0, y0, x1, y1)
+        return self._read(self.count_path, x0, y0, x1, y1, opened)
+
+    @property
+    def planes(self) -> tuple[Path, ...]:
+        """The files this panel reads."""
+
+        return tuple(dict.fromkeys(path for path in (self.path, self.coverage_path, self.count_path) if path is not None))
 
 
 def _intersection(left: PanelImage, right: PanelImage) -> tuple[int, int, int, int] | None:
@@ -107,6 +123,10 @@ class EdgeMeasurement:
     offset_x: NDArray[np.float64] = field(default_factory=lambda: np.empty(0))
     offset_y: NDArray[np.float64] = field(default_factory=lambda: np.empty(0))
     aperture_radius: float = 0.0
+    # Each panel's seeing (pixels) from its stars' half-light radii; 0 when
+    # no star was measured.
+    fwhm_left: float = 0.0
+    fwhm_right: float = 0.0
     # Per background bin: canvas centre, the two medians and the bin noise.
     bin_x: NDArray[np.float64] = field(default_factory=lambda: np.empty(0))
     bin_y: NDArray[np.float64] = field(default_factory=lambda: np.empty(0))
@@ -291,6 +311,8 @@ def measure_edge(left: PanelImage, right: PanelImage) -> EdgeMeasurement | None:
         edge.offset_x = np.asarray(cx_a[keep] - cx_b[keep], dtype=np.float64)
         edge.offset_y = np.asarray(cy_a[keep] - cy_b[keep], dtype=np.float64)
         edge.aperture_radius = max(radius_a, radius_b)
+        edge.fwhm_left = radius_a / APERTURE_FWHM
+        edge.fwhm_right = radius_b / APERTURE_FWHM
     usable = valid & ~star_mask
     rows, columns = valid.shape[0] // BIN_PIXELS, valid.shape[1] // BIN_PIXELS
     if rows and columns:

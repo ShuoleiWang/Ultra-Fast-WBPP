@@ -304,8 +304,10 @@ redistribution permissions are separate; see [licensing](licensing.md).
   solved blind. `photometry.py` matches the panels of a filter in their
   overlaps (one robust network for all scales from star photometry, one for
   the additive planes with an area-weighted minimum-norm gauge), `blend.py`
-  blends them by inverse variance with edge tapers, and `assemble.py` gates
-  the result and verifies the canvas WCS of every panel window.
+  blends them by inverse variance with edge tapers, except on the protected
+  set (`protect.py`): a bright star or core in an overlap takes its small
+  scales from one panel. `assemble.py` gates the result and verifies the
+  canvas WCS of every panel window.
 - `stacking/pipeline.py` is a sequence of stages: `_plan_run` (`run_plan.py`:
   validate and group every input into a `_RunPlan`),
   `_build_calibration_masters` (`masters.py`), `_plan_light_jobs` and
