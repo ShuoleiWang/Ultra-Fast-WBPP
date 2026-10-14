@@ -2,20 +2,29 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import math
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from astropy.io import fits
 from astropy.wcs import WCS
 import numpy as np
 
 from ..integrity import sha256_digest
+from ..mosaic.astrometry import (
+    SIP_FIT_ALGORITHM,
+    MosaicAstrometryError,
+    catalog_source_from_backends,
+    refine_solution,
+)
 from ..platform import remove_file
+from ..solvers.catalog_correspondence import CatalogCorrespondenceError
 from ..solvers.base import (
     SolveRequest,
     SolverBackend,
@@ -30,6 +39,14 @@ from ..solvers.process import (
 )
 from .contracts import IntegrationMode, E2EError
 
+# Catalog matches a refitted solution needs, the floor a mosaic panel's reference uses.
+_REFINEMENT_MINIMUM_MATCHES = 30
+# A refit replaces the solver's solution only when its residual on stars it was
+# not fitted to is at most this fraction of the solver's on the same stars.
+_REFINEMENT_MAXIMUM_RESIDUAL_RATIO = 0.8
+# The refit's catalog verification on each master, recorded as that master's
+# last accepted solve; its artifacts sit beside the master.
+CATALOG_REFIT_VERIFICATION_BACKEND = "catalog-refit-verification"
 
 
 
@@ -439,60 +456,25 @@ def _unify_same_grid_solutions(
             continue
         entry = record["filters"][filter_name]
         before_sha256 = sha256_digest(path)
-        try:
-            with fits.open(
-                path,
-                mode="update",
-                memmap=True,
-                do_not_scale_image_data=True,
-                uint=False,
-                checksum=False,
-            ) as hdul:
-                header = hdul[0].header
-                for keyword in [card.keyword for card in header.cards if _WCS_CARD_PATTERN.match(card.keyword)]:
-                    del header[keyword]
-                # Insert after the mandatory cards so the layout stays FITS-legal.
-                insert_at = header.index("EXTEND") + 1 if "EXTEND" in header else 5
-                for offset, card in enumerate(adopted_cards):
-                    header.insert(insert_at + offset, card)
-                header["OAFWCSSG"] = (adopted, "Filter whose same-grid solve is shared")
-                header["OAFWCSVP"] = (
-                    float(entry["ownVersusAdoptedMaximumPixels"]),
-                    "Own solve vs shared solve, max px",
-                )
-                header.add_history(
-                    f"Ultra-Fast WBPP: same-grid {adopted} solve adopted; own solve agreed within "
-                    f"{entry['ownVersusAdoptedMaximumPixels']:.4f} px"
-                )
-                for hdu in hdul:
-                    if "CHECKSUM" in hdu.header or "DATASUM" in hdu.header:
-                        hdu.add_checksum(override_datasum=True)
-                hdul.flush(output_verify="exception")
-            with path.open("r+b") as stream:
-                os.fsync(stream.fileno())
-        except Exception as error:
-            raise E2EError("SAME_GRID_WCS_REWRITE_FAILED", str(error), path=str(path)) from error
-        after_header, after_shape = _read_image_header(path)
-        validation = validate_wcs_header(after_header, image_shape=after_shape)
-        residual = _wcs_grid_disagreement(adopted_header, after_header, shape)
-        if (
-            not validation.valid
-            or after_shape != shape
-            or residual is None
-            or residual > 1e-6
-            or after_header.get("OAFSTATE") != "SOLVED"
-            or after_header.get("OAFWCS") != "SOLVED"
-        ):
-            raise E2EError(
-                "SAME_GRID_WCS_REWRITE_INVALID",
-                "rewritten master does not carry the adopted solution exactly",
-                path=str(path),
-            )
+        _rewrite_wcs_cards(
+            path,
+            adopted_cards,
+            stamps={
+                "OAFWCSSG": (adopted, "Filter whose same-grid solve is shared"),
+                "OAFWCSVP": (float(entry["ownVersusAdoptedMaximumPixels"]), "Own solve vs shared solve, max px"),
+            },
+            history=(
+                f"Ultra-Fast WBPP: same-grid {adopted} solve adopted; own solve agreed within "
+                f"{entry['ownVersusAdoptedMaximumPixels']:.4f} px"
+            ),
+            error_code="SAME_GRID_WCS_REWRITE_FAILED",
+        )
+        validation = _verify_rewritten_wcs(path, adopted_header, shape, error_code="SAME_GRID_WCS_REWRITE_INVALID")
         entry.update(
             rewritten=True,
             sha256Before=before_sha256,
             sha256After=sha256_digest(path),
-            wcsValidation=validation.serializable(),
+            wcsValidation=validation,
         )
         accepted = next(
             (
@@ -506,6 +488,207 @@ def _unify_same_grid_solutions(
             accepted["artifact"]["sha256"] = entry["sha256After"]
             accepted["artifact"]["sizeBytes"] = path.stat().st_size
             accepted["sameGridSolveAdopted"] = adopted
+    return record
+
+
+def _rewrite_wcs_cards(
+    path: Path,
+    cards: Sequence[fits.Card],
+    *,
+    stamps: Mapping[str, tuple[Any, str]],
+    history: str,
+    error_code: str,
+) -> None:
+    """Replace a master's WCS cards in place; pixels and every other card stay."""
+
+    try:
+        with fits.open(
+            path,
+            mode="update",
+            memmap=True,
+            do_not_scale_image_data=True,
+            uint=False,
+            checksum=False,
+        ) as hdul:
+            header = hdul[0].header
+            for keyword in [card.keyword for card in header.cards if _WCS_CARD_PATTERN.match(card.keyword)]:
+                del header[keyword]
+            # Insert after the mandatory cards so the layout stays FITS-legal.
+            insert_at = header.index("EXTEND") + 1 if "EXTEND" in header else 5
+            for offset, card in enumerate(cards):
+                header.insert(insert_at + offset, card)
+            for keyword, value in stamps.items():
+                header[keyword] = value
+            header.add_history(history)
+            for hdu in hdul:
+                if "CHECKSUM" in hdu.header or "DATASUM" in hdu.header:
+                    hdu.add_checksum(override_datasum=True)
+            hdul.flush(output_verify="exception")
+        with path.open("r+b") as stream:
+            os.fsync(stream.fileno())
+    except Exception as error:
+        raise E2EError(error_code, str(error), path=str(path)) from error
+
+
+def _verify_rewritten_wcs(
+    path: Path, expected: fits.Header, shape: tuple[int, int], *, error_code: str
+) -> dict[str, Any]:
+    """The rewritten master maps its grid exactly as ``expected`` and stays SOLVED."""
+
+    after_header, after_shape = _read_image_header(path)
+    validation = validate_wcs_header(after_header, image_shape=after_shape)
+    residual = _wcs_grid_disagreement(expected, after_header, shape)
+    if (
+        not validation.valid
+        or after_shape != shape
+        or residual is None
+        or residual > 1e-6
+        or after_header.get("OAFSTATE") != "SOLVED"
+        or after_header.get("OAFWCS") != "SOLVED"
+    ):
+        raise E2EError(error_code, "rewritten master does not carry the adopted solution exactly", path=str(path))
+    return validation.serializable()
+
+
+def _refine_solved_wcs(
+    masters: Mapping[str, Path],
+    *,
+    solver_records: Mapping[str, Any],
+    backends: Sequence[Any],
+    verifier: Callable[[np.ndarray, Mapping[str, Any], Path], Mapping[str, Any]] | None,
+    min_matches: int,
+    max_rms_arcsec: float,
+    workers: int,
+) -> dict[str, Any]:
+    """Refit the solution the ``masters`` share on the managed catalog's stars.
+
+    astrometry.net reports a SIP order of 2, which leaves the cubic distortion
+    of a fast corrected optical train in place.  The refit (TAN+SIP, order by
+    the BIC) is written to every master when its residual on held-out stars
+    beats the solver's and it passes catalog verification on each master;
+    otherwise the solver's solution stays.  Pixel values are untouched.
+    """
+
+    catalog = catalog_source_from_backends(backends)
+    if catalog is None or verifier is None:
+        return {"status": "NOT_APPLICABLE", "reason": "no managed star catalog"}
+    reference = "L" if "L" in masters else sorted(masters)[0]
+    header, shape = _read_image_header(masters[reference])
+    minimum_matches = max(int(min_matches), _REFINEMENT_MINIMUM_MATCHES)
+    record: dict[str, Any] = {
+        "status": "KEPT_SOLVER_WCS",
+        "algorithm": SIP_FIT_ALGORITHM,
+        "referenceFilter": reference,
+        "filters": sorted(masters),
+    }
+    try:
+        fit = refine_solution(
+            np.asarray(fits.getdata(masters[reference], memmap=False), dtype=np.float32),
+            header,
+            catalog,
+            minimum_matches=minimum_matches,
+            # About half of a catalog's stars survive saturation, isolation and
+            # matching on a real frame (23 of index 4107's 50 on a 1.1-degree
+            # M31 field), so a sparser field is skipped before the star
+            # detection is paid for.
+            minimum_catalog_stars=2 * minimum_matches,
+        )
+    except (MosaicAstrometryError, CatalogCorrespondenceError) as error:
+        return {**record, "code": error.code, "message": str(error).removeprefix(f"{error.code}: ")}
+    solver_rms = float(fit.evidence["initialRmsArcsec"])
+    holdout_rms = float(fit.evidence["holdoutRmsArcsec"])
+    record.update(
+        order=fit.order,
+        matched=fit.matched,
+        rmsArcsec=fit.rms_arcsec,
+        holdoutRmsArcsec=holdout_rms,
+        rmsPixels=fit.rms_pixels,
+        solverRmsArcsec=solver_rms,
+        evidence=fit.evidence,
+    )
+    if not holdout_rms <= min(max_rms_arcsec, _REFINEMENT_MAXIMUM_RESIDUAL_RATIO * solver_rms):
+        return {
+            **record,
+            "code": "WCS_REFINEMENT_NOT_BETTER",
+            "message": f"held-out residual {holdout_rms:.3g}\" against the solver's {solver_rms:.3g}\" on the same stars",
+        }
+    refined = fits.Header()
+    for keyword, value in fit.header.items():
+        refined[keyword] = value
+    validation = validate_wcs_header(refined, image_shape=shape)
+    if not validation.valid:
+        return {**record, "code": "WCS_REFINEMENT_INVALID", "message": validation.message}
+    # Every master is verified with the refit before any of them is rewritten.
+    def verify(item: tuple[str, Path]) -> tuple[bool, dict[str, Any] | None, dict[str, Any] | None]:
+        """(verification directory created, accepted quality, failure) of one master."""
+
+        path = item[1]
+        directory = path.parent / "catalog-refit-verification"
+        try:
+            directory.mkdir()
+        except OSError as error:
+            return False, None, {"code": "WCS_REFINEMENT_UNVERIFIED", "message": str(error)}
+        try:
+            quality = dict(verifier(np.asarray(fits.getdata(path, memmap=False), dtype=np.float32), dict(refined), directory))
+            matched = int(quality.get("matchedStars") or 0)
+            rms = float(quality.get("rmsArcsec", math.inf))
+        except Exception as error:
+            return True, None, {"code": getattr(error, "code", "WCS_REFINEMENT_UNVERIFIED"), "message": str(error)}
+        if quality.get("catalogManaged") is True and matched >= min_matches and rms <= max_rms_arcsec:
+            return True, quality, None
+        return True, None, {"code": "WCS_REFINEMENT_UNVERIFIED", "message": f"{matched} managed catalog matches at {rms:.3g}\""}
+
+    ordered = sorted(masters.items())
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(ordered))), thread_name_prefix="ufwbpp-refit") as pool:
+        outcomes = dict(zip((name for name, _ in ordered), pool.map(verify, ordered)))
+    failed = next((name for name, (_, _, failure) in outcomes.items() if failure is not None), None)
+    if failed is not None:
+        for name, (created, _, _) in outcomes.items():
+            if created:
+                shutil.rmtree(masters[name].parent / "catalog-refit-verification", ignore_errors=True)
+        return {**record, **outcomes[failed][2], "unverifiedFilter": failed}
+    verified = {name: quality for name, (_, quality, _) in outcomes.items()}
+    rewritten: dict[str, Any] = {}
+    for filter_name, path in sorted(masters.items()):
+        before_sha256 = sha256_digest(path)
+        _rewrite_wcs_cards(
+            path,
+            list(refined.cards),
+            stamps={
+                "OAFWCSRF": (fit.order, "WCS refitted on catalog stars: SIP order"),
+                "OAFWCSRA": (round(fit.rms_arcsec, 4), "Catalog residual of the refit, arcsec"),
+            },
+            history=(
+                f"Ultra-Fast WBPP: WCS refitted on {fit.matched} catalog stars (TAN+SIP order "
+                f"{fit.order}); held-out residual {holdout_rms:.3f} arcsec, solver {solver_rms:.3f}"
+            ),
+            error_code="WCS_REFINEMENT_REWRITE_FAILED",
+        )
+        validation = _verify_rewritten_wcs(path, refined, shape, error_code="WCS_REFINEMENT_REWRITE_INVALID")
+        after_sha256 = sha256_digest(path)
+        solver_records[filter_name]["attempts"].append(
+            {
+                "backendId": CATALOG_REFIT_VERIFICATION_BACKEND,
+                "accepted": True,
+                "result": {
+                    "backendId": CATALOG_REFIT_VERIFICATION_BACKEND,
+                    "astrometricQuality": verified[filter_name],
+                },
+                "artifact": {
+                    "path": solver_records[filter_name].get("output"),
+                    "sha256": after_sha256,
+                    "sizeBytes": path.stat().st_size,
+                },
+            }
+        )
+        rewritten[filter_name] = {
+            "sha256Before": before_sha256,
+            "sha256After": after_sha256,
+            "wcsValidation": validation,
+            "verifiedMatches": int(verified[filter_name]["matchedStars"]),
+            "verifiedRmsArcsec": float(verified[filter_name]["rmsArcsec"]),
+        }
+    record.update(status="APPLIED", rewritten=rewritten)
     return record
 
 

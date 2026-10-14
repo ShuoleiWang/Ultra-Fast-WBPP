@@ -37,6 +37,7 @@ CHECKED_CATALOG_RESOURCES = (
     "astap-external-v1.json",
     "astrometry-net-4107-4112-v1.json",
     "astrometry-net-4108-v1.json",
+    "astrometry-net-5205-lite-v1.json",
     "catalog-manifest-v1.schema.json",
     "installed-set-v1.schema.json",
 )

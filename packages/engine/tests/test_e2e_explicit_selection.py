@@ -12,12 +12,15 @@ from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from astropy.io import fits
 import numpy as np
 import pytest
 
+from lightframeqc.models import GateDisposition
+from ufwbpp.workflows.screening import _registration_anchor_exclusions
 from ufwbpp.workflows.single_target import E2EError, E2ERequest, E2EResult, ExplicitSelection, run_e2e
 from ufwbpp.workflows.contracts import ExplicitDecision, parse_explicit_selection
 from ufwbpp.inventory import inventory_project
@@ -278,6 +281,26 @@ def test_keep_against_an_exclude_flag_is_honoured_and_recorded(
     # A kept frame the gate did not pass never anchors the registration.
     registration = json.loads((output / "receipts" / "registration.json").read_text(encoding="utf-8"))
     assert not registration["referencePath"].endswith(moonlit.name)
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_a_frame_kept_with_thin_cloud_evidence_never_anchors(explicit: bool) -> None:
+    """The gate passes uniform thin cloud (evidence revision 6); such a frame
+    is integrated at its noise weight but must not become a reference: on
+    the M31 mosaic a G Light at 0.47 mag otherwise anchored a panel's
+    normalization as the flattest background."""
+
+    def gate(*codes: str) -> Any:
+        return SimpleNamespace(disposition=GateDisposition.PASS, evidence=[SimpleNamespace(code=code) for code in codes])
+
+    screening = SimpleNamespace(
+        approved_review_paths=set(),
+        blink=SimpleNamespace(flags=[]),
+        gate_by_path={"/clear.fits": gate(), "/hazy.fits": gate("GATE_TEMPORAL_EXTINCTION_INFO")},
+        passed=(Path("/clear.fits"), Path("/hazy.fits")),
+    )
+    request = SimpleNamespace(selection=SimpleNamespace(explicit=explicit))
+    assert _registration_anchor_exclusions(request, screening) == {"/hazy.fits"}
 
 
 def test_incomplete_selection_fails_closed_unless_undecided_is_decided(

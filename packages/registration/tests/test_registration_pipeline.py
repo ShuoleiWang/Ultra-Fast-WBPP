@@ -75,31 +75,35 @@ class RegistrationGeometryTests(unittest.TestCase):
                 exposure_seconds=exposure,
             )
 
-        analyses = (
-            analysis("/r-reference.fits", "R", 30.0, pixels(30.0, 500.0)),
-            analysis("/r-source.fits", "R", 60.0, pixels(60.0, 900.0, True)),
-            analysis("/b-reference.fits", "B", 30.0, pixels(30.0, 700.0)),
-        )
-        transforms = tuple(
-            SimpleNamespace(preview_matrix=np.eye(3, dtype=np.float64))
-            for _ in analyses
-        )
-        estimates = estimate_stellar_scale_hints(
-            analyses,
-            transforms,
-            (1.0, 0.9, 1.0),
-        )
+        # A source behind thin cloud (transparency 0.4) scales by 1/0.4.
+        for transparency in (1.0, 0.4):
+            with self.subTest(transparency=transparency):
+                analyses = (
+                    analysis("/r-reference.fits", "R", 30.0, pixels(30.0, 500.0)),
+                    analysis("/r-source.fits", "R", 60.0, pixels(60.0 * transparency, 900.0, True)),
+                    analysis("/b-reference.fits", "B", 30.0, pixels(30.0, 700.0)),
+                )
+                transforms = tuple(
+                    SimpleNamespace(preview_matrix=np.eye(3, dtype=np.float64))
+                    for _ in analyses
+                )
+                estimates = estimate_stellar_scale_hints(
+                    analyses,
+                    transforms,
+                    (1.0, 0.9, 1.0),
+                    reference_candidates=(0, 2),
+                )
 
-        self.assertEqual(estimates[0].status, "REFERENCE_IDENTITY")
-        self.assertEqual(estimates[1].status, "STELLAR_SCALE_ACCEPTED")
-        self.assertAlmostEqual(estimates[1].scale or 0.0, 1.0, delta=0.02)
-        self.assertEqual(
-            estimates[1].evidence["scaleDomain"],
-            "post-linear-exposure-normalization",
-        )
-        self.assertEqual(estimates[1].evidence["exposureCorrection"], 2.0)
-        self.assertEqual(estimates[2].reference_index, 2)
-        self.assertEqual(estimates[2].scale, 1.0)
+                self.assertEqual(estimates[0].status, "REFERENCE_IDENTITY")
+                self.assertEqual(estimates[1].status, "STELLAR_SCALE_ACCEPTED")
+                self.assertAlmostEqual(estimates[1].scale or 0.0, 1.0 / transparency, delta=0.02 / transparency)
+                self.assertEqual(
+                    estimates[1].evidence["scaleDomain"],
+                    "post-linear-exposure-normalization",
+                )
+                self.assertEqual(estimates[1].evidence["exposureCorrection"], 2.0)
+                self.assertEqual(estimates[2].reference_index, 2)
+                self.assertEqual(estimates[2].scale, 1.0)
 
     def test_full_resolution_refinement_defaults_to_affine(self) -> None:
         config = RegistrationConfig()

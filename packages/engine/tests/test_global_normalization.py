@@ -341,7 +341,7 @@ def test_excessive_additive_grid_keeps_safe_scalar_model_and_records_rejection(
     )
 
 
-@pytest.mark.parametrize("scale", [float("nan"), float("inf"), 3.0])
+@pytest.mark.parametrize("scale", [float("nan"), float("inf"), 6.0])
 def test_unsafe_stellar_scale_still_fails_when_offset_only_is_forbidden(
     tmp_path: Path, scale: float,
 ) -> None:

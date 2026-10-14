@@ -277,7 +277,10 @@ redistribution permissions are separate; see [licensing](licensing.md).
 
 - `workflows/contracts.py` owns run requests, explicit selections and progress.
   `workflows/project.py` and `workflows/single_target.py` coordinate runs;
-  `workflows/solve.py` owns final solve/geometry verification.
+  `workflows/solve.py` owns final solve/geometry verification and the
+  catalog refit of the published solution (`_refine_solved_wcs`: TAN+SIP,
+  order by the BIC, written only when it beats the solver's solution on
+  held-out stars and passes catalog verification on every master).
 - The engine has one subpackage per domain: `workflows/`, `stacking/`,
   `calibration/`, `image_io/`, `selection/`, `quality/`, `blink/`, `solvers/`,
   `products/` and `platform/`. Its modules import without cycles, and private

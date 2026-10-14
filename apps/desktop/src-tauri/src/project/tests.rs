@@ -478,7 +478,7 @@ fn final_gate_accepts_known_hash_forms_and_rejects_malformed_or_changed_content(
         "guiArtifacts":[{"kind":"SOLVED_MONO_FITS","path":"product.fits","sha256":digest,"sizeBytes":artifact_path.metadata().unwrap().len(),"finalGate":{"status":"PASS"},"astrometry":{
             "referenceFrame":"ICRS","projection":"TAN","centerRaDegrees":281.0,"centerDecDegrees":-6.0,
             "pixelScaleArcsec":1.4,"rotationDegrees":0.0,"rmsPixels":0.3,"rmsArcsec":0.42,"matchedStars":73,
-            "parity":"POSITIVE","catalogIdentity":"2".repeat(64),"indexIdentities":["astrometry.net:index:4108:healpix:123:hpnside:4"],
+            "parity":"POSITIVE","catalogIdentity":"2".repeat(64),"indexIdentities":["astrometry.net:index:4108:healpix:-1:hpnside:0"],
             "correspondenceSha256":"3".repeat(64),"catalogManaged":true,"installedSetIdentity":"5".repeat(64),"catalogManifestSha256":"6".repeat(64),
             "indexArtifacts":[{"indexId":"4108","relativeName":"index-4108.fits","sizeBytes":94550400,"sha256":"7".repeat(64),"manifestSha256":"6".repeat(64),"installedSetIdentity":"5".repeat(64)}],
             "wcsSha256":"4".repeat(64),"imageShape":[4176,6248],"state":"SOLVED"
@@ -520,6 +520,24 @@ fn final_gate_accepts_known_hash_forms_and_rejects_malformed_or_changed_content(
     receipt["finalProducts"]["guiArtifacts"][0]["astrometry"]["catalogManaged"] = false.into();
     assert!(validate(&receipt).is_err());
     receipt["finalProducts"]["guiArtifacts"][0]["astrometry"]["catalogManaged"] = true.into();
+    // A solve bound to one HEALPix tile of a tiled index names that tile's file.
+    let astrometry = &mut receipt["finalProducts"]["guiArtifacts"][0]["astrometry"];
+    astrometry["indexIdentities"] =
+        serde_json::json!(["astrometry.net:index:5205:healpix:3:hpnside:2"]);
+    astrometry["indexArtifacts"][0]["indexId"] = "5205".into();
+    for (name, valid) in [
+        ("index-5205-04.fits", false),
+        ("index-5205.fits", false),
+        ("index-5205-03.fits", true),
+    ] {
+        let artifact =
+            &mut receipt["finalProducts"]["guiArtifacts"][0]["astrometry"]["indexArtifacts"][0];
+        artifact["relativeName"] = name.into();
+        match validate(&receipt) {
+            Ok(_) => assert!(valid, "{name} must be refused"),
+            Err(error) => assert!(!valid && error.contains("exact managed filename")),
+        }
+    }
     receipt["finalProducts"]["guiArtifacts"][0]["path"] = "../escaped.fits".into();
     assert!(validate(&receipt)
         .unwrap_err()
@@ -604,7 +622,7 @@ fn artifact_previews_are_carried_as_bounded_data_urls() {
     let astrometry = serde_json::json!({
         "referenceFrame":"ICRS","projection":"TAN","centerRaDegrees":281.0,"centerDecDegrees":-6.0,
         "pixelScaleArcsec":1.4,"rotationDegrees":0.0,"rmsPixels":0.3,"rmsArcsec":0.42,"matchedStars":73,
-        "parity":"POSITIVE","catalogIdentity":"2".repeat(64),"indexIdentities":["astrometry.net:index:4108:healpix:123:hpnside:4"],
+        "parity":"POSITIVE","catalogIdentity":"2".repeat(64),"indexIdentities":["astrometry.net:index:4108:healpix:-1:hpnside:0"],
         "correspondenceSha256":"3".repeat(64),"catalogManaged":true,"installedSetIdentity":"5".repeat(64),"catalogManifestSha256":"6".repeat(64),
         "indexArtifacts":[{"indexId":"4108","relativeName":"index-4108.fits","sizeBytes":94550400,"sha256":"7".repeat(64),"manifestSha256":"6".repeat(64),"installedSetIdentity":"5".repeat(64)}],
         "wcsSha256":"4".repeat(64)
@@ -1114,7 +1132,7 @@ fn managed_astrometry_schema_rejects_unbound_catalogs() {
     let value = serde_json::json!({
         "referenceFrame":"ICRS","projection":"TAN","centerRaDegrees":1.0,"centerDecDegrees":2.0,
         "pixelScaleArcsec":1.0,"rotationDegrees":0.0,"rmsPixels":0.2,"rmsArcsec":0.3,"matchedStars":30,
-        "parity":"POSITIVE","catalogIdentity":"1".repeat(64),"indexIdentities":["astrometry.net:index:4108:healpix:1:hpnside:1"],
+        "parity":"POSITIVE","catalogIdentity":"1".repeat(64),"indexIdentities":["astrometry.net:index:4108:healpix:-1:hpnside:0"],
         "correspondenceSha256":"2".repeat(64),"catalogManaged":false,"installedSetIdentity":"3".repeat(64),
         "catalogManifestSha256":"4".repeat(64),"indexArtifacts":[],"wcsSha256":"5".repeat(64)
     });
@@ -1156,7 +1174,7 @@ digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
 astro = {
   "referenceFrame":"ICRS","projection":"TAN","centerRaDegrees":281.0,"centerDecDegrees":-6.0,
   "pixelScaleArcsec":1.4,"rotationDegrees":0.0,"rmsPixels":0.3,"rmsArcsec":0.42,"matchedStars":73,
-  "parity":"POSITIVE","catalogIdentity":"2"*64,"indexIdentities":["astrometry.net:index:4108:healpix:123:hpnside:4"],
+  "parity":"POSITIVE","catalogIdentity":"2"*64,"indexIdentities":["astrometry.net:index:4108:healpix:-1:hpnside:0"],
   "correspondenceSha256":"3"*64,"catalogManaged":True,"installedSetIdentity":"5"*64,"catalogManifestSha256":"6"*64,
   "indexArtifacts":[{"indexId":"4108","relativeName":"index-4108.fits","sizeBytes":94550400,"sha256":"7"*64,"manifestSha256":"6"*64,"installedSetIdentity":"5"*64}],
   "wcsSha256":"4"*64,"imageShape":[4176,6248],"state":"SOLVED"

@@ -34,7 +34,9 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 OFFICIAL_MANIFEST_DIR = REPO_ROOT / "packages" / "engine" / "src" / "ufwbpp" / "solvers" / "catalog_manifests"
 
 
-def _fixture_manifest(directory: Path, payload: bytes = b"checked-catalog-bytes") -> tuple[Path, str]:
+def _fixture_manifest(
+    directory: Path, payload: bytes = b"checked-catalog-bytes", artifact_id: str = "index-4107.fits"
+) -> tuple[Path, str]:
     directory.mkdir(parents=True)
     acceptance_id = "fake-provider-terms-v1"
     manifest = {
@@ -56,8 +58,8 @@ def _fixture_manifest(directory: Path, payload: bytes = b"checked-catalog-bytes"
         "allowedDownloadOrigins": ["https://provider.invalid"],
         "artifacts": [
             {
-                "artifactId": "index-4107.fits",
-                "url": "https://provider.invalid/index-4107.fits",
+                "artifactId": artifact_id,
+                "url": f"https://provider.invalid/{artifact_id}",
                 "sha256": hashlib.sha256(payload).hexdigest(),
                 "sizeBytes": len(payload),
                 "installScope": "user",
@@ -442,10 +444,20 @@ def test_configure_adopts_semantically_identical_existing_config_without_replaci
     assert configured["installedSet"]["config"]["sha256"] == hashlib.sha256(existing).hexdigest()
 
 
-def test_installed_set_api_binds_solver_index_to_actual_verified_bytes(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("artifact", "identity"),
+    (
+        ("index-4107.fits", "astrometry.net:index:4107:healpix:-1:hpnside:0"),
+        # one HEALPix tile of a tiled series (the 5200 LITE files)
+        ("index-4107-03.fits", "astrometry.net:index:4107:healpix:3:hpnside:2"),
+    ),
+)
+def test_installed_set_api_binds_solver_index_to_actual_verified_bytes(
+    tmp_path: Path, artifact: str, identity: str
+) -> None:
     payload = b"checked-catalog-bytes"
     manifests = tmp_path / "manifests"
-    _, acceptance_id = _fixture_manifest(manifests, payload)
+    _, acceptance_id = _fixture_manifest(manifests, payload, artifact)
     root = tmp_path / "catalogs"
     installed = install_catalog(
         "fake-astrometry-4107",
@@ -459,7 +471,7 @@ def test_installed_set_api_binds_solver_index_to_actual_verified_bytes(tmp_path:
     )
     assert len(receipts) == 1
     reference = installed_set_identity_for_solver_indexes(
-        ("astrometry.net:index:4107:healpix:-1:hpnside:0",),
+        (identity,),
         catalog_root=root,
         manifest_dir=manifests,
     )
@@ -473,17 +485,17 @@ def test_installed_set_api_binds_solver_index_to_actual_verified_bytes(tmp_path:
     config.write_bytes(original_config + b"# changed\n")
     with pytest.raises(CatalogError) as config_failure:
         installed_set_identity_for_solver_indexes(
-            ("astrometry.net:index:4107:healpix:-1:hpnside:0",),
+            (identity,),
             catalog_root=root,
             manifest_dir=manifests,
         )
     assert config_failure.value.code == "CATALOG_INSTALLED_SET_UNBOUND"
     config.write_bytes(original_config)
 
-    (root / "index-4107.fits").write_bytes(b"changed-catalog-bytes")
+    (root / artifact).write_bytes(b"changed-catalog-bytes")
     with pytest.raises(CatalogError) as failure:
         installed_set_identity_for_solver_indexes(
-            ("astrometry.net:index:4107:healpix:-1:hpnside:0",),
+            (identity,),
             catalog_root=root,
             manifest_dir=manifests,
         )

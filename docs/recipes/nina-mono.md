@@ -16,7 +16,7 @@ The recommended minimum is eight Light frames per target/filter group and three 
 
 Ordinary registration refines every non-reference transform on full-resolution stellar centroids and then uses normalized, domain-bounded 6×6 Lanczos-3 resampling. A sample is published only when its complete kernel support is present and finite; the identity reference is copied exactly without interpolation. The receipt records the chosen resampler and support-aware crop. This is interpolation, not post-processing sharpening.
 
-A uniform whole-night zeropoint shift below 0.50 mag is not a defect by itself when registration, spatial transparency, source retention, background, noise, focus, trailing, and occlusion evidence are otherwise clean. Such a shift can arise from season, target angle, or throughput and is retained for the downstream global normalization and quality weighting. A shift at or above 0.50 mag still requires review; independent cloud evidence can still produce a hard failure regardless of this night-level threshold.
+A uniform whole-night zeropoint shift below 0.50 mag is not a defect by itself when registration, spatial transparency, source retention, background, noise, focus, trailing, and occlusion evidence are otherwise clean. Such a shift can arise from season, target angle, or throughput and is retained for the downstream global normalization and quality weighting. A shift at or above 0.50 mag still requires review; independent cloud evidence can still produce a hard failure regardless of this night-level threshold. A single frame's uniform extinction between 0.35 and 1.5 mag is likewise recorded and kept unless another cloud family agrees ([automatic screening](automatic-screening.md)).
 
 ## Calibration matching
 

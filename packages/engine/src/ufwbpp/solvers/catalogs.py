@@ -29,12 +29,12 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .. import platform as platform_services
 from ..integrity import canonical_json, canonical_json_document
+from .base import INDEX_IDENTITY, index_artifact_name
 
 
 _CHUNK_BYTES = 1024 * 1024
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CATALOG_ID = re.compile(r"^[a-z0-9][a-z0-9.-]+$")
-_SOLVER_INDEX_ID = re.compile(r"^astrometry\.net:index:(\d+):healpix:[^:]+:hpnside:[^:]+$")
 
 
 class CatalogError(RuntimeError):
@@ -1659,10 +1659,10 @@ def installed_set_identity_for_solver_indexes(
 ) -> dict[str, Any]:
     required: set[str] = set()
     for value in index_identities:
-        match = _SOLVER_INDEX_ID.fullmatch(value)
+        match = INDEX_IDENTITY.fullmatch(value)
         if match is None:
             raise CatalogError("CATALOG_SOLVER_INDEX_INVALID", f"unsupported solver index identity: {value}")
-        required.add(f"index-{match.group(1)}.fits")
+        required.add(index_artifact_name(match.group(1), int(match.group(2)), int(match.group(3))))
     if not required:
         raise CatalogError("CATALOG_SOLVER_INDEX_MISSING", "no solver index identities were supplied")
     candidates: list[dict[str, Any]] = []
@@ -1690,7 +1690,7 @@ def installed_set_identity_for_solver_indexes(
     selected_artifacts = [item for item in selected["artifacts"] if item["artifactId"] in required]
     index_artifacts = []
     for item in selected_artifacts:
-        match = re.fullmatch(r"index-(\d+)\.fits", item["artifactId"])
+        match = re.fullmatch(r"index-(\d+)(?:-\d{2})?\.fits", item["artifactId"])
         if match is None:
             raise CatalogError(
                 "CATALOG_SOLVER_INDEX_INVALID",

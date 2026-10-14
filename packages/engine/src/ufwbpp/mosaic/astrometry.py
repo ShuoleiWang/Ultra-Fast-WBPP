@@ -106,20 +106,53 @@ class ManagedCatalogStars:
             height_degrees=diameter / math.sqrt(2.0),
             diagonal_degrees=diameter,
         )
+        # Densest index first; a HEALPix-tiled index is read as the union of
+        # its tiles, so a field on a tile boundary keeps its stars on both sides.
+        ordered: dict[str, list[Any]] = {}
         for summary in rank_indexes(summaries, field_geometry):
-            found = read_index_stars(
-                root / summary.relative_name,
-                centre_ra_degrees=centre_ra_degrees,
-                centre_dec_degrees=centre_dec_degrees,
-                radius_degrees=radius_degrees,
-                expected_stat=artifacts[summary.relative_name].get("statIdentity"),
-            )
-            if found.count >= 3 * STARS_PER_TERM * 3:
+            ordered.setdefault(summary.index_id, []).append(summary)
+        for index_id, members in ordered.items():
+            ra: list[NDArray[np.float64]] = []
+            dec: list[NDArray[np.float64]] = []
+            magnitudes: list[NDArray[np.float64]] | None = []
+            read: list[Any] = []
+            # Tiles in HEALPix order, so the star list does not depend on the ranking.
+            for summary in sorted(members, key=lambda item: item.healpix):
+                found = read_index_stars(
+                    root / summary.relative_name,
+                    centre_ra_degrees=centre_ra_degrees,
+                    centre_dec_degrees=centre_dec_degrees,
+                    radius_degrees=radius_degrees,
+                    expected_stat=artifacts[summary.relative_name].get("statIdentity"),
+                )
+                if not found.count:
+                    continue
+                read.append(summary)
+                ra.append(np.asarray(found.ra_degrees, dtype=np.float64) % 360.0)
+                dec.append(np.asarray(found.dec_degrees, dtype=np.float64))
+                if magnitudes is not None and found.magnitudes is not None:
+                    magnitudes.append(np.asarray(found.magnitudes, dtype=np.float64))
+                else:
+                    magnitudes = None
+            if not read:
+                continue
+            all_ra, all_dec = np.concatenate(ra), np.concatenate(dec)
+            # A tile also holds the stars in a margin around it, so neighbouring
+            # tiles repeat those; positions equal to 0.01" are one star.
+            _, unique = np.unique(np.round(np.column_stack((all_ra, all_dec)) * 3.6e5), axis=0, return_index=True)
+            unique = np.sort(unique)
+            if unique.size >= 3 * STARS_PER_TERM * 3:
+                identity = (
+                    read[0].identity
+                    if len(read) == 1
+                    else f"astrometry.net:index:{index_id}:healpix-union:"
+                    f"{'+'.join(str(item.healpix) for item in read)}:hpnside:{read[0].hpnside}"
+                )
                 return CatalogStars(
-                    np.asarray(found.ra_degrees, dtype=np.float64) % 360.0,
-                    np.asarray(found.dec_degrees, dtype=np.float64),
-                    None if found.magnitudes is None else np.asarray(found.magnitudes, dtype=np.float64),
-                    found.summary.identity,
+                    all_ra[unique],
+                    all_dec[unique],
+                    None if not magnitudes else np.concatenate(magnitudes)[unique],
+                    identity,
                 )
         raise MosaicAstrometryError(
             "MOSAIC_CATALOG_FIELD_UNCOVERED", "no managed index holds enough stars for this panel"
@@ -325,6 +358,28 @@ def fit_tan_sip(
     return fit["header"], order, keep
 
 
+def _holdout_rms_arcsec(
+    pixels: NDArray[np.float64],
+    world: NDArray[np.float64],
+    shape: tuple[int, int],
+    order: int,
+    crval: tuple[float, float],
+) -> float:
+    """Two-fold cross-validated residual: each half of the stars against the
+    solution of ``order`` fitted on the other half."""
+
+    first = np.arange(len(pixels)) % 2 == 0
+    residuals = []
+    for train in (first, ~first):
+        try:
+            fit, _ = _clipped_fit(pixels[train], world[train], shape, order, crval)
+        except (np.linalg.LinAlgError, ValueError):
+            return math.inf
+        residuals.append(_arcsec_residuals(fit["wcs"], pixels[~train], world[~train]))
+    values = np.concatenate(residuals)
+    return float(np.sqrt(np.mean(np.square(values)))) if np.all(np.isfinite(values)) else math.inf
+
+
 def _arcsec_residuals(wcs: WCS, pixels: NDArray[np.float64], world: NDArray[np.float64]) -> NDArray[np.float64]:
     ra, dec = wcs.all_pix2world(pixels[:, 0], pixels[:, 1], 0)
     a = np.deg2rad(np.column_stack((ra, dec)))
@@ -366,8 +421,11 @@ def refine_solution(
     *,
     minimum_matches: int = 30,
     maximum_order: int = 3,
+    minimum_catalog_stars: int = 0,
 ) -> SipFit:
-    """Refine a solver's solution of ``image`` into TAN+SIP on catalog stars."""
+    """Refine a solver's solution of ``image`` into TAN+SIP on catalog stars;
+    a field holding fewer than ``minimum_catalog_stars`` catalog stars is
+    refused before any star detection."""
 
     from ..solvers.catalog_correspondence import (
         CorrespondenceParameters,
@@ -377,14 +435,6 @@ def refine_solution(
 
     height, width = image.shape
     initial = celestial_wcs(header)
-    detected_one_based, fwhm, detection = detect_field_stars(
-        np.asarray(image, dtype=np.float32), CorrespondenceParameters(maximum_stars=4000)
-    )
-    detected = _isolated_windowed_centroids(
-        np.asarray(image, dtype=np.float32),
-        np.asarray(detected_one_based, dtype=np.float64) - 1.0,
-        float(np.median(fwhm)) if len(fwhm) else 3.0,
-    )
     centre = initial.all_pix2world([(width - 1) / 2.0], [(height - 1) / 2.0], 0)
     corner = initial.all_pix2world([0.0], [0.0], 0)
     radius = 1.05 * _arcsec_residuals(
@@ -402,6 +452,19 @@ def refine_solution(
     )
     world = world[inside]
     predicted = predicted[inside]
+    if len(world) < minimum_catalog_stars:
+        raise MosaicAstrometryError(
+            "MOSAIC_CATALOG_TOO_SPARSE",
+            f"{len(world)} catalog stars in the field; a refit needs at least {minimum_catalog_stars}",
+        )
+    detected_one_based, fwhm, detection = detect_field_stars(
+        np.asarray(image, dtype=np.float32), CorrespondenceParameters(maximum_stars=4000)
+    )
+    detected = _isolated_windowed_centroids(
+        np.asarray(image, dtype=np.float32),
+        np.asarray(detected_one_based, dtype=np.float64) - 1.0,
+        float(np.median(fwhm)) if len(fwhm) else 3.0,
+    )
     median_fwhm = float(np.median(fwhm)) if len(fwhm) else 0.0
     first_radius = max(FIRST_MATCH_RADIUS_PIXELS, FIRST_MATCH_RADIUS_FWHM * median_fwhm)
     rows, catalog_rows, _ = match_mutual_nearest(detected, predicted, first_radius)
@@ -436,6 +499,11 @@ def refine_solution(
     )
     radius_pixels = np.hypot(residual[:, 0], residual[:, 1])
     arcsec = _arcsec_residuals(wcs, matched_pixels, matched_world)
+    # The solver's own solution on the same stars, for the comparison.
+    initial_arcsec = _arcsec_residuals(initial, matched_pixels, matched_world)
+    holdout_arcsec = _holdout_rms_arcsec(
+        matched_pixels, matched_world, (height, width), order, (float(fitted["CRVAL1"]), float(fitted["CRVAL2"]))
+    )
     # Residuals of the frame's outer ring (where mosaic overlaps lie) against its middle.
     edge = np.minimum.reduce(
         (matched_pixels[:, 0], width - 1 - matched_pixels[:, 0], matched_pixels[:, 1], height - 1 - matched_pixels[:, 1])
@@ -456,6 +524,8 @@ def refine_solution(
             "edgeRmsPixels": float(np.sqrt(np.mean(np.square(radius_pixels[edge])))) if edge.any() else None,
             "centreRmsPixels": float(np.sqrt(np.mean(np.square(radius_pixels[~edge])))) if (~edge).any() else None,
             "edgeMatches": int(edge.sum()),
+            "initialRmsArcsec": float(np.sqrt(np.mean(np.square(initial_arcsec)))),
+            "holdoutRmsArcsec": holdout_arcsec,
         },
     )
 

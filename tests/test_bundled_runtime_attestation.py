@@ -153,6 +153,7 @@ def _resource_root(root: Path, target: str = TARGET) -> Path:
                 {"catalogId": "astap-external"},
                 {"catalogId": "astrometry-net-4107-4112"},
                 {"catalogId": "astrometry-net-4108"},
+                {"catalogId": "astrometry-net-5205-lite"},
             ],
         },
         sort_keys=True,

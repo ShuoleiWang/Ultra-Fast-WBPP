@@ -163,7 +163,7 @@ def _quality(matched: int, rms_pixels: float, scale_arcsec: float) -> Astrometri
         rms_arcsec=rms_pixels * scale_arcsec,
         parity=WcsParity.NEGATIVE,
         catalog_identity="1" * 64,
-        index_identities=("astrometry.net:index:4200:healpix:1:hpnside:1",),
+        index_identities=("astrometry.net:index:4200:healpix:-1:hpnside:0",),
         correspondence_sha256="2" * 64,
         catalog_managed=True,
         installed_set_identity="3" * 64,

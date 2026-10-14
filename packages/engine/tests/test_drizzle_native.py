@@ -223,7 +223,8 @@ def _frames(tmp_path: Path, shape: tuple[int, int] = (24, 32)) -> list[DrizzleFr
         frames.append(
             DrizzleFrame(
                 calibrated_path=_write_light(tmp_path / f"light_{index}.fits", values),
-                source_path=f"/raw/light_{index}.fits",
+                # NINA's default names carry a degree sign; the receipt is UTF-8.
+                source_path=f"/raw/light_{index}_-10.00°C.fits",
                 input_to_reference=_translation(dx, dy),
                 weight=1.0 if index else 2.0,
                 exposure_seconds=60.0,

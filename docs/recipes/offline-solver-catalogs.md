@@ -23,6 +23,14 @@ Use the acceptance ID printed by your installed version of `catalog list`, not o
 
 To install every checked wide-field scale instead, omit `--field-of-view`. To select exact files, repeat `--artifact index-4108.fits`. `--artifact` and `--field-of-view` are mutually exclusive.
 
+For the catalog refit of a solved field's distortion (and for mosaic panels), install the Gaia DR2 LITE index 5205 as well. It has 48 HEALPix tiles, 587 MiB, and about six times the stars of index 4107:
+
+```bash
+ultra-fast-wbpp catalog install astrometry-net-5205-lite \
+  --accept-provider-terms astrometry-net-index-data-2026-09 \
+  --progress-json
+```
+
 ## 2. Resume or verify
 
 An interrupted command can be repeated unchanged. Ultra-Fast WBPP resumes only when the partial file's manifest digest, exact URL, expected size and SHA-256 still match, and a strong HTTP ETag binds the `Range`/`If-Range` response to the same provider object. A strict `206 Content-Range`, unchanged ETag and exact total are required. Without a strong ETag, or if a provider ignores the range request and returns `200`, the application safely restarts its own temporary file instead of appending potentially incompatible bytes.

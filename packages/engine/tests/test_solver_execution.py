@@ -224,7 +224,8 @@ match_columns = [
     fits.Column(name="WCS_VALID", format="L", array=np.asarray([True])),
     fits.Column(name="INDEXID", format="I", array=np.asarray([4206], dtype=np.int16)),
     fits.Column(name="HEALPIX", format="I", array=np.asarray([17], dtype=np.int16)),
-    fits.Column(name="HPNSIDE", format="I", array=np.asarray([32], dtype=np.int16)),
+    # one nside-2 HEALPix tile, named as Astrometry.net names its tiles
+    fits.Column(name="HPNSIDE", format="I", array=np.asarray([2], dtype=np.int16)),
     fits.Column(name="PARITY", format="L", array=np.asarray([mode == "parity-drift"])),
     fits.Column(
         name="NMATCH",
@@ -273,7 +274,7 @@ def managed_catalog(tmp_path: Path) -> tuple[Path, Path, dict[str, object]]:
     manifests = tmp_path / "managed-manifests"
     root.mkdir()
     manifests.mkdir()
-    (root / "index-4206.fits").write_bytes(payload)
+    (root / "index-4206-17.fits").write_bytes(payload)
     manifest = {
         "schemaVersion": 1,
         "catalogId": "fake-managed-4206",
@@ -292,8 +293,8 @@ def managed_catalog(tmp_path: Path) -> tuple[Path, Path, dict[str, object]]:
         "allowedDownloadOrigins": ["https://provider.invalid"],
         "artifacts": [
             {
-                "artifactId": "index-4206.fits",
-                "url": "https://provider.invalid/index-4206.fits",
+                "artifactId": "index-4206-17.fits",
+                "url": "https://provider.invalid/index-4206-17.fits",
                 "sha256": hashlib.sha256(payload).hexdigest(),
                 "sizeBytes": len(payload),
                 "installScope": "user",
@@ -626,7 +627,7 @@ def test_strict_astrometry_rejects_unmanaged_and_replaced_indexes(tmp_path: Path
     assert not (tmp_path / "unmanaged-solved.fits").exists()
 
     config, manifests, _ = managed_catalog(tmp_path)
-    catalog_path = config.parent / "index-4206.fits"
+    catalog_path = config.parent / "index-4206-17.fits"
     replaced = AstrometryNetSolverBackend(
         executable=sys.executable,
         executable_args=(str(script),),
@@ -809,7 +810,7 @@ def test_success_isolated_input_and_verifiable_receipt(tmp_path: Path, kind: str
             "sha256:" + result.astrometric_quality.correspondence_sha256
         )
         assert result.astrometric_quality.index_identities == (
-            "astrometry.net:index:4206:healpix:17:hpnside:32",
+            "astrometry.net:index:4206:healpix:17:hpnside:2",
         )
         assert result.evidence["outputs"]["match"]["sha256"].startswith("sha256:")
         assert validate_solver_result(

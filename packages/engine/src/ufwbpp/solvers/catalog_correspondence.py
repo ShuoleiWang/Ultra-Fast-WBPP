@@ -37,7 +37,7 @@ from astropy.wcs import WCS
 import numpy as np
 
 from ..integrity import canonical_json
-from .base import AstrometricQuality, SolverIndexArtifact, wcs_parity
+from .base import AstrometricQuality, SolverIndexArtifact, index_artifact_name, wcs_parity
 from .catalogs import (
     CatalogError,
     installed_set_identity_for_solver_indexes,
@@ -49,7 +49,8 @@ VERIFICATION_METHOD = "engine-catalog-correspondence-v1"
 CORRESPONDENCE_ARTIFACT_NAME = "correspondence.json"
 MATCH_ARTIFACT_NAME = "match.json"
 
-_INDEX_FILE_NAME = re.compile(r"^index-(\d+)\.fits$")
+# One all-sky file per index, or one file per HEALPix tile (``index-5205-03.fits``).
+_INDEX_FILE_NAME = re.compile(r"^index-(\d+)(?:-(\d{2}))?\.fits$")
 _ENDIAN_MARKERS = {"04:03:02:01": "<", "01:02:03:04": ">"}
 _DECODE_CHUNK_ROWS = 262144
 _MATCH_CHUNK_ROWS = 256
@@ -296,6 +297,12 @@ def read_index_summary(path: Path) -> IndexSummary:
         raise CatalogCorrespondenceError(
             "CATALOG_INDEX_INVALID", f"{name}: INDEXID {index_id} disagrees with the managed file name"
         )
+    healpix = _header_int(header, "HEALPIX", context=name)
+    hpnside = _header_int(header, "HPNSIDE", context=name)
+    if name != index_artifact_name(str(index_id), healpix, hpnside):
+        raise CatalogCorrespondenceError(
+            "CATALOG_INDEX_INVALID", f"{name}: HEALPIX {healpix}/HPNSIDE {hpnside} disagree with the managed file name"
+        )
     lower = _header_float(header, "SCALE_L", context=name)
     upper = _header_float(header, "SCALE_U", context=name)
     if not 0.0 < lower < upper:
@@ -304,8 +311,8 @@ def read_index_summary(path: Path) -> IndexSummary:
     return IndexSummary(
         relative_name=name,
         index_id=str(index_id),
-        healpix=_header_int(header, "HEALPIX", context=name),
-        hpnside=_header_int(header, "HPNSIDE", context=name),
+        healpix=healpix,
+        hpnside=hpnside,
         scale_lower_radians=lower,
         scale_upper_radians=upper,
         star_count=int(star_count) if isinstance(star_count, (int, np.integer)) and not isinstance(star_count, bool) else None,
@@ -605,8 +612,9 @@ def verify_solution(
     """Recompute catalog-correspondence quality for a WCS from managed indexes.
 
     ``index_artifacts`` are the ``artifacts`` of a pre-solve installed-set
-    snapshot; only ``index-NNNN.fits`` entries take part and each read is
-    bound to that snapshot's file identity.  The returned quality is not yet
+    snapshot; only all-sky ``index-NNNN.fits`` entries take part (a HEALPix
+    tile holds only part of a field) and each read is bound to that
+    snapshot's file identity.  The returned quality is not yet
     catalog-managed; ``bind_installed_set`` performs that binding.
     """
 
@@ -617,7 +625,8 @@ def verify_solution(
     summaries: list[tuple[IndexSummary, Mapping[str, Any]]] = []
     for artifact in index_artifacts:
         relative_name = str(artifact.get("relativeName") or artifact.get("artifactId") or "")
-        if _INDEX_FILE_NAME.fullmatch(relative_name) is None:
+        match = _INDEX_FILE_NAME.fullmatch(relative_name)
+        if match is None or match.group(2) is not None:
             continue
         summaries.append((read_index_summary(catalog_root / relative_name), artifact))
     if not summaries:
