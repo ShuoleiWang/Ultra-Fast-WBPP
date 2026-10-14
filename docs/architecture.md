@@ -290,18 +290,34 @@ redistribution permissions are separate; see [licensing](licensing.md).
   `registration.py` (registration calibration and transforms),
   `integration.py` (integration passes, again without frames the
   counterfactual confirms harmful) and `products.py` (drizzle, candidates,
-  solving); `workflows/project.run_project_e2e` runs shared calibration,
-  the mosaic canvas plan (`workflows/mosaic.py`), target panels, the canvas
-  mosaics, channel alignment, colour and publication as stages.
+  solving). `run_e2e_stages` is the same run as a generator: a mosaic
+  panel's run yields its measured reference stars and resumes with its
+  placement, while any other run returns at once. `run_e2e` drives it for a
+  single run, where a lone panel is placed by its own catalog stars.
+- `workflows/project.run_project_e2e` runs these stages:
+  - shared calibration;
+  - the mosaic canvas plan (`workflows/mosaic.py`, with the catalog-density check);
+  - the target panels: mosaic panels pause after measuring their references, `_solve_placements` fits every panel at once, and the runs resume;
+  - the canvas mosaics;
+  - channel alignment;
+  - colour and publication.
 - Mosaics (`mosaic/`): `canvas.py` plans one gnomonic canvas (stereographic
   beyond 10°) from one solved Light per panel, tangent at the centroid of the
   panels' union and turned to the median panel orientation, and turns a
   panel's window of it into the pipeline's `OutputGrid`: a 16 px lattice of
   registration-reference coordinates through the canvas projection and the
   reference's TAN+SIP. `workflows/canvas.py` (the stage between registration
-  and integration of a panel run) solves the calibrated reference and fits
-  that TAN+SIP on catalog stars (`astrometry.py`), so every Light is warped
-  once, from calibrated pixels onto the canvas, by the native lattice warp
+  and integration of a panel run) solves the calibrated reference and
+  measures its isolated stars and catalog matches. `astrometry.solve_mosaic`
+  then fits every panel's TAN+SIP at once, as a Gauss–Newton adjustment in
+  each panel's tangent plane: the catalog stars hold each panel on the sky,
+  and the stars two panels share in their overlap hold the panels to each
+  other. The distortion is one SIP for all panels or one per panel, by BIC.
+  Each Light is warped through the window's lattice shifted by its own
+  residual field (`measure_frame_field`, fitted on the inlier stars of its
+  registration: lateral colour, a meridian flip, another night), so every
+  Light is warped once, from calibrated pixels onto the canvas, by the
+  native lattice warp
   (`ufwbpp_native_cpu_warp_lanczos3_lattice_v1`, value-identical to its NumPy
   reference). The window's WCS is verified on catalog stars instead of being
   solved blind. `photometry.py` matches the panels of a filter in their

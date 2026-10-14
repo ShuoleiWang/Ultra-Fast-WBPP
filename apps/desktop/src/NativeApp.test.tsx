@@ -1629,6 +1629,22 @@ describe("native run failure", () => {
     expect(card).toHaveTextContent("/结果/深空 输出/ultra-fast-wbpp-run.unsolved");
     expect(screen.getByRole("button", { name: "返回导入" })).toHaveClass("primary");
   });
+
+  it("names the Gaia catalog when a mosaic panel holds too few catalog stars", async () => {
+    render(<App />);
+    await reachRun();
+    await act(async () =>
+      native.handlers?.onError({
+        jobId: "run-native-1",
+        code: "MOSAIC_CATALOG_TOO_SPARSE",
+        message: "the installed catalog holds fewer than 30 stars in the frame of panel p2 (12)",
+        retryable: false,
+      }),
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Gaia DR2 分块星表（astrometry-net-5205-lite）足够密；应用内暂时无法安装",
+    );
+  });
 });
 
 describe("explicit catalog setup", () => {

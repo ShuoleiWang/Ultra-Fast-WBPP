@@ -31,6 +31,7 @@ function RunFailure({ workflow, t }: { workflow: Workflow; t: Translator }) {
         {detail}
       </p>
       {code === "ASTROMETRY_REQUIRED" && <p className="run-failure-hint">{t("astrometryFailedHint")}</p>}
+      {code === "MOSAIC_CATALOG_TOO_SPARSE" && <p className="run-failure-hint">{t("mosaicCatalogHint")}</p>}
       {evidence && (
         <p className="run-failure-hint">
           {t("unsolvedEvidenceHint")}{" "}

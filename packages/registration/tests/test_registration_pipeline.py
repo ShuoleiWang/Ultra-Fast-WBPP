@@ -189,6 +189,11 @@ class RegistrationGeometryTests(unittest.TestCase):
         self.assertGreaterEqual(refined.full_refine_inliers, 12)
         np.testing.assert_allclose(refined.full_matrix, expected, rtol=0.0, atol=0.02)
         np.testing.assert_allclose(refined.full_matrix[2], (0.0, 0.0, 1.0), rtol=0.0, atol=1e-12)
+        # The inlier centroid pairs a caller fits a residual field on.
+        source_pairs, reference_pairs = refined.full_refine_pairs
+        self.assertEqual(source_pairs.shape, (refined.full_refine_inliers, 2))
+        mapped = np.column_stack((source_pairs, np.ones(len(source_pairs)))) @ np.asarray(expected).T
+        np.testing.assert_allclose(mapped[:, :2], reference_pairs, rtol=0.0, atol=0.05)
 
     def test_full_resolution_affine_rejects_spatially_clustered_control_points(
         self,
@@ -248,6 +253,7 @@ class RegistrationGeometryTests(unittest.TestCase):
 
         self.assertEqual(refined.transform_model, "similarity")
         self.assertEqual(refined.full_refine_evidence["status"], "REJECTED")
+        self.assertIsNone(refined.full_refine_pairs)
         self.assertEqual(
             refined.full_refine_evidence["reason"], "FULL_MODEL_GATE_FAILED"
         )

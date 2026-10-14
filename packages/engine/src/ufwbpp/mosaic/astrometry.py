@@ -11,6 +11,11 @@ inverse ``AP``/``BP``), choosing the polynomial order by the Bayesian
 information criterion so that a sparse catalog never buys a wiggle it cannot
 support.  The fit is a robust least-squares in the tangent plane of its own
 centre, iterated until that centre is the CRVAL of the solution.
+
+The panels of a mosaic are fitted at once (:func:`solve_mosaic`): with a
+few dozen catalog stars per field each panel alone is off by a pixel or more
+at its edges, where the panels overlap, while the hundreds of stars two
+neighbours both measure there tie their solutions to a tenth of a pixel.
 """
 
 from __future__ import annotations
@@ -21,11 +26,11 @@ import os
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
-from astropy.io import fits
 from astropy.wcs import WCS
 import numpy as np
 from numpy.typing import NDArray
 
+from ..stacking.parameters import SHIFT_FIELD_MAXIMUM_ORDER, ShiftField
 from .canvas import _plane, celestial_wcs
 
 
@@ -42,6 +47,17 @@ _CLIP_FLOOR_PIXELS = 0.25
 # A star with another detection closer than this many FWHM is left out of
 # the fit: a blend pulls its centroid by up to a pixel.
 ISOLATION_FWHM = 3.0
+JOINT_FIT_ALGORITHM = "mosaic-joint-tan-sip-v1"
+# Two panels constrain each other once this many of their stars match in
+# the overlap; the difference of a star's two measured positions starts at
+# this error per axis (re-estimated from the residuals).
+MINIMUM_OVERLAP_MATCHES = 20
+OVERLAP_SIGMA_PIXELS = 0.07
+# Overlap stars are first matched through the panels' own catalog fits,
+# which may disagree there by a pixel or two: within this many FWHM.
+OVERLAP_MATCH_FWHM = 1.5
+_JOINT_ITERATIONS = 20
+_REMATCH_ROUNDS = 3
 _INVERSE_GRID = 33
 
 
@@ -210,6 +226,65 @@ class SipFit:
         }
 
 
+def _sip_header(
+    crval: tuple[float, float],
+    crpix: tuple[float, float],
+    cd: NDArray[np.float64],
+    sip_a: Mapping[tuple[int, int], float],
+    sip_b: Mapping[tuple[int, int], float],
+    order: int,
+    shape: tuple[int, int],
+) -> dict[str, Any]:
+    """The TAN(+SIP) header of a solution; the inverse polynomials (one
+    order more) are fitted on a grid slightly larger than the frame."""
+
+    height, width = shape
+    length = max(width, height) / 2.0
+    header: dict[str, Any] = {
+        "WCSAXES": 2,
+        "CTYPE1": "RA---TAN-SIP" if order >= 2 else "RA---TAN",
+        "CTYPE2": "DEC--TAN-SIP" if order >= 2 else "DEC--TAN",
+        "CUNIT1": "deg",
+        "CUNIT2": "deg",
+        "CRVAL1": crval[0],
+        "CRVAL2": crval[1],
+        "CRPIX1": crpix[0],
+        "CRPIX2": crpix[1],
+        "CD1_1": float(cd[0, 0]),
+        "CD1_2": float(cd[0, 1]),
+        "CD2_1": float(cd[1, 0]),
+        "CD2_2": float(cd[1, 1]),
+        "RADESYS": "ICRS",
+    }
+    if order >= 2:
+        header["A_ORDER"] = order
+        header["B_ORDER"] = order
+        for term in _terms(order, minimum=2):
+            header[f"A_{term[0]}_{term[1]}"] = sip_a[term]
+            header[f"B_{term[0]}_{term[1]}"] = sip_b[term]
+        # AP/BP map the distorted offsets back.
+        samples = np.linspace(-0.02, 1.02, _INVERSE_GRID)
+        grid_u, grid_v = np.broadcast_arrays(
+            (samples * (width - 1))[None, :] + 1.0 - crpix[0],
+            (samples * (height - 1))[:, None] + 1.0 - crpix[1],
+        )
+        grid_u, grid_v = grid_u.ravel(), grid_v.ravel()
+        forward_u = grid_u + sum(value * grid_u**p * grid_v**q for (p, q), value in sip_a.items())
+        forward_v = grid_v + sum(value * grid_u**p * grid_v**q for (p, q), value in sip_b.items())
+        inverse_order = order + 1
+        inverse_terms = _terms(inverse_order, minimum=1)
+        inverse_design = _design(forward_u / length, forward_v / length, inverse_terms)
+        inverse_scale = np.asarray([length ** (p + q) for p, q in inverse_terms], dtype=np.float64)
+        ap, *_ = np.linalg.lstsq(inverse_design, grid_u - forward_u, rcond=None)
+        bp, *_ = np.linalg.lstsq(inverse_design, grid_v - forward_v, rcond=None)
+        header["AP_ORDER"] = inverse_order
+        header["BP_ORDER"] = inverse_order
+        for term, value_ap, value_bp in zip(inverse_terms, ap / inverse_scale, bp / inverse_scale):
+            header[f"AP_{term[0]}_{term[1]}"] = float(value_ap)
+            header[f"BP_{term[0]}_{term[1]}"] = float(value_bp)
+    return header
+
+
 def _fit_order(
     pixels: NDArray[np.float64],
     world: NDArray[np.float64],
@@ -243,54 +318,13 @@ def _fit_order(
     index = {term: position for position, term in enumerate(terms)}
     cd = np.asarray(((a[index[(1, 0)]], a[index[(0, 1)]]), (b[index[(1, 0)]], b[index[(0, 1)]])), dtype=np.float64)
     inverse_cd = np.linalg.inv(cd)
-    header: dict[str, Any] = {
-        "WCSAXES": 2,
-        "CTYPE1": "RA---TAN-SIP" if order >= 2 else "RA---TAN",
-        "CTYPE2": "DEC--TAN-SIP" if order >= 2 else "DEC--TAN",
-        "CUNIT1": "deg",
-        "CUNIT2": "deg",
-        "CRVAL1": crval[0],
-        "CRVAL2": crval[1],
-        "CRPIX1": crpix[0],
-        "CRPIX2": crpix[1],
-        "CD1_1": float(cd[0, 0]),
-        "CD1_2": float(cd[0, 1]),
-        "CD2_1": float(cd[1, 0]),
-        "CD2_2": float(cd[1, 1]),
-        "RADESYS": "ICRS",
-    }
-    if order >= 2:
-        header["A_ORDER"] = order
-        header["B_ORDER"] = order
-        sip_a: dict[tuple[int, int], float] = {}
-        sip_b: dict[tuple[int, int], float] = {}
-        for term in _terms(order, minimum=2):
-            coefficient = inverse_cd @ np.asarray((a[index[term]], b[index[term]]))
-            sip_a[term] = float(coefficient[0])
-            sip_b[term] = float(coefficient[1])
-            header[f"A_{term[0]}_{term[1]}"] = sip_a[term]
-            header[f"B_{term[0]}_{term[1]}"] = sip_b[term]
-        # The inverse polynomials (one order more) on a grid slightly
-        # larger than the frame: AP/BP map the distorted offsets back.
-        samples = np.linspace(-0.02, 1.02, _INVERSE_GRID)
-        grid_u, grid_v = np.broadcast_arrays(
-            (samples * (width - 1))[None, :] + 1.0 - crpix[0],
-            (samples * (height - 1))[:, None] + 1.0 - crpix[1],
-        )
-        grid_u, grid_v = grid_u.ravel(), grid_v.ravel()
-        forward_u = grid_u + sum(value * grid_u**p * grid_v**q for (p, q), value in sip_a.items())
-        forward_v = grid_v + sum(value * grid_u**p * grid_v**q for (p, q), value in sip_b.items())
-        inverse_order = order + 1
-        inverse_terms = _terms(inverse_order, minimum=1)
-        inverse_design = _design(forward_u / length, forward_v / length, inverse_terms)
-        inverse_scale = np.asarray([length ** (p + q) for p, q in inverse_terms], dtype=np.float64)
-        ap, *_ = np.linalg.lstsq(inverse_design, grid_u - forward_u, rcond=None)
-        bp, *_ = np.linalg.lstsq(inverse_design, grid_v - forward_v, rcond=None)
-        header["AP_ORDER"] = inverse_order
-        header["BP_ORDER"] = inverse_order
-        for term, value_ap, value_bp in zip(inverse_terms, ap / inverse_scale, bp / inverse_scale):
-            header[f"AP_{term[0]}_{term[1]}"] = float(value_ap)
-            header[f"BP_{term[0]}_{term[1]}"] = float(value_bp)
+    sip_a: dict[tuple[int, int], float] = {}
+    sip_b: dict[tuple[int, int], float] = {}
+    for term in _terms(order, minimum=2):
+        coefficient = inverse_cd @ np.asarray((a[index[term]], b[index[term]]))
+        sip_a[term] = float(coefficient[0])
+        sip_b[term] = float(coefficient[1])
+    header = _sip_header(crval, crpix, cd, sip_a, sip_b, order, shape)
     wcs = celestial_wcs(header)
     predicted = np.column_stack(wcs.all_world2pix(world[:, 0], world[:, 1], 0, tolerance=1e-9, maxiter=100, quiet=True))
     residual = pixels - predicted
@@ -414,7 +448,21 @@ def _isolated_windowed_centroids(
     return np.column_stack((x[good], y[good])).astype(np.float64)
 
 
-def refine_solution(
+@dataclass(frozen=True)
+class PanelStars:
+    """A frame measured for a solution: its isolated star centroids
+    (zero-based pixels), the median FWHM, its catalog matches and its own
+    catalog fit."""
+
+    shape: tuple[int, int]
+    fwhm: float
+    detected: NDArray[np.float64]
+    catalog_pixels: NDArray[np.float64]
+    catalog_world: NDArray[np.float64]
+    fit: SipFit
+
+
+def measure_panel(
     image: NDArray[np.float32],
     header: Mapping[str, Any],
     catalog: CatalogStarSource,
@@ -422,10 +470,11 @@ def refine_solution(
     minimum_matches: int = 30,
     maximum_order: int = 3,
     minimum_catalog_stars: int = 0,
-) -> SipFit:
-    """Refine a solver's solution of ``image`` into TAN+SIP on catalog stars;
-    a field holding fewer than ``minimum_catalog_stars`` catalog stars is
-    refused before any star detection."""
+) -> PanelStars:
+    """Detect the stars of ``image``, match them to catalog stars through a
+    solver's solution and refine it into TAN+SIP; a field holding fewer than
+    ``minimum_catalog_stars`` catalog stars is refused before any star
+    detection."""
 
     from ..solvers.catalog_correspondence import (
         CorrespondenceParameters,
@@ -491,9 +540,9 @@ def refine_solution(
     fitted, order, keep = fit_tan_sip(
         detected[rows], world[catalog_rows], (height, width), crval=(float(fitted["CRVAL1"]), float(fitted["CRVAL2"])), maximum_order=maximum_order
     )
-    wcs = celestial_wcs(fitted)
     matched_pixels = detected[rows][keep]
     matched_world = world[catalog_rows][keep]
+    wcs = celestial_wcs(fitted)
     residual = matched_pixels - np.column_stack(
         wcs.all_world2pix(matched_world[:, 0], matched_world[:, 1], 0, tolerance=1e-9, maxiter=100, quiet=True)
     )
@@ -508,10 +557,10 @@ def refine_solution(
     edge = np.minimum.reduce(
         (matched_pixels[:, 0], width - 1 - matched_pixels[:, 0], matched_pixels[:, 1], height - 1 - matched_pixels[:, 1])
     ) < 0.15 * min(width, height)
-    return SipFit(
+    fit = SipFit(
         header=fitted,
         order=order,
-        matched=int(keep.sum()),
+        matched=int(len(matched_pixels)),
         rms_pixels=float(np.sqrt(np.mean(np.square(radius_pixels)))),
         rms_arcsec=float(np.sqrt(np.mean(np.square(arcsec)))),
         max_residual_pixels=float(radius_pixels.max()),
@@ -528,16 +577,652 @@ def refine_solution(
             "holdoutRmsArcsec": holdout_arcsec,
         },
     )
+    return PanelStars((height, width), median_fwhm, detected, matched_pixels, matched_world, fit)
+
+
+def refine_solution(
+    image: NDArray[np.float32],
+    header: Mapping[str, Any],
+    catalog: CatalogStarSource,
+    *,
+    minimum_matches: int = 30,
+    maximum_order: int = 3,
+    minimum_catalog_stars: int = 0,
+) -> SipFit:
+    """A solver's solution of ``image`` refined into TAN+SIP on catalog stars
+    (see :func:`measure_panel`)."""
+
+    return measure_panel(
+        image,
+        header,
+        catalog,
+        minimum_matches=minimum_matches,
+        maximum_order=maximum_order,
+        minimum_catalog_stars=minimum_catalog_stars,
+    ).fit
+
+
+def _tangent_basis(crval: tuple[float, float]) -> NDArray[np.float64]:
+    """Rows: the east and north unit vectors of the tangent plane at
+    ``crval`` and the unit vector of ``crval`` itself."""
+
+    alpha, delta = math.radians(crval[0]), math.radians(crval[1])
+    return np.asarray(
+        (
+            (-math.sin(alpha), math.cos(alpha), 0.0),
+            (-math.sin(delta) * math.cos(alpha), -math.sin(delta) * math.sin(alpha), math.cos(delta)),
+            (math.cos(delta) * math.cos(alpha), math.cos(delta) * math.sin(alpha), math.sin(delta)),
+        ),
+        dtype=np.float64,
+    )
+
+
+def _directions(world: NDArray[np.float64]) -> NDArray[np.float64]:
+    alpha, delta = np.radians(world[:, 0]), np.radians(world[:, 1])
+    return np.column_stack((np.cos(delta) * np.cos(alpha), np.cos(delta) * np.sin(alpha), np.sin(delta)))
+
+
+def _in_plane(basis: NDArray[np.float64], directions: NDArray[np.float64], scale: float) -> NDArray[np.float64]:
+    """Gnomonic coordinates of ``directions`` in units of ``scale`` radians."""
+
+    local = directions @ basis.T
+    return local[:, :2] / local[:, 2:3] / scale
+
+
+def _transfer(matrix: NDArray[np.float64], z: NDArray[np.float64], scale: float) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Points of one tangent plane in another (``matrix`` = target basis @
+    source basis.T, a projective map) and its Jacobian per point."""
+
+    h = np.column_stack((z * scale, np.ones(len(z)))) @ matrix.T
+    a, b, c = h[:, 0], h[:, 1], h[:, 2]
+    jacobian = np.empty((len(z), 2, 2))
+    square = c * c
+    jacobian[:, 0, 0] = (matrix[0, 0] * c - a * matrix[2, 0]) / square
+    jacobian[:, 0, 1] = (matrix[0, 1] * c - a * matrix[2, 1]) / square
+    jacobian[:, 1, 0] = (matrix[1, 0] * c - b * matrix[2, 0]) / square
+    jacobian[:, 1, 1] = (matrix[1, 1] * c - b * matrix[2, 1]) / square
+    return np.column_stack((a / c, b / c)) / scale, jacobian
+
+
+@dataclass(frozen=True)
+class _JointModel:
+    """Per panel a CD matrix and an offset in its tangent plane; the SIP
+    distortion of the given order shared by all panels or one per panel.
+    Parameters: six per panel, then the distortion coefficients."""
+
+    order: int
+    shared: bool
+    panels: int
+
+    @property
+    def terms(self) -> list[tuple[int, int]]:
+        return _terms(self.order, minimum=2)
+
+    @property
+    def size(self) -> int:
+        return 6 * self.panels + 2 * len(self.terms) * (1 if self.shared else self.panels)
+
+    def local_size(self) -> int:
+        """The parameters a panel owns alone."""
+
+        return 6 + (0 if self.shared else 2 * len(self.terms))
+
+    def indices(self, panel: int) -> NDArray[np.int64]:
+        count = 2 * len(self.terms)
+        base = 6 * self.panels + (0 if self.shared else count * panel)
+        return np.concatenate((np.arange(6 * panel, 6 * panel + 6), np.arange(base, base + count)))
+
+    def serializable(self) -> dict[str, Any]:
+        return {"order": self.order, "distortion": "shared" if self.shared or self.order < 2 else "perPanel"}
+
+
+def _panel_model(
+    local: NDArray[np.float64], q: NDArray[np.float64], length: float, terms: Sequence[tuple[int, int]]
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """A panel's tangent-plane points at pixel offsets ``q`` and their
+    derivatives by the panel's parameters (CD, offset, distortion)."""
+
+    count = len(terms)
+    cd = local[:4].reshape(2, 2)
+    phi = _design(q[:, 0] / length, q[:, 1] / length, terms) * length if count else np.zeros((len(q), 0))
+    distorted = q + np.column_stack((phi @ local[6 : 6 + count], phi @ local[6 + count :])) if count else q
+    z = distorted @ cd.T + local[4:6]
+    jacobian = np.zeros((len(q), 2, 6 + 2 * count))
+    jacobian[:, 0, 0] = distorted[:, 0]
+    jacobian[:, 0, 1] = distorted[:, 1]
+    jacobian[:, 1, 2] = distorted[:, 0]
+    jacobian[:, 1, 3] = distorted[:, 1]
+    jacobian[:, 0, 4] = 1.0
+    jacobian[:, 1, 5] = 1.0
+    if count:
+        jacobian[:, 0, 6 : 6 + count] = cd[0, 0] * phi
+        jacobian[:, 1, 6 : 6 + count] = cd[1, 0] * phi
+        jacobian[:, 0, 6 + count :] = cd[0, 1] * phi
+        jacobian[:, 1, 6 + count :] = cd[1, 1] * phi
+    return z, jacobian
+
+
+@dataclass
+class _Overlap:
+    """Stars two panels both measured: pixel offsets in each."""
+
+    first: int
+    second: int
+    q_first: NDArray[np.float64]
+    q_second: NDArray[np.float64]
+    keep: NDArray[np.bool_]
+    sigma: float = OVERLAP_SIGMA_PIXELS
+
+
+@dataclass
+class _Catalog:
+    q: NDArray[np.float64]
+    directions: NDArray[np.float64]
+    keep: NDArray[np.bool_]
+    sigma: float
+
+
+class _JointProblem:
+    """The panels' stars, catalog matches and overlaps, and the state of a fit."""
+
+    def __init__(self, panels: Sequence[PanelStars]) -> None:
+        self.panels = list(panels)
+        self.crpix = [((stars.shape[1] + 1) / 2.0, (stars.shape[0] + 1) / 2.0) for stars in self.panels]
+        self.length = [max(stars.shape) / 2.0 for stars in self.panels]
+        scales = [math.sqrt(abs(np.linalg.det(_cd(stars.fit.header)))) for stars in self.panels]
+        # One unit for every tangent plane: a panel pixel, radians.
+        self.scale = math.radians(float(np.median(scales)))
+        self.catalogs = [
+            _Catalog(
+                self.offsets(index, stars.catalog_pixels),
+                _directions(stars.catalog_world),
+                np.ones(len(stars.catalog_pixels), dtype=bool),
+                max(stars.fit.rms_pixels / math.sqrt(2.0), 0.05),
+            )
+            for index, stars in enumerate(self.panels)
+        ]
+        self.overlaps: list[_Overlap] = []
+
+    def offsets(self, panel: int, pixels: NDArray[np.float64]) -> NDArray[np.float64]:
+        crpix = self.crpix[panel]
+        return np.column_stack((pixels[:, 0] + 1.0 - crpix[0], pixels[:, 1] + 1.0 - crpix[1]))
+
+    def start(self, model: _JointModel) -> tuple[NDArray[np.float64], list[tuple[float, float]]]:
+        """Parameters from the panels' own catalog fits (a shared distortion
+        starts at their mean) and their tangent points."""
+
+        theta = np.zeros(model.size)
+        distortions = []
+        for index, stars in enumerate(self.panels):
+            header = stars.fit.header
+            indices = model.indices(index)
+            theta[indices[:4]] = (np.radians(_cd(header)) / self.scale).ravel()
+            length = self.length[index]
+            coefficients = [
+                float(header.get(f"{axis}_{p}_{q}", 0.0)) * length ** (p + q - 1)
+                for axis in ("A", "B")
+                for p, q in model.terms
+            ]
+            distortions.append(coefficients)
+            if not model.shared:
+                theta[indices[6:]] = coefficients
+        if model.shared and model.terms:
+            weights = np.asarray([len(stars.catalog_pixels) for stars in self.panels], dtype=np.float64)
+            theta[6 * model.panels :] = np.average(np.asarray(distortions), axis=0, weights=weights)
+        centres = [(float(stars.fit.header["CRVAL1"]), float(stars.fit.header["CRVAL2"])) for stars in self.panels]
+        return theta, centres
+
+    def residuals(
+        self, model: _JointModel, theta: NDArray[np.float64], centres: Sequence[tuple[float, float]]
+    ) -> tuple[list[NDArray[np.float64]], list[NDArray[np.float64]]]:
+        """Residual vectors (plane pixels) of every catalog match and overlap star, kept or not."""
+
+        bases = [_tangent_basis(centre) for centre in centres]
+        catalog = []
+        for index, item in enumerate(self.catalogs):
+            z, _ = _panel_model(theta[model.indices(index)], item.q, self.length[index], model.terms)
+            catalog.append(_in_plane(bases[index], item.directions, self.scale) - z)
+        overlap = []
+        for item in self.overlaps:
+            z_first, _ = _panel_model(theta[model.indices(item.first)], item.q_first, self.length[item.first], model.terms)
+            z_second, _ = _panel_model(theta[model.indices(item.second)], item.q_second, self.length[item.second], model.terms)
+            moved, _ = _transfer(bases[item.first] @ bases[item.second].T, z_second, self.scale)
+            overlap.append(moved - z_first)
+        return catalog, overlap
+
+    def _normal_equations(
+        self, model: _JointModel, theta: NDArray[np.float64], centres: Sequence[tuple[float, float]]
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], float]:
+        bases = [_tangent_basis(centre) for centre in centres]
+        normal = np.zeros((model.size, model.size))
+        gradient = np.zeros(model.size)
+        chi_square = 0.0
+        for index, item in enumerate(self.catalogs):
+            indices = model.indices(index)
+            z, jacobian = _panel_model(theta[indices], item.q[item.keep], self.length[index], model.terms)
+            residual = (_in_plane(bases[index], item.directions[item.keep], self.scale) - z).ravel()
+            design = jacobian.reshape(-1, len(indices))
+            weight = 1.0 / item.sigma**2
+            normal[np.ix_(indices, indices)] += weight * (design.T @ design)
+            gradient[indices] += weight * (design.T @ residual)
+            chi_square += weight * float(residual @ residual)
+        for item in self.overlaps:
+            first, second = model.indices(item.first), model.indices(item.second)
+            z_first, jacobian_first = _panel_model(theta[first], item.q_first[item.keep], self.length[item.first], model.terms)
+            z_second, jacobian_second = _panel_model(theta[second], item.q_second[item.keep], self.length[item.second], model.terms)
+            moved, transfer = _transfer(bases[item.first] @ bases[item.second].T, z_second, self.scale)
+            residual = (moved - z_first).ravel()
+            design_first = jacobian_first.reshape(-1, len(first))
+            design_second = -np.einsum("nij,njk->nik", transfer, jacobian_second).reshape(-1, len(second))
+            weight = 1.0 / item.sigma**2
+            normal[np.ix_(first, first)] += weight * (design_first.T @ design_first)
+            normal[np.ix_(second, second)] += weight * (design_second.T @ design_second)
+            normal[np.ix_(first, second)] += weight * (design_first.T @ design_second)
+            normal[np.ix_(second, first)] += weight * (design_second.T @ design_first)
+            gradient[first] += weight * (design_first.T @ residual)
+            gradient[second] += weight * (design_second.T @ residual)
+            chi_square += weight * float(residual @ residual)
+        return normal, gradient, chi_square
+
+    def solve(
+        self, model: _JointModel, theta: NDArray[np.float64], centres: Sequence[tuple[float, float]]
+    ) -> tuple[NDArray[np.float64], list[tuple[float, float]], float]:
+        """Gauss-Newton on the kept stars; every panel's tangent point moves
+        to its fitted centre after each step, so its offset ends at zero
+        and the solution is a plain TAN+SIP header."""
+
+        theta = theta.copy()
+        centres = list(centres)
+        chi_square = math.inf
+        for _ in range(_JOINT_ITERATIONS):
+            normal, gradient, chi_square = self._normal_equations(model, theta, centres)
+            diagonal = np.sqrt(np.diag(normal))
+            if np.any(diagonal <= 0.0):
+                raise MosaicAstrometryError("MOSAIC_PANELS_UNCONSTRAINED", "a mosaic panel has no stars to place it")
+            scaled = normal / np.outer(diagonal, diagonal)
+            eigenvalues = np.linalg.eigvalsh(scaled)
+            if eigenvalues[0] < 1e-12 * eigenvalues[-1]:
+                raise MosaicAstrometryError(
+                    "MOSAIC_PANELS_UNCONSTRAINED",
+                    "the catalog and overlap stars do not determine every panel's solution",
+                )
+            step = np.linalg.solve(scaled, gradient / diagonal) / diagonal
+            theta += step
+            moved = 0.0
+            for index in range(model.panels):
+                indices = model.indices(index)
+                corners = np.asarray(
+                    [[-1.0, -1.0], [1.0, -1.0], [-1.0, 1.0], [1.0, 1.0]]
+                ) * np.asarray(self.panels[index].shape[::-1]) / 2.0
+                _, jacobian = _panel_model(theta[indices], corners, self.length[index], model.terms)
+                moved = max(moved, float(np.max(np.abs(jacobian @ step[indices]))))
+                offset = theta[indices[4:6]]
+                direction = _tangent_basis(centres[index]).T @ np.asarray((offset[0] * self.scale, offset[1] * self.scale, 1.0))
+                direction /= np.linalg.norm(direction)
+                centres[index] = (
+                    math.degrees(math.atan2(direction[1], direction[0])) % 360.0,
+                    math.degrees(math.asin(max(-1.0, min(1.0, direction[2])))),
+                )
+                theta[indices[4:6]] = 0.0
+            if moved < 1e-7:
+                break
+        else:
+            if moved > 1e-3:
+                raise MosaicAstrometryError("MOSAIC_JOINT_FIT_DIVERGED", "the joint astrometric fit did not converge")
+        return theta, centres, chi_square
+
+    def clipped(
+        self, model: _JointModel, theta: NDArray[np.float64], centres: Sequence[tuple[float, float]]
+    ) -> tuple[NDArray[np.float64], list[tuple[float, float]]]:
+        """A fit with outliers clipped and each class's error re-estimated:
+        per panel for its catalog matches, per overlap for its stars."""
+
+        for _ in range(_CLIP_ITERATIONS + 1):
+            theta, centres, _ = self.solve(model, theta, centres)
+            catalog, overlap = self.residuals(model, theta, centres)
+            changed = False
+            for item, residual in [*zip(self.catalogs, catalog), *zip(self.overlaps, overlap)]:
+                radius = np.hypot(residual[:, 0], residual[:, 1])
+                floor = 0.05 if isinstance(item, _Catalog) else 0.02
+                item.sigma = max(float(np.median(radius[item.keep])) / 1.1774, floor) if item.keep.any() else item.sigma
+                updated = radius <= max(_CLIP_SIGMA * item.sigma, _CLIP_FLOOR_PIXELS)
+                if np.count_nonzero(updated) < 0.7 * len(radius):
+                    # More outliers than one clip may take: keep the nearest 70 %.
+                    updated = radius <= np.quantile(radius, 0.7)
+                if not np.array_equal(updated, item.keep):
+                    item.keep = updated
+                    changed = True
+            if not changed:
+                break
+        return theta, centres
+
+    def admissible(self, model: _JointModel) -> bool:
+        """Three stars per term in all and for every panel's own
+        parameters, and enough catalog stars to hold the mosaic on the sky."""
+
+        catalog = [int(item.keep.sum()) for item in self.catalogs]
+        local = list(catalog)
+        for item in self.overlaps:
+            local[item.first] += int(item.keep.sum())
+            local[item.second] += int(item.keep.sum())
+        stars = sum(catalog) + sum(int(item.keep.sum()) for item in self.overlaps)
+        return (
+            2 * stars >= STARS_PER_TERM * model.size
+            and all(2 * count >= STARS_PER_TERM * model.local_size() for count in local)
+            and sum(catalog) >= STARS_PER_TERM * 3
+        )
+
+    def header(self, model: _JointModel, theta: NDArray[np.float64], centre: tuple[float, float], panel: int) -> dict[str, Any]:
+        local = theta[model.indices(panel)]
+        cd = np.degrees(local[:4].reshape(2, 2) * self.scale)
+        length = self.length[panel]
+        count = len(model.terms)
+        sip_a = {term: float(local[6 + position]) * length ** (1 - sum(term)) for position, term in enumerate(model.terms)}
+        sip_b = {term: float(local[6 + count + position]) * length ** (1 - sum(term)) for position, term in enumerate(model.terms)}
+        return _sip_header(centre, self.crpix[panel], cd, sip_a, sip_b, model.order, self.panels[panel].shape)
+
+    def match_overlaps(self, headers: Sequence[Mapping[str, Any]], radii: Sequence[Sequence[float]]) -> None:
+        """Stars of each pair of panels that are one star on the sky through
+        ``headers``, within ``radii[first][second]`` pixels."""
+
+        from ..solvers.catalog_correspondence import match_mutual_nearest
+
+        wcs = [celestial_wcs(header) for header in headers]
+        self.overlaps = []
+        for first in range(len(self.panels)):
+            sky = wcs[first].all_pix2world(self.panels[first].detected, 0)
+            for second in range(first + 1, len(self.panels)):
+                height, width = self.panels[second].shape
+                projected = _project(wcs[second], sky)
+                inside = np.flatnonzero(
+                    np.all(np.isfinite(projected), axis=1)
+                    & (projected[:, 0] >= 0.0)
+                    & (projected[:, 0] <= width - 1.0)
+                    & (projected[:, 1] >= 0.0)
+                    & (projected[:, 1] <= height - 1.0)
+                )
+                if inside.size < MINIMUM_OVERLAP_MATCHES:
+                    continue
+                rows, second_rows, _ = match_mutual_nearest(projected[inside], self.panels[second].detected, radii[first][second])
+                if rows.size < MINIMUM_OVERLAP_MATCHES:
+                    continue
+                self.overlaps.append(
+                    _Overlap(
+                        first,
+                        second,
+                        self.offsets(first, self.panels[first].detected[inside[rows]]),
+                        self.offsets(second, self.panels[second].detected[second_rows]),
+                        np.ones(rows.size, dtype=bool),
+                    )
+                )
+
+
+def _cd(header: Mapping[str, Any]) -> NDArray[np.float64]:
+    return np.asarray(((header["CD1_1"], header["CD1_2"]), (header["CD2_1"], header["CD2_2"])), dtype=np.float64)
+
+
+def _project(wcs: WCS, world: NDArray[np.float64]) -> NDArray[np.float64]:
+    return np.column_stack(wcs.all_world2pix(world[:, 0], world[:, 1], 0, tolerance=1e-9, maxiter=100, quiet=True))
+
+
+def _clip_flexible(
+    problem: _JointProblem, admissible: Sequence[_JointModel]
+) -> tuple[_JointModel, NDArray[np.float64], list[tuple[float, float]]]:
+    """The most flexible admissible model the stars determine, fitted with
+    its outliers clipped; a model they cannot determine gives way to the next."""
+
+    items = [*problem.catalogs, *problem.overlaps]
+    for model in sorted(admissible, key=lambda item: item.size, reverse=True):
+        state = [(item.keep.copy(), item.sigma) for item in items]
+        try:
+            return (model, *problem.clipped(model, *problem.start(model)))
+        except MosaicAstrometryError:
+            for item, (keep, sigma) in zip(items, state):
+                item.keep, item.sigma = keep, sigma
+    raise MosaicAstrometryError(
+        "MOSAIC_PANELS_UNCONSTRAINED", "the catalog and overlap stars do not determine every panel's solution"
+    )
+
+
+def solve_mosaic(panels: Mapping[str, PanelStars]) -> tuple[dict[str, SipFit], dict[str, Any]]:
+    """One TAN+SIP solution per panel, fitted on all panels at once.
+
+    A panel's catalog matches place it on the sky; the stars it shares with
+    a neighbour in their overlap tie the two solutions together, so the
+    overlaps agree and no panel's sparse-catalog error passes to another
+    unchecked.  The distortion is one SIP polynomial for all panels (the
+    same optics) or one per panel, whichever, with its order, the BIC
+    prefers on the inliers of the most flexible admissible model.  Returns
+    the solution per panel and the record of the fit."""
+
+    keys = list(panels)
+    problem = _JointProblem([panels[key] for key in keys])
+    count = len(keys)
+    fwhm = [max(panels[key].fwhm, 1.0) for key in keys]
+    problem.match_overlaps(
+        [panels[key].fit.header for key in keys],
+        [[max(2.0, OVERLAP_MATCH_FWHM * max(fwhm[first], fwhm[second])) for second in range(count)] for first in range(count)],
+    )
+    candidates = [_JointModel(1, True, count)] + [
+        _JointModel(order, shared, count) for order in (2, 3) for shared in ((True, False) if count > 1 else (True,))
+    ]
+    admissible = [model for model in candidates if problem.admissible(model)]
+    if not admissible:
+        raise MosaicAstrometryError(
+            "MOSAIC_REFERENCE_STARS_INSUFFICIENT", "the panels' catalog and overlap stars cannot constrain even linear solutions"
+        )
+    flexible, theta, centres = _clip_flexible(problem, admissible)
+    # Again through the joint solution, within what its residuals justify,
+    # until no overlap gains stars: a pair the panels' own fits put too far
+    # apart links once its neighbours have pulled them into place.
+    linked = sum(int(item.keep.sum()) for item in problem.overlaps)
+    for _ in range(_REMATCH_ROUNDS):
+        headers = [problem.header(flexible, theta, centres[index], index) for index in range(count)]
+        sigma = max([item.sigma for item in problem.overlaps] or [OVERLAP_SIGMA_PIXELS])
+        problem.match_overlaps(headers, [[max(1.0, 5.0 * sigma)] * count for _ in range(count)])
+        admissible = [model for model in admissible if problem.admissible(model)]
+        flexible, theta, centres = _clip_flexible(problem, admissible)
+        now = sum(int(item.keep.sum()) for item in problem.overlaps)
+        if now <= linked:
+            break
+        linked = now
+    observations = 2 * (
+        sum(int(item.keep.sum()) for item in problem.catalogs) + sum(int(item.keep.sum()) for item in problem.overlaps)
+    )
+    best: tuple[float, _JointModel, NDArray[np.float64], list[tuple[float, float]]] | None = None
+    table = []
+    for model in admissible:
+        try:
+            fitted, fitted_centres, chi_square = problem.solve(model, *problem.start(model))
+        except MosaicAstrometryError as error:
+            table.append({**model.serializable(), "parameters": model.size, "failed": error.code})
+            continue
+        bic = chi_square + model.size * math.log(observations)
+        table.append({**model.serializable(), "parameters": model.size, "bic": bic})
+        if best is None or bic < best[0]:
+            best = (bic, model, fitted, fitted_centres)
+    if best is None:
+        raise MosaicAstrometryError(
+            "MOSAIC_PANELS_UNCONSTRAINED", "no candidate model determines every panel's solution"
+        )
+    _, model, theta, centres = best
+    theta, centres = problem.clipped(model, theta, centres)
+    catalog_residuals, overlap_residuals = problem.residuals(model, theta, centres)
+    overlaps = []
+    for item, residual in zip(problem.overlaps, overlap_residuals):
+        radius = np.hypot(residual[:, 0], residual[:, 1])[item.keep]
+        overlaps.append(
+            {
+                "panels": [keys[item.first], keys[item.second]],
+                "matches": int(item.keep.size),
+                "inliers": int(item.keep.sum()),
+                "rmsPixels": float(np.sqrt(np.mean(np.square(radius)))) if radius.size else None,
+                "sigmaPixels": item.sigma,
+            }
+        )
+    record = {
+        "algorithm": JOINT_FIT_ALGORITHM,
+        **model.serializable(),
+        "panels": count,
+        "catalogStars": sum(int(item.keep.sum()) for item in problem.catalogs),
+        "overlapStars": sum(int(item.keep.sum()) for item in problem.overlaps),
+        "candidates": table,
+        "overlaps": overlaps,
+    }
+    solutions = {}
+    for index, key in enumerate(keys):
+        stars = panels[key]
+        item = problem.catalogs[index]
+        header = problem.header(model, theta, centres[index], index)
+        wcs = celestial_wcs(header)
+        pixels, world = stars.catalog_pixels[item.keep], stars.catalog_world[item.keep]
+        residual = pixels - _project(wcs, world)
+        radius_pixels = np.hypot(residual[:, 0], residual[:, 1])
+        arcsec = _arcsec_residuals(wcs, pixels, world)
+        height, width = stars.shape
+        edge = np.minimum.reduce((pixels[:, 0], width - 1 - pixels[:, 0], pixels[:, 1], height - 1 - pixels[:, 1])) < 0.15 * min(width, height)
+        shared_stars = sum(int(overlap.keep.sum()) for overlap in problem.overlaps if index in (overlap.first, overlap.second))
+        evidence = {
+            key_: value
+            for key_, value in stars.fit.evidence.items()
+            if key_ in ("catalogIdentity", "detectedStars", "catalogStarsInField", "matchRadiusPixels", "initialRmsArcsec")
+        }
+        solutions[key] = SipFit(
+            header=header,
+            order=model.order,
+            matched=int(pixels.shape[0]),
+            rms_pixels=float(np.sqrt(np.mean(np.square(radius_pixels)))) if radius_pixels.size else 0.0,
+            rms_arcsec=float(np.sqrt(np.mean(np.square(arcsec)))) if arcsec.size else 0.0,
+            max_residual_pixels=float(radius_pixels.max()) if radius_pixels.size else 0.0,
+            evidence={
+                **evidence,
+                "algorithm": JOINT_FIT_ALGORITHM,
+                "clippedMatches": int(item.keep.size - item.keep.sum()),
+                "catalogSigmaPixels": item.sigma,
+                "edgeRmsPixels": float(np.sqrt(np.mean(np.square(radius_pixels[edge])))) if edge.any() else None,
+                "centreRmsPixels": float(np.sqrt(np.mean(np.square(radius_pixels[~edge])))) if (~edge).any() else None,
+                "edgeMatches": int(edge.sum()),
+                "overlapStars": shared_stars,
+                "ownFit": {
+                    "order": stars.fit.order,
+                    "matchedStars": stars.fit.matched,
+                    "rmsPixels": stars.fit.rms_pixels,
+                    "rmsArcsec": stars.fit.rms_arcsec,
+                },
+            },
+        )
+    return solutions, record
+
+
+FRAME_FIELD_ALGORITHM = "registration-residual-frame-field-v1"
+# A shift field is fitted on at least this many star pairs.
+_FIELD_MINIMUM_MATCHES = 50
+# An order is admissible only where its stars determine it: the standard
+# error of its predicted shift stays within this at every node where the
+# field is applied (a cloud can leave a corner without stars).
+_FIELD_MAXIMUM_STANDARD_ERROR_PIXELS = 0.1
+
+
+def fit_shift_field(
+    points: NDArray[np.float64],
+    shifts: NDArray[np.float64],
+    shape: tuple[int, int],
+    nodes: NDArray[np.float64],
+) -> ShiftField:
+    """The shift field ``shifts`` measured at reference pixels ``points`` of
+    a ``shape`` frame and applied at reference pixels ``nodes``: polynomial
+    of the order (none, 0 to 3) the BIC chooses, on the inliers of the most
+    flexible fit, among the orders the stars determine at every node."""
+
+    height, width = shape
+    centre, length = ((width - 1) / 2.0, (height - 1) / 2.0), max(width, height) / 2.0
+    evidence: dict[str, Any] = {"algorithm": FRAME_FIELD_ALGORITHM, "matches": int(len(points))}
+    if len(points) < _FIELD_MINIMUM_MATCHES:
+        return ShiftField(None, (), (), centre, length, {**evidence, "applied": False})
+    u, v = (points[:, 0] - centre[0]) / length, (points[:, 1] - centre[1]) / length
+    node_x, node_y = np.asarray(nodes, dtype=np.float64).T
+
+    def fit(order: int, keep: NDArray[np.bool_]) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+        design = ShiftField.design(u, v, order)
+        cx, *_ = np.linalg.lstsq(design[keep], shifts[keep, 0], rcond=None)
+        cy, *_ = np.linalg.lstsq(design[keep], shifts[keep, 1], rcond=None)
+        return cx, cy, shifts - np.column_stack((design @ cx, design @ cy))
+
+    keep = np.ones(len(points), dtype=bool)
+    for _ in range(3):
+        *_, residual = fit(SHIFT_FIELD_MAXIMUM_ORDER, keep)
+        radius = np.hypot(residual[:, 0], residual[:, 1])
+        sigma = 1.4826 * float(np.median(radius[keep])) + 1e-6
+        updated = radius <= 3.5 * sigma
+        if np.array_equal(updated, keep) or updated.sum() < _FIELD_MINIMUM_MATCHES:
+            break
+        keep = updated
+    observations = 2 * int(keep.sum())
+    best = (observations * math.log(max(float(np.sum(np.square(shifts[keep]))), 1e-30) / observations), None, (), (), 0.0)
+    for order in range(SHIFT_FIELD_MAXIMUM_ORDER + 1):
+        cx, cy, residual = fit(order, keep)
+        squares = max(float(np.sum(np.square(residual[keep]))), 1e-30)
+        bic = observations * math.log(squares / observations) + 2 * len(cx) * math.log(observations)
+        if bic >= best[0]:
+            continue
+        design = ShiftField.design(u[keep], v[keep], order)
+        at_nodes = ShiftField.design((node_x - centre[0]) / length, (node_y - centre[1]) / length, order)
+        leverage = np.einsum("ij,jk,ik->i", at_nodes, np.linalg.pinv(design.T @ design), at_nodes)
+        standard_error = math.sqrt(squares / max(observations - 2 * len(cx), 1) * float(leverage.max()))
+        if standard_error <= _FIELD_MAXIMUM_STANDARD_ERROR_PIXELS:
+            best = (bic, order, tuple(float(value) for value in cx), tuple(float(value) for value in cy), standard_error)
+    _, order, cx, cy, standard_error = best
+    field_ = ShiftField(order, cx, cy, centre, length)
+    sx, sy = field_.shift(node_x, node_y)
+    after = shifts[keep] - np.column_stack(field_.shift(points[keep, 0], points[keep, 1]))
+    evidence.update(
+        applied=order is not None,
+        order=order,
+        inliers=int(keep.sum()),
+        rmsBeforePixels=float(np.sqrt(np.mean(np.sum(np.square(shifts[keep]), axis=1)))),
+        rmsAfterPixels=float(np.sqrt(np.mean(np.sum(np.square(after), axis=1)))),
+        maxShiftPixels=float(np.max(np.hypot(sx, sy))),
+        standardErrorPixels=standard_error,
+    )
+    return ShiftField(order, cx, cy, centre, length, evidence)
+
+
+def _mapped(transform: NDArray[np.float64], points: NDArray[np.float64]) -> NDArray[np.float64]:
+    mapped = np.column_stack((points, np.ones(len(points)))) @ np.asarray(transform, dtype=np.float64).T
+    return mapped[:, :2] / mapped[:, 2:3]
+
+
+def measure_frame_field(
+    pairs: tuple[NDArray[np.float64], NDArray[np.float64]],
+    transform: NDArray[np.float64],
+    shape: tuple[int, int],
+) -> ShiftField:
+    """A registered Light's own shift field (a meridian flip, another night,
+    its filter's lateral colour) from its registration's inlier centroid
+    ``pairs`` (source, reference) and its 3x3 matrix ``transform``; it must
+    hold on a 17x13 grid over the Light's frame, mapped into the reference."""
+
+    source, reference = (np.asarray(item, dtype=np.float64) for item in pairs)
+    height, width = shape
+    grid = np.stack(np.meshgrid(np.linspace(0, width - 1, 17), np.linspace(0, height - 1, 13)), axis=-1).reshape(-1, 2)
+    return fit_shift_field(reference, _mapped(transform, source) - reference, shape, _mapped(transform, grid))
 
 
 __all__ = [
+    "FRAME_FIELD_ALGORITHM",
+    "JOINT_FIT_ALGORITHM",
     "CatalogStarSource",
     "CatalogStars",
     "ManagedCatalogStars",
     "MosaicAstrometryError",
+    "PanelStars",
     "SIP_FIT_ALGORITHM",
     "SipFit",
     "catalog_source_from_backends",
+    "fit_shift_field",
     "fit_tan_sip",
+    "measure_frame_field",
+    "measure_panel",
     "refine_solution",
+    "solve_mosaic",
 ]

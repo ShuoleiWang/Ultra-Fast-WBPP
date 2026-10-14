@@ -22,7 +22,7 @@ solution.  A failed final solve publishes only ``<output>.unsolved`` evidence.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
@@ -36,7 +36,7 @@ import shutil
 import stat
 import tempfile
 import traceback
-from typing import Any, Callable, Mapping, NamedTuple, Sequence
+from typing import Any, Callable, Generator, Mapping, NamedTuple, Sequence
 
 from astropy.io import fits
 from astropy.wcs import WCS
@@ -51,6 +51,7 @@ from ..calibration.matching import BIAS, DARK, FLAT
 from ..calibration.policy import MONO_STANDARD, workflow_receipt
 from ..integrity import canonical_json_document, sha256_digest
 from ..models import AssetRole, AssetStatus, FrameAsset, ProjectInventory
+from ..mosaic.astrometry import PanelStars, SipFit
 from ..path_budget import DETAILS_DIRECTORY, PROJECT_STAGING_SUFFIX, RUNS_DIRECTORY, target_key
 from ..platform import remove_file, rename_with_retry
 from ..products.color import (
@@ -64,7 +65,7 @@ from ..products.preview import render_auto_stretch_preview
 from ..solvers.base import SolverBackend, canonical_wcs_sha256, validate_wcs_header
 from ..stacking.crop import histogram_rectangle
 from ..stacking.integration import CalibrationError
-from .canvas import _catalog_verifier
+from .canvas import _catalog_verifier, _solve_placements
 from .common import _fsync_directory, _rename_directory_no_replace, _safe_token
 from .contracts import ProgressEvent
 from .mosaic import (
@@ -84,7 +85,7 @@ from .single_target import (
     E2EState,
     ProgressCallback,
     ProgressStage,
-    run_e2e,
+    run_e2e_stages,
 )
 from .solve import (
     _SolverHints,
@@ -353,7 +354,10 @@ class ProjectE2EResult:
         }
 
 
-PanelRunner = Callable[..., E2EResult]
+# A target run as a generator (:func:`run_e2e_stages`): a mosaic panel yields
+# its measured reference stars and resumes with its placement.
+PanelStages = Generator[PanelStars, tuple[SipFit, Mapping[str, Any]], E2EResult]
+PanelRunner = Callable[..., PanelStages]
 ColorBuilder = Callable[..., ColorProductResult]
 
 
@@ -1668,7 +1672,9 @@ def _run_target_panels(run: _ProjectRun, shared: _SharedMasters, explicit_select
     """Run every target once with all of its filters; a failed target run fails the project.
 
     With ``canvas`` (a mosaic) every target is a panel that integrates straight
-    onto its window of the canvas."""
+    onto its window of the canvas: each panel run pauses once it has measured
+    its reference stars, every panel's solution is then fitted at once on all
+    their catalog and overlap stars, and the runs resume to integrate."""
 
     direct_approved_panel, masters_bias, masters_dark, masters_flat, trusted_generated_master_overrides = shared
     request, evidence, layout, sources, staging, details, records, passed, excluded, project_progress = run.request, run.evidence, run.layout, run.sources, run.staging, run.details, run.records, run.passed, run.excluded, run.project_progress
@@ -1676,79 +1682,24 @@ def _run_target_panels(run: _ProjectRun, shared: _SharedMasters, explicit_select
     panel_quality_by_path: dict[str, dict[str, Any]] = {}
     runs_root = details / RUNS_DIRECTORY
     runs_root.mkdir()
-    # One run per target carries every filter of that target: the run
-    # registers all Lights onto one reference frame and crops the filter
-    # masters to one common rectangle, so they share their pixel grid.
-    for index, (group, panels) in enumerate(layout.target_runs, start=1):
-        panel_progress = project_progress.panel_callback(index, group)
-        panel_progress(ProgressEvent(ProgressStage.INVENTORY, "started",
-                                     message=f"target {group.target} ({group.filter_name})"))
-        sub_output = runs_root / _safe_token(group.target_key)
-        panel_digests = run_digests[group.target_key]
-        run_explicit_selection = (
-            replace(
-                explicit_selection,
-                decisions=tuple(
-                    decision
-                    for decision in explicit_selection.decisions
-                    if decision.source_sha256 in panel_digests
-                ),
-            )
-            if explicit_selection is not None
-            else None
-        )
-        mosaic_fields = (
-            {"mosaic_canvas": canvas, "mosaic_panel": group.target_key} if canvas is not None else {}
-        )
-        if direct_approved_panel:
-            sub_request = replace(
-                request.e2e_request,
-                light_files=group.light_files,
-                output_directory=str(sub_output),
-                **mosaic_fields,
-            )
-        else:
-            panel_pipeline_parameters = replace(
-                request.e2e_request.pipeline_parameters,
-                raw_frame_metadata_overrides=tuple(
-                    item
-                    for item in request.e2e_request.pipeline_parameters.raw_frame_metadata_overrides
-                    if item.source_sha256 in panel_digests
-                ),
-                master_metadata_overrides=(
-                    *request.e2e_request.pipeline_parameters.master_metadata_overrides,
-                    *trusted_generated_master_overrides,
-                ),
-            )
-            sub_request = replace(
-                request.e2e_request,
-                light_files=group.light_files,
-                flat_files=(),
-                dark_files=(),
-                bias_files=(),
-                master_bias_files=masters_bias,
-                master_dark_files=masters_dark,
-                master_flat_files=masters_flat,
-                output_directory=str(sub_output),
-                review_approvals=(),
-                pipeline_parameters=panel_pipeline_parameters,
-                explicit_selection=run_explicit_selection,
-                **mosaic_fields,
-            )
-            run_selections = [
-                selection for selection in request.review_selections
-                if selection["sourceSha256"] in panel_digests
-            ]
-            if run_selections:
-                # Bound against this run's own request: its Lights, the
-                # shared masters it will use, the gate policy and the
-                # pipeline parameters, exactly what run_e2e re-verifies.
-                sub_request = bind_review_approval_selections(sub_request, run_selections)
-        sub_result = panel_runner(
-            sub_request,
-            solver_backends=solver_backends,
-            progress=panel_progress,
-        )
+    # Panel runs paused for the joint placement, and what each measured.
+    paused: list[tuple[int, SciencePanel, tuple[SciencePanel, ...], PanelStages]] = []
+    measured: dict[str, PanelStars] = {}
+
+    def close_paused() -> None:
+        """Close every paused run, which removes its own staging; one that
+        fails to close does not keep the others open, and its error is raised."""
+
+        failure: Exception | None = None
+        while paused:
+            try:
+                paused.pop()[3].close()
+            except Exception as error:
+                failure = failure or error
+        if failure is not None:
+            raise failure
+
+    def finish(index: int, group: SciencePanel, panels: tuple[SciencePanel, ...], sub_result: E2EResult) -> ProjectE2EResult | None:
         passed.extend(sub_result.passed_light_paths)
         excluded.extend(sub_result.excluded_light_paths)
         record = {
@@ -1767,6 +1718,8 @@ def _run_target_panels(run: _ProjectRun, shared: _SharedMasters, explicit_select
             record["screening"] = None
         records["screening"] = _project_screening(records["subruns"])
         if not sub_result.success:
+            # The paused runs' staging must be gone before the evidence is published.
+            close_paused()
             sub_message = sub_result.message or f"{group.target}/{group.filter_name}: {sub_result.code}"
             _verify_sources(sources)
             return _failure_result(
@@ -1795,7 +1748,126 @@ def _run_target_panels(run: _ProjectRun, shared: _SharedMasters, explicit_select
                 "sha256": sha256_digest(product),
             }
         project_progress.panel_done(index, group)
+        return None
+
+    try:
+        # One run per target carries every filter of that target: the run
+        # registers all Lights onto one reference frame and crops the filter
+        # masters to one common rectangle, so they share their pixel grid.
+        for index, (group, panels) in enumerate(layout.target_runs, start=1):
+            stages = _start_target_run(
+                run, shared, explicit_selection, run_digests, solver_backends, panel_runner, canvas, index, group, runs_root
+            )
+            try:
+                measured[group.target_key] = next(stages)
+            except StopIteration as stop:
+                failure = finish(index, group, panels, stop.value)
+                if failure is not None:
+                    return failure
+                continue
+            paused.append((index, group, panels, stages))
+        if measured:
+            placements = _solve_placements(measured, max_rms_arcsec=request.e2e_request.max_rms_arcsec)
+            records["canvas"]["astrometry"] = next(iter(placements.values()))[1]
+        while paused:
+            index, group, panels, stages = paused.pop(0)
+            try:
+                stages.send(placements[group.target_key])
+            except StopIteration as stop:
+                failure = finish(index, group, panels, stop.value)
+            else:
+                stages.close()
+                raise E2EError("RUN_STAGES_INVALID", "a run pauses only once, to be placed on the mosaic canvas")
+            if failure is not None:
+                return failure
+    except BaseException:
+        # The run fails already; a paused run that cannot clean up must not
+        # replace that error.
+        with suppress(Exception):
+            close_paused()
+        raise
     return panels_by_filter, panel_quality_by_path
+
+
+def _start_target_run(
+    run: _ProjectRun,
+    shared: _SharedMasters,
+    explicit_selection: Any,
+    run_digests: dict[str, Any],
+    solver_backends: Sequence[SolverBackend],
+    panel_runner: PanelRunner,
+    canvas: Any,
+    index: int,
+    group: SciencePanel,
+    runs_root: Path,
+) -> PanelStages:
+    """Start one target's run on its own Lights (and the shared masters)."""
+
+    direct_approved_panel, masters_bias, masters_dark, masters_flat, trusted_generated_master_overrides = shared
+    request, project_progress = run.request, run.project_progress
+    panel_progress = project_progress.panel_callback(index, group)
+    panel_progress(ProgressEvent(ProgressStage.INVENTORY, "started",
+                                 message=f"target {group.target} ({group.filter_name})"))
+    sub_output = runs_root / _safe_token(group.target_key)
+    panel_digests = run_digests[group.target_key]
+    run_explicit_selection = (
+        replace(
+            explicit_selection,
+            decisions=tuple(
+                decision
+                for decision in explicit_selection.decisions
+                if decision.source_sha256 in panel_digests
+            ),
+        )
+        if explicit_selection is not None
+        else None
+    )
+    mosaic_fields = {"mosaic_canvas": canvas, "mosaic_panel": group.target_key} if canvas is not None else {}
+    if direct_approved_panel:
+        sub_request = replace(
+            request.e2e_request,
+            light_files=group.light_files,
+            output_directory=str(sub_output),
+            **mosaic_fields,
+        )
+    else:
+        panel_pipeline_parameters = replace(
+            request.e2e_request.pipeline_parameters,
+            raw_frame_metadata_overrides=tuple(
+                item
+                for item in request.e2e_request.pipeline_parameters.raw_frame_metadata_overrides
+                if item.source_sha256 in panel_digests
+            ),
+            master_metadata_overrides=(
+                *request.e2e_request.pipeline_parameters.master_metadata_overrides,
+                *trusted_generated_master_overrides,
+            ),
+        )
+        sub_request = replace(
+            request.e2e_request,
+            light_files=group.light_files,
+            flat_files=(),
+            dark_files=(),
+            bias_files=(),
+            master_bias_files=masters_bias,
+            master_dark_files=masters_dark,
+            master_flat_files=masters_flat,
+            output_directory=str(sub_output),
+            review_approvals=(),
+            pipeline_parameters=panel_pipeline_parameters,
+            explicit_selection=run_explicit_selection,
+            **mosaic_fields,
+        )
+        run_selections = [
+            selection for selection in request.review_selections
+            if selection["sourceSha256"] in panel_digests
+        ]
+        if run_selections:
+            # Bound against this run's own request: its Lights, the
+            # shared masters it will use, the gate policy and the
+            # pipeline parameters, exactly what run_e2e re-verifies.
+            sub_request = bind_review_approval_selections(sub_request, run_selections)
+    return panel_runner(sub_request, solver_backends=solver_backends, progress=panel_progress)
 
 
 def _single_panel_products(run: _ProjectRun, panels_by_filter: dict[str, list[tuple[SciencePanel, Path]]], panel_quality_by_path: dict[str, dict[str, Any]]) -> tuple[dict[str, tuple[str, Path]], dict[str, dict[str, Any]]]:
@@ -1828,6 +1900,8 @@ def _plan_canvas_stage(run: _ProjectRun, solver_backends: Sequence[SolverBackend
             run.details,
         )
     except MosaicStageError as error:
+        if error.survey is not None:
+            run.records["canvas"] = {"schemaVersion": 1, "survey": error.survey}
         _verify_sources(run.sources)
         return _failure_result(
             staging=run.staging,
@@ -2321,7 +2395,7 @@ def run_project_e2e(
     solver_backends: Sequence[SolverBackend],
     progress: ProgressCallback | None = None,
     reproject_provider: ReprojectProvider | None = None,
-    panel_runner: PanelRunner = run_e2e,
+    panel_runner: PanelRunner = run_e2e_stages,
     color_builder: ColorBuilder = build_color_product,
 ) -> ProjectE2EResult:
     """Run a complete multi-target project and commit one final directory.

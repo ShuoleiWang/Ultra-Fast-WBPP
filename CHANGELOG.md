@@ -4,6 +4,75 @@ All notable changes are documented here. The format follows Keep a Changelog and
 
 ## [Unreleased]
 
+### Mosaic panels keep the clean part of partly clouded Lights
+
+- The unattended selection's region weight maps now apply on a mosaic panel's canvas window. A partly clouded Light weighs zero where the cloud was and full weight elsewhere, as it does on a single target. The map is read at the reference-frame position of window nodes 64 px apart, through the window's lattice. A blanked cell stays blanked, and window nodes outside the reference frame carry weight 1.
+
+### Each Light of a mosaic panel is resampled with its own residual distortion
+
+- A Light's homography to its panel reference absorbs only the linear part of the optics' distortion. The rest stays as a smooth shift:
+  - the filter's lateral colour: the M31 corrector images B with slightly more barrel distortion than L;
+  - after a meridian flip or on another night, the distortion seen from the other side of the optical axis.
+- The flip case broke the first M31 run with panel 5 (four nights, both sides of the pier). There, R Lights kept 0.57–0.68 px at the frame corners after the flip and 0.15–0.42 px before it. One shift per filter, measured on one Light, cannot hold both, and the R overlap of panels 4 and 5 failed its astrometry gate at 0.742 px (0.140 FWHM).
+- Each Light now has its own shift field, fitted on the inlier stars of its full-resolution registration (about 1000 per M31 Light):
+  - a polynomial of order 0–3 or none, as the BIC prefers, on at least 50 stars;
+  - an order is kept only where its stars determine it: its predicted shift must have a standard error within 0.1 px at every node of a 17×13 grid over the Light's own frame, mapped into the reference, where the field is applied.
+  - With stars on only 40 % of a frame (a passing cloud), an unconstrained cubic is 2.6–4 px off on the far side; the kept order (1) is within 0.36 px of the true field.
+- The Light is resampled through the window's lattice shifted by its field: still one interpolation.
+- Records:
+  - each panel's `canvas.json` has a per-filter summary under `frameFields`: Lights, fields applied, orders, largest shift, and residual RMS before and after;
+  - the pixel pipeline receipt has each Light's order, largest shift and digest under `shiftField`.
+  - Algorithm `registration-residual-frame-field-v1`.
+- Single targets are unchanged: the NGC 7331 masters are bit-identical (67 s).
+- M31, panels 1–5 with the Gaia tiles: 479 Lights, 450 admitted, 848 s.
+  - Every admitted Light except the panel references took a field: 445 fields, 436 of order 3 and 9 of order 2.
+  - Median largest shift per panel and filter:
+    - panels 1–3, whose references are R Lights: 0.15–0.27 px for L and R, 0.35–0.53 px for G and B (lateral colour);
+    - panels 4 and 5 (several nights; panel 5 on both sides of the pier): 0.40–0.61 px for every filter.
+  - Residual RMS after registration on panels 4 and 5 fell from 0.12–0.18 px to 0.083–0.098 px.
+  - Overlap astrometry passes on all 32 overlaps of the four filters. The worst is panels 4–5 at 0.168–0.209 px (0.033–0.039 FWHM); R there went from 0.742 px to 0.168 px.
+- The synthetic two-panel L+B test (1.5 and 2.1 px of barrel) checks the plumbing only. Its residual field is 0.05 px RMS, too small to move the star offsets (0.024–0.033 px median with or without the fields).
+
+### Mosaic panels are placed by one fit of all panels
+
+- A panel was placed by its own catalog stars alone. With the Tycho-2 set that is 34–46 matches in a 1.1° M31 panel; against Gaia DR2 stars those fits were off by up to 8 px across a frame, and the overlaps disagreed by 1.1–15.8 px.
+- Each panel run now pauses once it has measured its registration reference: its isolated star centroids, its catalog matches and its own TAN+SIP fit. The project fits every panel's solution at once, and the runs resume to integrate.
+- The fit is a Gauss–Newton adjustment in each panel's own tangent plane. The catalog stars hold each panel on the sky; the stars two panels both measured in their overlap hold the panels to each other. The distortion is one SIP polynomial for all panels (the same optics) or one per panel, and the BIC chooses which, with its order, on the inliers of the most flexible model. Four panels take 0.4 s.
+- On the real 2×2 M31 mosaic (276 Lights):
+  - With the Tycho-2 set alone it now publishes in 467 s: B passes every gate, L, R and G are WARN on their diagonal corner overlaps (L also on one overlap's residual background, 0.13 of the pixel noise), none FAIL. Every panel master's canvas WCS verifies at 0.54–1.59″ (limit 2.0″), and the largest overlap misregistration is 0.022 FWHM with the per-Light shift fields above. Before, each panel fitted on its own left the overlaps misregistered by 1.2–1.9 px (0.25–0.31 FWHM).
+  - Recomputed from the panels' reference stars against Gaia DR2, every panel lies within 0.43–0.64 px (its worst twelfth), and every overlap within 0.06 px systematic.
+  - With the Gaia tiles (533 s) the largest overlap misregistration is 0.021 FWHM.
+- Each panel's `receipts/canvas.json` holds its solution under `distortion`, with its own catalog-only fit under `ownFit`, and the whole fit under `jointFit` (model, BIC table, every overlap's stars and residual). The project receipt holds the fit under `execution.canvas.astrometry`. Algorithm `mosaic-joint-tan-sip-v1`.
+- A mosaic is refused while the canvas is planned, before any panel runs, when its catalog holds fewer stars in a panel's frame than a placement needs (30, or `min_matches`). `MOSAIC_CATALOG_TOO_SPARSE` names the panels and the command that installs the Gaia tiles, with its terms acceptance; the failure receipt keeps each panel's count. The desktop's failure card names the Gaia tiles in both languages and says that the app cannot install them yet. A mosaic without a managed catalog is refused at the same point (`MOSAIC_CATALOG_UNAVAILABLE`), and a catalog that cannot be read reports its own error instead of "too sparse".
+- The panel runs that wait for the joint fit hold only what placement and integration read (the registration's previews of every Light are dropped), and when another panel fails, they remove their staging before the failure evidence is written. Every panel's solution passes the catalog-residual gate before any panel resumes. A candidate model the stars cannot determine gives way to the next one instead of failing the fit, and a class of stars with more than 30 % outliers keeps its nearest 70 %.
+
+### Bayer mosaics run through the real pipeline in the test suite
+
+- A two-panel RGGB mosaic is placed from its debayered stars, integrated into R, G and B masters on each window, and published as three mosaics and `RGB.fits`, every channel's stars within 0.08 px median of the true sky.
+
+### Mosaics: photometric components, a quadratic sky per panel and flipped panels
+
+- Panels whose overlaps give no scale (fewer than 8 common stars) no longer stop the run. Each connected component of a filter's photometric graph is matched, blended and gated on its own, with its own gauge: the largest is the filter's mosaic on the canvas box, and the others are written on their own bounding box (an integer window of the same canvas) to `details/mosaics/<filter>/component<k>/mosaic_<F>_component<k>.fits` with their own receipts and canvas verification. The filter is WARN with `MOSAIC_PHOTOMETRIC_COMPONENTS`; its receipt lists the components and the unmatched overlaps, and the colour cube keeps the pixels where the R, G and B mosaics all have data. A FAIL in any component fails the filter, after every component was gated. The overlaps' flux ratios are computed once per filter, each with its own seeded bootstrap, so the components and the gain network see the same links and an overlap's numbers do not depend on the other overlaps.
+- A gate with nothing to measure is NOT_MEASURED and does not count toward the verdict: the overlap gates of a one-panel component, an overlap's residual background on fewer than 8 bins free of bright structure, flux conservation without overlap stars. Overlaps without a scale are listed with the reason under `photometry.unmeasuredOverlaps`.
+- The additive model per panel is a quadratic (six terms) with the same minimum-norm gauge and leak mask. A strip along a panel's edge barely measures the panel's curvature across it, so the three curvature terms carry a prior of a tenth of the pixel noise of bending across the panel; the overlaps decide beyond it. On the six-panel synthetic set with 100 px overlaps and a quadratic sky per panel, the sky residual after the unobservable common sky is 0.09 of the pixel noise against 0.18 with planes; with a linear sky it is 0.07 (0.045 with planes). Curvature no overlap can see, the same bend along a whole row or the cross term, stays at the consensus.
+- The canvas takes the median panel orientation modulo a half turn: panels shot after a meridian flip, 180° from the others, no longer turn the canvas by 90°, and every panel fills its window. Whether two panels overlap is decided on their footprint polygons on the canvas, not on their bounding boxes.
+- Both networks are solved through the normal equations of sparse designs. A 6×6 mosaic of 1600×1200 panels (24 000 background bins, 216 unknowns) solves in 3.4 s within 24 MB, where the dense design alone took 41 MB per copy. The bootstrap of the flux-flux slopes is vectorized: the gain network of the 2×2 synthetic mosaic takes 0.2 s instead of 1.4 s.
+- Identifiers: photometry `mosaic-star-photometry-gain-plane-network-v1`, background `mosaic-quadratic-network-min-norm-v1`, canvas `mosaic-canvas-v2`, mosaic `ultra-fast-wbpp-canvas-mosaic-v4`. Mosaic headers carry `OAFCOMP` and `OAFNCOMP`.
+
+### Mosaic panels are matched by gain planes
+
+- A panel master inherits a smooth gain gradient from frames whose transparency changed across the field: thin cloud, or differential extinction at high airmass. On a real 2×2 M31 mosaic the masters carried up to 1.3 % per half panel. One scale per panel cannot hold that: the diagonal corner overlaps were 1.1–2.0 % off in B, G and L (4–6 standard errors), and the photometric network's χ²/dof was 8–20. Measurements on the overlap stars ruled out encircled energy, annulus bias and stale flats.
+- The gains of a component are now one scale per panel, or a scale times a linear gradient per panel when that lowers the BIC of the robust fit of the whole component. The fit uses flux-flux slopes in up to six bins along each overlap. A gradient common to all panels is unobservable; a weak prior keeps the consensus. On the 2×2 M31 mosaic the BIC chose the gradients in all four filters in both runs (χ²/dof 0.7–3.4), and every overlap's corrected ratio is within 0.9 %, except one L diagonal with the Gaia tiles whose 54 stars give a bootstrap error of 6.7 % (−1.8 %, WARN). The synthetic six-panel set has no gradients and keeps one scale per panel.
+- An overlap now fails photometry only when it lies beyond 1 % by more than two standard errors, and passes only when it is within 0.3 % and known to be within 1 % at two standard errors; anything else is WARN. A corner overlap measures its ratio to about 0.7 %, so its point estimate alone can neither separate a 1 % mismatch from noise nor certify agreement. Each panel's scale error is relative to the reference panel, whose gain is 1 at the component's centre.
+- The residual-background gate is measured against the per-pixel noise of the blended mosaic: PASS ≤ 0.1 σ, WARN ≤ 0.3 σ. It was measured against the noise of a 32 px bin's median difference, about a tenth of that, so PASS required a sky difference near 10⁻⁴ of the sky. The M31 overlaps measured 0.003–0.11 pixel σ (0.003–0.21 % of the sky); with a fade-in of up to 256 px that is a ramp no stretch shows. The bin-noise level and the sky fraction stay in the receipt.
+
+### Mosaic overlap astrometry measures misregistration, not centroid noise
+
+- The overlap-astrometry gate took the plain RMS of the per-star offsets between two panels. On a real 2×2 M31 mosaic (QHY268M, FWHM 4.4–6.5 px) that RMS was dominated by centroid noise and by a few blended stars on the bulge: 1.02 px on the overlap holding the nucleus, where the panels were misregistered by 0.17 px. Every filter failed.
+- The gate now uses the RMS of the median offset in up to eight equal-count bins along the overlap, less the noise of those medians, in units of the overlap's FWHM: PASS ≤ 0.05, WARN ≤ 0.10. The noise comes from the scatter within the bins: a scatter over the whole overlap also holds the variation between bins and read a misregistration that varies along the overlap 12–16 % low (80 and 64 stars). Two equal Gaussians offset by 0.1 FWHM blend into one 0.7 % wider. The plain RMS and the robust per-star scatter stay in the receipt.
+- On that mosaic, with panels refitted on Gaia, the systematic offsets are 0.06–0.44 px (≤ 0.078 FWHM): PASS, and WARN on the corner overlaps of B, where the corrector's lateral colour puts B stars 0.13–0.19 px inside L's at the frame corners. With the Tycho-2 set alone each panel fitted on its own rests on about 40 stars, and the same overlaps were misregistered by 1.2–1.9 px (0.25–0.31 FWHM); the joint fit above brings them within 0.061 FWHM.
+- Every filter is now assembled and gated before a failure is raised, and the failure receipt (`mosaics.failure.filters`) holds the gates of all of them. Before, the first failing filter stopped the run and the others were never measured.
+
 ### Screening judges extinction on every night and keeps uniform thin cloud
 
 - The airmass fit of a group needs at least three same-night pairs and one night spanning 0.2 in airmass. Without them the gate produced no extinction evidence for any frame of the group. On the NGC 7331 reference project an R Light at 44 % transparency (0.91 mag) passed silently.
@@ -78,7 +147,7 @@ All notable changes are documented here. The format follows Keep a Changelog and
   - Two panels through the real pipeline, with distortion the solver's TAN ignores: isolated stars of the mosaic lie within 0.05 px (median) of the truth.
   - Six panels with a bright galaxy core in an overlap: scales within 0.2 %, residual background under 0.25 at a pixel noise of 2, against injected planes of up to 10.
   - Single-target runs are unchanged: identical master hashes against main on a synthetic per-night project, on the native and Metal paths.
-- Not yet: drizzle onto the canvas, a joint distortion adjustment, real mosaic data. Merging short and long exposures (HDR) is not planned: bright cores are protected by the blend instead.
+- Not yet: drizzle onto the canvas. Merging short and long exposures (HDR) is not planned: bright cores are protected by the blend instead.
 
 ### Calibration paired by WBPP's rules
 

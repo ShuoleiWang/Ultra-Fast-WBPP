@@ -34,7 +34,7 @@ from .integration import CalibrationError
 from .lights import _calibrate_and_register_lights, _plan_light_jobs
 from .masters import _build_calibration_masters
 from .normalization import StellarScaleHint
-from .parameters import OUTPUT_STATE, PIPELINE_VERSION, PipelineParameters, PipelineResult, PixelTransform
+from .parameters import OUTPUT_STATE, PIPELINE_VERSION, PipelineParameters, PipelineResult, PixelTransform, ShiftField
 from .records import _canonical_inputs, _content_lineage_sha256, _verify_source_identities
 from .run_plan import (
     _plan_run,
@@ -127,6 +127,7 @@ def run_portable_pipeline_fits(
     _source_identity_seed: Mapping[str, tuple[str, Mapping[str, int]]] | None = None,
     _integration_tile_observers: Callable[[str, Sequence[str]], Any] | None = None,
     region_weight_maps: Mapping[str, Any] | None = None,
+    frame_fields: Mapping[str, ShiftField] | None = None,
     _staging_stem: str | None = None,
 ) -> PipelineResult:
     """Run raw or pre-integrated calibration through unsolved linear masters.
@@ -149,6 +150,11 @@ def run_portable_pipeline_fits(
     weight maps (``RegionWeightMap``: node values in normalized reference
     coordinates); a bound Light's samples are weighted by the map during the
     ordinary weighted mean.  Lights without a map keep unit sample weights.
+
+    ``frame_fields`` binds Lights (by path) of a mosaic panel to the residual
+    shift each keeps against the registration reference after its matrix
+    (``ShiftField``); a bound Light is resampled onto the output grid shifted
+    by its field.  Only on a mosaic panel's canvas window.
 
     ``_source_identity_seed`` maps canonical original paths to a content
     digest and the stat identity that digest was captured with.  Seeded
@@ -180,6 +186,7 @@ def run_portable_pipeline_fits(
         quality_weights=quality_weights,
         stellar_scale_hints=stellar_scale_hints,
         region_weight_maps=region_weight_maps,
+        frame_fields=frame_fields,
         parameters=parameters,
         source_aliases=_source_aliases,
         trusted_generated_calibration=_trusted_generated_calibration,

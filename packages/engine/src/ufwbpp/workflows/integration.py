@@ -27,7 +27,7 @@ from ..selection import (
 )
 from ..selection.policy import selection_receipt
 from ..stacking.integration import CalibrationError
-from ..stacking.parameters import PipelineResult
+from ..stacking.parameters import PipelineResult, ShiftField
 from ..stacking.pipeline import run_portable_pipeline_fits
 from .common import _emit, _write_json
 from .contracts import E2EError, E2ERequest, IntegrationMode, ProgressCallback, ProgressStage
@@ -65,6 +65,7 @@ def _integrate_admitted_lights(
     work: Path,
     receipts_dir: Path,
     progress: ProgressCallback | None,
+    frame_fields: Mapping[str, ShiftField],
 ) -> _IntegrationProducts:
     """Integrate the admitted Lights; ``screening`` is updated in place with
     every frame a counterfactual pass removes."""
@@ -166,6 +167,11 @@ def _integrate_admitted_lights(
         staged_transforms, staged_weights, staged_hints = _staged_pixel_maps(
             light_subset, registration_source_aliases, pipeline_transforms, registration
         )
+        staged_fields: dict[str, ShiftField] = {}
+        for staged in light_subset:
+            original = str(registration_source_aliases[str(staged)].resolve(strict=True))
+            if original in frame_fields:
+                staged_fields[str(staged)] = frame_fields[original]
         selection_observers.clear()
         try:
             pipeline_result = run_portable_pipeline_fits(
@@ -195,6 +201,7 @@ def _integrate_admitted_lights(
                     if screening.selection_region_maps
                     else None
                 ),
+                frame_fields=staged_fields or None,
             )
         except CalibrationError as error:
             raise E2EError(error.code, str(error), path=error.path) from error

@@ -5,8 +5,8 @@ panels that cover it, except on the protected set (``protect.py``): there a
 bright star or galaxy core takes its small scales from one panel.  A
 panel's weight is the product of
 
-* its inverse variance (the panel's noise, scaled with its photometric
-  factor, and the number of frames that reached the pixel), so overlaps get
+* its inverse variance (the panel's noise, scaled with its photometric gain
+  at the pixel, and the number of frames that reached it), so overlaps get
   the signal-to-noise gain of both panels;
 * an edge taper ``min(1, d/D)`` of the distance ``d`` to the end of the
   panel's valid area, so a panel fades in over ``D`` pixels instead of
@@ -22,9 +22,10 @@ into the NOISE plane.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 import math
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from astropy.io import fits
 import numpy as np
@@ -49,7 +50,9 @@ MASK_PROTECTED = 4
 @dataclass(frozen=True)
 class _PanelWeights:
     panel: PanelImage
+    # The panel's gain at its component's centre and its gain over the canvas.
     scale: float
+    gain: Callable[[NDArray[np.float64], NDArray[np.float64]], NDArray[np.float64]]
     noise: float
     median_count: float
     taper: NDArray[np.float32]
@@ -75,7 +78,9 @@ def _taper_map(panel: PanelImage) -> NDArray[np.float32]:
     valid = np.isfinite(values)
     height, width = valid.shape
     rows, columns = math.ceil(height / _TAPER_BINNING), math.ceil(width / _TAPER_BINNING)
-    padded = np.zeros((rows * _TAPER_BINNING, columns * _TAPER_BINNING), dtype=bool)
+    # A trailing partial block counts as valid when its pixels are: the
+    # window's edge is the frame of the distance map, not a hole in it.
+    padded = np.ones((rows * _TAPER_BINNING, columns * _TAPER_BINNING), dtype=bool)
     padded[:height, :width] = valid
     binned = padded.reshape(rows, _TAPER_BINNING, columns, _TAPER_BINNING).all(axis=(1, 3))
     distance = ndimage.distance_transform_edt(np.pad(binned, 1, constant_values=False))[1:-1, 1:-1]
@@ -103,11 +108,10 @@ def _panel_values(
     px0, py0, _, _ = weights.panel.box
     values = weights.panel.read(left, top, right, bottom, opened=opened).astype(np.float64)
     valid = np.isfinite(values)
-    corrected = weights.scale * values - planes.evaluate(
-        weights.panel.key,
-        np.arange(left, right, dtype=np.float64)[None, :],
-        np.arange(top, bottom, dtype=np.float64)[:, None],
-    )
+    columns = np.arange(left, right, dtype=np.float64)[None, :]
+    rows = np.arange(top, bottom, dtype=np.float64)[:, None]
+    gain = weights.gain(columns, rows)
+    corrected = gain * values - planes.evaluate(weights.panel.key, columns, rows)
     taper = _taper_rows(weights, top - py0, bottom - py0, left - px0, right - px0)
     counts = weights.panel.counts(left, top, right, bottom, opened=opened)
     depth = (
@@ -115,7 +119,7 @@ def _panel_values(
         if counts is not None
         else np.ones_like(values)
     )
-    pixel_variance = np.square(weights.scale * weights.noise) / np.maximum(depth, 1e-6)
+    pixel_variance = np.square(gain * weights.noise) / np.maximum(depth, 1e-6)
     weight = np.where(valid & (depth > 0), taper.astype(np.float64) / pixel_variance, 0.0)
     return corrected, weight, pixel_variance
 
@@ -231,6 +235,7 @@ def blend_filter(
             _PanelWeights(
                 panel=panel,
                 scale=scales.scales[panel.key],
+                gain=partial(scales.gain, panel.key),
                 noise=float(noises[panel.key]),
                 median_count=max(median_count, 1.0),
                 taper=_taper_map(panel),

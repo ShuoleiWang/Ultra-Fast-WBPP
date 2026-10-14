@@ -48,6 +48,9 @@ class _RegistrationProducts:
     run: Any
     receipt: dict[str, Any]
     source_aliases: dict[str, str] = field(default_factory=dict)
+    # Per registered Light (not the reference): the (source, reference)
+    # inlier centroids of its full-resolution refinement.
+    star_pairs: dict[str, tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -630,6 +633,7 @@ def _register_lights(
     except Exception as error:
         raise E2EError("REGISTRATION_FAILED", str(error)) from error
     transforms: dict[str, tuple[tuple[float, float, float], ...]] = {}
+    star_pairs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     transform_records: list[dict[str, Any]] = []
     reference_path = (
         str(Path(run.analyses[run.reference_index].path).resolve(strict=True))
@@ -680,6 +684,9 @@ def _register_lights(
         serialized = tuple(tuple(float(value) for value in row) for row in matrix)
         displayed_path = str((source_aliases or {}).get(actual_path, Path(actual_path)))
         transforms[displayed_path] = serialized
+        pairs = getattr(item, "full_refine_pairs", None)
+        if pairs is not None and not is_reference:
+            star_pairs[displayed_path] = pairs
         transform_records.append(
             {
                 "path": displayed_path,
@@ -791,4 +798,5 @@ def _register_lights(
             key: str(value)
             for key, value in (source_aliases or {}).items()
         },
+        star_pairs,
     )

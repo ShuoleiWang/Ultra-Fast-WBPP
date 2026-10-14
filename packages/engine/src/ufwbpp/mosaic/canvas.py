@@ -3,11 +3,14 @@
 The canvas is an exact TAN projection (STG once the mosaic spans more than
 ``STG_EXTENT_DEGREES``) without distortion terms.  Its tangent point is the
 centroid of the union of the panels' footprints, its axes follow the median
-panel orientation (the smallest canvas for a mosaic shot with one camera
-angle) and its pixel scale is the panels' scale at their centres.  Every
+panel orientation modulo a half turn (the smallest canvas for a mosaic shot
+with one camera angle, whether or not some panels went through a meridian
+flip) and its pixel scale is the panels' scale at their centres.  Every
 panel run resamples its Lights onto an integer-offset window of this lattice
 (:func:`window_grid`), so all panels and filters share one pixel grid and the
-mosaic and colour products never resample a master again.
+mosaic and colour products never resample a master again.  Whether two
+panels overlap is decided on their footprint polygons on the canvas, not on
+their bounding boxes (:func:`panels_connected`).
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ from numpy.typing import NDArray
 from ..stacking.parameters import OutputGrid
 
 
-CANVAS_ALGORITHM = "mosaic-canvas-v1"
+CANVAS_ALGORITHM = "mosaic-canvas-v2"
 # Lattice node spacing of a canvas window (a power of two: exact fractions).
 LATTICE_SPACING = 16
 # Beyond this span a gnomonic canvas stretches its edges by more than 1 %.
@@ -99,10 +102,15 @@ def rotation_scale_parity(cd: NDArray[np.float64]) -> tuple[float, float, int]:
     return math.atan2(float(rotation[1, 0]), float(rotation[0, 0])), math.sqrt(abs(determinant)), parity
 
 
-def _circular_median(angles: Sequence[float]) -> float:
+def _orientation_median(angles: Sequence[float]) -> float:
+    """The median orientation of the panels' axes, modulo a half turn: a
+    panel shot after a meridian flip lies 180 degrees from the others and
+    has the same axes.  The representative nearest north-up is returned, in
+    (-pi/2, pi/2]."""
+
     first = angles[0]
-    unwrapped = [first + math.remainder(angle - first, 2.0 * math.pi) for angle in angles]
-    return float(np.median(unwrapped))
+    unwrapped = [first + math.remainder(angle - first, math.pi) for angle in angles]
+    return math.remainder(float(np.median(unwrapped)), math.pi)
 
 
 @dataclass(frozen=True)
@@ -262,6 +270,44 @@ def _inside_polygon(points_x: NDArray[np.float64], points_y: NDArray[np.float64]
     return inside
 
 
+# Points across the bounding boxes' intersection that decide whether two
+# footprints share area.
+_OVERLAP_SAMPLES = 128
+
+
+def polygons_overlap(a: NDArray[np.float64], b: NDArray[np.float64]) -> bool:
+    """Whether two simple polygons share area: some point of a grid over
+    the intersection of their bounding boxes lies inside both.  Polygons
+    that merely touch do not overlap."""
+
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    x0, y0 = max(a[:, 0].min(), b[:, 0].min()), max(a[:, 1].min(), b[:, 1].min())
+    x1, y1 = min(a[:, 0].max(), b[:, 0].max()), min(a[:, 1].max(), b[:, 1].max())
+    if not (x1 > x0 and y1 > y0):
+        return False
+    steps = (np.arange(_OVERLAP_SAMPLES) + 0.5) / _OVERLAP_SAMPLES
+    grid_x, grid_y = np.meshgrid(x0 + (x1 - x0) * steps, y0 + (y1 - y0) * steps)
+    return bool((_inside_polygon(grid_x, grid_y, a) & _inside_polygon(grid_x, grid_y, b)).any())
+
+
+def panels_connected(polygons: Mapping[str, NDArray[np.float64]]) -> bool:
+    """Whether the panels' canvas footprints overlap into one mosaic."""
+
+    keys = sorted(polygons)
+    if len(keys) <= 1:
+        return True
+    linked = {keys[0]}
+    frontier = [keys[0]]
+    while frontier:
+        current = polygons[frontier.pop()]
+        for key in keys:
+            if key not in linked and polygons_overlap(current, polygons[key]):
+                linked.add(key)
+                frontier.append(key)
+    return len(linked) == len(keys)
+
+
 def _union_centroid(footprints: Sequence[PanelFootprint]) -> tuple[float, float]:
     """Sky position of the centroid of the union of the footprints, on a
     grid in the tangent plane of their mean centre (overlaps count once)."""
@@ -325,7 +371,7 @@ def plan_canvas(
             }
         )
     angles = [angle for angle, _, item in decomposed if item == parity]
-    angle = _circular_median(angles)
+    angle = _orientation_median(angles)
     scales = np.asarray([scale for _, scale, _ in decomposed], dtype=np.float64)
     median_scale = float(np.median(scales))
     spread = float((scales.max() - scales.min()) / median_scale)
@@ -353,6 +399,7 @@ def plan_canvas(
         cd=((float(cd[0, 0]), float(cd[0, 1])), (float(cd[1, 0]), float(cd[1, 1]))),
     )
     boxes = []
+    polygons = []
     all_x: list[NDArray[np.float64]] = []
     all_y: list[NDArray[np.float64]] = []
     for footprint in footprints:
@@ -362,6 +409,7 @@ def plan_canvas(
         all_x.append(x)
         all_y.append(y)
         boxes.append((float(x.min()), float(y.min()), float(x.max()), float(y.max())))
+        polygons.append(np.column_stack((x, y)))
     x0 = math.floor(min(float(item.min()) for item in all_x)) - margin
     y0 = math.floor(min(float(item.min()) for item in all_y)) - margin
     x1 = math.ceil(max(float(item.max()) for item in all_x)) + margin
@@ -380,8 +428,10 @@ def plan_canvas(
             "rotationDegrees": math.degrees(item_angle),
             "parity": item_parity,
             "canvasBox": [box[0] - x0, box[1] - y0, box[2] - x0, box[3] - y0],
+            # The footprint on the canvas, counter-clockwise along the frame edges.
+            "canvasPolygon": [[float(px - x0), float(py - y0)] for px, py in polygon],
         }
-        for footprint, (item_angle, item_scale, item_parity), box in zip(footprints, decomposed, boxes)
+        for footprint, (item_angle, item_scale, item_parity), box, polygon in zip(footprints, decomposed, boxes, polygons)
     )
     return CanvasPlan(
         projection=canvas,
@@ -485,7 +535,9 @@ __all__ = [
     "canvas_window",
     "celestial_wcs",
     "frame_boundary",
+    "panels_connected",
     "plan_canvas",
+    "polygons_overlap",
     "rotation_scale_parity",
     "window_grid",
 ]

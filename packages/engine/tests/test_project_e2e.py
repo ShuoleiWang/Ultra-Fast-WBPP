@@ -5,16 +5,18 @@ import errno
 import hashlib
 import json
 from pathlib import Path
+import shutil
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any, Generator, Mapping
 
 from astropy.io import fits
 from astropy.wcs import Sip, WCS
 import numpy as np
 import pytest
 
-from mosaic_synthetic import TruthSolver, make_sky, render, true_header, truth_cards
-from ufwbpp.mosaic.canvas import canvas_window, frame_boundary, window_grid
+from mosaic_synthetic import Sky, TruthCatalog, TruthSolver, make_sky, render, true_header, truth_cards
+from ufwbpp.mosaic.astrometry import MosaicAstrometryError, PanelStars, SipFit
+from ufwbpp.mosaic.canvas import canvas_window, celestial_wcs, frame_boundary, window_grid
 from ufwbpp.workflows.single_target import (
     E2EError,
     E2ERequest,
@@ -27,6 +29,7 @@ from ufwbpp.workflows.contracts import ProgressEvent
 from ufwbpp.cli import _load_project_request, _verify_expected_source_roles
 from ufwbpp.inventory import inventory_project
 from ufwbpp.products.reprojection import ReprojectProvider
+from ufwbpp.solvers.catalogs import get_catalog_manifest
 from ufwbpp.workflows.project import (
     ProjectE2EError,
     ProjectE2ERequest,
@@ -250,22 +253,29 @@ class FakePanelRunner:
         misplaced_panel: str | None = None,
         master_shape: tuple[int, int] = (8, 8),
         rotate_filter: str | None = None,
+        exclusive_stars_panel: str | None = None,
     ) -> None:
         self.calls = 0
         self.drift_source = drift_source
         # Masters with a SIP solution, one channel with an invalid corner
-        # pixel, a canvas panel whose master is not on its window, and one
-        # channel solved 1 degree off the others.
+        # pixel, a canvas panel whose master is not on its window, one
+        # channel solved 1 degree off the others, and a canvas panel whose
+        # masters hold stars only where no other panel reaches (its
+        # overlaps are starless: no photometric link).
         self.sip = sip
         self.invalid_corner_filter = invalid_corner_filter
         self.misplaced_panel = misplaced_panel
         self.master_shape = master_shape
         self.rotate_filter = rotate_filter
+        self.exclusive_stars_panel = exclusive_stars_panel
+        # (panel, the placement the joint fit sent it), in run order.
+        self.placements: list[tuple[str | None, Any]] = []
 
-    def __call__(self, request: E2ERequest, **_kwargs: Any) -> E2EResult:
+    def __call__(self, request: E2ERequest, **_kwargs: Any) -> Generator[PanelStars, Any, E2EResult]:
         # One run carries every filter of one target; every filter master of
         # the run shares the target's pixel grid, as the real pipeline does.
         self.calls += 1
+        call = self.calls
         filters: dict[str, str] = {}
         target = ""
         for path in request.light_files:
@@ -280,6 +290,8 @@ class FakePanelRunner:
         products: list[Path] = []
         astrometry: dict[str, Any] = {}
         if request.mosaic_canvas is not None:
+            placement = yield self._reference_stars(target_index)
+            self.placements.append((request.mosaic_panel, placement))
             products, astrometry = self._canvas_products(request, output, sorted(filters), target, target_index, quality)
         for filter_name in sorted(filters) if request.mosaic_canvas is None else ():
             solved_wcs = _output_wcs(crpix=(7.5 - start_x, 7.5 - start_y))
@@ -354,7 +366,7 @@ class FakePanelRunner:
             }),
             encoding="utf-8",
         )
-        if self.drift_source is not None and self.calls == 1:
+        if self.drift_source is not None and call == 1:
             with self.drift_source.open("ab") as stream:
                 stream.write(b"drift")
         return E2EResult(
@@ -371,6 +383,17 @@ class FakePanelRunner:
         )
 
 
+    def _reference_stars(self, target_index: int) -> PanelStars:
+        """What a real run measures on its reference frame: here the true
+        sky through the panel's true solution."""
+
+        truth = _panel_truth(target_index)
+        pixels = np.column_stack(celestial_wcs(truth).all_world2pix(SKY.ra, SKY.dec, 0))
+        inside = np.all((pixels >= 0.0) & (pixels <= np.asarray(PANEL_SHAPE[::-1]) - 1.0), axis=1)
+        world = np.column_stack((SKY.ra, SKY.dec))[inside]
+        fit = SipFit(truth, 1, int(inside.sum()), 0.0, 0.0, 0.0)
+        return PanelStars(PANEL_SHAPE, 2.2, pixels[inside], pixels[inside], world, fit)
+
     def _canvas_products(
         self,
         request: E2ERequest,
@@ -385,8 +408,18 @@ class FakePanelRunner:
 
         canvas = request.mosaic_canvas
         truth = _panel_truth(target_index)
-        from ufwbpp.mosaic.canvas import celestial_wcs
+        sky = SKY
+        if request.mosaic_panel == self.exclusive_stars_panel:
+            # Stars inside this frame and 4 px clear of every other frame.
+            def inside(header: Mapping[str, Any], margin: float) -> np.ndarray:
+                x, y = celestial_wcs(header).all_world2pix(SKY.ra, SKY.dec, 0)
+                return (x > margin) & (x < PANEL_SHAPE[1] - 1 - margin) & (y > margin) & (y < PANEL_SHAPE[0] - 1 - margin)
 
+            exclusive = inside(truth, 0.0)
+            for other in range(4):
+                if other != target_index:
+                    exclusive &= ~inside(_panel_truth(other), -4.0)
+            sky = Sky(SKY.ra[exclusive], SKY.dec[exclusive], SKY.flux[exclusive])
         boundary = frame_boundary(PANEL_SHAPE, inset=2.5)
         ra, dec = celestial_wcs(truth).all_pix2world(boundary[:, 0], boundary[:, 1], 0)
         origin, shape = canvas_window(canvas, np.asarray(ra), np.asarray(dec), margin=1)
@@ -402,7 +435,7 @@ class FakePanelRunner:
         for filter_name in filters:
             brightness = {"R": 1.0, "G": 0.8, "B": 0.6, "L": 1.2}.get(filter_name, 0.7)
             gain = brightness * (1.0 + 0.1 * target_index)
-            image = render(SKY, grid.wcs, shape, fwhm=2.2 + 0.2 * target_index, background=200.0 + 5.0 * target_index, noise=1.0, rng=rng, gain=gain)
+            image = render(sky, grid.wcs, shape, fwhm=2.2 + 0.2 * target_index, background=200.0 + 5.0 * target_index, noise=1.0, rng=rng, gain=gain)
             header = fits.Header()
             for key, value in grid.wcs.items():
                 header[key] = value
@@ -523,7 +556,7 @@ def test_four_panel_rgb_project_assembles_canvas_mosaics_and_color(tmp_path: Pat
         callback = kwargs["progress"]
         callback(ProgressEvent(ProgressStage.QUALITY_CONTROL, "completed", 1, 1))
         callback(ProgressEvent(ProgressStage.INTEGRATION, "started"))
-        result = runner(request, **kwargs)
+        result = yield from runner(request, **kwargs)
         callback(ProgressEvent(ProgressStage.COMPLETE, "completed", 1, 1))
         return result
 
@@ -541,6 +574,12 @@ def test_four_panel_rgb_project_assembles_canvas_mosaics_and_color(tmp_path: Pat
     # One multi-filter run per target keeps every filter master of a target
     # on one pixel grid.
     assert runner.calls == 4
+    # Every panel is placed by one fit of all four, tied in the overlaps.
+    assert [panel for panel, _ in runner.placements] == ["dunpai1", "dunpai2", "dunpai3", "dunpai4"]
+    _, record = runner.placements[0][1]
+    assert record["panels"] == 4 and len(record["overlaps"]) >= 4
+    receipt = json.loads(Path(result.receipt_path).read_text(encoding="utf-8"))
+    assert receipt["execution"]["canvas"]["astrometry"] == record
     fractions = [event.overall_fraction for event in events]
     assert fractions == sorted(fractions)
     assert all(0 <= value < 1 for value in fractions)
@@ -1003,11 +1042,24 @@ def test_panel_exception_detail_reaches_project_result(tmp_path: Path) -> None:
     assert result.message == "REGISTRATION_FAILED: at least two frames are required"
 
 
-def test_panel_qc_failure_preserves_reason_and_evidence(tmp_path: Path) -> None:
+@pytest.mark.parametrize("paused_first", [False, True], ids=["first-panel", "after-a-paused-panel"])
+def test_panel_qc_failure_preserves_reason_and_evidence(tmp_path: Path, paused_first: bool) -> None:
     inventory, base, _ = _project(tmp_path, filters=("R",))
     detail = "quality gate admitted 1 Light frame; at least 2 are required"
+    started: list[str] = []
 
-    def failed_panel(request: E2ERequest, **_kwargs: Any) -> E2EResult:
+    def failed_panel(request: E2ERequest, **_kwargs: Any) -> Generator[PanelStars, Any, E2EResult]:
+        started.append(request.output_directory)
+        if paused_first and len(started) == 1:
+            # A panel paused for the joint fit removes its staging only when it is closed.
+            staging = Path(request.output_directory).with_name(f".{Path(request.output_directory).name}.stage")
+            (staging / "work").mkdir(parents=True)
+            try:
+                yield FakePanelRunner()._reference_stars(0)
+            finally:
+                shutil.rmtree(staging, ignore_errors=True)
+            raise AssertionError("a paused panel is closed, not resumed, when another panel fails")
+        yield from ()  # the run fails before it measures its reference stars
         evidence = Path(request.output_directory + ".unsolved")
         (evidence / "qc").mkdir(parents=True)
         (evidence / "qc" / "manifest.json").write_text('{"frames": []}')
@@ -1038,21 +1090,89 @@ def test_panel_qc_failure_preserves_reason_and_evidence(tmp_path: Path) -> None:
     assert len(result.passed_light_paths) == 1
     assert len(result.excluded_light_paths) == 2
     assert not Path(base.output_directory).exists()
+    # The paused panel was closed before the evidence was published, and no later panel started.
+    assert len(started) == 1 + paused_first
+    assert not list(Path(result.evidence_directory or "").rglob("*.stage"))
     receipt = json.loads(Path(result.receipt_path).read_text())
     sub_receipt = Path(result.evidence_directory or "") / receipt["execution"]["subruns"][0]["receipt"]
     assert json.loads(sub_receipt.read_text())["message"] == detail
     assert (sub_receipt.parent / "qc" / "manifest.json").is_file()
 
 
+def test_a_panel_without_overlap_stars_is_a_photometric_component_of_its_own(tmp_path: Path) -> None:
+    """Panel 4's masters hold stars only where no other panel reaches, so
+    no overlap links it photometrically: every filter publishes panels 1-3
+    as its mosaic and panel 4 beside it as component 2, with its own
+    receipt and canvas verification; the filter is WARN.  The colour cube
+    is built from the mosaics, so it covers the three linked panels."""
+
+    inventory, base, _ = _project(tmp_path)
+    # Panel 4's own area holds five catalog stars at this fixture's size:
+    # its canvas verification is asked for four.
+    base = replace(base, min_matches=4)
+    result = run_project_e2e(
+        ProjectE2ERequest(inventory, base, base.output_directory),
+        solver_backends=(_mosaic_solver(),),
+        panel_runner=FakePanelRunner(exclusive_stars_panel="dunpai4"),
+        reproject_provider=FakeReproject().provider(),
+    )
+    assert result.success is True, result
+    output = Path(result.output_directory)
+    receipt = json.loads(Path(result.receipt_path).read_text(encoding="utf-8"))
+    mosaics = receipt["execution"]["mosaics"]
+    canvas_box = mosaics["canvas"]["canvasBox"]
+    for key in ("r", "g", "b"):
+        assert mosaics[key]["verdict"] == "WARN"
+        assert mosaics[key]["gates"]["photometricComponents"] == "WARN"
+        assert mosaics[key]["gates"]["canvasWcs"] == "PASS"
+        (component,) = mosaics["canvas"]["photometricComponents"][key]
+        assert component["component"] == 2 and component["panels"] == ["dunpai4"] and component["gates"]["canvasWcs"] == "PASS"
+        directory = output / "details" / "mosaics" / key / "component2"
+        assert component["directory"] == f"{key}/component2"
+        assert (directory / f"mosaic_{key.upper()}_component2.fits").is_file()
+        component_receipt = json.loads((directory / "receipt.json").read_text(encoding="utf-8"))
+        assert component_receipt["component"] == 2 and component_receipt["componentCount"] == 2
+        assert [panel["key"] for panel in component_receipt["panels"]] == ["dunpai4"]
+        assert fits.getheader(directory / f"mosaic_{key.upper()}_component2.fits")["OAFWCSPR"] == "CANVAS_CATALOG_VERIFIED"
+        main_receipt = json.loads((output / "details" / "mosaics" / key / "receipt.json").read_text(encoding="utf-8"))
+        assert [panel["key"] for panel in main_receipt["panels"]] == ["dunpai1", "dunpai2", "dunpai3"]
+        assert main_receipt["warnings"][0]["code"] == "MOSAIC_PHOTOMETRIC_COMPONENTS"
+        assert main_receipt["components"][0]["component"] == 2
+    # The mosaic covers the linked panels' windows; the component is panel
+    # 4's window alone, where the mosaic is NaN wherever only panel 4 reaches.
+    main = fits.getdata(output / "R.fits")
+    other = fits.getdata(output / "details" / "mosaics" / "r" / "component2" / "mosaic_R_component2.fits")
+    main_receipt = json.loads((output / "details" / "mosaics" / "r" / "receipt.json").read_text(encoding="utf-8"))
+    covered = np.zeros(main.shape, dtype=bool)
+    for panel in main_receipt["panels"]:
+        x0, y0 = panel["origin"][0] - canvas_box[0], panel["origin"][1] - canvas_box[1]
+        covered[y0 : y0 + panel["shape"][0], x0 : x0 + panel["shape"][1]] = True
+    fourth = main_receipt["components"][0]["panels"][0]
+    x0, y0 = fourth["origin"][0] - canvas_box[0], fourth["origin"][1] - canvas_box[1]
+    window = np.zeros(main.shape, dtype=bool)
+    window[y0 : y0 + fourth["shape"][0], x0 : x0 + fourth["shape"][1]] = True
+    assert np.array_equal(np.isfinite(main), covered)
+    assert other.shape == tuple(fourth["shape"]) and np.isfinite(other).all()
+    assert (window & ~covered).sum() > 1000
+    # The colour cube: the mosaics' common support, not the components'.
+    cube = fits.getdata(result.color_product_path)
+    assert np.array_equal(np.isfinite(cube).all(axis=0), covered)
+
+
 def test_mosaic_failures_publish_unsolved_only(tmp_path: Path) -> None:
-    """A canvas WCS the catalog does not confirm, or a panel nobody can
-    place, publishes evidence and never a success tree."""
+    """A canvas WCS the catalog does not confirm, a panel nobody can place,
+    or a catalog too sparse to place a panel publishes evidence and never
+    a success tree."""
 
-    inventory, base, _ = _project(tmp_path / "catalog", filters=("R",))
+    inventory, base, _ = _project(tmp_path / "catalog", filters=("R", "G"))
     solver = _mosaic_solver()
+    verify = solver.canvas_verifier
 
-    def refusing(*_args: Any) -> dict[str, Any]:
-        return {**_managed_quality().serializable(), "matchedStars": 2}
+    def refusing(image: np.ndarray, header: Mapping[str, Any], artifacts: Path) -> Mapping[str, Any]:
+        # Only the R mosaic's canvas WCS is refused: G is gated and kept in the evidence.
+        if artifacts.parent.name.casefold() == "r":
+            return {**_managed_quality().serializable(), "matchedStars": 2}
+        return verify(image, header, artifacts)
 
     solver.canvas_verifier = refusing
     unverified = run_project_e2e(
@@ -1064,6 +1184,10 @@ def test_mosaic_failures_publish_unsolved_only(tmp_path: Path) -> None:
     assert unverified.code == "MOSAIC_GATE_FAILED"
     assert not Path(base.output_directory).exists()
     assert Path(unverified.evidence_directory or "").is_dir()
+    failure = json.loads(Path(unverified.receipt_path).read_text())["execution"]["mosaics"]["failure"]
+    assert [key.casefold() for key in failure["filters"]] == ["r"] and [key.casefold() for key in failure["passedFilters"]] == ["g"]
+    (failed,) = failure["filters"].values()
+    assert failed["gates"]["canvasWcs"] == "FAIL"
 
     inventory2, base2, _ = _project(tmp_path / "survey", filters=("R",))
     unplaced = run_project_e2e(
@@ -1074,6 +1198,42 @@ def test_mosaic_failures_publish_unsolved_only(tmp_path: Path) -> None:
     assert unplaced.success is False
     assert unplaced.code == "MOSAIC_SURVEY_UNSOLVED"
     assert not Path(base2.output_directory).exists()
+
+    # About ten catalog stars per panel: refused before any panel runs.
+    inventory3, base3, _ = _project(tmp_path / "sparse", filters=("R",))
+    sparse_solver = _mosaic_solver()
+    bright = np.argsort(-SKY.flux)[:60]
+    sparse_solver.catalog_star_source = TruthCatalog(Sky(SKY.ra[bright], SKY.dec[bright], SKY.flux[bright]))
+    runner = FakePanelRunner()
+    sparse = run_project_e2e(
+        ProjectE2ERequest(inventory3, base3, base3.output_directory),
+        solver_backends=(sparse_solver,),
+        panel_runner=runner,
+    )
+    assert sparse.success is False and sparse.code == "MOSAIC_CATALOG_TOO_SPARSE", sparse
+    # The command it names is the checked manifest's, with that manifest's terms acceptance.
+    terms = get_catalog_manifest("astrometry-net-5205-lite").acceptance_id
+    assert f"astrometry-net-5205-lite --accept-provider-terms {terms}" in (sparse.message or "") and runner.calls == 0
+    survey = json.loads(Path(sparse.receipt_path).read_text())["execution"]["canvas"]["survey"]
+    assert [record["catalogStarsInFrame"] < 30 for record in survey] == [True] * 4, survey
+
+    # A broken catalog keeps its own code, and a mosaic without a catalog is refused at once.
+    class BrokenCatalog:
+        def stars(self, *_args: Any) -> Any:
+            raise MosaicAstrometryError("CATALOG_INSTALLED_SET_UNBOUND", "the installed set changed")
+
+    for case, catalog, code in (
+        ("broken", BrokenCatalog(), "CATALOG_INSTALLED_SET_UNBOUND"),
+        ("none", None, "MOSAIC_CATALOG_UNAVAILABLE"),
+    ):
+        inventory4, base4, _ = _project(tmp_path / case, filters=("R",))
+        solver = _mosaic_solver()
+        solver.catalog_star_source = catalog
+        refused = run_project_e2e(
+            ProjectE2ERequest(inventory4, base4, base4.output_directory), solver_backends=(solver,), panel_runner=runner
+        )
+        assert refused.success is False and refused.code == code, refused
+        assert runner.calls == 0
 
 
 def test_misplaced_panel_master_and_source_drift_fail_without_success_tree(tmp_path: Path) -> None:

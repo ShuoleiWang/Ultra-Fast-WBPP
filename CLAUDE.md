@@ -60,7 +60,9 @@ that live in the module of their step (`workflows/screening.py`,
 `workflows/integration.py`, `stacking/masters.py`, `stacking/groups.py`, ...);
 put new work in a stage, not inline. `integrity.py` holds the canonical JSON
 and SHA-256 forms every digest uses; `mosaic/` the shared canvas, the
-panel distortion fit, the overlap matching and the blend (its stages are
+joint distortion fit of all panels (a panel's run, `run_e2e_stages`, pauses
+after measuring its reference so the project fits every panel at once), each
+Light's residual shift field, the overlap matching and the blend (its stages are
 `workflows/canvas.py` and `workflows/mosaic.py`); `calibration/matching.py` WBPP's
 calibration grouping and pairing (planning, preflight and the run share it);
 `calibration/inputs.py` content-bound master metadata; `image_io/fits.py` FITS primitives; `solvers/process.py`
