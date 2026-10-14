@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import math
 
 import pytest
 
@@ -161,6 +162,59 @@ def test_global_brightness_without_airmass_is_never_a_hard_failure_by_itself() -
     assert results[4].quality_gate is not None
     assert results[4].quality_gate.disposition is not GateDisposition.HARD_FAIL
     assert "GATE_MULTI_FAMILY_CLOUD_HARD" not in _codes(results[4])
+
+
+def test_a_dim_frame_without_airmass_is_reviewed_not_rejected_for_its_source_count() -> None:
+    """Without airmass a frame 0.55 mag below the cohort's clearest may just
+    be low in the sky, where fewer sources are detected for the same reason:
+    the source count does not turn its extinction into a rejection."""
+
+    results, measurements = _cohort(8)
+    for result in results:
+        result.metadata.airmass = None
+        result.features.transparency_ratio = 1.0
+    results[4].features.transparency_ratio = 10 ** (-0.4 * 0.55)
+    results[4].features.detected_source_ratio = 0.62
+
+    evaluate_quality_gate(results, measurements)
+
+    gate = results[4].quality_gate
+    assert gate is not None and gate.disposition is GateDisposition.REVIEW
+    assert "GATE_MULTI_FAMILY_CLOUD_HARD" not in _codes(results[4])
+    assert "GATE_TEMPORAL_EXTINCTION_INFO" in _codes(results[4])
+
+
+@pytest.mark.parametrize("airmass_step", [None, 0.01, 0.05])
+@pytest.mark.parametrize(("transparency", "disposition", "code"), [
+    (0.435, GateDisposition.PASS, "GATE_TEMPORAL_EXTINCTION_INFO"),
+    (0.20, GateDisposition.REVIEW, "GATE_TEMPORAL_EXTINCTION_STRONG"),
+])
+def test_unmodelled_nights_record_extinction_and_keep_only_uniform_thin_cloud(
+    airmass_step: float | None, transparency: float, disposition: GateDisposition, code: str
+) -> None:
+    """Without airmass, or with a night whose airmass span is too small for
+    the nightly fit, a frame at 43 % transparency used to pass without any
+    extinction evidence (an NGC 7331 R Light at 0.91 mag did).  It is now
+    recorded and, as uniform thin cloud, kept; thick cloud is reviewed."""
+
+    excess = -2.5 * math.log10(transparency)
+    results, measurements = _cohort(8)
+    for index, result in enumerate(results):
+        result.metadata.airmass = None if airmass_step is None else 1.1 + index * airmass_step
+        result.features.transparency_ratio = 1.0
+        result.features.extra_extinction_mag = None if airmass_step is None else 0.0
+    results[4].features.transparency_ratio = transparency
+    results[4].features.extra_extinction_mag = None if airmass_step is None else excess
+
+    evaluate_quality_gate(results, measurements)
+
+    gate = results[4].quality_gate
+    assert gate is not None and gate.disposition is disposition
+    evidence = next(item for item in gate.evidence if item.code == code)
+    assert evidence.value == pytest.approx(excess, abs=1e-6)
+    expected_model = {None: "cohort-clear-frames", 0.01: "cohort-airmass-envelope", 0.05: "nightly-airmass-envelope"}
+    assert evidence.details["model"] == expected_model[airmass_step]
+    assert all(result.quality_gate.disposition is GateDisposition.PASS for index, result in enumerate(results) if index != 4)
 
 
 @pytest.mark.parametrize("count", [4, 7])
@@ -375,10 +429,8 @@ def test_background_signal_outlier_alone_requires_review_not_hard_fail() -> None
 def test_historical_known_bad_metric_profiles_never_pass_gate() -> None:
     dispositions: list[GateDisposition] = []
 
-    # Thin uniform cloud: temporal family alone is sufficient to withhold PASS.
-    results, measurements = _cohort(8)
-    results[4].features.transparency_ratio *= 10 ** (-0.4 * 0.531)
-    dispositions.append(evaluate_quality_gate(results, measurements)[4].disposition)
+    # Uniform thin cloud alone is kept (evidence revision 6); see
+    # test_unmodelled_nights_record_extinction_and_keep_only_uniform_thin_cloud.
 
     # Strong cloud with source loss.
     results, measurements = _cohort(8)
@@ -423,6 +475,34 @@ def test_strong_coherent_full_field_trailing_is_hard_fail() -> None:
     assert trailed.quality_gate is not None
     assert trailed.quality_gate.disposition is GateDisposition.HARD_FAIL
     assert "GATE_COHERENT_TRAILING_HARD" in _codes(trailed)
+
+
+@pytest.mark.parametrize(
+    ("coherence", "whole_night", "ellipticity", "expected"),
+    (
+        (0.05, True, 0.21, GateDisposition.PASS),  # the night's optics: no common direction
+        (0.05, False, 0.21, GateDisposition.REVIEW),  # one frame worse than its night
+        (0.40, True, 0.21, GateDisposition.REVIEW),  # a common direction is a smear
+        (0.05, True, 0.45, GateDisposition.REVIEW),  # as elongated as hard trailing
+    ),
+)
+def test_elongation_shared_by_the_night_without_a_direction_is_not_trailing(
+    coherence: float, whole_night: bool, ellipticity: float, expected: GateDisposition
+) -> None:
+    # A narrowband night at f/4 (M31 Ha, 2026-10-02): every frame at median
+    # ellipticity 0.21 with p90 just over the review threshold.
+    results, measurements = _cohort(8)
+    for result in results if whole_night else results[6:7]:
+        result.features.median_ellipticity = ellipticity
+        result.features.p90_ellipticity = 0.56
+        result.features.orientation_coherence = coherence
+
+    evaluate_quality_gate(results, measurements)
+
+    frame = results[6]
+    assert frame.quality_gate.disposition is expected
+    assert ("GATE_TRAILING_REVIEW" in _codes(frame)) is (expected is GateDisposition.REVIEW)
+    assert ("GATE_SHARED_ELONGATION_INFO" in _codes(frame)) is (expected is GateDisposition.PASS)
 
 
 def test_round_fragments_in_raw_catalog_cannot_pass_as_good_star_shapes() -> None:
@@ -489,7 +569,7 @@ def test_policy_digest_is_canonical_and_changes_with_thresholds() -> None:
 def test_evidence_revision_is_fixed_and_invalidates_previous_policy_digest() -> None:
     policy = GatePolicy()
     legacy = policy.serializable()
-    assert legacy.pop("evidence_revision") == 4
+    assert legacy.pop("evidence_revision") == 6
     previous_digest = "sha256:" + hashlib.sha256(
         json.dumps(legacy, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()

@@ -4,6 +4,17 @@ Support, compatibility, implementation, and optimization are separate claims. Th
 
 Before tagging a candidate, regenerate the source-test summary and platform evidence from that exact commit. Report optional hardware skips explicitly, retain private data outside Git, and publish only sanitized summaries. Until those checks are complete, the correct status is alpha; in particular, gradient-free output and general PixInsight/WBPP equivalence are not established.
 
+## Thin cloud, optical elongation and the catalog-refitted WCS (2026-10-15)
+
+Reference project: NGC 7331, 62 admitted Lights (L 26 / R 12 / G 11 / B 13), 6252x4176, M3 Pro, macOS 27, `run <4 nights> <master dark> <master bias> --workers 8`, Release native library of `main`, `calibration.workflow: mono-standard-v1`, QC cache off; one run per arm.
+
+| Check | Evidence | Status |
+|---|---|---|
+| Masters against `main` (Tycho-2 set 4107–4112) | L `40ee1b8a…`, G `a20bb3c1…` and B `263149bc…` byte-identical to `main`. R `a9479170…` → `f7732730…`: one Light at 44 % transparency is scaled by its stars (2.28 instead of 1.80). Against the PixInsight WBPP R master the evaluator goes from inconsistent to consistent, G₈ 1.022 → 1.023, worst per-bin flux ratio 0.12 % → 0.09 %. The catalog refit is skipped (56 catalog stars in the field, 60 needed). 64 s. | Passing |
+| Catalog refit with the 5205 tiles | Order 3 on 113 stars: 0.129″ in sample and 0.157″ on held-out stars, against the solver's 2.58″ on the same stars. Verified on each master against the all-sky indexes (25–43 matches, 0.61–0.82″) and recorded as that master's accepted solve. Pixel data byte-identical to the Tycho-2 run. 79 s against 64 s: the refit takes 3.9 s and the parallel verification of the four masters about 7 s. Synthetic tests cover the applied, not-better, unverified, sparse and no-catalog cases. | Passing on macOS; Windows, ASTAP-only installations and drizzled masters not run |
+| Thin cloud and shared elongation (gate evidence revision 6) | Unit tests of the cohort extinction models, the thin-cloud keep and its escalation, a dim frame without airmass, shared versus coherent elongation. M31 Hα night (12-inch f/4 Newtonian): 10 of 30 frames integrated instead of 4, sky noise 39 % lower. | Passing; the desktop review flow was not re-run |
+| Gaia DR2 index tiles | Tile file names against `HEALPIX`/`HPNSIDE` and the receipt's index identity in the engine and in the desktop receipt check; tile union across a tile boundary; the 48-tile set installed and verified on macOS. | Passing on macOS; the Windows install was not run |
+
 ## Opt-in advanced algorithms (2026-09-25)
 
 Both options are off by default; see [advanced algorithms](recipes/advanced-algorithms.md). Reference project throughout: NGC 7331, 62 admitted Lights (L 26 / R 12 / G 11 / B 13), 6252x4176, M3 Pro, macOS 27, `run-project --workers 8`, Release native library, `calibration.workflow: mono-standard-v1`.

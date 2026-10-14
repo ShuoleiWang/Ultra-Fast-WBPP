@@ -407,6 +407,9 @@ class E2ERequest:
     # (solver precision, not the 0.05 px grid-identity gate) before the best
     # one is written to every same-grid master.
     same_grid_wcs_tolerance_pixels: float = 1.0
+    # The recipe's ``solver.catalogRefit``: the solution the filters share is
+    # refitted on the managed catalog's stars.
+    catalog_refit: bool = True
     registration_detection: Any = field(default=None, repr=False, compare=False)
     registration_config: Any = field(default=None, repr=False, compare=False)
     # A mosaic panel run: the project's canvas, onto whose window this run

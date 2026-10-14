@@ -36,6 +36,20 @@ class WcsParity(StrEnum):
     NEGATIVE = "NEGATIVE"
 
 
+# An astrometry.net index identity: INDEXID, and the HEALPix tile and side of
+# the file that holds it (-1 and 0 for an all-sky file).
+INDEX_IDENTITY = re.compile(r"^astrometry\.net:index:([0-9]+):healpix:(-?[0-9]+):hpnside:([0-9]+)$")
+
+
+def index_artifact_name(index_id: str, healpix: int, hpnside: int) -> str:
+    """The managed file of an index: one all-sky file, or one file per
+    HEALPix tile (``index-5205-03.fits``)."""
+
+    if hpnside <= 0 or healpix < 0:
+        return f"index-{index_id}.fits"
+    return f"index-{index_id}-{healpix:02d}.fits"
+
+
 @dataclass(frozen=True, slots=True)
 class SolverIndexArtifact:
     """Content identity of one managed astrometry.net index file."""
@@ -419,13 +433,18 @@ def validate_astrometric_quality(
                 "SOLVER_MANAGED_CATALOG_IDENTITY_INVALID",
                 "managed catalog evidence needs installed-set, manifest, and index artifact identities",
             )
+        expected_names = {
+            match.group(1): index_artifact_name(match.group(1), int(match.group(2)), int(match.group(3)))
+            for identity in quality.index_identities
+            if (match := INDEX_IDENTITY.fullmatch(identity))
+        }
         artifact_index_ids: set[str] = set()
         for artifact in quality.index_artifacts:
             if not isinstance(artifact, SolverIndexArtifact):
                 return WcsValidation(False, "SOLVER_INDEX_ARTIFACT_INVALID", "indexArtifacts contains an invalid value")
             if (
                 not re.fullmatch(r"[0-9]+", artifact.index_id)
-                or artifact.relative_name != f"index-{artifact.index_id}.fits"
+                or artifact.relative_name != expected_names.get(artifact.index_id)
                 or isinstance(artifact.size_bytes, bool)
                 or not isinstance(artifact.size_bytes, int)
                 or artifact.size_bytes < 1
@@ -441,12 +460,7 @@ def validate_astrometric_quality(
                 )
             artifact_index_ids.add(artifact.index_id)
         logical_index_ids = {
-            match.group(1)
-            for identity in quality.index_identities
-            if (match := re.fullmatch(
-                r"astrometry\.net:index:([0-9]+):healpix:[^:]+:hpnside:[^:]+",
-                identity,
-            ))
+            match.group(1) for identity in quality.index_identities if (match := INDEX_IDENTITY.fullmatch(identity))
         }
         if len(logical_index_ids) != len(quality.index_identities) or logical_index_ids != artifact_index_ids:
             return WcsValidation(
@@ -612,6 +626,7 @@ __all__ = [
     "WcsParity",
     "WcsValidation",
     "canonical_wcs_sha256",
+    "index_artifact_name",
     "validate_astrometric_quality",
     "validate_solver_result",
     "validate_wcs_header",

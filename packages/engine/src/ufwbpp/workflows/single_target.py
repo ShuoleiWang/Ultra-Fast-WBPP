@@ -63,7 +63,7 @@ from .products import _drizzle_candidates, _ordinary_candidates, _promote_proper
 from .registration import _build_registration_masters, _register_lights
 from .screening import _panels_below_registration_minimum, _registration_anchor_exclusions, _screen_lights
 from .sharing import _sanitize_shareable_tree, _share_safe_receipt_core, _share_safe_value
-from .solve import _same_grid_signatures, _unify_same_grid_solutions, _validate_cross_filter_wcs
+from .solve import _refine_solved_wcs, _same_grid_signatures, _unify_same_grid_solutions, _validate_cross_filter_wcs
 from .sources import (
     _SourceIdentity,
     _stage_e2e_xisf_inputs,
@@ -595,6 +595,23 @@ def run_e2e(
             )
             if same_grid_unification["status"] == "MISMATCH":
                 all_solved = False
+        # The masters are refitted when they carry one shared solution.
+        if not request.catalog_refit:
+            catalog_refinement: dict[str, Any] = {"status": "DISABLED", "reason": "solver.catalogRefit is false"}
+        elif request.pipeline_parameters.output_grid is not None:
+            catalog_refinement = {"status": "NOT_APPLICABLE", "reason": "a mosaic panel carries its canvas WCS"}
+        elif not all_solved or (len(solved_products) > 1 and same_grid_unification["status"] != "APPLIED"):
+            catalog_refinement = {"status": "NOT_APPLICABLE", "reason": "the filters do not carry one verified solution"}
+        else:
+            catalog_refinement = _refine_solved_wcs(
+                solved_products,
+                solver_records=solver_records,
+                backends=solver_backends,
+                verifier=_catalog_verifier(solver_backends),
+                min_matches=request.min_matches,
+                max_rms_arcsec=request.max_rms_arcsec,
+                workers=request.workers,
+            )
         cross_filter_validation = (
             _validate_cross_filter_wcs(solved_products, tolerance_pixels=0.05 * grid_pixels_per_native)
             if all_solved
@@ -617,6 +634,7 @@ def run_e2e(
             },
             "crossFilterValidation": cross_filter_validation.serializable(),
             "sameGridUnification": same_grid_unification,
+            "catalogRefinement": catalog_refinement,
             "filters": solver_records,
         }
         if not all_solved:

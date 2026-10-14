@@ -4,6 +4,48 @@ All notable changes are documented here. The format follows Keep a Changelog and
 
 ## [Unreleased]
 
+### Screening judges extinction on every night and keeps uniform thin cloud
+
+- The airmass fit of a group needs at least three same-night pairs and one night spanning 0.2 in airmass. Without them the gate produced no extinction evidence for any frame of the group. On the NGC 7331 reference project an R Light at 44 % transparency (0.91 mag) passed silently.
+- Such groups are now judged against the cohort's clear airmass envelope, or without airmass against the cohort's clearest 5 % of frames.
+- Extinction from 0.35 to 1.5 mag is recorded as `GATE_TEMPORAL_EXTINCTION_INFO` and the frame is kept: its stellar scale and noise weight absorb it. It is reviewed above 1.5 mag, or when spatial dimming, star retention or background evidence agrees. The blink review's `BLINK_EXTINCTION` flag is unchanged and still suggests excluding a frame at 1.0 mag or more.
+- Reviewing such frames cost signal on the reference project. Excluding four 2026-09-12 R and G Lights at 0.35–0.91 mag, whose only evidence was extinction, took the effective-noise gain against PixInsight from 1.023 to 0.960 in R and from 1.033 to 1.011 in G. Kept, the four masters are those of the stellar-scale fix below.
+- A frame kept with that evidence never anchors registration or normalization while clear frames exist. The master inherits its reference's level and background. On the M31 mosaic, a G Light at 0.47 mag otherwise became a panel's normalization reference as its flattest background.
+- The gate's evidence revision goes from 4 to 6 (5 is the elongation rule below); REVIEW approvals recorded under earlier revisions must be made again.
+
+### Frames behind thin cloud are scaled by their stars
+
+- The stellar scale of a Light was estimated only from star flux ratios between 0.5 and 2, and accepted only between 0.5 and 2. Near 50 % transparency the ratios above 2 were cut away and the scale came out low; below it the frame had no stellar scale, and normalization fell back to a unit scale with a scalar offset, so its stars and nebula entered the stack at their dimmed level and at full weight. In a synthetic test, 8 frames at 30 % transparency beside 16 clear ones took 22 % off the nebula.
+- Star ratios are now bounded around the frame's own median ratio, and a stellar scale between 0.2 and 5 is accepted. A frame at 40 % transparency scales by 2.5, and its noise, measured after scaling, gives it about a sixth of a clear frame's weight.
+- The NGC 7331 reference project had such a frame: an R Light at 44 % transparency that the legacy gate passed. It was scaled by 1.80 instead of 2.28 at 4.4 % of the weight; it now scales by 2.28 at 2.8 %. The R master changes and L, G and B stay byte-identical. Against PixInsight's R master the evaluator moves from inconsistent to consistent: effective-noise gain G₈ 1.022 → 1.023, G₄ 1.023 → 1.027, linearity slope 0.9994 → 0.9996, worst per-bin flux ratio 0.12 % → 0.09 %, and the core-fraction self-consistency from −0.0307 (past the −0.03 clipping limit) to −0.0299. Every other metric is unchanged or better.
+
+### Screening keeps a night whose optics elongate every star
+
+- The trailing review used absolute ellipticity thresholds alone, so a night whose stars are all elongated with no common direction (astigmatism, tilt, a filter's focus offset) lost most of its frames. Dropping those frames cannot round the stars. On an M31 Ha night every frame had median ellipticity 0.21, orientation coherence 0.00–0.09 and a 90th percentile of 0.55–0.57; 26 of 30 frames went to review and 4 were integrated.
+- A frame now goes to review for elongation only if its stars share a direction (coherence ≥ 0.25) or it is at least 1.2 times as elongated as its night. Otherwise it passes with `GATE_SHARED_ELONGATION_INFO`. Coherent trails and single bad frames are reviewed as before.
+- On that Ha night 10 frames now pass instead of 4. The other 20 stay in review for source retention, which is unchanged. The master's sky noise falls from 2.10 to 1.28 ADU, 39 % lower.
+- The NGC 7331 reference project's four masters are byte-identical, so its decisions did not move.
+
+### Published masters can carry a catalog-refitted WCS
+
+- Astrometry.net's solution keeps a SIP order of 2. On a 12-inch f/4 Newtonian with a coma corrector it is off from Gaia DR3 by 1.53″ median and 2.64″ at the 90th percentile, yet passes the 2.0″ gate.
+- After the filters solve, the grid's solution is refitted on the managed catalog with the mosaic's TAN+SIP fit (order by the BIC, up to 3). It replaces the solver's solution only when its residual on held-out stars (two-fold cross-validation) is at most 0.8 of the solver's on the same stars and within the 2.0″ gate, and when every master passes the engine's catalog verification with it. That verification becomes each master's accepted solve in the receipt. Headers carry `OAFWCSRF`/`OAFWCSRA`; the receipt records `astrometry.catalogRefinement`. Pixels are unchanged. The recipe field `solver.catalogRefit` (default `true`) switches it off.
+- The refit needs at least 60 catalog stars in the field, twice the matches it needs. The checked Tycho-2 set 4107–4112 holds about 50 in the M31 test field and 56 in the NGC 7331 reference field, so there the refit is skipped after a 0.3 s query and the published WCS is the solver's, as before. With a Gaia-density catalog the M31 master refits to order 3 on 1218 stars in 3.9 s: 0.058″ median, 0.22″ at the 90th percentile, against the independent half of Gaia.
+
+### Gaia DR2 index tiles for the catalog refit
+
+- `ultra-fast-wbpp catalog` knows `astrometry-net-5205-lite`: the 48 HEALPix tiles of Astrometry.net's Gaia DR2 LITE index 5205 (587 MiB, about 280 stars per square degree against 46 for index 4107). It is installed and verified like the Tycho-2 set.
+- Index files may be HEALPix tiles (`index-5205-03.fits`). The name must agree with the header's `HEALPIX`/`HPNSIDE` and the receipt's index identity, and a solve on a tile binds to that tile's bytes. The engine's own catalog verification reads only all-sky indexes (a tile holds part of a field), so the tiles are installed beside the Tycho-2 set.
+- The catalog stars of a refit or a mosaic panel come from the densest installed index. A tiled index is read as the union of its tiles, so a field on a tile boundary keeps its stars on both sides.
+- With 5205 beside 4107–4112, the published WCS is refitted:
+  - The M31 panel refits to order 3 on 123 stars: 0.069″ median and 0.21″ at the 90th percentile against Gaia DR3, where the solver's solution is off by about 1.5″ and 2.64″.
+  - The NGC 7331 reference project refits to order 3 on 113 stars: 0.157″ on held-out stars against the solver's 2.58″ on the same stars, and every master passes the catalog verification with it. Its pixel data are byte-identical to the Tycho-2 run.
+  - That run took 79 s against 64 s with the Tycho-2 set alone (one run each on an M3 Pro). The refit takes 3.9 s; the catalog verification of the four masters takes about 7 s, half of it hashing the installed catalog set again for each master.
+
+### Drizzle accepts N.I.N.A. file names with a degree sign
+
+- The drizzle receipt is written as UTF-8, and its verification read it back as ASCII. Every N.I.N.A. default name (`…_CAA0.00°_…_-10.00°C_…`) made drizzle fail with `UnicodeDecodeError` after the drizzle itself had finished. The verifier now reads the bytes.
+
 ### Mosaic blend keeps each bright star and core from one panel
 
 - In an overlap, panels of different seeing hold different profiles of a bright star or galaxy core, and their mean is neither. The blend now takes such a blob's small scales from one panel while its large scales stay averaged:

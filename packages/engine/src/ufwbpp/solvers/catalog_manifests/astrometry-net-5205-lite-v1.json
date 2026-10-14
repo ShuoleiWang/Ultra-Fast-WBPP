@@ -1,0 +1,859 @@
+{
+  "schemaVersion": 1,
+  "catalogId": "astrometry-net-5205-lite",
+  "provider": "Astrometry.net",
+  "version": "5200-LITE-series-gaia-dr2",
+  "homepage": "https://data.astrometry.net/",
+  "downloadPage": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/",
+  "bundled": false,
+  "redistributionStatus": "user-download-required",
+  "license": "Provider-specific index-data conditions are unresolved; OpenAstroFlow neither bundles nor redistributes these files",
+  "citation": "Lang, Hogg, Mierle, Blanton & Roweis (2010), AJ 139, 1782; 5200-series LITE indexes built from Gaia DR2 (Gaia Collaboration 2018, A&A 616, A1)",
+  "providerTerms": {
+    "acceptanceId": "astrometry-net-index-data-2026-09",
+    "url": "https://astrometry.net/doc/readme.html#getting-index-files",
+    "summary": "Astrometry.net states that index files have separate license conditions. OpenAstroFlow makes no redistribution or license grant and downloads only from the provider after the user reviews this notice and explicitly accepts responsibility for use.",
+    "licenseStatus": "provider-specific-unresolved",
+    "requiresExplicitAcceptance": true
+  },
+  "sources": [
+    {
+      "kind": "scale-guide",
+      "url": "https://astrometry.net/doc/readme.html#getting-index-files"
+    },
+    {
+      "kind": "directory-listing",
+      "url": "https://data.astrometry.net/"
+    },
+    {
+      "kind": "directory-listing",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/"
+    }
+  ],
+  "allowedDownloadOrigins": [
+    "https://portal.nersc.gov"
+  ],
+  "coverage": {
+    "sky": "all sky, 48 HEALPix nside-2 tiles (Gaia DR2-derived)",
+    "magnitude": "Gaia DR2-derived; about 280 stars per square degree, six times the Tycho-2 index 4107",
+    "fieldOfViewDegrees": "approximately 0.27-1.83 degrees for solving from the provider's 10%-100% quad/image-width guidance; its denser star list also serves the catalog refit of a solved field's distortion"
+  },
+  "artifacts": [
+    {
+      "artifactId": "index-5205-00.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-00.fits",
+      "sha256": "2b1732c0d80ff0fd871c83f102ea8c0ce7edea69e117c90c0864d50dd0e631bf",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-01.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-01.fits",
+      "sha256": "47eccac746f74f41dc8dbac3ac5ceecf1cc483e39df944700bab218368ebbc8e",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-02.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-02.fits",
+      "sha256": "a90688b730f1b994d249efc3801a7e46af2d3d6fc7143b989e3af6384ff8a394",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-03.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-03.fits",
+      "sha256": "b4c5a7ef78d3e5f3a5fd1485a37e3766e829ebe7df75ce5b82a94ba09c0dcf16",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-04.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-04.fits",
+      "sha256": "c0844a689098c20282d790fc89b915c95cdb6b6ee1ae38de56633947fd2f396b",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-05.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-05.fits",
+      "sha256": "6d130cd71fb280bad78276d19580c0a54a19335c260e5904c64fae2a7981d408",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-06.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-06.fits",
+      "sha256": "3f8f1e4615d4b5961c7e52d847793f978bbb349ec9eef803a3fac0ebd04897b5",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-07.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-07.fits",
+      "sha256": "d8180756f43033f9a5a05a8f2598c24e798e25f4d7310d735745e2e8de5961ef",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-08.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-08.fits",
+      "sha256": "4be3117d13eb1031a030c539cf5194a6ce129e59421b33bb5057ac31dbf4420e",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-09.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-09.fits",
+      "sha256": "3f7995520ba90ec204f9550fab813256ff4140524a0d9a96a8f3050df567496f",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-10.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-10.fits",
+      "sha256": "96964bbcdbc2c716d1405c9356a04759d06da0936ce0bde7c5ad8771fabeb479",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-11.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-11.fits",
+      "sha256": "be3a7eea75b5031b81d3165cbf95214d732fb6b507ddeb1a0aeff6e4919e1ca4",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-12.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-12.fits",
+      "sha256": "62e5c223b4497ab8d06fb7db23f66a51bb111a7283542d7cc5f2619bb657f8d4",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-13.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-13.fits",
+      "sha256": "7791c6385b3940ab22042e5fa818a972a0207f39b0d4fda756c56a8697321b95",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-14.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-14.fits",
+      "sha256": "ba7bf91f0e9a083acf0ec2e2333b08df1983720ed8401fe3ba120803c2e35a7d",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-15.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-15.fits",
+      "sha256": "ce2e07513d19e8cce780ed6dcd0385beaae64c23ce408620dd603f41116abb2c",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-16.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-16.fits",
+      "sha256": "221b4fa34b71c3e2a99737b6a00b6b08f2689a711285aebf7d14d9f811e0d12f",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-17.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-17.fits",
+      "sha256": "595510a889716432a2a0368dfafa28d8f7d0ddefede338c25edab83b7a46bb73",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-18.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-18.fits",
+      "sha256": "21fae83fdb4044444ac109c938ad724f4888ca5a78a8a46a4061bece2322364b",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-19.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-19.fits",
+      "sha256": "3bc4d0dd69c52647e15a42e601a1716986c28e16337fdc58bf1cced31d7034dc",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-20.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-20.fits",
+      "sha256": "b7d8d99730143d4ad0896df337c2bbe064b970e034b2e52af98fa8b01127d088",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-21.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-21.fits",
+      "sha256": "1f883589831e1af0945a7de6ff423bdae3e81f4a4a96594c2d517ce676112b8c",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-22.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-22.fits",
+      "sha256": "72b1803b6396e1591c9167284f6f6f4fba349f2cae44513314efb0933824872f",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-23.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-23.fits",
+      "sha256": "3b60ae9fdc9e684aab44b8de3625fd7f793e71dd1a66fff398ada0cc963adfed",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-24.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-24.fits",
+      "sha256": "92b4b221c269d1a217e12e0c43791dcb276f4884056d556266e35af716446905",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-25.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-25.fits",
+      "sha256": "3aa92342ccbea60a7d799c163dd1c70d39acb6e8c6c48056e95877ffc9c4043d",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-26.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-26.fits",
+      "sha256": "8e141f768dc851838c4f1f0f93f62681b442e2b4fd6e8d043bb1d83e84546d33",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-27.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-27.fits",
+      "sha256": "b44cdb0862773aae4d81fbd379a175bfa66890fa54874ed047130ba7b42f2a55",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-28.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-28.fits",
+      "sha256": "1346a7c2b9cf7aa3ddfbddde3fb536a8f89a3070a9b8df98ed6f05b84c0c1d05",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-29.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-29.fits",
+      "sha256": "85cea5f2fcb7bd2703ac72139f3fa3c9500b3fc52bc4265b28dbf417392e1c7d",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-30.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-30.fits",
+      "sha256": "24247ba11e47f0e5a92af63eaab63c1e9be557e09495b567edc29398f9176ed7",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-31.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-31.fits",
+      "sha256": "7c3c5430a3a5aac409954399284a426179b722220b6b4d3cc9d4f78e00fba157",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-32.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-32.fits",
+      "sha256": "60dd71e2fb64a9050da6c9e2430b7f0619c71f6440ffd6bd86b7ad2aa6399cc1",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-33.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-33.fits",
+      "sha256": "adaab4c32dddbbd9043341f8c3285ae374629f235826c9ec331559c526541109",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-34.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-34.fits",
+      "sha256": "d7163cdbd3348b621523aefebf73950ccb2fe82c38056d0a794d24729462fb12",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-35.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-35.fits",
+      "sha256": "f05841d86d01d366e6d6f32684d056597643af33c4eeed072a0585a946ec4c53",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-36.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-36.fits",
+      "sha256": "4cba5e44e8fc315aa57c0dff75211c7f2dc3f1829b054c1857233a8aed06d27f",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-37.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-37.fits",
+      "sha256": "25d8a0ce75f41f91f23d5e694d8b1bd851d80389a705bd3dbb1d0d36edf5d759",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-38.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-38.fits",
+      "sha256": "ab9d8838bfb3bb5c0e955a247048105a5eff83efa41240daada8179952b70644",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-39.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-39.fits",
+      "sha256": "648a57c67bccbfd202fbe9332f6c555ac5a39a413c97f362135279eafde50496",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-40.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-40.fits",
+      "sha256": "f906b025668abfc4e22bad0a24f1db0f4ed2a1eccb3b612ea195ff4324563986",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-41.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-41.fits",
+      "sha256": "82c7eba0603d6b4887551437db4afab86f9dc86b5d8d8754f26d1ebfb0ab2e3a",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-42.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-42.fits",
+      "sha256": "2527317510e80c268d94929468fa1d6e9e6eac33118b386cb17dda73d6ce3d80",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-43.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-43.fits",
+      "sha256": "e32a8fafed8793b87b0c9ba0735f7ecc5d0678dbbdfbda34afdda514ce0c3fcd",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-44.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-44.fits",
+      "sha256": "e9397864058025d334a55ee75fa8001979c614a81c8e6c8099193cb0a92e9f2c",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-45.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-45.fits",
+      "sha256": "65501fdd04116baee36ca23cf01445823aae38efe2a700a9fc675540b61e2c7a",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-46.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-46.fits",
+      "sha256": "23c66bc8d0a4a0e041298b948a92999ed0606553f5d81f91e02d0c8650f736f9",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    },
+    {
+      "artifactId": "index-5205-47.fits",
+      "url": "https://portal.nersc.gov/project/cosmo/temp/dstn/index-5200/LITE/index-5205-47.fits",
+      "sha256": "9e1983bcf90eaa4d1541a31526db8cfe639d74b4bfec7c5f3ff87e393ef8dce5",
+      "sizeBytes": 12810240,
+      "scale": 5,
+      "quadScaleArcminutes": {
+        "minimum": 11,
+        "maximum": 16
+      },
+      "recommendedImageFieldOfViewDegrees": {
+        "minimum": 0.2666666667,
+        "maximum": 1.8333333333,
+        "basis": "Provider quad scale and 10%-100% image-width guidance"
+      },
+      "installScope": "user"
+    }
+  ]
+}

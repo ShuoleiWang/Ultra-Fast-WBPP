@@ -197,12 +197,32 @@ impl AstrometricSolutionReceipt {
                 "must contain at least one managed index artifact",
             ));
         }
+        // The managed file of each identity: one all-sky file, or one file per
+        // HEALPix tile (index-5205-03.fits), as the engine names them.
+        let expected_names = self
+            .index_identities
+            .iter()
+            .filter_map(|identity| {
+                let parts = identity.split(':').collect::<Vec<_>>();
+                if parts.len() != 7 || parts[0] != "astrometry.net" || parts[1] != "index" {
+                    return None;
+                }
+                let healpix = parts[4].parse::<i64>().ok()?;
+                let hpnside = parts[6].parse::<i64>().ok()?;
+                let name = if hpnside <= 0 || healpix < 0 {
+                    format!("index-{}.fits", parts[2])
+                } else {
+                    format!("index-{}-{:02}.fits", parts[2], healpix)
+                };
+                Some((parts[2], name))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
         let mut artifact_index_ids = BTreeSet::new();
         for artifact in &self.index_artifacts {
             if artifact.index_id.is_empty()
                 || !artifact.index_id.bytes().all(|byte| byte.is_ascii_digit())
                 || !artifact_index_ids.insert(artifact.index_id.as_str())
-                || artifact.relative_name != format!("index-{}.fits", artifact.index_id)
+                || expected_names.get(artifact.index_id.as_str()) != Some(&artifact.relative_name)
                 || artifact.size_bytes == 0
             {
                 return Err(ValidationError::new(

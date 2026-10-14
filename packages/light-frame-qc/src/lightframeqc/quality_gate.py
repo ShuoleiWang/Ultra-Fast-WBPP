@@ -48,7 +48,13 @@ class GatePolicy:
     # Revision 4: nightly z-scores are bounded on tiny nights (the peer
     # scale never falls below 2 % of the centre, and a night with fewer than
     # five peers borrows the whole cohort's spread).
-    evidence_revision: int = field(default=4, init=False)
+    # Revision 5: elongation shared by the night without a common direction is
+    # the optics, not trailing, and no longer sends frames to review.
+    # Revision 6: a night whose airmass fit is unreliable is judged against
+    # the cohort's clear envelope instead of passing without extinction
+    # evidence, and uniform extinction below thick cloud is recorded and kept
+    # unless another cloud family agrees.
+    evidence_revision: int = field(default=6, init=False)
     minimum_pass_group_frames: int = 8
     minimum_night_frames_for_pass: int = 3
     minimum_registration_matches: int = 30
@@ -63,6 +69,12 @@ class GatePolicy:
     strong_spatial_dimming_mag: float = 0.45
     weak_extinction_mag: float = 0.35
     strong_extinction_mag: float = 0.45
+    # Uniform extinction below this is kept: the stellar scale restores the
+    # frame's flux and its noise weight falls with the transparency squared
+    # (1.5 mag leaves 6 % of a clear frame's weight).  Above it, or together
+    # with spatial, star-retention or background cloud evidence, the frame
+    # is reviewed at the weak/strong levels above.
+    thick_extinction_mag: float = 1.5
     # A uniform night-wide shift is ambiguous: throughput, seasonal pointing,
     # filter state, or a different sky pedestal can change it without a bad
     # frame.  Keep sub-0.5 mag shifts admissible when every spatial, morphology,
@@ -87,6 +99,10 @@ class GatePolicy:
     night_fwhm_review_ratio: float = 1.12
     trailing_review_median: float = 0.30
     trailing_review_p90: float = 0.55
+    # Elongation is trailing when the stars share a direction or the frame is
+    # worse than its night; otherwise it is the optics of the whole night.
+    trailing_review_coherence: float = 0.25
+    trailing_review_relative: float = 1.20
     trailing_hard_median: float = 0.45
     trailing_hard_fraction: float = 0.60
     trailing_hard_coherence: float = 0.75
@@ -466,6 +482,20 @@ def evaluate_quality_gate(
         extinction_fit = fit_nightly_extinction_envelope(
             [result.metadata.airmass for result in cohort_results], extinction, nights
         )
+        # The fallback when a night's fit is unreliable: the analysis' extra
+        # extinction over the cohort's clear airmass envelope, or without
+        # airmass, the extinction over the cohort's clearest 5 %.
+        finite_extinction = [value for value in extinction if value is not None]
+        clear_zero = float(np.percentile(finite_extinction, 5)) if len(finite_extinction) >= 4 else None
+        cohort_extinction_excess: list[tuple[float | None, str]] = []
+        for result, value in zip(cohort_results, extinction):
+            extra = _finite(result.features.extra_extinction_mag)
+            if extra is not None:
+                cohort_extinction_excess.append((extra, "cohort-airmass-envelope"))
+            elif value is not None and clear_zero is not None:
+                cohort_extinction_excess.append((value - clear_zero, "cohort-clear-frames"))
+            else:
+                cohort_extinction_excess.append((None, "unmeasured"))
         hfr_values = [_finite(result.features.nina_hfr_pixels) for result in cohort_results]
         fwhm_values = [_finite(result.features.median_fwhm_native_pixels) for result in cohort_results]
         background_values = [
@@ -760,36 +790,46 @@ def evaluate_quality_gate(
 
             extinction_residual = extinction_fit.residuals[local_index]
             result.features.nightly_extinction_residual = extinction_residual
-            airmass_explained = bool(
-                extinction_fit.diagnostics.reliable
-                and extinction_residual is not None
-                and extinction_residual < policy.weak_extinction_mag
-            )
-            if extinction_fit.diagnostics.reliable and extinction_residual is not None:
-                if extinction_residual >= policy.strong_extinction_mag:
+            nightly_reliable = extinction_fit.diagnostics.reliable and extinction_residual is not None
+            airmass_explained = bool(nightly_reliable and extinction_residual < policy.weak_extinction_mag)
+            # Without a reliable nightly fit (too few frames or too little
+            # airmass span in a night) the cohort's clear envelope judges the
+            # frame instead of nothing: a 0.9 mag cloud must not pass silently.
+            if nightly_reliable:
+                extinction_excess, extinction_model = extinction_residual, "nightly-airmass-envelope"
+            else:
+                extinction_excess, extinction_model = cohort_extinction_excess[local_index]
+            # Uniform thin cloud is recorded and kept; it is reviewed only when
+            # another cloud family agrees (checked below) or it is thick.
+            thin_cloud: float | None = None
+            if extinction_excess is not None:
+                if extinction_excess >= policy.thick_extinction_mag:
                     _add_family(
                         families,
                         _evidence(
                             "GATE_TEMPORAL_EXTINCTION_STRONG",
                             EvidenceFamily.TRANSPARENCY,
                             EvidenceSeverity.ERROR,
-                            "Extinction exceeds the nightly airmass clear envelope.",
-                            value=extinction_residual,
-                            threshold=policy.strong_extinction_mag,
+                            "Extinction exceeds the clear envelope by thick-cloud levels.",
+                            value=extinction_excess,
+                            threshold=policy.thick_extinction_mag,
                             units="mag",
+                            details={"model": extinction_model},
                         ),
                     )
-                elif extinction_residual >= policy.weak_extinction_mag:
+                elif extinction_excess >= policy.weak_extinction_mag:
+                    thin_cloud = extinction_excess
                     _add_family(
                         families,
                         _evidence(
-                            "GATE_TEMPORAL_EXTINCTION_REVIEW",
+                            "GATE_TEMPORAL_EXTINCTION_INFO",
                             EvidenceFamily.TRANSPARENCY,
-                            EvidenceSeverity.REVIEW,
-                            "Nightly airmass-corrected extinction requires review.",
-                            value=extinction_residual,
+                            EvidenceSeverity.INFO,
+                            "Uniform extinction above the clear envelope; the stellar scale and noise weight absorb it.",
+                            value=extinction_excess,
                             threshold=policy.weak_extinction_mag,
                             units="mag",
+                            details={"model": extinction_model},
                         ),
                     )
 
@@ -821,6 +861,7 @@ def evaluate_quality_gate(
                         ),
                     )
             spatial = _finite(result.features.spatial_dimming_p90_mag)
+            spatial_cloud = spatial is not None and spatial >= policy.weak_spatial_dimming_mag
             if spatial is not None and spatial >= policy.strong_spatial_dimming_mag:
                 _add_family(
                     families,
@@ -1134,14 +1175,44 @@ def evaluate_quality_gate(
                 (median_e is not None and median_e >= policy.trailing_review_median)
                 or (p90_e is not None and p90_e >= policy.trailing_review_p90)
             ):
+                # A smear points every star the same way, and a bad frame stands
+                # out from its night.  Elongation that every frame of the night
+                # shares, pointing every which way across the field, is the
+                # optics (astigmatism, tilt, a filter's focus offset): dropping
+                # those frames cannot round the stars, it only costs signal.
+                # Stars elongated as far as the hard trailing level are
+                # reviewed however their night looks.
+                optical = (
+                    coherence is not None
+                    and coherence < policy.trailing_review_coherence
+                    and e_relative is not None
+                    and e_relative < policy.trailing_review_relative
+                    and median_e is not None
+                    and median_e < policy.trailing_hard_median
+                )
+                value = {
+                    "medianEllipticity": median_e,
+                    "p90Ellipticity": p90_e,
+                    "orientationCoherence": coherence,
+                    "relative": e_relative,
+                }
                 _add_family(
                     families,
                     _evidence(
+                        "GATE_SHARED_ELONGATION_INFO",
+                        EvidenceFamily.MORPHOLOGY,
+                        EvidenceSeverity.INFO,
+                        "Stars are elongated in every frame of the night with no common "
+                        "direction: optics or focus, not tracking.",
+                        value=value,
+                    )
+                    if optical
+                    else _evidence(
                         "GATE_TRAILING_REVIEW",
                         EvidenceFamily.MORPHOLOGY,
                         EvidenceSeverity.REVIEW,
                         "Elongated star profiles require review.",
-                        value={"medianEllipticity": median_e, "p90Ellipticity": p90_e},
+                        value=value,
                     ),
                 )
 
@@ -1204,6 +1275,31 @@ def evaluate_quality_gate(
                     "GATE_NOISE_",
                 ),
             }
+            # Thin cloud is reviewed when spatial dimming or background evidence
+            # agrees.  The raw source count is no such evidence: it falls with a
+            # dimmer frame for the same reason.  Without airmass the excess is
+            # not corrected for altitude, so it never goes beyond a review.
+            background = families.get(EvidenceFamily.BACKGROUND)
+            background_cloud = (
+                background is not None
+                and background.code.startswith(cloud_prefixes[EvidenceFamily.BACKGROUND])
+                and _SEVERITY_RANK[background.severity] >= _SEVERITY_RANK[EvidenceSeverity.REVIEW]
+            )
+            if thin_cloud is not None and (spatial_cloud or background_cloud):
+                strong = thin_cloud >= policy.strong_extinction_mag and extinction_model != "cohort-clear-frames"
+                _add_family(
+                    families,
+                    _evidence(
+                        "GATE_TEMPORAL_EXTINCTION_STRONG" if strong else "GATE_TEMPORAL_EXTINCTION_REVIEW",
+                        EvidenceFamily.TRANSPARENCY,
+                        EvidenceSeverity.ERROR if strong else EvidenceSeverity.REVIEW,
+                        "Extinction above the clear envelope with other cloud evidence.",
+                        value=thin_cloud,
+                        threshold=policy.strong_extinction_mag if strong else policy.weak_extinction_mag,
+                        units="mag",
+                        details={"model": extinction_model},
+                    ),
+                )
             cloud_families = [
                 family
                 for family, prefixes in cloud_prefixes.items()

@@ -160,9 +160,10 @@ def write_synthetic_index(
     # A decoy tree of the same shape family ensures the reader selects tables
     # by column name rather than by position.
     blocks.append(_raw_table("kdtree_header_codes", b"", 0, 0, {"ENDIAN": marker, "KDT_DATA": "u16"}))
+    minimum = np.asarray([-1.0, -1.0, -1.0])
+    maximum = np.asarray([1.0, 1.0, 1.0])
+    scale = 2147483647.0
     if data_type == "u32":
-        scale = 2147483647.0
-        minimum = np.asarray([-1.0, -1.0, -1.0])
         encoded = np.round((xyz - minimum) * scale).astype(f"{order}u4")
         rows = encoded.tobytes()
         row_bytes = 12
@@ -186,7 +187,7 @@ def write_synthetic_index(
             },
         )
     )
-    scaling = np.asarray([-1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 2147483647.0], dtype=f"{order}f8")
+    scaling = np.asarray([*minimum, *maximum, scale], dtype=f"{order}f8")
     blocks.append(_raw_table("kdtree_range_stars", scaling.tobytes(), 8, 7))
     blocks.append(_raw_table("kdtree_data_stars", rows, row_bytes, count))
     tag = fits.Header()
@@ -271,13 +272,12 @@ def write_master(path: Path, image: np.ndarray) -> Path:
     return path
 
 
-def managed_index_catalog(tmp_path: Path, index_path: Path) -> tuple[Path, Path, dict[str, object]]:
-    """Adopt a synthetic index into a managed installed set with a receipt."""
+def managed_index_catalog(tmp_path: Path, *index_paths: Path) -> tuple[Path, Path, dict[str, object]]:
+    """Adopt synthetic index files of one directory into a managed installed set with a receipt."""
 
-    root = index_path.parent
+    root = index_paths[0].parent
     manifests = tmp_path / "managed-manifests"
     manifests.mkdir()
-    payload = index_path.read_bytes()
     manifest = {
         "schemaVersion": 1,
         "catalogId": f"fake-managed-{INDEX_ID}",
@@ -296,13 +296,14 @@ def managed_index_catalog(tmp_path: Path, index_path: Path) -> tuple[Path, Path,
         "allowedDownloadOrigins": ["https://provider.invalid"],
         "artifacts": [
             {
-                "artifactId": index_path.name,
-                "url": f"https://provider.invalid/{index_path.name}",
-                "sha256": hashlib.sha256(payload).hexdigest(),
-                "sizeBytes": len(payload),
+                "artifactId": path.name,
+                "url": f"https://provider.invalid/{path.name}",
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "sizeBytes": path.stat().st_size,
                 "installScope": "user",
                 "scale": 7,
             }
+            for path in index_paths
         ],
     }
     (manifests / f"fake-managed-{INDEX_ID}.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -407,6 +408,52 @@ def test_index_reader_rejects_unknown_endian_and_mismatched_identity(tmp_path: P
     assert changed.value.code == "CATALOG_FILE_CHANGED"
 
 
+def _near_field(field: dict[str, np.ndarray]) -> np.ndarray:
+    return np.hypot((field["ra"] - FIELD_RA) * np.cos(np.radians(FIELD_DEC)), field["dec"] - FIELD_DEC) < 1.0
+
+
+def test_healpix_tile_names_are_checked(tmp_path: Path, field: dict[str, np.ndarray]) -> None:
+    near = _near_field(field)
+    stars = (field["ra"][near], field["dec"][near], field["magnitudes"][near])
+    tile = write_synthetic_index(tmp_path / "index-5205-03.fits", *stars, index_id=5205, healpix=3, hpnside=2)
+    assert read_index_summary(tile).identity == "astrometry.net:index:5205:healpix:3:hpnside:2"
+    inside = read_index_stars(tile, centre_ra_degrees=FIELD_RA, centre_dec_degrees=FIELD_DEC, radius_degrees=0.2)
+    assert inside.count == field["ra"].shape[0] - 5
+    for name, healpix, hpnside in (("index-5205-04.fits", 3, 2), ("index-5205.fits", 3, 2), ("index-5205-03.fits", -1, 0)):
+        directory = tmp_path / f"{name}-{healpix}"
+        directory.mkdir()
+        bad = write_synthetic_index(directory / name, *stars, index_id=5205, healpix=healpix, hpnside=hpnside)
+        with pytest.raises(CatalogCorrespondenceError) as failure:
+            read_index_summary(bad)
+        assert failure.value.code == "CATALOG_INDEX_INVALID"
+
+
+def test_managed_catalog_reads_a_tiled_index_as_the_union_of_its_tiles(
+    tmp_path: Path, field: dict[str, np.ndarray]
+) -> None:
+    from ufwbpp.mosaic.astrometry import ManagedCatalogStars
+
+    near = _near_field(field)
+    ra, dec, magnitudes = field["ra"][near], field["dec"][near], field["magnitudes"][near]
+    west = ra < FIELD_RA
+    shared = np.abs(ra - FIELD_RA) < 0.02  # boundary stars belong to both tiles
+    root = tmp_path / "tiles"
+    root.mkdir()
+    tiles = [
+        write_synthetic_index(
+            root / f"index-5205-{healpix:02d}.fits", ra[part], dec[part], magnitudes[part],
+            index_id=5205, healpix=healpix, hpnside=2,
+        )
+        for healpix, part in ((3, west | shared), (4, ~west | shared))
+    ]
+    config, manifests, _ = managed_index_catalog(tmp_path, *tiles)
+
+    found = ManagedCatalogStars(config, manifest_dir=manifests).stars(FIELD_RA, FIELD_DEC, 0.2)
+
+    assert found.identity == "astrometry.net:index:5205:healpix-union:3+4:hpnside:2"
+    assert len(found.ra_degrees) == ra.shape[0]  # every star once, the shared ones included
+
+
 def test_rank_indexes_prefers_fitting_then_densest() -> None:
     geometry = field_geometry(synthetic_wcs(), (FIELD_HEIGHT, FIELD_WIDTH))
     assert geometry.width_degrees == pytest.approx(FIELD_WIDTH / 3600.0, rel=1e-3)
@@ -447,7 +494,17 @@ def test_mutual_nearest_matching_is_one_to_one_and_bounded() -> None:
 
 def test_verify_solution_recovers_exact_matches_and_evidence_shape(tmp_path: Path, field: dict[str, np.ndarray], index_root: Path) -> None:
     image = render_master(np.vstack((field["inside_pixels"], field["decoy_pixels"])))
-    artifacts = [{"relativeName": f"index-{INDEX_ID}.fits", "artifactId": f"index-{INDEX_ID}.fits"}]
+    # A denser HEALPix tile ranks first but holds only part of a field:
+    # verification reads the all-sky index.
+    corner = field["ra"] < np.median(field["ra"])
+    write_synthetic_index(
+        index_root / "index-5205-03.fits", field["ra"][corner], field["dec"][corner], field["magnitudes"][corner],
+        index_id=5205, healpix=3, hpnside=2, scale_lower_radians=0.001, scale_upper_radians=0.0087,
+    )
+    artifacts = [
+        {"relativeName": "index-5205-03.fits", "artifactId": "index-5205-03.fits"},
+        {"relativeName": f"index-{INDEX_ID}.fits", "artifactId": f"index-{INDEX_ID}.fits"},
+    ]
     verification = verify_solution(
         image=image,
         wcs_header=synthetic_wcs(),
@@ -473,6 +530,7 @@ def test_verify_solution_recovers_exact_matches_and_evidence_shape(tmp_path: Pat
     assert all(row["indexMag"] is not None for row in table["matches"])
     match = json.loads(verification.match_path.read_text(encoding="utf-8"))
     assert match["indexIdentities"] == [INDEX_IDENTITY]
+    assert [item["relativeName"] for item in match["indexSelection"]] == [f"index-{INDEX_ID}.fits"]
     assert match["indexSelection"][0]["selected"] is True
     assert match["nmatch"] == quality.matched_stars
     diagnostics = verification.correspondence_diagnostics

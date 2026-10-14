@@ -303,8 +303,17 @@ def test_review_approval_recipe_requires_three_canonical_digests() -> None:
         )
 
 
-def test_solver_required_by_default() -> None:
+def test_solver_recipe_defaults() -> None:
     assert Recipe().solver.policy.value == "REQUIRED"
+    # The catalog refit is on by default; only switching it off is serialized,
+    # so recipes that leave it keep their digest.
+    assert Recipe().solver.catalog_refit is True
+    assert "catalogRefit" not in Recipe().serializable()["solver"]
+    switched_off = Recipe.from_dict({"solver": {"catalogRefit": False}})
+    assert switched_off.solver.catalog_refit is False
+    assert switched_off.serializable()["solver"]["catalogRefit"] is False
+    with pytest.raises(RecipeError, match="catalogRefit"):
+        Recipe.from_dict({"solver": {"catalogRefit": "no"}})
 
 
 def test_published_recipe_examples_parse() -> None:

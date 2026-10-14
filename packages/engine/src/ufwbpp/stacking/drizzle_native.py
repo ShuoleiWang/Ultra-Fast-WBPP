@@ -478,7 +478,7 @@ def verify_drizzle_receipt(receipt_path: str | os.PathLike[str]) -> dict[str, An
     """Re-read a drizzle receipt and check its artifact still hashes the same."""
 
     path = Path(receipt_path)
-    payload = json.loads(path.read_text(encoding="ascii"))
+    payload = json.loads(path.read_bytes())
     if not isinstance(payload, dict) or payload.get("stage") != "drizzle" or payload.get("status") != "succeeded":
         raise DrizzleError("DRIZZLE_RECEIPT_INVALID", "drizzle receipt is not a succeeded drizzle stage", path=str(path))
     artifact = payload.get("artifact")

@@ -33,7 +33,12 @@ if str(REGISTRATION_SOURCE) not in sys.path:
 from ufwbpp.native_kernels import load_native_kernels
 from ufwbpp.workflows.single_target import E2ERequest, E2EState, IntegrationMode, ReviewApproval, run_e2e
 from ufwbpp.workflows.contracts import DrizzleOptions, ProgressEvent
-from ufwbpp.workflows.single_target import E2EError, _unify_same_grid_solutions, _validate_cross_filter_wcs
+from ufwbpp.workflows.single_target import (
+    E2EError,
+    _refine_solved_wcs,
+    _unify_same_grid_solutions,
+    _validate_cross_filter_wcs,
+)
 from ufwbpp.workflows.solve import _SolverHints, _solve_one
 from ufwbpp.workflows.registration import _build_registration_masters, _register_lights
 from ufwbpp.workflows.screening import _drizzle_sampling_evidence, _inferred_solver_hints
@@ -306,7 +311,7 @@ class FakeSolver:
                 rms_arcsec=self.rms_arcsec,
                 parity=WcsParity.NEGATIVE,
                 catalog_identity="1" * 64,
-                index_identities=("astrometry.net:index:4200:healpix:1:hpnside:1",),
+                index_identities=("astrometry.net:index:4200:healpix:-1:hpnside:0",),
                 correspondence_sha256="2" * 64,
                 catalog_managed=True,
                 installed_set_identity="3" * 64,
@@ -548,6 +553,11 @@ def test_complete_raw_to_verified_wcs_success_is_atomic_and_read_only(
         "maxRmsArcsec": 2.0,
     }
     assert receipt["astrometry"]["crossFilterValidation"]["valid"] is True
+    # The fake solver has no catalog stars to refit on.
+    assert receipt["astrometry"]["catalogRefinement"] == {
+        "status": "NOT_APPLICABLE",
+        "reason": "no managed star catalog",
+    }
     accepted_attempt = receipt["astrometry"]["filters"]["R"]["attempts"][-1]
     assert accepted_attempt["result"]["astrometricQuality"]["matchedStars"] == 30
     assert accepted_attempt["hintValidation"]["valid"] is True
@@ -1793,6 +1803,90 @@ def test_masters_with_different_crops_are_not_unified(tmp_path: Path) -> None:
     )
     assert record["status"] == "NOT_APPLICABLE"
     assert _validate_cross_filter_wcs(products).valid is False
+
+
+@pytest.mark.parametrize("catalog", ("dense", "exact", "unverified", "sparse", "none"))
+def test_solved_grid_is_refitted_on_catalog_stars(tmp_path: Path, catalog: str) -> None:
+    from mosaic_synthetic import TruthSolver, make_sky, render, true_header
+    from ufwbpp.mosaic.canvas import celestial_wcs
+    from ufwbpp.workflows.canvas import _catalog_verifier
+
+    # A fast corrected train: cubic barrel distortion the solver's pure TAN
+    # misses; "exact" is a solver that already has the true solution.
+    sky = make_sky((150.0, 2.0), 0.4, 40 if catalog == "sparse" else 700)
+    shape = (600, 900)
+    truth = true_header((150.0, 2.0), shape, scale_arcsec=2.0, distortion=0.0 if catalog == "exact" else 4.0)
+    tan = {key: value for key, value in truth.items() if not key.startswith(("A_", "B_"))}
+    tan.update(CTYPE1="RA---TAN", CTYPE2="DEC--TAN")
+    products: dict[str, Path] = {}
+    pixels: dict[str, np.ndarray] = {}
+    for filter_name, seed in (("L", 1), ("R", 2)):
+        image = render(sky, truth, shape, fwhm=3.0, background=100.0, noise=2.0, rng=np.random.default_rng(seed))
+        header = fits.Header(list(tan.items()))
+        header["OAFSTATE"] = "SOLVED"
+        header["OAFWCS"] = "SOLVED"
+        (tmp_path / filter_name).mkdir()
+        products[filter_name] = tmp_path / filter_name / "master.fits"
+        fits.PrimaryHDU(image.astype(np.float32), header).writeto(products[filter_name])
+        # A copy: on Windows a mapped file cannot take the rewritten, longer header.
+        pixels[filter_name] = fits.getdata(products[filter_name], memmap=False)
+    records = {name: {"output": f"{name}/master.fits", "attempts": [{"accepted": True, "artifact": {}}]} for name in products}
+    before = {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in products.items()}
+    backends = [TruthSolver(sky, scale_arcsec=2.0)] if catalog != "none" else [SimpleNamespace()]
+    verifier = _catalog_verifier(backends)
+    if catalog == "unverified":
+        # The R master does not confirm the refit on catalog stars.
+        accept = verifier
+        verifier = lambda image, header, directory: (  # noqa: E731
+            {**accept(image, header, directory), "matchedStars": 3} if directory.parent.name == "R" else accept(image, header, directory)
+        )
+
+    record = _refine_solved_wcs(
+        products,
+        solver_records=records,
+        backends=backends,
+        verifier=verifier,
+        min_matches=20,
+        max_rms_arcsec=2.0,
+        workers=2,
+    )
+
+    if catalog != "dense":
+        # No catalog, too few stars to pay for a detection, no gain on held-out
+        # stars, or a master that does not verify: the solver's WCS stays.
+        expected = {
+            "none": ("NOT_APPLICABLE", None),
+            "sparse": ("KEPT_SOLVER_WCS", "MOSAIC_CATALOG_TOO_SPARSE"),
+            "exact": ("KEPT_SOLVER_WCS", "WCS_REFINEMENT_NOT_BETTER"),
+            "unverified": ("KEPT_SOLVER_WCS", "WCS_REFINEMENT_UNVERIFIED"),
+        }[catalog]
+        assert (record["status"], record.get("code")) == expected
+        assert {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in products.items()} == before
+        assert all(len(item["attempts"]) == 1 for item in records.values())
+        assert not any((path.parent / "catalog-refit-verification").exists() for path in products.values())
+        return
+    assert record["status"] == "APPLIED"
+    assert record["referenceFilter"] == "L" and record["order"] >= 3
+    assert record["holdoutRmsArcsec"] < 0.2 * record["solverRmsArcsec"]
+    for name, path in products.items():
+        np.testing.assert_array_equal(np.asarray(fits.getdata(path)), pixels[name])
+        header = fits.getheader(path)
+        assert header["OAFWCSRF"] == record["order"]
+        assert header["OAFSTATE"] == "SOLVED" and header["OAFWCS"] == "SOLVED"
+        # The refit's own verification is the master's accepted solve, bound to its bytes.
+        solver_attempt, refit_attempt = records[name]["attempts"]
+        assert solver_attempt == {"accepted": True, "artifact": {}}
+        assert refit_attempt["accepted"] is True and refit_attempt["backendId"] == "catalog-refit-verification"
+        assert refit_attempt["result"]["astrometricQuality"]["catalogManaged"] is True
+        assert refit_attempt["artifact"]["path"] == f"{name}/master.fits"
+        assert refit_attempt["artifact"]["sha256"] == "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    assert _validate_cross_filter_wcs(products).valid is True
+    # The refit maps every pixel where the true solution does, corners included.
+    yy, xx = np.mgrid[0 : shape[0] : 50, 0 : shape[1] : 50]
+    refit = np.column_stack(celestial_wcs(fits.getheader(products["L"])).all_pix2world(xx.ravel(), yy.ravel(), 0))
+    exact = np.column_stack(celestial_wcs(truth).all_pix2world(xx.ravel(), yy.ravel(), 0))
+    error = np.hypot((refit[:, 0] - exact[:, 0]) * np.cos(np.radians(exact[:, 1])), refit[:, 1] - exact[:, 1]) * 3600
+    assert error.max() < 0.3 * 2.0
 
 
 @pytest.mark.parametrize("mutation", ("rotate90", "mirror", "sip-edge"))

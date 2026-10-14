@@ -110,7 +110,7 @@ def test_catalog_quality_is_structured_and_validated_against_wcs() -> None:
         rms_arcsec=0.72,
         parity=WcsParity.NEGATIVE,
         catalog_identity="1" * 64,
-        index_identities=("astrometry.net:index:4206:healpix:17:hpnside:32",),
+        index_identities=("astrometry.net:index:4206:healpix:-1:hpnside:0",),
         correspondence_sha256="2" * 64,
         catalog_managed=True,
         installed_set_identity="3" * 64,

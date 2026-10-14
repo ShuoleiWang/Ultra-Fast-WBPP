@@ -76,8 +76,10 @@ class GlobalNormalizationParameters:
     lower_quantile: float = 0.05
     upper_quantile: float = 0.70
     residual_clip_sigma: float = 3.5
-    minimum_scale: float = 0.50
-    maximum_scale: float = 2.00
+    # A stellar scale up to 5 is a frame at 20 % transparency; its noise,
+    # measured after scaling, gives it 1/25 of a clear frame's weight.
+    minimum_scale: float = 0.20
+    maximum_scale: float = 5.00
     allow_offset_only_fallback: bool = True
     offset_tile_size_pixels: int = 128
     offset_smoothing_sigma_nodes: float = 7.0

@@ -765,8 +765,10 @@ def _registration_anchor_exclusions(
     star retention, extinction, atypical background shape, ...) never
     anchors either: the master inherits the reference's background, and the
     previous rule's preference for the lowest sky picked exactly such
-    cloud-dimmed frames (NGC 6822, 2026-09-22).  Only when nothing else
-    remains do the excluded frames compete.
+    cloud-dimmed frames (NGC 6822, 2026-09-22).  A frame the gate passed
+    with thin-cloud extinction evidence is integrated at its noise weight
+    but never anchors for the same reason.  Only when nothing else remains
+    do the excluded frames compete.
     """
 
     excluded = set(screening.approved_review_paths)
@@ -780,6 +782,11 @@ def _registration_anchor_exclusions(
         )
     excluded.update(
         str(Path(frame.path).resolve(strict=True)) for frame in screening.blink.flags if frame.flags
+    )
+    excluded.update(
+        path
+        for path, gate in screening.gate_by_path.items()
+        if gate is not None and any(item.code == "GATE_TEMPORAL_EXTINCTION_INFO" for item in gate.evidence)
     )
     if request.selection.explicit:
         passed_text = {str(path) for path in screening.passed}

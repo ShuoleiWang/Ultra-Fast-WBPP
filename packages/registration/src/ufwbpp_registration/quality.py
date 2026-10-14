@@ -161,9 +161,13 @@ def _robust_ratio(
     minimum_samples: int,
 ) -> tuple[float, float, int]:
     selected = np.asarray(values, dtype=np.float64)
-    selected = selected[
-        np.isfinite(selected) & (selected >= 0.5) & (selected <= 2.0)
-    ]
+    selected = selected[np.isfinite(selected) & (selected > 0.0)]
+    if selected.size < minimum_samples:
+        raise ValueError("too few positive stellar flux ratios")
+    # Mismatched pairs are bounded around the frame's own ratio, not around
+    # 1: a frame behind thin cloud has every star at 1/transparency.
+    center = float(np.median(selected))
+    selected = selected[(selected >= 0.5 * center) & (selected <= 2.0 * center)]
     if selected.size < minimum_samples:
         raise ValueError("too few bounded stellar flux ratios")
     for _ in range(3):
@@ -355,7 +359,7 @@ def estimate_stellar_scale_hints(
             1.0,
             "REFERENCE_IDENTITY",
             {
-                "method": "matched-preview-aperture-median-mad-v1",
+                "method": "matched-preview-aperture-median-mad-v2",
                 "matchedSources": reference.catalog.count,
                 "acceptedScaleStars": reference.catalog.count,
                 "scaleSigma": 0.0,
@@ -380,7 +384,7 @@ def estimate_stellar_scale_hints(
         source = analyses[source_index]
         source_transform = transforms[source_index].preview_matrix
         evidence: dict[str, Any] = {
-            "method": "matched-preview-aperture-median-mad-v1",
+            "method": "matched-preview-aperture-median-mad-v2",
             "minimumScaleStars": minimum_scale_stars,
             "matchRadiusPreviewPixels": match_radius_preview_pixels,
         }

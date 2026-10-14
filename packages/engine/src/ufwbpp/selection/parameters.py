@@ -62,7 +62,8 @@ class SelectionParameters:
     # Per-frame region weight maps for partly blocked or partly clouded
     # frames (unattended policies only; legacy-gate never builds them).
     region_weights: bool = True
-    # Global normalization cannot recover a frame below this stellar scale.
+    # Unattended policies exclude a frame below this transparency; global
+    # normalization itself accepts stellar scales up to 5 (transparency 0.2).
     transparency_floor: float = 0.50
     extra_extinction_exclusion_mag: float = 0.75
     insufficient_evidence_confidence: float = 0.50

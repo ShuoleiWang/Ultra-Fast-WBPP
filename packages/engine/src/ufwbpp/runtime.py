@@ -358,6 +358,7 @@ def build_e2e_request(
             if search_radius_degrees is not None
             else recipe.solver.search_radius_degrees
         ),
+        catalog_refit=recipe.solver.catalog_refit,
         review_approvals=tuple(
             ReviewApproval(
                 source_sha256=item.source_sha256,

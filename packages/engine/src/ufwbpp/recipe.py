@@ -304,11 +304,13 @@ class SolverRecipe:
     policy: SolverPolicy = SolverPolicy.REQUIRED
     backend: str = "auto"
     search_radius_degrees: float = 15.0
+    # Refit the solution the filters share on the managed catalog's stars.
+    catalog_refit: bool = True
 
     @classmethod
     def from_dict(cls, raw: Any) -> SolverRecipe:
         value = _mapping(raw, "solver")
-        _unknown(value, {"policy", "backend", "searchRadiusDegrees"}, "solver")
+        _unknown(value, {"policy", "backend", "searchRadiusDegrees", "catalogRefit"}, "solver")
         backend = value.get("backend", "auto")
         if not isinstance(backend, str) or not backend.strip():
             raise RecipeError("solver.backend must be a non-empty string")
@@ -318,10 +320,14 @@ class SolverRecipe:
         radius = float(radius)
         if not 0 < radius <= 180:
             raise RecipeError("solver.searchRadiusDegrees must be in (0, 180]")
+        catalog_refit = value.get("catalogRefit", True)
+        if not isinstance(catalog_refit, bool):
+            raise RecipeError("solver.catalogRefit must be a boolean")
         return cls(
             policy=_enum(SolverPolicy, value.get("policy", "REQUIRED"), "solver.policy"),
             backend=backend.strip(),
             search_radius_degrees=radius,
+            catalog_refit=catalog_refit,
         )
 
     def serializable(self) -> dict[str, Any]:
@@ -329,6 +335,9 @@ class SolverRecipe:
             "policy": self.policy.value,
             "backend": self.backend,
             "searchRadiusDegrees": self.search_radius_degrees,
+            # Written only when switched off, so a recipe that leaves the
+            # default serializes, and digests, exactly as before.
+            **({} if self.catalog_refit else {"catalogRefit": False}),
         }
 
 
