@@ -219,3 +219,20 @@ def test_transformed_map_follows_a_meridian_flip_and_a_dither() -> None:
     assert half_shifted.zero_cells == 16
     with pytest.raises(ValueError):
         built.transformed(np.zeros((2, 2)), height, width)
+    # On a mosaic panel's canvas window the map is read through the window's
+    # lattice: here a window turned 180 degrees and offset by (32, 24) px.
+    spacing = 16
+    lattice_y, lattice_x = np.mgrid[:29, :45].astype(float) * spacing
+    reference_x = width - 1.0 - (lattice_x - 32.0)
+    reference_y = height - 1.0 - (lattice_y - 24.0)
+    outside = (reference_x < 0) | (reference_x > width - 1) | (reference_y < 0) | (reference_y > height - 1)
+    reference_x[outside] = np.nan
+    reference_y[outside] = np.nan
+    window = SimpleNamespace(spacing=spacing, reference_x=reference_x, reference_y=reference_y)
+    window_nodes, window_x, window_y = built.on_window(window, height, width)
+    values = np.asarray(window_nodes)
+    assert window_x[1] - window_x[0] == 64.0 and window_x[-1] == 44 * spacing and window_y[-1] == 28 * spacing
+    column, row = window_x.index(576.0), window_y.index(384.0)
+    assert values[row, column] == 0.0  # the blocked corner, now at the window's lower right
+    assert values[window_y.index(64.0), window_x.index(64.0)] == 1.0
+    assert values[window_y.index(0.0), window_x.index(0.0)] == 1.0  # outside the frame: no evidence

@@ -1,11 +1,13 @@
 """A mosaic panel's place on the canvas: the stage between registration and
 integration of a panel run.
 
-The registration reference is calibrated at full resolution and solved, the
-solution is refined into TAN+SIP on catalog stars, and the window of the
-canvas that holds every admitted Light becomes the output grid of the pixel
-pipeline: each Light is then resampled once, from its calibrated pixels
-straight onto the canvas (see :class:`ufwbpp.stacking.parameters.OutputGrid`).
+The registration reference is calibrated at full resolution, solved, and its
+stars are measured against the catalog; the project then fits every panel's
+TAN+SIP solution at once (:func:`ufwbpp.mosaic.astrometry.solve_mosaic`), and
+the window of the canvas that holds every admitted Light becomes the output
+grid of the pixel pipeline: each Light is then resampled once, from its
+calibrated pixels straight onto the canvas (see
+:class:`ufwbpp.stacking.parameters.OutputGrid`).
 """
 
 from __future__ import annotations
@@ -19,9 +21,24 @@ from typing import Any, Callable, Mapping, Sequence
 from astropy.io import fits
 import numpy as np
 
-from ..mosaic.astrometry import MosaicAstrometryError, catalog_source_from_backends, refine_solution
-from ..mosaic.canvas import CanvasError, canvas_window, celestial_wcs, frame_boundary, window_grid
-from ..stacking.parameters import OutputGrid
+from ..mosaic.astrometry import (
+    FRAME_FIELD_ALGORITHM,
+    MosaicAstrometryError,
+    PanelStars,
+    SipFit,
+    catalog_source_from_backends,
+    measure_frame_field,
+    measure_panel,
+    solve_mosaic,
+)
+from ..mosaic.canvas import (
+    CanvasError,
+    canvas_window,
+    celestial_wcs,
+    frame_boundary,
+    window_grid,
+)
+from ..stacking.parameters import OutputGrid, ShiftField
 from ..solvers.base import SolverBackend
 from .common import _emit, _relativize_solver_attempts, _safe_token
 from .contracts import E2EError, E2ERequest, ProgressCallback, ProgressStage
@@ -49,6 +66,9 @@ class _CanvasPlacement:
     # The fraction of the window the reference frame's footprint fills: a
     # window is a rectangle on the canvas, a rotated frame is not.
     footprint_fill: float
+    # Per registered Light (by its registration key), its own residual
+    # shift against the reference.
+    frame_fields: Mapping[str, ShiftField]
 
 
 def _light_header(path: str) -> fits.Header:
@@ -66,7 +86,16 @@ def _light_header(path: str) -> fits.Header:
     return header
 
 
-def _place_on_canvas(
+@dataclass(frozen=True)
+class _MeasuredReference:
+    """A panel's registration reference, solved and measured on catalog stars."""
+
+    stars: PanelStars
+    path: str
+    attempts: list[dict[str, Any]]
+
+
+def _measure_reference(
     request: E2ERequest,
     registration: Any,
     calibration_plan: Any,
@@ -74,11 +103,9 @@ def _place_on_canvas(
     work: Path,
     backends: Sequence[Any],
     hints: _SolverHints,
-) -> _CanvasPlacement:
+) -> _MeasuredReference:
     from ufwbpp_registration import read_calibrated_full_image
 
-    canvas = request.mosaic_canvas
-    assert canvas is not None
     run = registration.run
     reference_path = str(Path(run.analyses[run.reference_index].path))
     directory = work / "canvas"
@@ -103,7 +130,7 @@ def _place_on_canvas(
             "MOSAIC_REFERENCE_UNSOLVED",
             "the panel's registration reference did not solve; its place on the mosaic canvas is unknown",
         )
-    solved_header, shape = _read_image_header(solved_path)
+    solved_header, _ = _read_image_header(solved_path)
     catalog = catalog_source_from_backends(backends)
     if catalog is None:
         raise E2EError(
@@ -111,21 +138,45 @@ def _place_on_canvas(
             "a mosaic panel needs the managed star catalog to measure its distortion",
         )
     try:
-        fit = refine_solution(
-            image,
-            solved_header,
-            catalog,
-            minimum_matches=max(request.min_matches, MINIMUM_REFERENCE_MATCHES),
+        stars = measure_panel(
+            image, solved_header, catalog, minimum_matches=max(request.min_matches, MINIMUM_REFERENCE_MATCHES)
         )
     except MosaicAstrometryError as error:
         raise E2EError(error.code, str(error)) from error
-    if fit.rms_arcsec > request.max_rms_arcsec:
-        raise E2EError(
-            "MOSAIC_REFERENCE_ASTROMETRY_FAILED",
-            f"the panel reference's catalog residual is {fit.rms_arcsec:.3g} arcsec; at most "
-            f"{request.max_rms_arcsec:.3g} is accepted",
-        )
-    reference_wcs = celestial_wcs(fit.header)
+    return _MeasuredReference(stars, reference_path, attempts)
+
+
+def _solve_placements(
+    measured: Mapping[str, PanelStars], *, max_rms_arcsec: float
+) -> dict[str, tuple[SipFit, dict[str, Any]]]:
+    """Every panel's solution, fitted on all panels' catalog and overlap stars
+    at once; each must pass the catalog-residual gate before any panel integrates."""
+
+    try:
+        solutions, record = solve_mosaic(measured)
+    except MosaicAstrometryError as error:
+        raise E2EError(error.code, str(error)) from error
+    for key, solution in solutions.items():
+        if solution.rms_arcsec > max_rms_arcsec:
+            raise E2EError(
+                "MOSAIC_REFERENCE_ASTROMETRY_FAILED",
+                f"{key}: the panel reference's catalog residual is {solution.rms_arcsec:.3g} arcsec; at most "
+                f"{max_rms_arcsec:.3g} is accepted",
+            )
+    return {key: (solution, record) for key, solution in solutions.items()}
+
+
+def _place_on_canvas(
+    request: E2ERequest,
+    registration: Any,
+    measured: _MeasuredReference,
+    solution: SipFit,
+    joint: Mapping[str, Any],
+) -> _CanvasPlacement:
+    canvas = request.mosaic_canvas
+    assert canvas is not None
+    shape = measured.stars.shape
+    reference_wcs = celestial_wcs(solution.header)
     # The part of a Light the warp can sample: inside its interpolation margin.
     boundary = frame_boundary(shape, inset=_WARP_MARGIN_PIXELS)
     homogeneous = np.column_stack((boundary, np.ones(len(boundary))))
@@ -138,27 +189,72 @@ def _place_on_canvas(
     ra, dec = reference_wcs.all_pix2world(np.concatenate(points_x), np.concatenate(points_y), 0)
     try:
         origin, window_shape = canvas_window(canvas, np.asarray(ra), np.asarray(dec), margin=1)
-        grid = window_grid(canvas, origin, window_shape, fit.header, shape)
+        grid = window_grid(canvas, origin, window_shape, solution.header, shape)
     except (CanvasError, ValueError) as error:
         raise E2EError(getattr(error, "code", "MOSAIC_CANVAS_WINDOW_INVALID"), str(error)) from error
-    accepted = next(item for item in reversed(attempts) if item.get("accepted") is True)
+    accepted = next(item for item in reversed(measured.attempts) if item.get("accepted") is True)
     record = {
         "schemaVersion": 1,
         "panel": request.mosaic_panel,
         "canvas": canvas.serializable(),
-        "referenceLight": Path(reference_path).name,
+        "referenceLight": Path(measured.path).name,
         "referenceSolve": {
             "backendId": accepted.get("result", {}).get("backendId"),
             "astrometricQuality": accepted.get("result", {}).get("astrometricQuality"),
         },
-        "distortion": fit.serializable(),
-        "referenceWcs": {key: fit.header[key] for key in sorted(fit.header)},
+        "distortion": solution.serializable(),
+        "jointFit": dict(joint),
+        "referenceWcs": {key: solution.header[key] for key in sorted(solution.header)},
         "window": grid.serializable(),
         "lightsInWindow": len(registration.transforms),
     }
     fill = min(1.0, (shape[0] * shape[1]) / float(window_shape[0] * window_shape[1]))
     record["footprintFill"] = fill
-    return _CanvasPlacement(grid, record, fill)
+    frame_fields, record["frameFields"] = _frame_fields(registration, shape)
+    return _CanvasPlacement(grid, record, fill, frame_fields=frame_fields)
+
+
+def _frame_fields(registration: Any, shape: tuple[int, int]) -> tuple[dict[str, ShiftField], dict[str, Any]]:
+    """Each registered Light's own residual shift against the reference,
+    fitted on its registration's inlier centroids: a meridian flip, another
+    night's optics and the Light's filter (lateral colour) each leave one
+    that its matrix cannot absorb, and a panel that stacks them unshifted
+    places a star where none of its Lights does.  Per filter, the receipt's
+    summary."""
+
+    filters = {item["path"]: str(item.get("filter")) for item in registration.receipt.get("transforms", ())}
+    fields: dict[str, ShiftField] = {}
+    measured: dict[str, list[ShiftField]] = {}
+    for path, pairs in registration.star_pairs.items():
+        shift_field = measure_frame_field(pairs, np.asarray(registration.transforms[path], dtype=np.float64), shape)
+        measured.setdefault(filters.get(path, "None"), []).append(shift_field)
+        if shift_field.order is not None:
+            fields[path] = shift_field
+    summary: dict[str, Any] = {}
+    for filter_name, items in sorted(measured.items()):
+        applied = [item.evidence for item in items if item.order is not None]
+        orders: dict[str, int] = {}
+        for item in items:
+            key = "none" if item.order is None else str(item.order)
+            orders[key] = orders.get(key, 0) + 1
+        summary[filter_name] = {
+            "lights": len(items),
+            "applied": len(applied),
+            "orders": orders,
+            **(
+                {
+                    "maxShiftPixels": {
+                        "median": float(np.median([item["maxShiftPixels"] for item in applied])),
+                        "max": float(np.max([item["maxShiftPixels"] for item in applied])),
+                    },
+                    "rmsBeforePixels": float(np.median([item["rmsBeforePixels"] for item in applied])),
+                    "rmsAfterPixels": float(np.median([item["rmsAfterPixels"] for item in applied])),
+                }
+                if applied
+                else {}
+            ),
+        }
+    return fields, {"algorithm": FRAME_FIELD_ALGORITHM, "filters": summary}
 
 
 def _catalog_verifier(

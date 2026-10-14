@@ -60,6 +60,8 @@ TEXTURE_RATIO_FLOOR = 0.50
 SMOOTHING_SIGMA_CELLS = 1.0
 # Maps whose smallest weight is above this are not worth a per-sample pass.
 NEGLIGIBLE_FLOOR = 0.98
+# On a mosaic panel's canvas window a map is read at window nodes this far apart.
+WINDOW_NODE_PIXELS = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,8 +108,7 @@ class RegionWeightMap:
         transform = np.asarray(matrix, dtype=np.float64)
         if transform.shape != (3, 3) or not np.all(np.isfinite(transform)):
             raise ValueError("region map transform must be a finite 3x3 matrix")
-        source = self.as_array()
-        rows, columns = source.shape
+        rows, columns = self.rows, self.columns
         centre_x = (np.arange(columns) + 0.5) / columns * float(width)
         centre_y = (np.arange(rows) + 0.5) / rows * float(height)
         grid_x, grid_y = np.meshgrid(centre_x, centre_y)
@@ -116,17 +117,40 @@ class RegionWeightMap:
         with np.errstate(divide="ignore", invalid="ignore"):
             mapped_x = mapped[0] / mapped[2]
             mapped_y = mapped[1] / mapped[2]
-        inside = (
-            np.isfinite(mapped_x)
-            & np.isfinite(mapped_y)
-            & (mapped_x >= 0.0)
-            & (mapped_x < float(width))
-            & (mapped_y >= 0.0)
-            & (mapped_y < float(height))
+        values = self._read(mapped_x, mapped_y, height, width).reshape(rows, columns)
+        return RegionWeightMap(
+            path=self.path,
+            rows=rows,
+            columns=columns,
+            nodes=tuple(tuple(float(value) for value in row) for row in values),
+            zero_cells=int(np.count_nonzero(values <= 0.0)),
+            minimum_weight=float(values.min()),
+            mean_weight=float(values.mean()),
+            evidence={**dict(self.evidence), "frame": "registered"},
         )
-        # Fractional cell coordinates of the mapped centres in this map's grid.
-        fx = np.clip(mapped_x / float(width) * columns - 0.5, 0.0, columns - 1.0)
-        fy = np.clip(mapped_y / float(height) * rows - 0.5, 0.0, rows - 1.0)
+
+    def _read(
+        self, x: NDArray[np.float64], y: NDArray[np.float64], height: int, width: int
+    ) -> NDArray[np.float64]:
+        """The map at pixel positions of its own ``height`` x ``width``
+        frame: bilinear between cell centres, 0 where the nearest cell is
+        blanked, 1 outside the frame (no evidence there)."""
+
+        source = self.as_array()
+        rows, columns = source.shape
+        inside = (
+            np.isfinite(x)
+            & np.isfinite(y)
+            & (x >= 0.0)
+            & (x < float(width))
+            & (y >= 0.0)
+            & (y < float(height))
+        )
+        x = np.where(np.isfinite(x), x, 0.0)
+        y = np.where(np.isfinite(y), y, 0.0)
+        # Fractional cell coordinates of the positions in this map's grid.
+        fx = np.clip(x / float(width) * columns - 0.5, 0.0, columns - 1.0)
+        fy = np.clip(y / float(height) * rows - 0.5, 0.0, rows - 1.0)
         x0 = np.clip(np.floor(fx).astype(int), 0, columns - 2)
         y0 = np.clip(np.floor(fy).astype(int), 0, rows - 2)
         wx = fx - x0
@@ -145,17 +169,27 @@ class RegionWeightMap:
             np.clip(np.rint(fx).astype(int), 0, columns - 1),
         ]
         values = np.where(nearest <= 0.0, 0.0, values)
-        values = np.where(inside, values, 1.0).reshape(rows, columns)
-        values = np.clip(values, 0.0, 1.0)
-        return RegionWeightMap(
-            path=self.path,
-            rows=rows,
-            columns=columns,
-            nodes=tuple(tuple(float(value) for value in row) for row in values),
-            zero_cells=int(np.count_nonzero(values <= 0.0)),
-            minimum_weight=float(values.min()),
-            mean_weight=float(values.mean()),
-            evidence={**dict(self.evidence), "frame": "registered"},
+        return np.clip(np.where(inside, values, 1.0), 0.0, 1.0)
+
+    def on_window(
+        self, grid: Any, height: int, width: int
+    ) -> tuple[tuple[tuple[float, ...], ...], tuple[float, ...], tuple[float, ...]]:
+        """The map as a weight grid in the pixels of a mosaic panel's canvas
+        window (``grid``, an ``OutputGrid`` of a reference frame of
+        ``height`` x ``width``): read at the reference position of window
+        nodes about ``WINDOW_NODE_PIXELS`` apart.  Returns (nodes, x, y)."""
+
+        step = max(1, int(round(WINDOW_NODE_PIXELS / grid.spacing)))
+        lattice_rows, lattice_columns = grid.reference_x.shape
+        rows = sorted({*range(0, lattice_rows, step), lattice_rows - 1})
+        columns = sorted({*range(0, lattice_columns, step), lattice_columns - 1})
+        reference_x = np.asarray(grid.reference_x, dtype=np.float64)[np.ix_(rows, columns)]
+        reference_y = np.asarray(grid.reference_y, dtype=np.float64)[np.ix_(rows, columns)]
+        values = self._read(reference_x.ravel(), reference_y.ravel(), height, width).reshape(len(rows), len(columns))
+        return (
+            tuple(tuple(float(value) for value in row) for row in values),
+            tuple(float(column * grid.spacing) for column in columns),
+            tuple(float(row * grid.spacing) for row in rows),
         )
 
     def serializable(self) -> dict[str, Any]:

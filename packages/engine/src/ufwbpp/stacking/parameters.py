@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 import math
 from typing import Any, Mapping, Sequence
@@ -107,6 +107,61 @@ class PixelTransform:
 AffineTransform = PixelTransform
 
 
+SHIFT_FIELD_MAXIMUM_ORDER = 3
+
+
+@dataclass(frozen=True)
+class ShiftField:
+    """A smooth shift a Light keeps against the registration reference after
+    its registration matrix ``H``: the Light shows the sky point the
+    reference shows at reference pixel ``p`` at its own pixel
+    ``H^-1(p + shift(p))``.  A polynomial of total degree ``order`` in
+    ``(p - centre) / length``; ``order`` None is no field."""
+
+    order: int | None
+    coefficients_x: tuple[float, ...]
+    coefficients_y: tuple[float, ...]
+    centre: tuple[float, float]
+    length: float
+    evidence: dict[str, Any] = field(default_factory=dict)
+
+    @staticmethod
+    def design(u: NDArray[np.float64], v: NDArray[np.float64], order: int) -> NDArray[np.float64]:
+        """The terms ``u**p * v**q`` by total degree, then descending ``p``."""
+
+        return np.column_stack([u**p * v ** (total - p) for total in range(order + 1) for p in range(total, -1, -1)])
+
+    def shift(self, x: NDArray[np.float64], y: NDArray[np.float64]) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        x, y = np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
+        if self.order is None:
+            return np.zeros_like(x), np.zeros_like(y)
+        design = self.design(((x - self.centre[0]) / self.length).ravel(), ((y - self.centre[1]) / self.length).ravel(), self.order)
+        return (design @ np.asarray(self.coefficients_x)).reshape(x.shape), (design @ np.asarray(self.coefficients_y)).reshape(y.shape)
+
+    def validate(self) -> None:
+        if not isinstance(self.order, int) or isinstance(self.order, bool) or not 0 <= self.order <= SHIFT_FIELD_MAXIMUM_ORDER:
+            raise ValueError(f"a shift field's order must be 0 to {SHIFT_FIELD_MAXIMUM_ORDER}")
+        terms = (self.order + 1) * (self.order + 2) // 2
+        if len(self.coefficients_x) != terms or len(self.coefficients_y) != terms:
+            raise ValueError(f"an order-{self.order} shift field has {terms} coefficients per axis")
+        values = (*self.coefficients_x, *self.coefficients_y, *self.centre, self.length)
+        if len(self.centre) != 2 or not all(math.isfinite(float(value)) for value in values) or self.length <= 0:
+            raise ValueError("a shift field needs finite coefficients, a centre and a positive length")
+
+    def serializable(self) -> dict[str, Any]:
+        return {
+            "order": self.order,
+            "coefficientsX": [float(value) for value in self.coefficients_x],
+            "coefficientsY": [float(value) for value in self.coefficients_y],
+            "centre": [float(value) for value in self.centre],
+            "length": float(self.length),
+        }
+
+    @property
+    def digest(self) -> str:
+        return hashlib.sha256(canonical_json_document(self.serializable())).hexdigest()
+
+
 OUTPUT_GRID_ALGORITHM = "canvas-window-lattice-v1"
 
 
@@ -193,6 +248,14 @@ class OutputGrid:
         for nodes in (self.reference_x, self.reference_y):
             hasher.update(np.ascontiguousarray(nodes, dtype="<f8").tobytes())
         return hasher.hexdigest()
+
+    def shifted(self, by: ShiftField) -> OutputGrid:
+        """This lattice for a Light with its own shift field: the node at
+        reference pixel ``p`` samples the Light at ``H^-1(p + shift(p))``,
+        ``H`` its registration matrix (see :meth:`frame_lattice`)."""
+
+        dx, dy = by.shift(self.reference_x, self.reference_y)
+        return replace(self, reference_x=self.reference_x + dx, reference_y=self.reference_y + dy)
 
     def frame_lattice(self, transform: PixelTransform) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         """The input coordinates of a Light at the nodes: the inverse of its

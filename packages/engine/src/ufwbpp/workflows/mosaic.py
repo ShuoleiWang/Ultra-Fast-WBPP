@@ -1,7 +1,8 @@
 """The mosaic stages of a project run.
 
 Before the panels run, :func:`_plan_mosaic_canvas` solves one Light of every
-panel and plans the canvas they all share; every panel run then integrates
+panel, checks that the catalog holds enough stars in each panel to place it,
+and plans the canvas they all share; every panel run then integrates
 straight onto its window of that canvas (``E2ERequest.mosaic_canvas``).
 Afterwards :func:`_assemble_canvas_mosaics` matches and blends each filter's
 panel masters, which already share the canvas lattice, and verifies the
@@ -15,15 +16,18 @@ from pathlib import Path
 import tempfile
 from typing import Any, Callable, Mapping, Sequence
 
+from astropy.coordinates import angular_separation
 from astropy.io import fits
 import numpy as np
 
 from ..mosaic.assemble import CANVAS_MOSAIC_VERSION, MosaicGateError, assemble_filter
-from ..mosaic.canvas import CanvasError, CanvasPlan, PanelFootprint, plan_canvas
+from ..mosaic.astrometry import CatalogStarSource, MosaicAstrometryError, catalog_source_from_backends
+from ..mosaic.canvas import CanvasError, CanvasPlan, PanelFootprint, frame_boundary, panels_connected, plan_canvas
 from ..mosaic.photometry import PanelImage
 from ..platform import remove_tree
 from ..solvers.base import SolverBackend
-from .canvas import _light_header
+from .canvas import MINIMUM_REFERENCE_MATCHES, _light_header
+from .common import _write_json
 from .contracts import E2ERequest
 from .screening import _inferred_solver_hints
 from .solve import _read_image_header, _solve_one
@@ -33,11 +37,16 @@ from .solve import _read_image_header, _solve_one
 SURVEY_CANDIDATES = 3
 # A canvas larger than this is refused before any panel runs.
 MAXIMUM_CANVAS_PIXELS = 1 << 30
+DENSER_CATALOG_COMMAND = (
+    "ultra-fast-wbpp catalog install astrometry-net-5205-lite --accept-provider-terms astrometry-net-index-data-2026-09"
+)
 
 
 class MosaicStageError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
+        # The canvas survey so far, for the failure receipt of a refused plan.
+        self.survey: list[dict[str, Any]] | None = None
         super().__init__(f"{code}: {message}")
 
 
@@ -96,6 +105,54 @@ def _survey_panel(
     return None, {"panel": key, "attempts": attempts}
 
 
+def _catalog_stars_in_frame(footprint: PanelFootprint, catalog: CatalogStarSource) -> tuple[int, str]:
+    """The catalog stars inside a panel's solved frame, and the catalog's identity."""
+
+    wcs = footprint.wcs()
+    corners = frame_boundary(footprint.shape, 1)
+    ra, dec = wcs.all_pix2world(corners[:, 0], corners[:, 1], 0)
+    centre = footprint.centre()
+    radius = float(np.degrees(np.max(angular_separation(np.radians(ra), np.radians(dec), *np.radians(centre)))))
+    found = catalog.stars(centre[0], centre[1], 1.05 * radius)
+    x, y = wcs.all_world2pix(np.asarray(found.ra_degrees), np.asarray(found.dec_degrees), 0, quiet=True)
+    height, width = footprint.shape
+    inside = np.isfinite(x) & np.isfinite(y) & (x >= -0.5) & (x <= width - 0.5) & (y >= -0.5) & (y <= height - 0.5)
+    return int(inside.sum()), found.identity
+
+
+def _check_catalog_density(
+    footprints: Sequence[PanelFootprint], request: E2ERequest, backends: Sequence[SolverBackend], records: Sequence[dict[str, Any]]
+) -> None:
+    """A panel is placed on its catalog stars: refuse a mosaic before any
+    panel runs without a managed catalog, or when it holds fewer stars in a
+    panel's frame than the placement needs (a long focal length on the
+    Tycho-2 set)."""
+
+    catalog = catalog_source_from_backends(backends)
+    if catalog is None:
+        raise MosaicStageError(
+            "MOSAIC_CATALOG_UNAVAILABLE", "a mosaic needs the managed star catalog to place its panels"
+        )
+    needed = max(request.min_matches, MINIMUM_REFERENCE_MATCHES)
+    sparse = []
+    for footprint, record in zip(footprints, records):
+        try:
+            count, record["catalogIdentity"] = _catalog_stars_in_frame(footprint, catalog)
+        except MosaicAstrometryError as error:
+            if error.code != "MOSAIC_CATALOG_FIELD_UNCOVERED":
+                raise MosaicStageError(error.code, str(error).removeprefix(f"{error.code}: ")) from error
+            count = 0
+        record["catalogStarsInFrame"] = count
+        if count < needed:
+            sparse.append(f"{footprint.key} ({count})")
+    if sparse:
+        raise MosaicStageError(
+            "MOSAIC_CATALOG_TOO_SPARSE",
+            f"the installed catalog holds fewer than {needed} stars in the frame of panel {', '.join(sparse)}, "
+            f"too few to place it on the mosaic; install a denser catalog: {DENSER_CATALOG_COMMAND}",
+        )
+
+
 def _plan_mosaic_canvas(
     panels: Sequence[tuple[str, Sequence[str]]],
     request: E2ERequest,
@@ -105,9 +162,9 @@ def _plan_mosaic_canvas(
     """Plan the canvas from one solved Light of every panel."""
 
     work = Path(tempfile.mkdtemp(prefix="survey-", dir=work_root))
+    records: list[dict[str, Any]] = []
     try:
         footprints: list[PanelFootprint] = []
-        records = []
         for key, light_files in panels:
             footprint, record = _survey_panel(key, light_files, request, backends, work)
             records.append(record)
@@ -117,10 +174,14 @@ def _plan_mosaic_canvas(
                     f"no Light of panel {key} solved; its place on the mosaic canvas is unknown",
                 )
             footprints.append(footprint)
+        _check_catalog_density(footprints, request, backends, records)
         try:
             plan = plan_canvas(footprints)
         except CanvasError as error:
             raise MosaicStageError(error.code, str(error)) from error
+    except MosaicStageError as error:
+        error.survey = records
+        raise
     finally:
         remove_tree(work)
     if plan.width * plan.height > MAXIMUM_CANVAS_PIXELS:
@@ -128,31 +189,12 @@ def _plan_mosaic_canvas(
             "MOSAIC_CANVAS_TOO_LARGE",
             f"the panels span a {plan.width}x{plan.height} canvas; at most {MAXIMUM_CANVAS_PIXELS} pixels are supported",
         )
-    boxes = {panel["key"]: panel["canvasBox"] for panel in plan.panels}
-    if not _boxes_connected(boxes):
+    if not panels_connected({panel["key"]: np.asarray(panel["canvasPolygon"], dtype=np.float64) for panel in plan.panels}):
         raise MosaicStageError(
             "MOSAIC_PANELS_DISCONNECTED",
             "the panels do not overlap into one mosaic (separate targets belong in separate projects)",
         )
     return plan, {"schemaVersion": 1, "canvas": plan.serializable(), "survey": records}
-
-
-def _boxes_connected(boxes: Mapping[str, Sequence[float]]) -> bool:
-    keys = sorted(boxes)
-    if len(keys) <= 1:
-        return True
-    linked = {keys[0]}
-    frontier = [keys[0]]
-    while frontier:
-        current = boxes[frontier.pop()]
-        for key in keys:
-            if key in linked:
-                continue
-            other = boxes[key]
-            if min(current[2], other[2]) > max(current[0], other[0]) and min(current[3], other[3]) > max(current[1], other[1]):
-                linked.add(key)
-                frontier.append(key)
-    return len(linked) == len(keys)
 
 
 def _panel_product(panel: str, filter_name: str, master: Path, token: str) -> PanelImage:
@@ -192,33 +234,78 @@ def _assemble_canvas_mosaics(
     progress: Callable[[int, int, str], None] | None = None,
 ) -> tuple[dict[str, Path], dict[str, dict[str, Any] | None], dict[str, dict[str, Any]], dict[str, Any]]:
     """Every filter's mosaic on one canvas box (the union of all windows);
-    ``panels_by_filter`` maps a filter key to its name and panel masters."""
+    ``panels_by_filter`` maps a filter key to its name and panel masters.
+    Every filter is assembled before a failure is raised, so the receipt
+    holds the gates of all of them.  A filter whose panels fall into
+    several photometric components publishes its largest as the mosaic and
+    the others under ``<filter>/component<k>/`` with their receipts; the
+    summary lists them under ``photometricComponents``."""
 
     boxes = [panel.box for _, panels in panels_by_filter.values() for panel in panels]
     canvas_box = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
     paths: dict[str, Path] = {}
     qualities: dict[str, dict[str, Any] | None] = {}
     receipts: dict[str, dict[str, Any]] = {}
+    components: dict[str, list[dict[str, Any]]] = {}
+    failures: dict[str, MosaicGateError] = {}
     total = len(panels_by_filter)
     for position, (filter_key, (filter_name, panels)) in enumerate(sorted(panels_by_filter.items()), start=1):
         directory = output_root / filter_key
         directory.mkdir(parents=True)
-        result = assemble_filter(
-            filter_name,
-            panels,
-            projection=plan.projection,
-            canvas_box=canvas_box,
-            output_directory=directory,
-            verifier=verifier,
-            minimum_matches=minimum_matches,
-            maximum_rms_arcsec=maximum_rms_arcsec,
-        )
+        try:
+            result = assemble_filter(
+                filter_name,
+                panels,
+                projection=plan.projection,
+                canvas_box=canvas_box,
+                output_directory=directory,
+                verifier=verifier,
+                minimum_matches=minimum_matches,
+                maximum_rms_arcsec=maximum_rms_arcsec,
+            )
+        except MosaicGateError as error:
+            failures[filter_key] = error
+            if progress is not None:
+                progress(position, total, f"{filter_name}: mosaic failed its gates")
+            continue
         paths[filter_key] = result.science_path
         qualities[filter_key] = result.quality
         receipts[filter_key] = result.receipt
+        for component in result.components:
+            _write_json(component.science_path.parent / "receipt.json", component.receipt)
+            components.setdefault(filter_key, []).append(
+                {
+                    "component": component.receipt["component"],
+                    "panels": [panel["key"] for panel in component.receipt["panels"]],
+                    "verdict": component.receipt["verdict"],
+                    "gates": component.receipt["gates"],
+                    "directory": component.science_path.parent.relative_to(output_root).as_posix(),
+                    "science": component.science_path.name,
+                    "sha256": component.receipt["blend"]["sha256"]["science"],
+                }
+            )
         if progress is not None:
-            progress(position, total, f"{filter_name}: mosaic assembled and verified")
-    return paths, qualities, receipts, {"canvasBox": list(canvas_box), "version": CANVAS_MOSAIC_VERSION}
+            progress(
+                position,
+                total,
+                f"{filter_name}: mosaic assembled and verified"
+                + (f" ({len(result.components) + 1} photometric components)" if result.components else ""),
+            )
+    if failures:
+        codes = {error.code for error in failures.values()}
+        raise MosaicGateError(
+            codes.pop() if len(codes) == 1 else "MOSAIC_GATE_FAILED",
+            "; ".join(str(error).removeprefix(f"{error.code}: ") for error in failures.values()),
+            {
+                "filters": {key: {"code": error.code, **error.receipt} for key, error in failures.items()},
+                "passedFilters": receipts,
+            },
+        )
+    return paths, qualities, receipts, {
+        "canvasBox": list(canvas_box),
+        "version": CANVAS_MOSAIC_VERSION,
+        "photometricComponents": components,
+    }
 
 
 __all__ = ["MAXIMUM_CANVAS_PIXELS", "MosaicGateError", "MosaicStageError"]

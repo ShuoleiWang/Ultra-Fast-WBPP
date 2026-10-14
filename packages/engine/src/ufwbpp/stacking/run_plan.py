@@ -40,7 +40,7 @@ from ..calibration.pairing import dark_group_warnings, light_group_warnings, pai
 from ..calibration.policy import MONO_STANDARD, apply_mono_workflow, cfa_for_workflow
 from .integration import CalibrationError, FrameInfo, PixelStatistics
 from .normalization import StellarScaleHint
-from .parameters import PipelineParameters, PixelTransform
+from .parameters import PipelineParameters, PixelTransform, ShiftField
 from .records import (
     _artifact_record,
     _canonical_inputs,
@@ -200,6 +200,45 @@ def _resolve_region_weight_maps(
                 path=str(path),
             )
         result[bound] = region_map
+    return result
+
+
+def _resolve_frame_fields(
+    light_paths: tuple[Path, ...],
+    fields: Mapping[str, ShiftField] | None,
+    parameters: PipelineParameters,
+) -> dict[Path, ShiftField]:
+    """Bind optional per-Light shift fields to admitted Lights (unknown keys fail)."""
+
+    if not fields:
+        return {}
+    if parameters.output_grid is None:
+        raise CalibrationError("FRAME_FIELDS_UNSUPPORTED", "per-Light shift fields need a mosaic panel's canvas window")
+    canonical = {os.path.normcase(str(path)): path for path in light_paths}
+    result: dict[Path, ShiftField] = {}
+    for key, item in fields.items():
+        try:
+            path = Path(key).expanduser().resolve(strict=True)
+        except (OSError, TypeError) as error:
+            raise CalibrationError(
+                "FRAME_FIELD_INPUT_UNKNOWN", "a shift field does not bind an existing Light", path=str(key)
+            ) from error
+        bound = canonical.get(os.path.normcase(str(path)))
+        if bound is None:
+            raise CalibrationError(
+                "FRAME_FIELD_INPUT_UNKNOWN", "a shift field does not bind an integration Light", path=str(path)
+            )
+        if bound in result:
+            raise CalibrationError(
+                "FRAME_FIELD_KEY_CONFLICT", "multiple shift field keys bind the same Light", path=str(path)
+            )
+        if not isinstance(item, ShiftField):
+            raise CalibrationError("FRAME_FIELD_INVALID", "shift fields must be ShiftField values", path=str(path))
+        try:
+            item.validate()
+        except ValueError as error:
+            raise CalibrationError("FRAME_FIELD_INVALID", str(error), path=str(path)) from error
+        result[bound] = item
     return result
 
 
@@ -373,6 +412,7 @@ class _RunPlan:
     transforms: dict[Path, PixelTransform]
     quality_weights: dict[Path, float]
     region_weight_maps: dict[Path, Any]
+    frame_fields: dict[Path, ShiftField]
     stellar_scale_hints: dict[Path, StellarScaleHint | None]
     source_records: list[dict[str, Any]]
     source_identities: dict[str, dict[str, int]]
@@ -436,6 +476,7 @@ def _plan_run(
     quality_weights: Mapping[str, float] | None,
     stellar_scale_hints: Mapping[str, StellarScaleHint] | None,
     region_weight_maps: Mapping[str, Any] | None,
+    frame_fields: Mapping[str, ShiftField] | None,
     parameters: PipelineParameters,
     source_aliases: Mapping[str, Path] | None,
     trusted_generated_calibration: TrustedGeneratedCalibrationSet | None,
@@ -594,13 +635,7 @@ def _plan_run(
     resolved_transforms = _resolve_transforms(lights, transforms)
     resolved_quality_weights = _resolve_quality_weights(lights, quality_weights)
     resolved_region_weight_maps = _resolve_region_weight_maps(lights, region_weight_maps)
-    if resolved_region_weight_maps and parameters.output_grid is not None:
-        # Region maps are node grids in the reference frame's normalized
-        # coordinates; a canvas window is not that frame.
-        raise CalibrationError(
-            "MOSAIC_REGION_WEIGHTS_UNSUPPORTED",
-            "selection region weight maps are not supported on a mosaic canvas window yet",
-        )
+    resolved_frame_fields = _resolve_frame_fields(lights, frame_fields, parameters)
     resolved_stellar_scale_hints = _resolve_stellar_scale_hints(
         lights, light_info, stellar_scale_hints, aliases, identity_cache
     )
@@ -649,6 +684,7 @@ def _plan_run(
         transforms=resolved_transforms,
         quality_weights=resolved_quality_weights,
         region_weight_maps=resolved_region_weight_maps,
+        frame_fields=resolved_frame_fields,
         stellar_scale_hints=resolved_stellar_scale_hints,
         source_records=source_records,
         source_identities=source_identities,

@@ -323,6 +323,8 @@ const EN = {
   stageFailed: "failed",
   astrometryFailedHint:
     "Plate solving did not verify a WCS for every channel. The integrated masters are discarded when solving fails: check the solver setup (solve-field with its helper tools, or ASTAP with its star database, and the offline catalog), then run again.",
+  mosaicCatalogHint:
+    "The installed catalog holds too few stars in a mosaic panel to place it. The Gaia DR2 tiles (astrometry-net-5205-lite) are dense enough; the app cannot install them yet, so install them from the command line as the offline catalog guide describes, then run again.",
   unsolvedEvidenceHint: "The receipts, QC previews and coverage maps of this attempt are kept for diagnosis at",
   runDescription:
     "Only a solved, receipt-verified result can become complete. Cancellation and failures never publish a partial success.",
@@ -996,6 +998,8 @@ const ZH: Record<MessageKey, string> = {
   stageFailed: "失败",
   astrometryFailedHint:
     "板解算未能为每个通道验证 WCS。解算失败时不会保留积分后的 master：请检查解算器配置（solve-field 及其辅助工具，或 ASTAP 及其星表数据库，以及离线星表），然后重新运行。",
+  mosaicCatalogHint:
+    "已安装的星表在某块马赛克面板里星数太少，无法定位这块面板。Gaia DR2 分块星表（astrometry-net-5205-lite）足够密；应用内暂时无法安装，请按离线星表指南用命令行安装后重新运行。",
   unsolvedEvidenceHint: "本次尝试的收据、QC 预览与覆盖图保留在：",
   runDescription: "只有解算并通过收据校验的结果才会完成；取消或失败不会发布半套成功。",
   cancel: "安全取消",

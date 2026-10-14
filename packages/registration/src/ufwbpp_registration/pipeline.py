@@ -400,6 +400,10 @@ class FrameTransform:
     full_refine_inliers: int = 0
     full_refine_seconds: float = 0.0
     full_refine_evidence: Mapping[str, object] = field(default_factory=dict)
+    # The inlier centroids of an accepted full-resolution refinement, as
+    # (source, reference) full-resolution pixel positions: what a caller
+    # fits a residual distortion field on.
+    full_refine_pairs: tuple[Float64Array, Float64Array] | None = None
     warp_seconds: float = 0.0
     warp_pearson: float | None = None
     warp_valid_fraction: float | None = None
@@ -1327,6 +1331,7 @@ def _refine_full_resolution(
         full_refine_inliers=inlier_count,
         full_refine_seconds=time.perf_counter() - started,
         full_refine_evidence=gate_evidence,
+        full_refine_pairs=(selected_source, selected_reference),
     )
 
 

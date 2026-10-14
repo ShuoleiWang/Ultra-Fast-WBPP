@@ -35,7 +35,7 @@ from .integration import (
     _validate_expression_shapes,
 )
 from .masters import _CalibrationMasters
-from .parameters import OUTPUT_STATE, OutputGrid, PipelineParameters, PixelTransform
+from .parameters import OUTPUT_STATE, OutputGrid, PipelineParameters, PixelTransform, ShiftField
 from .records import _safe_token
 from .run_plan import _RunLedger, _RunPlan, _StagingDirs
 from .warp import (
@@ -73,6 +73,9 @@ class _LightJob:
     transform: PixelTransform
     info: FrameInfo
     source_exposure_seconds: float | None
+    # On a canvas window: the Light's own residual shift against the
+    # registration reference, which its lattice is shifted by.
+    shift_field: ShiftField | None = None
     # Master dark whose hot-pixel map drives the cosmetic correction, and the
     # detection threshold; ``None`` leaves the calibrated pixels untouched.
     hot_pixel_master: str | None = None
@@ -306,6 +309,8 @@ def _process_light_job(
         output_width
         * _registration_bytes_per_pixel(job.transform, resampler, calibrated.shape, grid),
     )
+    # On a canvas window the Light is resampled through its own lattice.
+    light_grid = grid.shifted(job.shift_field) if grid is not None and job.shift_field is not None else grid
     registered: list[_RegisteredOutput] = []
     for destination in job.destinations:
         if destination.channel is None:
@@ -333,7 +338,7 @@ def _process_light_job(
             native_threads=native_threads,
             execution=execution,
             durable=durable,
-            grid=grid,
+            grid=light_grid,
         )
         registered.append(
             _RegisteredOutput(
@@ -634,6 +639,7 @@ def _plan_light_jobs(
                 ),
                 hot_pixel_sigma=parameters.cosmetic_hot_pixel_sigma,
                 cfa_pattern=cfa_pattern,
+                shift_field=plan.frame_fields.get(path),
             )
         )
     return light_jobs, calibrated_details
@@ -719,6 +725,17 @@ def _calibrate_and_register_lights(
             "transformInputToOutput": transform.serializable(),
             "identity": transform.is_identity and parameters.output_grid is None,
             **resampling,
+            **(
+                {
+                    "shiftField": {
+                        "order": job.shift_field.order,
+                        "maxShiftPixels": job.shift_field.evidence.get("maxShiftPixels"),
+                        "sha256": job.shift_field.digest,
+                    }
+                }
+                if job.shift_field is not None
+                else {}
+            ),
             "qualityWeight": plan.quality_weights[path],
             "calibration": {
                 "materialized": job.calibrated_path is not None,

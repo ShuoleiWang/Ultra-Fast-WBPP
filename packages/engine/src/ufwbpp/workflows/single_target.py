@@ -23,7 +23,7 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
-from typing import Any, Mapping, Sequence
+from typing import Any, Generator, Mapping, Sequence
 
 from lightframeqc.metadata import grouping_keyword_root
 from lightframeqc.parallel import FrameRunner
@@ -31,11 +31,13 @@ from lightframeqc.parallel import FrameRunner
 from ..blink.session import BlinkEvidence
 from ..calibration.policy import workflow_receipt
 from ..integrity import canonical_json_document
+from ..mosaic.astrometry import PanelStars, SipFit
 from ..mosaic.canvas import CanvasProjection
 from ..path_budget import STAGING_SUFFIX, WORK_DIRECTORY
 from ..platform import remove_tree
 from ..products.preview import render_auto_stretch_preview
 from ..solvers.base import SolverBackend, WcsValidation
+from ..stacking.parameters import ShiftField
 from ..stacking.integration import CalibrationError
 from ..stacking.proper_coaddition import PROPER_COADD_ALGORITHM_ID
 from .common import (
@@ -57,7 +59,13 @@ from .contracts import (
     ProgressStage,
     ReviewApproval,
 )
-from .canvas import _catalog_verifier, _place_on_canvas, _verify_canvas_candidates
+from .canvas import (
+    _catalog_verifier,
+    _measure_reference,
+    _place_on_canvas,
+    _solve_placements,
+    _verify_canvas_candidates,
+)
 from .integration import _integrate_admitted_lights
 from .products import _drizzle_candidates, _ordinary_candidates, _promote_proper_coadds, _solve_candidates
 from .registration import _build_registration_masters, _register_lights
@@ -315,7 +323,30 @@ def run_e2e(
     ``solver_backends`` is an ordered fallback chain.  Each backend result must
     pass :func:`validate_solver_result`, execution-receipt verification, and an
     independent validation of the WCS actually written to ``output_path``.
+    A mosaic panel run alone is placed by its own catalog stars.
     """
+
+    stages = run_e2e_stages(request, solver_backends=solver_backends, progress=progress)
+    try:
+        stars = next(stages)
+        (placement,) = _solve_placements({"panel": stars}, max_rms_arcsec=request.max_rms_arcsec).values()
+        stages.send(placement)
+    except StopIteration as stop:
+        return stop.value
+    finally:
+        stages.close()
+    raise E2EError("RUN_STAGES_INVALID", "a run pauses only once, to be placed on the mosaic canvas")
+
+
+def run_e2e_stages(
+    request: E2ERequest,
+    *,
+    solver_backends: Sequence[SolverBackend],
+    progress: ProgressCallback | None = None,
+) -> Generator[PanelStars, tuple[SipFit, Mapping[str, Any]], E2EResult]:
+    """:func:`run_e2e` as a generator: a mosaic panel run yields its measured
+    reference stars and resumes with its solution and the record of the fit
+    of all panels; any other run returns at once."""
 
     _validate_request(request)
     if request.pipeline_parameters.grouping_keyword_root is None:
@@ -486,10 +517,12 @@ def run_e2e(
         # The share of a canvas window no Light can cover (its corners when
         # the panel is rotated against the canvas) is not a coverage defect.
         uncovered_window = 0.0
+        frame_fields: Mapping[str, ShiftField] = {}
         if request.mosaic_canvas is not None:
-            # A mosaic panel: its Lights go straight onto its canvas window.
-            _emit(progress, ProgressStage.ASTROMETRY, "progress", "placing the panel on the mosaic canvas")
-            placement = _place_on_canvas(
+            # A mosaic panel: its Lights go straight onto its canvas window,
+            # where the solution fitted on all panels at once places them.
+            _emit(progress, ProgressStage.ASTROMETRY, "progress", "measuring the panel's reference stars")
+            measured = _measure_reference(
                 request,
                 registration,
                 calibration.plan,
@@ -497,10 +530,17 @@ def run_e2e(
                 backends=solver_backends,
                 hints=screening.solver_hints,
             )
+            # A paused panel keeps only what placement and integration read:
+            # the registration's previews of every Light are dropped.
+            registration = replace(registration, run=None)
+            solution, joint = yield measured.stars
+            _emit(progress, ProgressStage.ASTROMETRY, "progress", "placing the panel on the mosaic canvas")
+            placement = _place_on_canvas(request, registration, measured, solution, joint)
             request = replace(
                 request,
                 pipeline_parameters=replace(request.pipeline_parameters, output_grid=placement.grid),
             )
+            frame_fields = placement.frame_fields
             canvas_receipt = "receipts/canvas.json"
             _write_json(staging / canvas_receipt, placement.record)
             uncovered_window = 1.0 - placement.footprint_fill
@@ -525,6 +565,7 @@ def run_e2e(
             work=work,
             receipts_dir=receipts_dir,
             progress=progress,
+            frame_fields=frame_fields,
         )
 
         if drizzle_mode:
@@ -761,7 +802,8 @@ def run_e2e(
             passed_light_paths=tuple(str(path) for path in screening.passed),
             excluded_light_paths=tuple(str(path) for path in screening.excluded),
         )
-    except Exception:
+    except (Exception, GeneratorExit):
+        # Also when a paused mosaic panel run is closed (another panel failed).
         if not published:
             remove_tree(staging)
         try:
@@ -792,4 +834,5 @@ __all__ = [
     "bind_review_approval_selections",
     "parse_explicit_selection",
     "run_e2e",
+    "run_e2e_stages",
 ]

@@ -22,7 +22,7 @@ from .integration import CalibrationError, FrameExpression, IntegrationMapPaths
 from .lights import _RegisteredLights
 from .metal_integration import MetalIntegrationError, NativeMetalExecutor, integrate_registered_group
 from .normalization import StellarScaleHint, fit_registered_group_global_normalization
-from .parameters import OUTPUT_STATE, PipelineParameters
+from .parameters import OUTPUT_STATE, OutputGrid, PipelineParameters
 from .proper_coaddition import PROPER_COADD_ALGORITHM_ID, proper_coadd_group
 from .records import _integration_record, _safe_token
 from .run_plan import _RunLedger, _RunPlan, _StagingDirs
@@ -275,9 +275,11 @@ def _public_normalization_evidence(
 
 
 def _with_region_weights(
-    plan: _RunPlan, paths: Sequence[Path], expressions: list[FrameExpression]
+    plan: _RunPlan, paths: Sequence[Path], expressions: list[FrameExpression], grid: OutputGrid | None = None
 ) -> tuple[list[FrameExpression], list[dict[str, Any]]]:
-    """Attach each Light's selection region weight map to its expression."""
+    """Attach each Light's selection region weight map to its expression,
+    as a grid in the integration's pixels: the reference frame's, or a
+    mosaic panel's canvas window (``grid``)."""
 
     attached: list[FrameExpression] = []
     mapped: list[dict[str, Any]] = []
@@ -287,11 +289,15 @@ def _with_region_weights(
             attached.append(expression)
             continue
         height, width = plan.light_info[path].shape
-        x_nodes, y_nodes = region_map.pixel_nodes(height, width)
+        if grid is None:
+            nodes = region_map.nodes
+            x_nodes, y_nodes = region_map.pixel_nodes(height, width)
+        else:
+            nodes, x_nodes, y_nodes = region_map.on_window(grid, height, width)
         attached.append(
             replace(
                 expression,
-                weight_grid=tuple(tuple(float(value) for value in row) for row in region_map.nodes),
+                weight_grid=tuple(tuple(float(value) for value in row) for row in nodes),
                 weight_grid_x=tuple(float(value) for value in x_nodes),
                 weight_grid_y=tuple(float(value) for value in y_nodes),
             )
@@ -419,7 +425,7 @@ def _integrate_group(
     timing["normalization"] = time.perf_counter() - group_started
     region_mapped_lights: list[dict[str, Any]] = []
     if plan.region_weight_maps:
-        expressions, region_mapped_lights = _with_region_weights(plan, paths, expressions)
+        expressions, region_mapped_lights = _with_region_weights(plan, paths, expressions, parameters.output_grid)
     integration_started = time.perf_counter()
     proper = parameters.proper_coaddition
     reuse_rejection = proper.enabled and proper.outlier_handling == "reuse-rejection"
