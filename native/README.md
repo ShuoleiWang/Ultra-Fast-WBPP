@@ -45,7 +45,11 @@ the row-pooled MAD and per-frame noise factors of the rejection scale model,
 and reproduces v1 exactly when neither is requested),
 `ufwbpp_native_cpu_masked_mean_v1`/`_v2` (v2 applies per-sample region weight
 maps), `ufwbpp_native_cpu_tile_offsets_v1`, `ufwbpp_native_cpu_radon_peaks_v1`
-(the transient-trail line search), `ufwbpp_native_cpu_drizzle_v1`,
+(the transient-trail line search), `ufwbpp_native_cpu_drizzle_v1` and
+`_v2` (v2 adds an optional forward lattice: the registration matrix leads
+into the reference, and a bilinear node lattice of output coordinates leads
+on to a mosaic's canvas window; kernel id `native-cpu-drizzle-v2-lattice`, an
+optional symbol that older libraries lack),
 `ufwbpp_native_cpu_debayer_bilinear_v1`, `ufwbpp_native_cpu_add_offset_grid_v1`
 (the bilinear normalization offset grid added to integration rows; kernel id
 `native-cpu-offset-grid-v1`) and `ufwbpp_native_lanczos3_table_v1` (the

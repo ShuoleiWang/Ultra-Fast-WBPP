@@ -64,6 +64,7 @@ def _drizzle_candidates(
             kernel=options.kernel,
             cfa_pattern=group.cfa_pattern,
             channel=group.channel,
+            output_grid=group.output_grid,
             metadata={**dict(group.metadata), "OAFCROP": "NONE"},
             max_accumulator_bytes=options.max_working_set_bytes,
             threads=threads,

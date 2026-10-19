@@ -177,7 +177,9 @@ def test_shift_fields_bind_only_the_admitted_lights_of_a_canvas_panel(tmp_path: 
         "same-light-twice": ({str(light): field, os.path.join(tmp_path, ".", "light.fits"): field}, "FRAME_FIELD_KEY_CONFLICT"),
         "invalid-field": ({str(light): ShiftField(5, (), (), (10.0, 10.0), 10.0)}, "FRAME_FIELD_INVALID"),
     }[case]
-    parameters = SimpleNamespace(output_grid=None if case == "no-canvas" else object())
+    parameters = SimpleNamespace(
+        output_grid=None if case == "no-canvas" else object(), channel_grids=(), capture_drizzle_inputs=False
+    )
     with pytest.raises(CalibrationError) as error:
         _resolve_frame_fields((light.resolve(),), fields, parameters)
     assert error.value.code == code

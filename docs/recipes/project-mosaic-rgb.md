@@ -4,7 +4,7 @@ Use this recipe when a project covers more sky than one frame: panels named by N
 
 > **Pre-1.0 boundary:** canvas mosaics are validated on two real M31 projects and on synthetic data.
 > - **Real:** a 2×2 M31 mosaic (QHY268M on a 12-inch f/4 Newtonian, mono L/R/G/B, 286 Lights over seven nights, 276 admitted by default) publishes with the Tycho-2 set alone (B PASS, L/R/G WARN on their diagonal corner overlaps, canvas WCS 0.54–1.59″, overlaps within 0.022 FWHM) and with the Gaia tiles (Astrometry.net 5205; overlaps within 0.021 FWHM). A five-panel M31 mosaic (479 Lights; one panel on four cloudy nights and both sides of the pier) publishes with the Gaia tiles, every overlap within 0.039 FWHM.
-> - **Synthetic only:** one-shot-colour (Bayer) mosaics and photometric components, run through the real pipeline or the assembly.
+> - **Synthetic only:** drizzle onto the canvas, one-shot-colour (Bayer) mosaics and photometric components, run through the real pipeline or the assembly.
 >
 > The design and its open phases are in [mosaic-plan.md](../mosaic-plan.md) (Chinese).
 
@@ -30,7 +30,8 @@ ultra-fast-wbpp run-project \
    - Each Light is resampled through the window's lattice shifted by its own residual distortion, fitted on the stars of its registration. The filter's lateral colour, a meridian flip and another night's optics each leave a smooth shift that the Light's registration matrix cannot absorb; a panel that stacked them unshifted would put a star where none of its Lights does. A Light whose stars do not cover the frame (a passing cloud) keeps only the part of its field those stars determine.
    - A Gaia-density catalog tightens every panel's fit: the Gaia DR2 tiles `astrometry-net-5205-lite`, installed from the command line beside the Tycho-2 set (see [offline solver catalogs](offline-solver-catalogs.md); the desktop app cannot install them yet). With them each M31 panel fits on about 180 stars at 0.11–0.13″. The Tycho-2 set holds about 46 stars per square degree, about 40 in each 1.1° M31 panel: enough for the joint fit, not for a longer focal length. A mosaic whose catalog holds fewer than 30 stars in a panel's frame is refused while the canvas is planned, before any panel runs (`MOSAIC_CATALOG_TOO_SPARSE`, naming the install command with its terms acceptance; the survey's counts per panel are in the failure receipt), and so is a mosaic without a managed catalog (`MOSAIC_CATALOG_UNAVAILABLE`).
    - Every Light is then resampled once, from its calibrated pixels straight onto its panel's window of the canvas. The window is an integer offset of the canvas lattice, so no master is ever resampled again and every filter of every panel shares one pixel grid.
-   - A panel master's WCS is the canvas window. It is verified against catalog stars, not solved blind.
+   - With drizzle (`integrationMode: drizzle`, scale 1×–4×, see the [drizzle recipe](drizzle.md)) every Light is dropped instead, through the same geometry (its registration matrix, then the window's forward lattice, or the lattice of its filter's lateral colour), onto its window of a canvas the drizzle scale times finer. The drizzle uses exactly what the panel's ordinary integration used: its normalization, weights and per-sample rejection, read at the window position. Bayer panels Bayer-drizzle. The panel masters keep their `WHT` and `COVERAGE` extensions, and the mosaics and the colour cube are assembled at the drizzle scale.
+   - A panel master's WCS is the canvas window (drizzled: the window that many times finer). It is verified against catalog stars, not solved blind.
 4. **Matching.** For each filter, the panels are matched in their overlaps.
    - **Gain.** Each panel's gain comes from the stars both panels measured. Each panel's aperture follows its own seeing (2.5 FWHM), each star's background is the median of its own annulus, and a robust flux-flux fit absorbs the additive part. The fit is made in up to six bins along each overlap, and all overlaps are solved at once instead of panel by panel.
    - **Components.** Overlaps with at least 8 common stars and a positive flux-flux slope link the panels into a graph. When it falls into several connected components, each component is matched, blended and gated on its own with its own gauge: the largest is the filter's mosaic on the whole canvas box, the others are written as components on their own bounding box (an integer window of the same canvas, see the published directory), and the filter is WARN (`MOSAIC_PHOTOMETRIC_COMPONENTS`). A FAIL in any component fails the filter, after every component was gated. A bright galaxy across a starless overlap does not link it: a regression of its bins panel on panel is biased by any difference in sky gradient along the galaxy's flank.
@@ -71,15 +72,14 @@ M31-mosaic/
   LRGB.fits                        # linear colour cube (RGB.fits without L)
   previews/
   receipt.json
-  details/                         # shared-calibration/, runs/<panel>/, mosaics/<filter>/, color/
+  details/                         # shared-calibration/, runs/<panel>/, mosaics/<filter>/, color/,
 ```
 
 `details/mosaics/<filter>/receipt.json` records every panel's scale (with its error relative to the reference), gain gradient and quadratic, every overlap's star count, ratio and astrometric offset, the overlaps without a scale and why, the background residuals (NOT_MEASURED with the reason where an overlap has too few bins), the extended-structure scale checks, flux conservation, the blend statistics and each window's catalog verification. A filter with several photometric components lists them under `components` and keeps each one in `details/mosaics/<filter>/component<k>/` as `mosaic_<F>_component<k>.fits` (with its NOISE, COVERAGE and MASK planes) and its own `receipt.json`; the project receipt lists them under `execution.mosaics.canvas.photometricComponents`. `details/runs/<panel>/receipts/canvas.json` records the panel's reference solution; its solution from the joint fit (order, matched stars, residuals at the edges and in the middle, overlap stars, and its own catalog-only fit under `ownFit`); the whole joint fit under `jointFit`; the residual shift fields of its Lights per filter under `frameFields` (each Light's own under `shiftField` in the pixel pipeline receipt); and its canvas window. The project receipt holds the joint fit under `execution.canvas.astrometry`.
 
 ## Not available yet
 
-- Drizzle onto the canvas.
-- Proper coaddition on canvas windows; it is refused. Selection region weight maps work on canvas windows: a partly clouded Light keeps its clean part.
+- Proper coaddition on canvas windows, and selection region weight maps together with drizzle onto the canvas; these combinations are refused. Without drizzle, region weight maps work on canvas windows: a partly clouded Light keeps its clean part.
 - A panel with fewer than 30 catalog stars in its frame, placed by its overlaps alone; such a mosaic is refused before any panel runs.
 
 A Bayer (one-shot-colour) Light set is one target's R, G and B panels: the pixel pipeline debayers each Light into the three channel groups (see [OSC / CFA](osc-cfa.md)); Bayer-as-mono processing never happens, and a Bayer set cannot share a target with mono R/G/B Lights.

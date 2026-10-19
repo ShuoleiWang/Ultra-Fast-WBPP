@@ -3,21 +3,25 @@
 The optics image B with more barrel distortion than L (a corrector's
 lateral colour).  A B Light's homography to the panel's reference absorbs
 the linear part only; each panel must resample every B Light by its own
-shift field, or the two panels place the same B star differently in their
-overlap.
+shift field (or drizzle B onto a lattice with B's shift field), or the two
+panels place the same B star differently in their overlap.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import math
 from pathlib import Path
 
 from astropy.io import fits
 import numpy as np
+import pytest
 
 from mosaic_synthetic import TruthSolver, calibration_header, light_header, make_sky, render, true_header, write_uint16
 from ufwbpp.inventory import inventory_project
+from ufwbpp.native_kernels import load_native_kernels
+from ufwbpp.workflows.contracts import DrizzleOptions, IntegrationMode
 from ufwbpp.workflows.project import ProjectE2ERequest, run_project_e2e
 from ufwbpp.workflows.single_target import E2ERequest
 
@@ -78,32 +82,57 @@ def _project(root: Path) -> tuple[E2ERequest, TruthSolver]:
     return request, TruthSolver(sky, scale_arcsec=SCALE)
 
 
-def test_each_light_is_resampled_with_its_own_lateral_colour(tmp_path: Path) -> None:
+@pytest.mark.parametrize("scale", [1, 2], ids=["integrated", "drizzled-2x"])
+def test_each_filter_is_resampled_with_its_own_lateral_colour(tmp_path: Path, scale: int) -> None:
     request, solver = _project(tmp_path / "input")
+    if scale > 1:
+        if not getattr(load_native_kernels(), "has_lattice_drizzle", False):
+            pytest.skip("the native lattice drizzle is not installed")
+        request = replace(request, integration_mode=IntegrationMode.DRIZZLE, drizzle=DrizzleOptions(scale=scale, pixfrac=0.8))
     inventory = inventory_project([tmp_path / "input"])
     result = run_project_e2e(ProjectE2ERequest(inventory, request, request.output_directory), solver_backends=(solver,))
     assert result.success is True, result
     output = Path(result.output_directory)
     for run in (output / "details" / "runs").iterdir():
         canvas = json.loads((run / "receipts" / "canvas.json").read_text(encoding="utf-8"))
-        # Every Light of the filter that is not the reference's carries its own shift field.
-        fields = canvas["frameFields"]["filters"]
-        pipeline = json.loads((run / "receipts" / "pixel-pipeline.json").read_text(encoding="utf-8"))
-        shifted = sum("shiftField" in item for item in pipeline["registration"].values())
-        assert shifted == sum(item["applied"] for item in fields.values()), (shifted, fields)
-        filter_name, record = max(fields.items(), key=lambda item: item[1].get("maxShiftPixels", {}).get("median", 0.0))
-        assert record["applied"] == record["lights"] >= 7, record
-        assert record["maxShiftPixels"]["median"] > 0.15 and record["rmsAfterPixels"] < 0.6 * record["rmsBeforePixels"], record
+        if scale > 1:
+            lateral = canvas["lateralColour"]
+            # The filter that is not the reference's carries its own shift field.
+            assert len(lateral) == 1, lateral
+            (filter_name, record), = lateral.items()
+            assert record["applied"] is True and record["matches"] >= 50, record
+            assert record["maxShiftPixels"] > 0.15 and record["rmsAfterPixels"] < 0.6 * record["rmsBeforePixels"], record
+            lattice = record["sha256"]
+        else:
+            # Every Light of the filter that is not the reference's carries its own shift field.
+            assert "lateralColour" not in canvas
+            fields = canvas["frameFields"]["filters"]
+            pipeline = json.loads((run / "receipts" / "pixel-pipeline.json").read_text(encoding="utf-8"))
+            shifted = sum("shiftField" in item for item in pipeline["registration"].values())
+            assert shifted == sum(item["applied"] for item in fields.values()), (shifted, fields)
+            filter_name, record = max(fields.items(), key=lambda item: item[1].get("maxShiftPixels", {}).get("median", 0.0))
+            assert record["applied"] == record["lights"] >= 7, record
+            assert record["maxShiftPixels"]["median"] > 0.15 and record["rmsAfterPixels"] < 0.6 * record["rmsBeforePixels"], record
+            lattice = canvas["window"]["sha256"]
         master = next(path for path in (run / "products").rglob("master_light_*_wcs.fits") if fits.getheader(path)["FILTER"] == filter_name)
-        assert fits.getheader(master)["OAFGRID"] == canvas["window"]["sha256"][:32]
-    # In both mosaics every star sits where the true sky puts it.
+        header = fits.getheader(master)
+        assert header["OAFGRID"] == lattice[:32]
+        assert header.get("OAFDRZSC", 1) == scale
+        if scale > 1:
+            # The filter drizzled through its own lattice's forward map.
+            drizzle = json.loads((run / "receipts" / f"drizzle_{filter_name}.json").read_text(encoding="utf-8"))
+            assert drizzle["backend"]["id"] == "native-cpu-drizzle-v2-lattice"
+            assert drizzle["geometry"]["canvasWindow"]["sha256"] == record["sha256"]
+            assert drizzle["geometry"]["canvasWindow"]["sha256"] != canvas["window"]["sha256"]
+    # In both mosaics every star sits where the true sky puts it (a
+    # drizzled pixel is 1/scale of a canvas pixel).
     for name in ("L", "B"):
         path = output / f"{name}.fits"
         header = fits.getheader(path)
         verification = solver.canvas_verifier(fits.getdata(path).astype(np.float32), dict(header), tmp_path)
         assert verification["matchedStars"] >= 60, (name, verification)
-        assert verification["offsetMedianPixels"] < 0.05, (name, verification)
-        assert verification["offsetP90Pixels"] < 0.15, (name, verification)
+        assert verification["offsetMedianPixels"] < 0.05 * scale, (name, verification)
+        assert verification["offsetP90Pixels"] < 0.15 * scale, (name, verification)
     receipt = json.loads((output / "receipt.json").read_text(encoding="utf-8"))
     for key, value in receipt["execution"]["mosaics"].items():
         if isinstance(value, dict) and value.get("mode") == "CANVAS_MOSAIC":

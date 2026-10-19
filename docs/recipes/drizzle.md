@@ -32,6 +32,8 @@ Each filter's drizzled master is one multi-extension FITS: `SCI` (the weighted m
 
 Sampling (QC FWHM), dither and coverage evidence is recorded as **advisory** (`coverageGate.advisory`, `sampling`): a well-sampled field or a small dither set is reported, not blocked, because the drizzle reuses a rejection that was already validated on the reference grid and its result is still a valid integration.
 
+In a mosaic project every panel drizzles straight onto its window of the shared canvas, through its registration matrix and the window's forward lattice, and the mosaics are assembled at the drizzle scale ([mosaics](project-mosaic-rgb.md)).
+
 The drizzled masters of one run share their grid by construction (`scale` times the reference grid). As for ordinary masters, every filter is solved on its own, the independent solutions verify the shared grid at solver precision (tolerances are expressed in native pixels and scaled by `scale`) and the lowest-RMS solution is written to every master, so the channels combine without resampling.
 
 ## Performance and quality (NGC 7331, 61 × 26 MP Lights, L 26 / R 11 / G 11 / B 13, M3 Pro)

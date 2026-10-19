@@ -1114,6 +1114,7 @@ def solve_mosaic(panels: Mapping[str, PanelStars]) -> tuple[dict[str, SipFit], d
     return solutions, record
 
 
+LATERAL_COLOUR_ALGORITHM = "registration-residual-lateral-colour-v1"
 FRAME_FIELD_ALGORITHM = "registration-residual-frame-field-v1"
 # A shift field is fitted on at least this many star pairs.
 _FIELD_MINIMUM_MATCHES = 50
@@ -1121,6 +1122,17 @@ _FIELD_MINIMUM_MATCHES = 50
 # error of its predicted shift stays within this at every node where the
 # field is applied (a cloud can leave a corner without stars).
 _FIELD_MAXIMUM_STANDARD_ERROR_PIXELS = 0.1
+_LATERAL_MATCH_RADIUS_PIXELS = 1.5
+
+
+def frame_stars(image: NDArray[np.float32]) -> NDArray[np.float64]:
+    """Zero-based windowed centroids of a frame's isolated stars."""
+
+    from ..solvers.catalog_correspondence import CorrespondenceParameters, detect_field_stars
+
+    image = np.asarray(image, dtype=np.float32)
+    detected, fwhm, _ = detect_field_stars(image, CorrespondenceParameters(maximum_stars=4000))
+    return _isolated_windowed_centroids(image, np.asarray(detected, dtype=np.float64) - 1.0, float(np.median(fwhm)) if len(fwhm) else 3.0)
 
 
 def fit_shift_field(
@@ -1128,6 +1140,8 @@ def fit_shift_field(
     shifts: NDArray[np.float64],
     shape: tuple[int, int],
     nodes: NDArray[np.float64],
+    *,
+    algorithm: str = FRAME_FIELD_ALGORITHM,
 ) -> ShiftField:
     """The shift field ``shifts`` measured at reference pixels ``points`` of
     a ``shape`` frame and applied at reference pixels ``nodes``: polynomial
@@ -1136,7 +1150,7 @@ def fit_shift_field(
 
     height, width = shape
     centre, length = ((width - 1) / 2.0, (height - 1) / 2.0), max(width, height) / 2.0
-    evidence: dict[str, Any] = {"algorithm": FRAME_FIELD_ALGORITHM, "matches": int(len(points))}
+    evidence: dict[str, Any] = {"algorithm": algorithm, "matches": int(len(points))}
     if len(points) < _FIELD_MINIMUM_MATCHES:
         return ShiftField(None, (), (), centre, length, {**evidence, "applied": False})
     u, v = (points[:, 0] - centre[0]) / length, (points[:, 1] - centre[1]) / length
@@ -1192,6 +1206,27 @@ def _mapped(transform: NDArray[np.float64], points: NDArray[np.float64]) -> NDAr
     return mapped[:, :2] / mapped[:, 2:3]
 
 
+def measure_lateral_colour(
+    reference_stars: NDArray[np.float64],
+    image: NDArray[np.float32],
+    transform: NDArray[np.float64],
+    shape: tuple[int, int],
+) -> ShiftField:
+    """The shift field of ``image`` (a Light of another filter, registered to
+    the reference by ``transform``, a 3x3 frame-to-reference matrix) against
+    the reference's ``reference_stars``: its filter's lateral colour."""
+
+    from ..solvers.catalog_correspondence import match_mutual_nearest
+
+    mapped = _mapped(transform, frame_stars(image))
+    rows, reference_rows, _ = match_mutual_nearest(mapped, reference_stars, _LATERAL_MATCH_RADIUS_PIXELS)
+    points = reference_stars[reference_rows]
+    # One lattice per filter holds over the whole reference frame.
+    height, width = shape
+    grid = np.stack(np.meshgrid(np.linspace(0, width - 1, 17), np.linspace(0, height - 1, 13)), axis=-1).reshape(-1, 2)
+    return fit_shift_field(points, mapped[rows] - points, shape, grid, algorithm=LATERAL_COLOUR_ALGORITHM)
+
+
 def measure_frame_field(
     pairs: tuple[NDArray[np.float64], NDArray[np.float64]],
     transform: NDArray[np.float64],
@@ -1211,6 +1246,7 @@ def measure_frame_field(
 __all__ = [
     "FRAME_FIELD_ALGORITHM",
     "JOINT_FIT_ALGORITHM",
+    "LATERAL_COLOUR_ALGORITHM",
     "CatalogStarSource",
     "CatalogStars",
     "ManagedCatalogStars",
@@ -1221,7 +1257,9 @@ __all__ = [
     "catalog_source_from_backends",
     "fit_shift_field",
     "fit_tan_sip",
+    "frame_stars",
     "measure_frame_field",
+    "measure_lateral_colour",
     "measure_panel",
     "refine_solution",
     "solve_mosaic",

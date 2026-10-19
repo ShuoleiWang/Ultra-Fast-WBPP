@@ -10,7 +10,11 @@ pixel's registered position, exactly as PixInsight's DrizzleIntegration reads
 the ImageIntegration rejection maps.  Kernels: square (exact quadrilateral
 overlap), circular (exact disc overlap), gaussian and point.  A CFA pattern
 turns the run into a Bayer drizzle whose three colour planes are dropped from
-the mosaic's own pixels.
+the mosaic's own pixels.  On a mosaic panel the output grid is the panel's
+canvas window (``DrizzleGroupRequest.output_grid``): the registration
+matrix leads into the reference frame and the window's forward lattice
+leads on to the canvas, where the masks, normalization and weights are
+read at the window position.
 
 The output is one multi-extension FITS (``SCI`` primary, ``WHT`` weights,
 ``COVERAGE`` contributing frame counts) followed by a JSON receipt; both are
@@ -27,7 +31,7 @@ import math
 import os
 from pathlib import Path
 import time
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from astropy.io import fits
 import numpy as np
@@ -38,11 +42,15 @@ from ..integrity import canonical_json
 from ..native_kernels import (
     DRIZZLE_KERNEL_ID,
     DRIZZLE_KERNELS,
+    LATTICE_DRIZZLE_KERNEL_ID,
     default_kernel_threads,
     load_native_kernels,
 )
 from ..platform import remove_file
 from .integration import CalibrationError, FitsFrame
+
+if TYPE_CHECKING:
+    from .parameters import OutputGrid
 
 DRIZZLE_ALGORITHM = "native-drizzle-weighted-mean-v1"
 SUPPORTED_SCALES = (1, 2, 3, 4)
@@ -99,6 +107,9 @@ class DrizzleGroupInputs:
     # mosaics and only the pixels of ``channel`` (0 R, 1 G, 2 B) are dropped.
     cfa_pattern: str | None = None
     channel: int | None = None
+    # A mosaic panel's lattice on its canvas window (``reference_shape`` is
+    # the window's shape): the frames drop through its forward lattice.
+    output_grid: OutputGrid | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +130,10 @@ class DrizzleGroupRequest:
     max_accumulator_bytes: int = DEFAULT_ACCUMULATOR_BYTES
     threads: int | None = None
     durable: bool = True
+    # A mosaic panel's lattice on its canvas window, whose shape
+    # ``reference_shape`` is: every frame is dropped through the lattice's
+    # forward map instead of straight through its registration matrix.
+    output_grid: OutputGrid | None = None
 
     def validate(self) -> None:
         if not self.frames:
@@ -136,6 +151,12 @@ class DrizzleGroupRequest:
         height, width = self.reference_shape
         if height < 1 or width < 1:
             raise DrizzleError("DRIZZLE_GEOMETRY_INVALID", "reference shape must be positive")
+        if self.output_grid is not None and (
+            not self.output_grid.has_forward_lattice or tuple(self.output_grid.shape) != (height, width)
+        ):
+            raise DrizzleError(
+                "DRIZZLE_GEOMETRY_INVALID", "a canvas window needs its forward lattice and must be the reference shape"
+            )
         if self.max_accumulator_bytes < 16 * width * self.scale:
             raise DrizzleError("DRIZZLE_MEMORY_BUDGET_TOO_SMALL", "one output row exceeds the accumulator budget")
         for index, frame in enumerate(self.frames):
@@ -223,6 +244,8 @@ def drizzle_group(request: DrizzleGroupRequest) -> DrizzleGroupResult:
     kernels = load_native_kernels()
     if kernels is None or not hasattr(kernels, "drizzle_band"):
         raise DrizzleError("DRIZZLE_KERNEL_UNAVAILABLE", "the native drizzle kernel library is not loaded")
+    if request.output_grid is not None and not getattr(kernels, "has_lattice_drizzle", False):
+        raise DrizzleError("DRIZZLE_KERNEL_UNAVAILABLE", "the native library cannot drizzle onto a canvas window")
     output_path = Path(request.output_path).expanduser().resolve(strict=False)
     receipt_path = Path(request.receipt_path).expanduser().resolve(strict=False)
     for path in (output_path, receipt_path):
@@ -240,6 +263,19 @@ def drizzle_group(request: DrizzleGroupRequest) -> DrizzleGroupResult:
     bytes_per_row = output_width * 16 * channels
     band_rows = max(1, min(output_height, int(request.max_accumulator_bytes // bytes_per_row)))
     scale_matrix = np.diag([float(scale), float(scale), 1.0])
+    # On a canvas window the registration matrix leads into the reference,
+    # and the window's forward lattice, at the output scale, leads on.
+    grid = request.output_grid
+    lattice: dict[str, Any] = (
+        {
+            "lattice_u": float(scale) * np.asarray(grid.forward_x, dtype=np.float64),
+            "lattice_v": float(scale) * np.asarray(grid.forward_y, dtype=np.float64),
+            "lattice_origin": tuple(float(value) for value in grid.forward_origin),
+            "lattice_spacing": float(grid.spacing),
+        }
+        if grid is not None
+        else {}
+    )
 
     science = np.full((channels, output_height, output_width), np.nan, dtype=np.float32)
     weight_map = np.zeros((channels, output_height, output_width), dtype=np.float32)
@@ -262,13 +298,17 @@ def drizzle_group(request: DrizzleGroupRequest) -> DrizzleGroupResult:
     sources: list[FitsFrame] = []
     reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ufwbpp-drizzle-read")
     try:
+        # Without a canvas window the output is the reference frame itself;
+        # on a window the frames share one shape of their own.
+        frame_shape = (height, width) if grid is None else None
         for frame in request.frames:
             opened = FitsFrame(frame.calibrated_path).__enter__()
             sources.append(opened)
-            if opened.shape != (height, width):
+            frame_shape = frame_shape or opened.shape
+            if opened.shape != frame_shape:
                 raise DrizzleError(
                     "DRIZZLE_GEOMETRY_INVALID",
-                    f"calibrated frame shape {opened.shape} differs from the reference {request.reference_shape}",
+                    f"calibrated frame shape {opened.shape} differs from {frame_shape}",
                     path=frame.calibrated_path,
                 )
         active = [
@@ -294,7 +334,11 @@ def drizzle_group(request: DrizzleGroupRequest) -> DrizzleGroupResult:
                     if index + 1 < len(active)
                     else None
                 )
-                forward = scale_matrix @ np.asarray(frame.input_to_reference, dtype=np.float64)
+                forward = (
+                    np.asarray(frame.input_to_reference, dtype=np.float64)
+                    if grid is not None
+                    else scale_matrix @ np.asarray(frame.input_to_reference, dtype=np.float64)
+                )
                 touched.fill(0)
                 for channel in range(channels):
                     kernels.drizzle_band(
@@ -325,6 +369,7 @@ def drizzle_group(request: DrizzleGroupRequest) -> DrizzleGroupResult:
                         frame_weight=frame.weight,
                         threads=threads,
                         output_touched=touched,
+                        **lattice,
                     )
                 band_coverage += touched
                 frame_timing.append(time.perf_counter() - frame_started)
@@ -385,7 +430,11 @@ def drizzle_group(request: DrizzleGroupRequest) -> DrizzleGroupResult:
             "stage": "drizzle",
             "status": "succeeded",
             "algorithm": DRIZZLE_ALGORITHM,
-            "backend": {"id": DRIZZLE_KERNEL_ID, "device": "CPU", "threads": threads},
+            "backend": {
+                "id": LATTICE_DRIZZLE_KERNEL_ID if grid is not None else DRIZZLE_KERNEL_ID,
+                "device": "CPU",
+                "threads": threads,
+            },
             "recipe": {
                 "scale": scale,
                 "pixfrac": float(request.pixfrac),
@@ -400,7 +449,12 @@ def drizzle_group(request: DrizzleGroupRequest) -> DrizzleGroupResult:
                 "outputHeight": output_height,
                 "outputWidth": output_width,
                 "channels": channels,
-                "outputPixelCentre": "output index = scale * reference index",
+                "outputPixelCentre": (
+                    "output index = scale * canvas window index"
+                    if grid is not None
+                    else "output index = scale * reference index"
+                ),
+                **({"canvasWindow": grid.serializable()} if grid is not None else {}),
             },
             "inputs": [
                 {

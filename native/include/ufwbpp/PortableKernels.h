@@ -272,8 +272,27 @@ struct DrizzleRequest
    std::uint32_t sourceRows = 0;
    std::uint32_t sourceRow0 = 0;
    // Row-major 3x3 homogeneous map from input pixel-centre coordinates to
-   // output pixel-centre coordinates (registration matrix times the scale).
+   // output pixel-centre coordinates (registration matrix times the scale),
+   // or, with a lattice, to the lattice's domain.
    double forward[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+   // Optional forward lattice (a mosaic canvas, whose map is not a
+   // homography): `forward` maps input pixel centres to the domain
+   // (registration-reference coordinates) and the lattice maps those to
+   // output pixel centres.  Node (column, row), row-major, holds the output
+   // coordinates of domain point (latticeX0 + column*latticeSpacing,
+   // latticeY0 + row*latticeSpacing).  A point uses the cell
+   //   cellX = clamp(floor((x - latticeX0)/latticeSpacing), 0, columns - 2)
+   // (likewise cellY), fx = (x - latticeX0)/latticeSpacing - cellX, and
+   //   top = n00 + fx*(n10 - n00), bottom = n01 + fx*(n11 - n01),
+   //   value = top + fy*(bottom - top),
+   // so points beyond the lattice extrapolate its edge cell.
+   std::span<const double> latticeU;
+   std::span<const double> latticeV;
+   double latticeX0 = 0.0;
+   double latticeY0 = 0.0;
+   double latticeSpacing = 0.0;
+   std::uint32_t latticeColumns = 0;
+   std::uint32_t latticeRows = 0;
    std::uint32_t scale = 1;      // output pixels per reference pixel
    double pixfrac = 1.0;         // drop shrink in (0, 1]
    DrizzleKernel kernel = DrizzleKernel::Square;
@@ -320,6 +339,7 @@ struct DrizzleRequest
    std::span<std::uint8_t> outputTouched;
    std::uint32_t threads = 1;
 
+   bool HasLattice() const { return !latticeU.empty(); }
    void Validate() const;
 };
 
@@ -374,7 +394,8 @@ void AddOffsetGrid( const OffsetGridRequest& request );
 // Drizzles one frame band onto one output band.  Output rows are split
 // across threads and every thread visits the input pixels whose drops can
 // touch its rows in row-major order, so the accumulators never depend on
-// the thread count.  Drop areas are exact for the square kernel (polygon
+// the thread count (with a lattice, the rows and column runs a thread
+// visits come from every source row's mapped rows sampled each 8 pixels).  Drop areas are exact for the square kernel (polygon
 // clipping) and the circular kernel (disc-rectangle area), Gaussian weights
 // are normalized per drop, and the point kernel adds the whole weight to
 // the pixel that holds the mapped centre.

@@ -520,6 +520,23 @@ typedef struct UfwbppNativeDrizzleRequestV1
    uint8_t* output_touched;
 } UfwbppNativeDrizzleRequestV1;
 
+// v2 adds the forward lattice of a mosaic canvas (see PortableKernels.h
+// DrizzleRequest): `v1.forward` then maps input pixel centres to the
+// lattice's domain.  `v1.struct_size` is sizeof(UfwbppNativeDrizzleRequestV2);
+// lattice_node_count 0 drizzles without a lattice, as v1 does.
+typedef struct UfwbppNativeDrizzleRequestV2
+{
+   UfwbppNativeDrizzleRequestV1 v1;
+   double lattice_x0;
+   double lattice_y0;
+   double lattice_spacing;
+   uint32_t lattice_columns;
+   uint32_t lattice_rows;
+   const double* lattice_u;
+   const double* lattice_v;
+   size_t lattice_node_count;
+} UfwbppNativeDrizzleRequestV2;
+
 typedef struct UfwbppNativeDebayerRequestV1
 {
    uint32_t struct_size;
@@ -582,6 +599,12 @@ UFWBPP_NATIVE_API int ufwbpp_native_cpu_add_offset_grid_v1(
 // DrizzleBand).
 UFWBPP_NATIVE_API int ufwbpp_native_cpu_drizzle_v1(
    const UfwbppNativeDrizzleRequestV1* request,
+   char* error_message,
+   size_t error_message_capacity );
+
+// v1 plus an optional forward lattice (mosaic canvases).
+UFWBPP_NATIVE_API int ufwbpp_native_cpu_drizzle_v2(
+   const UfwbppNativeDrizzleRequestV2* request,
    char* error_message,
    size_t error_message_capacity );
 

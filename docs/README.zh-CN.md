@@ -106,6 +106,7 @@ flowchart LR
 每个版本的安装包都附在 [Releases 页面](https://github.com/ShuoleiWang/Ultra-Fast-WBPP/releases)，同一次工作流运行还会附上 `SHA256SUMS-<target>` 校验文件和安装包验证清单。这些是未签名的 alpha 构建，安装前请先核对校验和。
 
 - **Windows 10 / 11 x64。** `Ultra-Fast-WBPP_<版本>_x64-setup.exe` 按用户安装到 `%LOCALAPPDATA%`，不需要管理员权限（通常选这个）；`Ultra-Fast-WBPP_<版本>_x64_en-US.msi` 按机器安装到 Program Files。因为没有 Authenticode 签名，SmartScreen 会提示"Windows 已保护你的电脑 → 更多信息 → 仍要运行"，MSI 会显示未知发布者的 UAC 提示。缺少 WebView2 时会静默安装；不需要 Visual C++ 运行库（[Windows](windows.md)）。
+- **拼接画布 Drizzle。** 面板可按 1×–4× 直接投放到共享画布。带畸变的单色、滤镜色差和 Bayer 路径已有合成流水线测试；尚未重新验证真实原始数据到已解算拼接成品的完整 Drizzle 流程。见[配方](recipes/project-mosaic-rgb.md)。
 - **macOS（Apple Silicon）。** `Ultra-Fast-WBPP_<版本>_aarch64.dmg`，ad-hoc 签名、未公证：首次打开请右键 → 打开，或在"系统设置 → 隐私与安全性"中选择"仍要打开"。
 - **然后配置天文解算器**（安装包不含）：Windows 上装 ASTAP 和星表数据库，macOS 上装 Astrometry.net 的 `solve-field`，再在应用的解算器面板下载托管索引集（约 350 MB），最后点**重新检测配置**。详见[状态与要求](#状态与要求)。
 

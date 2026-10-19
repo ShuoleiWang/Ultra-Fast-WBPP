@@ -243,6 +243,7 @@ def _process_light_job(
     division_floor: float,
     durable: bool = True,
     grid: OutputGrid | None = None,
+    group_grids: Mapping[str, OutputGrid | None] | None = None,
 ) -> _LightJobResult:
     expression = _canonical_expression(job.expression)
     sources: dict[str, Any] = {}
@@ -309,8 +310,6 @@ def _process_light_job(
         output_width
         * _registration_bytes_per_pixel(job.transform, resampler, calibrated.shape, grid),
     )
-    # On a canvas window the Light is resampled through its own lattice.
-    light_grid = grid.shifted(job.shift_field) if grid is not None and job.shift_field is not None else grid
     registered: list[_RegisteredOutput] = []
     for destination in job.destinations:
         if destination.channel is None:
@@ -338,7 +337,7 @@ def _process_light_job(
             native_threads=native_threads,
             execution=execution,
             durable=durable,
-            grid=light_grid,
+            grid=_destination_grid(job, destination, grid, group_grids),
         )
         registered.append(
             _RegisteredOutput(
@@ -357,6 +356,21 @@ def _process_light_job(
         cosmetic=cosmetic,
         debayer=debayer,
     )
+
+
+def _destination_grid(
+    job: _LightJob,
+    destination: _ChannelDestination,
+    grid: OutputGrid | None,
+    group_grids: Mapping[str, OutputGrid | None] | None,
+) -> OutputGrid | None:
+    """The lattice a Light's destination is resampled onto: its filter's own
+    (lateral colour) or the window's, shifted by the Light's own field."""
+
+    destination_grid = group_grids.get(destination.group, grid) if group_grids else grid
+    if destination_grid is not None and job.shift_field is not None:
+        return destination_grid.shifted(job.shift_field)
+    return destination_grid
 
 
 def _fused_job_bytes(job: _LightJob, resampler: str, grid: OutputGrid | None = None) -> int:
@@ -393,6 +407,7 @@ def _calibrate_and_register_frames(
     durable: bool = True,
     kernel_threads: int | None = None,
     grid: OutputGrid | None = None,
+    group_grids: Mapping[str, OutputGrid | None] | None = None,
 ) -> tuple[tuple[_LightJobResult, ...], dict[str, Any]]:
     """Calibrate and register every Light with one shared memory budget.
 
@@ -431,6 +446,7 @@ def _calibrate_and_register_frames(
             division_floor=division_floor,
             durable=durable,
             grid=grid,
+            group_grids=group_grids,
         )
 
     if workers == 1:
@@ -678,6 +694,11 @@ def _calibrate_and_register_lights(
         division_floor=parameters.integration.division_floor,
         durable=parameters.durable_intermediates,
         grid=parameters.output_grid,
+        group_grids=(
+            {group: parameters.grid_for(plan.group_filter[group], plan.group_channel[group]) for group in plan.group_filter}
+            if parameters.channel_grids
+            else None
+        ),
     )
     wall_seconds = time.perf_counter() - started
     del master_cache

@@ -98,6 +98,11 @@ class PanelImage:
     exposure_seconds: float | None = None
     coverage_path: Path | None = None
     count_path: Path | None = None
+    # The HDU of count_path holding the per-pixel sample counts.  A
+    # drizzled master carries them in its own COVERAGE extension and has no
+    # coverage plane: it is valid wherever a drop landed (its science plane
+    # is NaN elsewhere), and the blend weights every pixel by its depth.
+    count_hdu: int | str = 0
 
     @property
     def box(self) -> tuple[int, int, int, int]:
@@ -106,13 +111,20 @@ class PanelImage:
         return self.origin[0], self.origin[1], self.origin[0] + self.shape[1], self.origin[1] + self.shape[0]
 
     def _read(
-        self, path: Path, x0: int, y0: int, x1: int, y1: int, opened: Mapping[Path, Any] | None = None
+        self,
+        path: Path,
+        x0: int,
+        y0: int,
+        x1: int,
+        y1: int,
+        opened: Mapping[Path, Any] | None = None,
+        hdu: int | str = 0,
     ) -> NDArray[np.float32]:
         bx0, by0, _, _ = self.box
         if opened is not None and path in opened:
-            return np.array(opened[path][0].data[y0 - by0 : y1 - by0, x0 - bx0 : x1 - bx0], dtype=np.float32)
+            return np.array(opened[path][hdu].data[y0 - by0 : y1 - by0, x0 - bx0 : x1 - bx0], dtype=np.float32)
         with fits.open(path, mode="readonly", memmap=True) as hdul:
-            return np.array(hdul[0].data[y0 - by0 : y1 - by0, x0 - bx0 : x1 - bx0], dtype=np.float32)
+            return np.array(hdul[hdu].data[y0 - by0 : y1 - by0, x0 - bx0 : x1 - bx0], dtype=np.float32)
 
     def read(
         self, x0: int, y0: int, x1: int, y1: int, *, opened: Mapping[Path, Any] | None = None
@@ -132,7 +144,7 @@ class PanelImage:
     ) -> NDArray[np.float32] | None:
         if self.count_path is None:
             return None
-        return self._read(self.count_path, x0, y0, x1, y1, opened)
+        return self._read(self.count_path, x0, y0, x1, y1, opened, self.count_hdu)
 
     @property
     def planes(self) -> tuple[Path, ...]:

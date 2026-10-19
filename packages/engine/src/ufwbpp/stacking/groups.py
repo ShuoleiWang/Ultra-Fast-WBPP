@@ -423,14 +423,27 @@ def _integrate_group(
         rejection_count=dirs.work / f"rejection_count_{token}.fits",
     )
     timing["normalization"] = time.perf_counter() - group_started
+    # The integration's grid: the Lights' reference frame, or, for a mosaic
+    # panel, the group's lattice on the canvas window.
+    output_grid = parameters.grid_for(source_filter, cfa_channel) if parameters.output_grid is not None else None
     region_mapped_lights: list[dict[str, Any]] = []
     if plan.region_weight_maps:
-        expressions, region_mapped_lights = _with_region_weights(plan, paths, expressions, parameters.output_grid)
+        expressions, region_mapped_lights = _with_region_weights(plan, paths, expressions, output_grid)
     integration_started = time.perf_counter()
     proper = parameters.proper_coaddition
     reuse_rejection = proper.enabled and proper.outlier_handling == "reuse-rejection"
+    integration_shape = output_grid.shape if output_grid is not None else plan.light_info[paths[0]].shape
+    canvas_cards = (
+        {
+            "OAFGRID": output_grid.digest[:32],
+            "OAFGRIDX": parameters.output_grid.canvas_origin[0],
+            "OAFGRIDY": parameters.output_grid.canvas_origin[1],
+        }
+        if output_grid is not None
+        else {}
+    )
     mask_recorder = (
-        _RejectionMaskRecorder(len(paths), plan.light_info[paths[0]].shape)
+        _RejectionMaskRecorder(len(paths), integration_shape)
         if parameters.capture_drizzle_inputs or reuse_rejection
         else None
     )
@@ -499,7 +512,8 @@ def _integrate_group(
                     paths, expressions, integration.weights, mask_recorder.bits, strict=True,
                 )
             ),
-            reference_shape=plan.light_info[paths[0]].shape,
+            reference_shape=integration_shape,
+            output_grid=output_grid,
             metadata={
                 "IMAGETYP": "Master Light",
                 "FILTER": group_name,
@@ -508,6 +522,7 @@ def _integrate_group(
                 "OAFSTATE": OUTPUT_STATE,
                 "OAFWCS": "UNSOLVED",
                 "OAFNORM": normalization_method,
+                **canvas_cards,
                 **group_cfa_metadata,
                 **domain_metadata,
             },
@@ -545,18 +560,10 @@ def _integrate_group(
             "OAFINTTM": total_exposure,
             "OAFSTATE": OUTPUT_STATE,
             "OAFWCS": "UNSOLVED",
-            "OAFCROP": "AUTO" if parameters.auto_crop and parameters.output_grid is None else "NONE",
+            "OAFCROP": "AUTO" if parameters.auto_crop and output_grid is None else "NONE",
             "OAFNFRM": len(paths),
             "OAFNORM": normalization_method,
-            **(
-                {
-                    "OAFGRID": parameters.output_grid.digest[:32],
-                    "OAFGRIDX": parameters.output_grid.canvas_origin[0],
-                    "OAFGRIDY": parameters.output_grid.canvas_origin[1],
-                }
-                if parameters.output_grid is not None
-                else {}
-            ),
+            **canvas_cards,
             **group_cfa_metadata,
             **domain_metadata,
         },

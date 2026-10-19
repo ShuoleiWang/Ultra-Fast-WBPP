@@ -33,6 +33,7 @@ from ..calibration.policy import workflow_receipt
 from ..integrity import canonical_json_document
 from ..mosaic.astrometry import PanelStars, SipFit
 from ..mosaic.canvas import CanvasProjection
+from ..native_kernels import load_native_kernels
 from ..path_budget import STAGING_SUFFIX, WORK_DIRECTORY
 from ..platform import remove_tree
 from ..products.preview import render_auto_stretch_preview
@@ -119,8 +120,15 @@ def _validate_request(request: E2ERequest) -> None:
     if request.mosaic_canvas is not None:
         if not isinstance(request.mosaic_canvas, CanvasProjection):
             raise E2EError("MOSAIC_CANVAS_INVALID", "mosaic_canvas must be a CanvasProjection")
-        if request.integration_mode is not IntegrationMode.ORDINARY:
-            raise E2EError("MOSAIC_DRIZZLE_UNSUPPORTED", "drizzle onto a mosaic canvas is not supported yet")
+        if request.integration_mode is IntegrationMode.DRIZZLE and not getattr(
+            load_native_kernels(request.pipeline_parameters.native_library_path), "has_lattice_drizzle", False
+        ):
+            # Refused before any Light is read: the drizzle would fail after
+            # the whole integration otherwise.
+            raise E2EError(
+                "MOSAIC_DRIZZLE_UNSUPPORTED",
+                "drizzle onto a mosaic canvas needs the native lattice drizzle kernel (ufwbpp_native_cpu_drizzle_v2)",
+            )
         if request.pipeline_parameters.proper_coaddition.enabled:
             raise E2EError(
                 "MOSAIC_PROPER_COADDITION_UNSUPPORTED", "proper coaddition of mosaic panels is not supported yet"
@@ -535,10 +543,12 @@ def run_e2e_stages(
             registration = replace(registration, run=None)
             solution, joint = yield measured.stars
             _emit(progress, ProgressStage.ASTROMETRY, "progress", "placing the panel on the mosaic canvas")
-            placement = _place_on_canvas(request, registration, measured, solution, joint)
+            placement = _place_on_canvas(request, registration, calibration.plan, measured, solution, joint)
             request = replace(
                 request,
-                pipeline_parameters=replace(request.pipeline_parameters, output_grid=placement.grid),
+                pipeline_parameters=replace(
+                    request.pipeline_parameters, output_grid=placement.grid, channel_grids=placement.channel_grids
+                ),
             )
             frame_fields = placement.frame_fields
             canvas_receipt = "receipts/canvas.json"
@@ -594,11 +604,13 @@ def run_e2e_stages(
 
         _emit(progress, ProgressStage.ASTROMETRY, "started", "solving every filter", total=len(candidates))
         if request.pipeline_parameters.output_grid is not None:
-            # A mosaic panel's masters are on the canvas window: its WCS is
-            # known and verified on catalog stars, never solved blind.
+            # A mosaic panel's masters are on the canvas window (drizzled:
+            # on a finer copy of it): its WCS is known and verified on
+            # catalog stars, never solved blind.
+            window = request.pipeline_parameters.output_grid
             solver_records, product_paths_staged, solved_products, all_solved = _verify_canvas_candidates(
                 candidates,
-                grid=request.pipeline_parameters.output_grid,
+                wcs=window.scaled_wcs(request.drizzle.scale) if drizzle_mode else dict(window.wcs),
                 products_dir=products_dir,
                 staging=staging,
                 verifier=_catalog_verifier(solver_backends),

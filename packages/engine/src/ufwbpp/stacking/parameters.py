@@ -181,6 +181,12 @@ class OutputGrid:
     zero-based ``(x, y)`` offset on the canvas and ``wcs`` the window's
     celestial WCS cards (the canvas projection with CRPIX shifted to the
     window).
+
+    ``forward_x``/``forward_y`` (optional, for drizzle) are the forward map:
+    the window coordinates of registration-reference point
+    ``forward_origin + (column, row)*spacing``, over every point a Light of
+    the run reaches.  A drizzle drops each Light through its registration
+    matrix and then this lattice (bilinear between the nodes).
     """
 
     width: int
@@ -190,6 +196,9 @@ class OutputGrid:
     reference_y: NDArray[np.float64]
     canvas_origin: tuple[int, int]
     wcs: Mapping[str, Any]
+    forward_x: NDArray[np.float64] | None = None
+    forward_y: NDArray[np.float64] | None = None
+    forward_origin: tuple[float, float] | None = None
 
     def validate(self) -> None:
         if not (isinstance(self.width, int) and isinstance(self.height, int)) or self.width < 6 or self.height < 6:
@@ -216,10 +225,32 @@ class OutputGrid:
         for key in ("CTYPE1", "CTYPE2", "CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2"):
             if key not in self.wcs:
                 raise ValueError(f"output_grid wcs lacks {key}")
+        forward = (self.forward_x, self.forward_y, self.forward_origin)
+        if any(item is not None for item in forward):
+            if any(item is None for item in forward):
+                raise ValueError("output_grid forward lattice needs both coordinates and its origin")
+            for name, nodes in (("forward_x", self.forward_x), ("forward_y", self.forward_y)):
+                if (
+                    not isinstance(nodes, np.ndarray)
+                    or nodes.dtype != np.float64
+                    or nodes.ndim != 2
+                    or min(nodes.shape) < 2
+                    or nodes.shape != self.forward_x.shape
+                    or not np.isfinite(nodes).all()
+                ):
+                    raise ValueError(f"output_grid {name} must be a finite float64 lattice of at least 2x2 nodes")
+            if len(self.forward_origin) != 2 or not all(math.isfinite(float(value)) for value in self.forward_origin):
+                raise ValueError("output_grid forward_origin must be two finite numbers")
 
     @property
     def shape(self) -> tuple[int, int]:
         return self.height, self.width
+
+    @property
+    def has_forward_lattice(self) -> bool:
+        """Whether a drizzle can drop through this grid."""
+
+        return self.forward_x is not None
 
     @property
     def node_shape(self) -> tuple[int, int]:
@@ -247,7 +278,23 @@ class OutputGrid:
         )
         for nodes in (self.reference_x, self.reference_y):
             hasher.update(np.ascontiguousarray(nodes, dtype="<f8").tobytes())
+        if self.forward_x is not None and self.forward_y is not None and self.forward_origin is not None:
+            hasher.update(np.asarray(self.forward_origin, dtype="<f8").tobytes())
+            for nodes in (self.forward_x, self.forward_y):
+                hasher.update(np.ascontiguousarray(nodes, dtype="<f8").tobytes())
         return hasher.hexdigest()
+
+    def scaled_wcs(self, scale: int) -> dict[str, Any]:
+        """The window's WCS on a grid ``scale`` times finer whose pixel
+        ``scale*i`` is centred on window pixel ``i`` (a drizzle output)."""
+
+        cards = dict(self.wcs)
+        for axis in ("1", "2"):
+            cards[f"CRPIX{axis}"] = scale * (float(cards[f"CRPIX{axis}"]) - 1.0) + 1.0
+        for key in ("CD1_1", "CD1_2", "CD2_1", "CD2_2", "CDELT1", "CDELT2"):
+            if key in cards:
+                cards[key] = float(cards[key]) / scale
+        return cards
 
     def shifted(self, by: ShiftField) -> OutputGrid:
         """This lattice for a Light with its own shift field: the node at
@@ -281,6 +328,16 @@ class OutputGrid:
             "latticeSpacing": self.spacing,
             "canvasOrigin": list(self.canvas_origin),
             "wcs": {key: self.wcs[key] for key in sorted(self.wcs)},
+            **(
+                {
+                    "forwardLattice": {
+                        "origin": [float(value) for value in self.forward_origin],
+                        "nodes": list(self.forward_x.shape),
+                    }
+                }
+                if self.forward_x is not None and self.forward_origin is not None
+                else {}
+            ),
             "sha256": self.digest,
         }
 
@@ -336,10 +393,23 @@ class PipelineParameters:
     # keywords); ``None`` derives it from the inputs.  A local path derived
     # from the inputs: not serialized.
     grouping_keyword_root: str | None = None
-    # A mosaic panel's canvas window: every Light is resampled onto it
-    # instead of onto the registration reference's own grid (no shared crop;
-    # drizzle and proper coaddition are not available on it yet).
+    # A mosaic panel's canvas window: every Light is resampled (or, with
+    # the window's forward lattice, drizzled) onto it instead of onto the
+    # registration reference's own grid (no shared crop; proper coaddition
+    # is not available on it yet).
     output_grid: OutputGrid | None = None
+    # Per filter (and Bayer channel) of a mosaic panel, the window's lattice
+    # with that filter's own lateral colour: (filter, channel or None, grid),
+    # each on the window of ``output_grid``; other filters use ``output_grid``.
+    channel_grids: tuple[tuple[str, int | None, OutputGrid], ...] = ()
+
+    def grid_for(self, filter_name: str, channel: int | None) -> OutputGrid | None:
+        """The lattice a filter (and Bayer channel) is resampled onto."""
+
+        for name, item_channel, grid in self.channel_grids:
+            if name == filter_name and item_channel == channel:
+                return grid
+        return self.output_grid
 
     def validate(self) -> None:
         if self.calibration_workflow not in WORKFLOWS:
@@ -348,10 +418,29 @@ class PipelineParameters:
             if not isinstance(self.output_grid, OutputGrid):
                 raise ValueError("output_grid must be an OutputGrid")
             self.output_grid.validate()
-            if self.capture_drizzle_inputs:
-                raise ValueError("drizzle onto a mosaic canvas window is not supported yet")
+            if self.capture_drizzle_inputs and not self.output_grid.has_forward_lattice:
+                raise ValueError("drizzle onto a mosaic canvas window needs the window's forward lattice")
             if self.proper_coaddition.enabled:
                 raise ValueError("proper coaddition on a mosaic canvas window is not supported yet")
+        if self.channel_grids:
+            if self.output_grid is None:
+                raise ValueError("channel_grids need the output_grid whose window they share")
+            keys = set()
+            for name, channel, grid in self.channel_grids:
+                if not isinstance(grid, OutputGrid):
+                    raise ValueError("channel_grids hold OutputGrid lattices")
+                grid.validate()
+                if (
+                    (grid.width, grid.height, grid.spacing, grid.canvas_origin)
+                    != (self.output_grid.width, self.output_grid.height, self.output_grid.spacing, self.output_grid.canvas_origin)
+                    or dict(grid.wcs) != dict(self.output_grid.wcs)
+                ):
+                    raise ValueError("a channel grid must lie on the output_grid's window")
+                if self.capture_drizzle_inputs and not grid.has_forward_lattice:
+                    raise ValueError("drizzle onto a channel grid needs that grid's forward lattice")
+                if (name, channel) in keys:
+                    raise ValueError("channel_grids name a filter channel twice")
+                keys.add((name, channel))
         if self.cosmetic_hot_pixel_sigma is not None and (
             isinstance(self.cosmetic_hot_pixel_sigma, bool)
             or not math.isfinite(self.cosmetic_hot_pixel_sigma)
@@ -437,6 +526,16 @@ class PipelineParameters:
             "cosmeticHotPixelSigma": self.cosmetic_hot_pixel_sigma,
             "durableIntermediates": self.durable_intermediates,
             **({"outputGrid": self.output_grid.serializable()} if self.output_grid is not None else {}),
+            **(
+                {
+                    "channelGrids": [
+                        {"filter": name, "channel": channel, "sha256": grid.digest}
+                        for name, channel, grid in self.channel_grids
+                    ]
+                }
+                if self.channel_grids
+                else {}
+            ),
         }
 
 
