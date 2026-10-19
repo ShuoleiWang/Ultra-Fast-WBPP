@@ -1094,6 +1094,195 @@ void TestDrizzleBandDropsExactAreasAndIsBandAndThreadInvariant()
                                          "drizzle: channel must be 0, 1, 2 or 255" );
 }
 
+// The documented lattice arithmetic of DrizzleRequest for one point.
+std::array<double, 2> LatticePoint( const std::vector<double>& u, const std::vector<double>& v,
+                                    double x0, double y0, double spacing,
+                                    std::uint32_t columns, std::uint32_t rows, double x, double y )
+{
+   const double gx = (x - x0)/spacing;
+   const double gy = (y - y0)/spacing;
+   const double cellX = std::floor( std::min( std::max( gx, 0.0 ), static_cast<double>( columns - 2 ) ) );
+   const double cellY = std::floor( std::min( std::max( gy, 0.0 ), static_cast<double>( rows - 2 ) ) );
+   const double fx = gx - cellX, fy = gy - cellY;
+   const std::size_t n00 = static_cast<std::size_t>( cellY )*columns + static_cast<std::size_t>( cellX );
+   const auto blend = [&]( const std::vector<double>& nodes )
+   {
+      const double top = nodes[n00] + fx*(nodes[n00 + 1] - nodes[n00]);
+      const double bottom = nodes[n00 + columns] + fx*(nodes[n00 + columns + 1] - nodes[n00 + columns]);
+      return top + fy*(bottom - top);
+   };
+   return { blend( u ), blend( v ) };
+}
+
+// A forward lattice (a mosaic canvas) drops where its map puts each pixel:
+// an affine lattice reproduces the matrix drizzle, a distorted one conserves
+// the dropped weight of its mapped quads, and neither depends on threads,
+// bands or the C ABI version.
+void TestDrizzleLatticeDropsWhereItsMapPutsEachPixel()
+{
+   const std::uint32_t width = 41;
+   const std::uint32_t height = 29;
+   std::vector<float> source( static_cast<std::size_t>( width )*height );
+   std::mt19937 generator( 23 );
+   std::uniform_real_distribution<float> values( 10.0F, 20.0F );
+   for ( float& value : source )
+      value = values( generator );
+   source[7*width + 9] = Nan;
+
+   // Registration (input -> reference) and the reference -> output map: a
+   // rotation and shift at 2x, then, for the distorted case, a cubic bend.
+   const double angle = 0.21, c = std::cos( angle ), s = std::sin( angle );
+   const double registration[9] = { c, -s, 6.25, s, c, 3.5, 0.0, 0.0, 1.0 };
+   const double outputScale = 2.0;
+   const double x0 = -24.0, y0 = -24.0, spacing = 8.0;
+   const std::uint32_t columns = 12, rows = 11;
+   const auto lattice = [&]( double bend )
+   {
+      std::vector<double> u( static_cast<std::size_t>( columns )*rows ), v( u.size() );
+      for ( std::uint32_t j = 0; j < rows; ++j )
+         for ( std::uint32_t i = 0; i < columns; ++i )
+         {
+            const double x = x0 + i*spacing, y = y0 + j*spacing;
+            const double a = (x - 20.0)/20.0, b = (y - 14.0)/14.0;
+            u[static_cast<std::size_t>( j )*columns + i] = outputScale*(x + 4.0 + bend*a*a*a);
+            v[static_cast<std::size_t>( j )*columns + i] = outputScale*(y + 2.0 - bend*b*b*b);
+         }
+      return std::array<std::vector<double>, 2>{ u, v };
+   };
+   const std::uint32_t outputWidth = 2*(width + 20);
+   const std::uint32_t outputHeight = 2*(height + 22);
+
+   DrizzleRequest request;
+   request.source = source;
+   request.sourceWidth = width;
+   request.sourceRows = height;
+   request.scale = 2;
+   request.pixfrac = 0.7;
+   request.kernel = DrizzleKernel::Square;
+   request.frameWeight = 1.0F;
+   std::copy( registration, registration + 9, request.forward );
+   request.latticeX0 = x0;
+   request.latticeY0 = y0;
+   request.latticeSpacing = spacing;
+   request.latticeColumns = columns;
+   request.latticeRows = rows;
+
+   // An affine lattice: the same drops as the composed matrix.
+   const auto affine = lattice( 0.0 );
+   request.latticeU = affine[0];
+   request.latticeV = affine[1];
+   const DrizzleOutput fromLattice = DrizzleWhole( request, outputWidth, outputHeight, 3 );
+   DrizzleRequest matrix = request;
+   matrix.latticeU = {};
+   matrix.latticeV = {};
+   const double composed[9] = {
+      outputScale*c, -outputScale*s, outputScale*(6.25 + 4.0),
+      outputScale*s, outputScale*c, outputScale*(3.5 + 2.0), 0.0, 0.0, 1.0 };
+   std::copy( composed, composed + 9, matrix.forward );
+   const DrizzleOutput fromMatrix = DrizzleWhole( matrix, outputWidth, outputHeight, 3 );
+   for ( std::size_t i = 0; i < fromMatrix.sum.size(); ++i )
+      Require( std::fabs( fromLattice.sum[i] - fromMatrix.sum[i] ) <= 1.0e-9*(1.0 + std::fabs( fromMatrix.sum[i] ))
+            && std::fabs( fromLattice.weight[i] - fromMatrix.weight[i] ) <= 1.0e-9
+            && fromLattice.touched[i] == fromMatrix.touched[i],
+               "drizzle lattice: an affine lattice drops as its matrix does" );
+
+   // A distorted (but nowhere folding) lattice: every drop is the mapped
+   // quad of the shrunk pixel, so the dropped weight is the sum of the
+   // quads' areas.
+   const auto bent = lattice( 1.0 );
+   request.latticeU = bent[0];
+   request.latticeV = bent[1];
+   const DrizzleOutput single = DrizzleWhole( request, outputWidth, outputHeight, 1 );
+   double dropped = 0.0, expected = 0.0;
+   for ( double w : single.weight )
+      dropped += w;
+   const auto map = [&]( double x, double y )
+   {
+      const double rx = registration[0]*x + registration[1]*y + registration[2];
+      const double ry = registration[3]*x + registration[4]*y + registration[5];
+      return LatticePoint( bent[0], bent[1], x0, y0, spacing, columns, rows, rx, ry );
+   };
+   for ( std::uint32_t y = 0; y < height; ++y )
+      for ( std::uint32_t x = 0; x < width; ++x )
+      {
+         if ( !std::isfinite( source[static_cast<std::size_t>( y )*width + x] ) )
+            continue;
+         const double h = 0.35;
+         const std::array<double, 2> q[4] = {
+            map( x - h, y - h ), map( x + h, y - h ), map( x + h, y + h ), map( x - h, y + h ) };
+         double twice = 0.0;
+         for ( int k = 0; k < 4; ++k )
+         {
+            const auto& p = q[k];
+            const auto& n = q[(k + 1) % 4];
+            Require( p[0] > 1.0 && p[1] > 1.0 && p[0] < outputWidth - 2.0 && p[1] < outputHeight - 2.0,
+                     "drizzle lattice test keeps every drop inside the output" );
+            twice += p[0]*n[1] - n[0]*p[1];
+         }
+         expected += 0.5*std::fabs( twice );
+      }
+   Require( std::fabs( dropped - expected ) < 1.0e-9*expected,
+            "drizzle lattice: the dropped weight is the mapped quads' area" );
+   for ( std::uint32_t threads : { 2U, 3U, 5U, 64U } )
+      for ( std::uint32_t bandRows : { 0U, 7U, 16U } )
+      {
+         const DrizzleOutput parallel = DrizzleWhole( request, outputWidth, outputHeight, threads, bandRows );
+         Require( parallel.sum == single.sum && parallel.weight == single.weight
+               && parallel.touched == single.touched,
+                  "drizzle lattice: output must not depend on the thread count or the band split" );
+      }
+
+   // The v2 C ABI: the lattice as the direct kernel, and without one as v1.
+   UfwbppNativeDrizzleRequestV2 abi{};
+   abi.v1.struct_size = sizeof( abi );
+   abi.v1.source_width = width;
+   abi.v1.source_rows = height;
+   abi.v1.scale = 2;
+   abi.v1.kernel = UFWBPP_NATIVE_DRIZZLE_KERNEL_SQUARE;
+   abi.v1.output_width = outputWidth;
+   abi.v1.output_rows = outputHeight;
+   abi.v1.threads = 4;
+   const std::uint8_t pattern[4] = { 0, 1, 1, 2 };
+   std::copy( pattern, pattern + 4, abi.v1.cfa_pattern );
+   abi.v1.channel = 255;
+   abi.v1.normalization_scale = 1.0F;
+   abi.v1.frame_weight = 1.0F;
+   abi.v1.pixfrac = 0.7;
+   std::copy( registration, registration + 9, abi.v1.forward );
+   abi.v1.source = source.data();
+   abi.v1.source_count = source.size();
+   std::vector<double> abiSum( single.sum.size(), 0.0 ), abiWeight( single.sum.size(), 0.0 );
+   abi.v1.output_sum = abiSum.data();
+   abi.v1.output_weight = abiWeight.data();
+   abi.v1.output_count = abiSum.size();
+   abi.lattice_x0 = x0;
+   abi.lattice_y0 = y0;
+   abi.lattice_spacing = spacing;
+   abi.lattice_columns = columns;
+   abi.lattice_rows = rows;
+   abi.lattice_u = bent[0].data();
+   abi.lattice_v = bent[1].data();
+   abi.lattice_node_count = bent[0].size();
+   std::array<char, 256> error{};
+   Require( ufwbpp_native_cpu_drizzle_v2( &abi, error.data(), error.size() ) == UFWBPP_NATIVE_OK, error.data() );
+   Require( abiSum == single.sum && abiWeight == single.weight, "drizzle lattice: the v2 C ABI equals the direct kernel" );
+   std::fill( abiSum.begin(), abiSum.end(), 0.0 );
+   std::fill( abiWeight.begin(), abiWeight.end(), 0.0 );
+   abi.lattice_node_count = 0;
+   std::copy( composed, composed + 9, abi.v1.forward );
+   Require( ufwbpp_native_cpu_drizzle_v2( &abi, error.data(), error.size() ) == UFWBPP_NATIVE_OK, error.data() );
+   Require( abiSum == fromMatrix.sum && abiWeight == fromMatrix.weight,
+            "drizzle lattice: v2 without a lattice is the matrix drizzle" );
+   abi.lattice_node_count = bent[0].size();
+   abi.lattice_columns = columns + 1;
+   Require( ufwbpp_native_cpu_drizzle_v2( &abi, error.data(), error.size() ) == UFWBPP_NATIVE_INVALID_ARGUMENT,
+            "drizzle lattice: the C ABI rejects a lattice of the wrong size" );
+   abi.lattice_columns = columns;
+   abi.lattice_spacing = 0.0;
+   Require( ufwbpp_native_cpu_drizzle_v2( &abi, error.data(), error.size() ) == UFWBPP_NATIVE_INVALID_ARGUMENT,
+            "drizzle lattice: the C ABI rejects a zero spacing" );
+}
+
 void TestDebayerBilinearMatchesTheReferenceRules()
 {
    // A 4x5 RGGB mosaic with one missing (NaN) green sample.
@@ -1765,6 +1954,7 @@ int main()
       TestRadonPeaksFindTheDyadicLineAtEveryLevel();
       TestCAbiRoundTrip();
       TestDrizzleBandDropsExactAreasAndIsBandAndThreadInvariant();
+      TestDrizzleLatticeDropsWhereItsMapPutsEachPixel();
       TestDebayerBilinearMatchesTheReferenceRules();
       TestOffsetGridMatchesTheReferenceArithmetic();
       TestLanczos3TableIsDeterministicAndAccurate();

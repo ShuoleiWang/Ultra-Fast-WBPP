@@ -154,7 +154,8 @@ def run_portable_pipeline_fits(
     ``frame_fields`` binds Lights (by path) of a mosaic panel to the residual
     shift each keeps against the registration reference after its matrix
     (``ShiftField``); a bound Light is resampled onto the output grid shifted
-    by its field.  Only on a mosaic panel's canvas window.
+    by its field.  Only on a canvas window without filter lattices or a
+    drizzle.
 
     ``_source_identity_seed`` maps canonical original paths to a content
     digest and the stat identity that digest was captured with.  Seeded

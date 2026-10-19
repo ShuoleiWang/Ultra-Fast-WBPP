@@ -82,26 +82,37 @@ def test_identity_unit_drop_copies_pixels_and_skips_nan() -> None:
 
 
 @requires_native
+@pytest.mark.parametrize("through", ["matrix", "lattice"])
 @pytest.mark.parametrize("kernel", SUPPORTED_KERNELS)
-def test_kernels_are_thread_invariant_and_conserve_dropped_weight(kernel: str) -> None:
+def test_kernels_are_thread_invariant_and_conserve_dropped_weight(kernel: str, through: str) -> None:
     rng = np.random.default_rng(5)
     source = rng.uniform(100.0, 200.0, (21, 19)).astype(np.float32)
     angle = 0.2
     scale = 2
     # Rotation and translation that keep every drop inside a padded output.
-    forward = np.array(
-        [
-            [scale * np.cos(angle), -scale * np.sin(angle), scale * 6.0],
-            [scale * np.sin(angle), scale * np.cos(angle), scale * 3.0],
-            [0.0, 0.0, 1.0],
-        ]
+    registration = np.array(
+        [[np.cos(angle), -np.sin(angle), 6.0], [np.sin(angle), np.cos(angle), 3.0], [0.0, 0.0, 1.0]]
     )
+    forward = np.diag([scale, scale, 1.0]) @ registration
     shape = (scale * (21 + 12), scale * (19 + 12))
     pixfrac = 0.8
-    serial = _band(source, forward=forward, scale=scale, kernel=kernel, pixfrac=pixfrac, output_shape=shape)
+    extra: dict = {}
+    if through == "lattice":
+        # A mosaic canvas: the registration into the reference, then a
+        # lattice of output coordinates (here the plain scale).
+        if not getattr(KERNELS, "has_lattice_drizzle", False):
+            pytest.skip("native lattice drizzle not available")
+        nodes_y, nodes_x = np.mgrid[:9, :9].astype(np.float64) * 8.0 - 16.0
+        extra = {"lattice_u": scale * nodes_x, "lattice_v": scale * nodes_y, "lattice_origin": (-16.0, -16.0), "lattice_spacing": 8.0}
+        matrix = _band(source, forward=forward, scale=scale, kernel=kernel, pixfrac=pixfrac, output_shape=shape)
+        forward = registration
+    serial = _band(source, forward=forward, scale=scale, kernel=kernel, pixfrac=pixfrac, output_shape=shape, **extra)
+    if through == "lattice":
+        assert np.allclose(serial[0], matrix[0], rtol=1e-9, atol=1e-9)
+        assert np.allclose(serial[1], matrix[1], rtol=1e-9, atol=1e-12)
     for threads in (2, 5, 16):
         threaded = _band(
-            source, forward=forward, scale=scale, kernel=kernel, pixfrac=pixfrac, threads=threads, output_shape=shape
+            source, forward=forward, scale=scale, kernel=kernel, pixfrac=pixfrac, threads=threads, output_shape=shape, **extra
         )
         assert np.array_equal(serial[0], threaded[0]) and np.array_equal(serial[1], threaded[1])
     pixels = source.size
@@ -333,6 +344,111 @@ def test_scale_one_identity_drizzle_reproduces_the_weighted_mean(tmp_path: Path)
 
 
 @requires_native
+def test_drizzle_onto_a_canvas_window_drops_through_its_forward_lattice(tmp_path: Path) -> None:
+    """Frames of their own shape drizzled onto a larger canvas window whose
+    forward lattice is a pure shift: the output is the matrix drizzle moved
+    by the shift, the rejection mask is read at the window position, and
+    the receipt names the lattice kernel and the window."""
+
+    if not getattr(KERNELS, "has_lattice_drizzle", False):
+        pytest.skip("native lattice drizzle not available")
+    from ufwbpp.stacking.parameters import OutputGrid
+
+    frames = _frames(tmp_path)
+    frame_shape = (24, 32)
+    window_shape = (40, 50)
+    shift = (7.0, 5.0)  # reference pixel (x, y) lands on window pixel (x + 7, y + 5)
+    scale = 2
+    node_y, node_x = np.mgrid[:6, :6].astype(np.float64) * 16.0 - 16.0
+    grid = OutputGrid(
+        width=window_shape[1],
+        height=window_shape[0],
+        spacing=16,
+        reference_x=np.asarray(node_x[:4, :5] - shift[0] + 16.0),
+        reference_y=np.asarray(node_y[:4, :5] - shift[1] + 16.0),
+        canvas_origin=(100, 200),
+        wcs={"CTYPE1": "RA---TAN", "CTYPE2": "DEC--TAN", "CRVAL1": 10.0, "CRVAL2": 20.0, "CRPIX1": 1.0, "CRPIX2": 1.0},
+        forward_x=np.asarray(node_x + shift[0]),
+        forward_y=np.asarray(node_y + shift[1]),
+        forward_origin=(-16.0, -16.0),
+    )
+    # The masks of the ordinary integration live on the window: move frame 2's
+    # rejected pixel there.
+    moved = []
+    for frame in frames:
+        bits = frame.accepted_mask_bits
+        if bits is not None:
+            accepted = np.ones(window_shape, dtype=np.uint8)
+            rejected = np.argwhere(np.unpackbits(bits, axis=1, count=frame_shape[1]) == 0)
+            for row, column in rejected:
+                accepted[row + int(shift[1]), column + int(shift[0])] = 0
+            bits = np.packbits(accepted, axis=1)
+        moved.append(DrizzleFrame(**{**{f: getattr(frame, f) for f in DrizzleFrame.__slots__}, "accepted_mask_bits": bits}))
+    on_window = DrizzleGroupRequest(
+        frames=tuple(moved),
+        reference_shape=window_shape,
+        output_path=str(tmp_path / "window" / "drizzle.fits"),
+        receipt_path=str(tmp_path / "window" / "receipt.json"),
+        scale=scale,
+        pixfrac=0.9,
+        output_grid=grid,
+        durable=False,
+    )
+    result = drizzle_group(on_window)
+    receipt = verify_drizzle_receipt(result.receipt_path)
+    assert receipt["backend"]["id"] == "native-cpu-drizzle-v2-lattice"
+    assert receipt["geometry"]["outputHeight"] == scale * window_shape[0]
+    assert receipt["geometry"]["canvasWindow"]["forwardLattice"] == {"origin": [-16.0, -16.0], "nodes": [6, 6]}
+    assert receipt["geometry"]["outputPixelCentre"] == "output index = scale * canvas window index"
+    # The same frames straight onto the reference grid.
+    plain = DrizzleGroupRequest(
+        frames=tuple(frames),
+        reference_shape=frame_shape,
+        output_path=str(tmp_path / "plain" / "drizzle.fits"),
+        receipt_path=str(tmp_path / "plain" / "receipt.json"),
+        scale=scale,
+        pixfrac=0.9,
+        durable=False,
+    )
+    drizzle_group(plain)
+    with fits.open(on_window.output_path, memmap=False) as hdul:
+        window_science = np.asarray(hdul["SCI"].data, dtype=np.float64)
+        window_coverage = np.asarray(hdul["COVERAGE"].data)
+    with fits.open(plain.output_path, memmap=False) as hdul:
+        plain_science = np.asarray(hdul["SCI"].data, dtype=np.float64)
+        plain_coverage = np.asarray(hdul["COVERAGE"].data)
+    # Inside the reference grid's edges (the plain output clips the drops of
+    # dithered frames there, the window holds them) the two agree.
+    dy, dx = scale * int(shift[1]), scale * int(shift[0])
+    edge = 2 * scale
+    rows, columns = plain_science.shape
+    moved_science = window_science[dy + edge : dy + rows - edge, dx + edge : dx + columns - edge]
+    moved_coverage = window_coverage[dy + edge : dy + rows - edge, dx + edge : dx + columns - edge]
+    plain_science = plain_science[edge:-edge, edge:-edge]
+    plain_coverage = plain_coverage[edge:-edge, edge:-edge]
+    assert np.array_equal(moved_coverage, plain_coverage)
+    assert np.array_equal(np.isnan(moved_science), np.isnan(plain_science))
+    finite = np.isfinite(plain_science)
+    assert np.allclose(moved_science[finite], plain_science[finite], rtol=1e-6, atol=1e-3)
+    assert np.count_nonzero(plain_coverage == 2) >= 1 and np.count_nonzero(plain_coverage == 3) > 0.9 * plain_coverage.size
+    assert np.all(window_coverage[: dy - edge] == 0) and np.all(window_coverage[:, : dx - edge] == 0)
+    # A window without its forward lattice, or of another shape, is refused,
+    # by the drizzle and by the pipeline parameters that capture its inputs.
+    from ufwbpp.stacking.parameters import PipelineParameters
+
+    bare = OutputGrid(**{f: getattr(grid, f) for f in ("width", "height", "spacing", "reference_x", "reference_y", "canvas_origin", "wcs")})
+    for wrong in (dict(output_grid=bare), dict(output_grid=grid, reference_shape=(41, 50))):
+        with pytest.raises(DrizzleError) as error:
+            DrizzleGroupRequest(**{**{f: getattr(plain, f) for f in DrizzleGroupRequest.__slots__}, **wrong}).validate()
+        assert error.value.code == "DRIZZLE_GEOMETRY_INVALID"
+    PipelineParameters(output_grid=grid, capture_drizzle_inputs=True).validate()
+    with pytest.raises(ValueError, match="forward lattice"):
+        PipelineParameters(output_grid=bare, capture_drizzle_inputs=True).validate()
+    with pytest.raises(ValueError, match="forward lattice"):
+        PipelineParameters(output_grid=grid, channel_grids=(("B", None, bare),), capture_drizzle_inputs=True).validate()
+
+
+@requires_native
 def test_cfa_drizzle_produces_three_planes_from_the_mosaic(tmp_path: Path) -> None:
     shape = (16, 16)
     yy, xx = np.indices(shape)
@@ -418,3 +534,23 @@ def test_drizzle_discovery_does_not_advertise_a_fake_executor():
     provider = drizzle_backends()[0]
     assert isinstance(provider, DrizzleCapabilityProvider)
     assert not hasattr(provider, "drizzle")
+
+
+@requires_native
+def test_distorted_square_drops_match_the_numpy_polygon_reference() -> None:
+    if not getattr(KERNELS, "has_lattice_drizzle", False):
+        pytest.skip("native lattice drizzle not available")
+    from ufwbpp.reference.drizzle_numpy import square_lattice_drizzle
+
+    source = np.arange(24, dtype=np.float32).reshape(4, 6) / np.float32(24)
+    source[1, 2] = np.nan
+    registration = np.array([[1.0, 0.04, 0.31], [-0.03, 1.0, 0.23], [0.001, -0.002, 1.0]])
+    y, x = np.mgrid[:6, :7].astype(np.float64) * 2.0 - 2.0
+    u = 1.6 * x + 1.5 + 0.012 * x * y
+    v = 1.6 * y + 1.5 + 0.009 * x * x
+    extra = dict(lattice_u=u, lattice_v=v, lattice_origin=(-2.0, -2.0), lattice_spacing=2.0)
+    actual = _band(source, forward=registration, scale=2, pixfrac=0.9, output_shape=(10, 13), threads=3, **extra)
+    expected = square_lattice_drizzle(source, registration, u, v, (-2.0, -2.0), 2.0, (10, 13), pixfrac=0.9)
+    np.testing.assert_allclose(actual[0], expected[0], rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(actual[1], expected[1], rtol=1e-10, atol=1e-10)
+    np.testing.assert_array_equal(actual[2], expected[1] > 0)

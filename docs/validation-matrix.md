@@ -4,6 +4,12 @@ Support, compatibility, implementation, and optimization are separate claims. Th
 
 Before tagging a candidate, regenerate the source-test summary and platform evidence from that exact commit. Report optional hardware skips explicitly, retain private data outside Git, and publish only sanitized summaries. Until those checks are complete, the correct status is alpha; in particular, gradient-free output and general PixInsight/WBPP equivalence are not established.
 
+## Mosaic canvas drizzle (2026-10-19)
+
+- New path: synthetic distorted mono, L+B lateral-colour and RGGB two-panel projects run through the actual pipeline at ordinary resolution and 2× drizzle. They retain the existing sky-coordinate, flux and overlap gates. The native tests also check area conservation, identical thread/band results and v1/v2 ABI compatibility. `test_distorted_square_drops_match_the_numpy_polygon_reference` compares signal, area weights and touched pixels against the exhaustive NumPy polygon oracle.
+- Current local verification uses the isolated first-feature source and its Release native library: the full Python suite passes 1269 tests (7 optional skips, 4 subtests), with the new NumPy oracle passing separately. Native C API and portable tests pass. Metal compiles but its runtime differential is unavailable on this host; canvas drizzle uses the CPU implementation.
+- Real-image stage validation and baseline comparison are reported in the pull request. The original raw NGC 7331 reference inputs are no longer at their retained location, so this is not a new raw-to-solved-project certification. A real full mosaic-drizzle run, and new Windows/Linux runtime evidence, remain unvalidated locally.
+
 ## Mosaics on real data: joint astrometry, per-Light shift fields, gain planes (2026-10-15)
 
 | Check | Evidence | Status |

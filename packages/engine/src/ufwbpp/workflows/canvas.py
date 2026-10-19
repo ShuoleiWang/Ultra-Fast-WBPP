@@ -6,19 +6,21 @@ stars are measured against the catalog; the project then fits every panel's
 TAN+SIP solution at once (:func:`ufwbpp.mosaic.astrometry.solve_mosaic`), and
 the window of the canvas that holds every admitted Light becomes the output
 grid of the pixel pipeline: each Light is then resampled once, from its
-calibrated pixels straight onto the canvas (see
-:class:`ufwbpp.stacking.parameters.OutputGrid`).
+calibrated pixels straight onto the canvas, or, in a drizzle run, dropped
+through the window's forward lattice onto a copy of the window the drizzle
+scale times finer (see :class:`ufwbpp.stacking.parameters.OutputGrid`).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from pathlib import Path
 import shutil
 from typing import Any, Callable, Mapping, Sequence
 
 from astropy.io import fits
+from lightframeqc.cfa import is_cfa_pattern
 import numpy as np
 
 from ..mosaic.astrometry import (
@@ -27,22 +29,27 @@ from ..mosaic.astrometry import (
     PanelStars,
     SipFit,
     catalog_source_from_backends,
+    frame_stars,
     measure_frame_field,
+    measure_lateral_colour,
     measure_panel,
     solve_mosaic,
 )
 from ..mosaic.canvas import (
     CanvasError,
+    CanvasProjection,
     canvas_window,
     celestial_wcs,
+    forward_lattice,
     frame_boundary,
     window_grid,
 )
 from ..stacking.parameters import OutputGrid, ShiftField
 from ..solvers.base import SolverBackend
 from .common import _emit, _relativize_solver_attempts, _safe_token
-from .contracts import E2EError, E2ERequest, ProgressCallback, ProgressStage
+from .contracts import E2EError, E2ERequest, IntegrationMode, ProgressCallback, ProgressStage
 from .solve import _SolverHints, _read_image_header, _solve_one
+from .sources import _input_frame_info
 
 
 CANVAS_VERIFICATION_BACKEND = "canvas-catalog-verification"
@@ -67,8 +74,11 @@ class _CanvasPlacement:
     # window is a rectangle on the canvas, a rotated frame is not.
     footprint_fill: float
     # Per registered Light (by its registration key), its own residual
-    # shift against the reference.
+    # shift against the reference; none in a drizzle run.
     frame_fields: Mapping[str, ShiftField]
+    # (filter, None, lattice) for each mono filter with its own lateral
+    # colour (a drizzle run).
+    channel_grids: tuple[tuple[str, int | None, OutputGrid], ...] = ()
 
 
 def _light_header(path: str) -> fits.Header:
@@ -92,6 +102,8 @@ class _MeasuredReference:
 
     stars: PanelStars
     path: str
+    # The calibrated reference as solved (the lateral colour is measured on it).
+    image_path: Path
     attempts: list[dict[str, Any]]
 
 
@@ -143,7 +155,7 @@ def _measure_reference(
         )
     except MosaicAstrometryError as error:
         raise E2EError(error.code, str(error)) from error
-    return _MeasuredReference(stars, reference_path, attempts)
+    return _MeasuredReference(stars, reference_path, reference_fits, attempts)
 
 
 def _solve_placements(
@@ -169,6 +181,7 @@ def _solve_placements(
 def _place_on_canvas(
     request: E2ERequest,
     registration: Any,
+    calibration_plan: Any,
     measured: _MeasuredReference,
     solution: SipFit,
     joint: Mapping[str, Any],
@@ -186,10 +199,18 @@ def _place_on_canvas(
         mapped = homogeneous @ np.asarray(matrix, dtype=np.float64).T
         points_x.append(mapped[:, 0] / mapped[:, 2])
         points_y.append(mapped[:, 1] / mapped[:, 2])
-    ra, dec = reference_wcs.all_pix2world(np.concatenate(points_x), np.concatenate(points_y), 0)
+    reach_x, reach_y = np.concatenate(points_x), np.concatenate(points_y)
+    ra, dec = reference_wcs.all_pix2world(reach_x, reach_y, 0)
+    # A drizzle drops every pixel through the forward map, over every point
+    # the Lights reach in the reference.
+    forward_domain = (
+        (float(reach_x.min()), float(reach_y.min()), float(reach_x.max()), float(reach_y.max()))
+        if request.integration_mode is IntegrationMode.DRIZZLE
+        else None
+    )
     try:
         origin, window_shape = canvas_window(canvas, np.asarray(ra), np.asarray(dec), margin=1)
-        grid = window_grid(canvas, origin, window_shape, solution.header, shape)
+        grid = window_grid(canvas, origin, window_shape, solution.header, shape, forward_domain=forward_domain)
     except (CanvasError, ValueError) as error:
         raise E2EError(getattr(error, "code", "MOSAIC_CANVAS_WINDOW_INVALID"), str(error)) from error
     accepted = next(item for item in reversed(measured.attempts) if item.get("accepted") is True)
@@ -210,6 +231,12 @@ def _place_on_canvas(
     }
     fill = min(1.0, (shape[0] * shape[1]) / float(window_shape[0] * window_shape[1]))
     record["footprintFill"] = fill
+    if request.integration_mode is IntegrationMode.DRIZZLE:
+        image = np.asarray(fits.getdata(measured.image_path), dtype=np.float32)
+        channel_grids, record["lateralColour"] = _lateral_colour_grids(
+            request, registration, calibration_plan, measured.path, image, grid, canvas=canvas, reference_header=solution.header
+        )
+        return _CanvasPlacement(grid, record, fill, frame_fields={}, channel_grids=channel_grids)
     frame_fields, record["frameFields"] = _frame_fields(registration, shape)
     return _CanvasPlacement(grid, record, fill, frame_fields=frame_fields)
 
@@ -257,6 +284,82 @@ def _frame_fields(registration: Any, shape: tuple[int, int]) -> tuple[dict[str, 
     return fields, {"algorithm": FRAME_FIELD_ALGORITHM, "filters": summary}
 
 
+def _lateral_colour_grids(
+    request: E2ERequest,
+    registration: Any,
+    calibration_plan: Any,
+    reference_path: str,
+    reference_image: np.ndarray,
+    grid: OutputGrid,
+    *,
+    canvas: CanvasProjection,
+    reference_header: Mapping[str, Any],
+) -> tuple[tuple[tuple[str, int | None, OutputGrid], ...], dict[str, Any]]:
+    """Each mono filter other than the reference's gets its own lattice on the
+    window when its stars, registered to the reference, keep a smooth
+    lateral-colour field (measured on its best-weighted Light): the lattice
+    node at reference pixel ``p`` samples that filter at ``p + shift(p)``,
+    and the forward lattice of a drizzle run drops the filter's pixel at
+    ``p + shift(p)`` where the window's lattice drops ``p``.  One lattice
+    per panel would place a filter's stars by the reference colour's
+    distortion, and the overlapping panels would disagree."""
+
+    from ufwbpp_registration import read_calibrated_full_image
+
+    def info(path: str) -> Any:
+        try:
+            return _input_frame_info(Path(path), request.pipeline_parameters)
+        except Exception:
+            return None
+
+    reference = info(reference_path)
+    if reference is None or is_cfa_pattern(reference.cfa_pattern):
+        return (), {}
+    best: dict[str, tuple[float, str]] = {}
+    for path in registration.transforms:
+        frame = info(path)
+        if frame is None or is_cfa_pattern(frame.cfa_pattern) or frame.filter_name == reference.filter_name:
+            continue
+        weight = float(registration.quality_weights.get(path, 0.0))
+        if frame.filter_name not in best or weight > best[frame.filter_name][0]:
+            best[frame.filter_name] = (weight, path)
+    if not best:
+        return (), {}
+    reference_stars = frame_stars(reference_image)
+    grids: list[tuple[str, int | None, OutputGrid]] = []
+    records: dict[str, Any] = {}
+    for filter_name, (_, path) in sorted(best.items()):
+        try:
+            image = read_calibrated_full_image(path, calibration_plan)
+        except (OSError, ValueError) as error:
+            records[filter_name] = {"applied": False, "message": str(error)}
+            continue
+        lateral = measure_lateral_colour(
+            reference_stars, image, np.asarray(registration.transforms[path], dtype=np.float64), reference_image.shape
+        )
+        records[filter_name] = {"frame": Path(path).name, **lateral.evidence}
+        if lateral.order is None:
+            continue
+        forward = (
+            forward_lattice(
+                canvas,
+                grid.canvas_origin,
+                reference_header,
+                grid.forward_origin,
+                grid.forward_x.shape,
+                spacing=grid.spacing,
+                shift=lateral.shift,
+            )
+            if grid.has_forward_lattice
+            else {}
+        )
+        shifted = replace(grid.shifted(lateral), **forward)
+        shifted.validate()
+        grids.append((filter_name, None, shifted))
+        records[filter_name]["sha256"] = shifted.digest
+    return tuple(grids), records
+
+
 def _catalog_verifier(
     backends: Sequence[SolverBackend],
 ) -> Callable[[np.ndarray, Mapping[str, Any], Path], Mapping[str, Any]] | None:
@@ -300,16 +403,17 @@ def _catalog_verifier(
 def _verify_canvas_candidates(
     candidates: Mapping[str, Path],
     *,
-    grid: OutputGrid,
+    wcs: Mapping[str, Any],
     products_dir: Path,
     staging: Path,
     verifier: Callable[[np.ndarray, Mapping[str, Any], Path], Mapping[str, Any]] | None,
     request: E2ERequest,
     progress: ProgressCallback | None,
 ) -> tuple[dict[str, Any], list[Path], dict[str, Path], bool]:
-    """The filter masters of a mosaic panel carry the canvas window's WCS:
-    it is verified on catalog stars instead of being solved blind.  Returns
-    what :func:`ufwbpp.workflows.products._solve_candidates` returns."""
+    """The filter masters of a mosaic panel carry the canvas window's WCS
+    (``wcs``; a drizzle's is the window's that many times finer): it is
+    verified on catalog stars instead of being solved blind.  Returns what
+    :func:`ufwbpp.workflows.products._solve_candidates` returns."""
 
     records: dict[str, Any] = {}
     staged: list[Path] = []
@@ -326,11 +430,10 @@ def _verify_canvas_candidates(
         with fits.open(candidate, mode="readonly", memmap=True) as hdul:
             # A copy: no mapping of the staged master may outlive this block.
             data = np.array(hdul[0].data, dtype=np.float32)
-            header = hdul[0].header.copy()
         try:
             if verifier is None:
                 raise E2EError("MOSAIC_CATALOG_UNAVAILABLE", "no managed catalog verifies the canvas WCS")
-            quality = dict(verifier(data, dict(grid.wcs), artifacts))
+            quality = dict(verifier(data, dict(wcs), artifacts))
             matched = int(quality.get("matchedStars", 0) or 0)
             rms = float(quality.get("rmsArcsec", math.inf) or math.inf)
             accepted = (
@@ -343,13 +446,20 @@ def _verify_canvas_candidates(
                 attempt["code"] = "CANVAS_WCS_VERIFICATION_FAILED"
         except Exception as error:
             attempt.update(code=getattr(error, "code", "CANVAS_WCS_VERIFICATION_FAILED"), message=str(error))
+        del data
         if attempt["accepted"]:
-            for key, value in grid.wcs.items():
-                header[key] = value
-            header["OAFSTATE"] = "SOLVED"
-            header["OAFWCS"] = "SOLVED"
-            header["OAFWCSPR"] = ("CANVAS_CATALOG_VERIFIED", "WCS provenance of this grid")
-            fits.PrimaryHDU(data, header).writeto(output, checksum=True)
+            # The whole master, extensions (a drizzle's weight and coverage)
+            # included, with the verified WCS in its primary header.
+            shutil.copyfile(candidate, output)
+            with fits.open(output, mode="update", memmap=False) as hdul:
+                header = hdul[0].header
+                for key, value in wcs.items():
+                    header[key] = value
+                header["OAFSTATE"] = "SOLVED"
+                header["OAFWCS"] = "SOLVED"
+                header["OAFWCSPR"] = ("CANVAS_CATALOG_VERIFIED", "WCS provenance of this grid")
+                for hdu in hdul:
+                    hdu.add_checksum()
             staged.append(output)
             solved[filter_name] = output
         else:

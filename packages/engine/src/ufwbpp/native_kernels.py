@@ -47,6 +47,8 @@ MEAN_KERNEL_ID = "native-cpu-masked-mean-v1"
 TILE_OFFSET_KERNEL_ID = "native-cpu-tile-offsets-v1"
 RADON_KERNEL_ID = "native-cpu-radon-peaks-v1"
 DRIZZLE_KERNEL_ID = "native-cpu-drizzle-v1"
+# The drizzle through a mosaic canvas window's forward lattice.
+LATTICE_DRIZZLE_KERNEL_ID = "native-cpu-drizzle-v2-lattice"
 DEBAYER_KERNEL_ID = "native-cpu-debayer-bilinear-v1"
 OFFSET_GRID_KERNEL_ID = "native-cpu-offset-grid-v1"
 DRIZZLE_KERNELS = {"square": 0, "circular": 1, "gaussian": 2, "point": 3}
@@ -364,6 +366,20 @@ class _DrizzleRequestV1(ctypes.Structure):
     ]
 
 
+class _DrizzleRequestV2(ctypes.Structure):
+    _fields_ = [
+        ("v1", _DrizzleRequestV1),
+        ("lattice_x0", ctypes.c_double),
+        ("lattice_y0", ctypes.c_double),
+        ("lattice_spacing", ctypes.c_double),
+        ("lattice_columns", ctypes.c_uint32),
+        ("lattice_rows", ctypes.c_uint32),
+        ("lattice_u", ctypes.POINTER(ctypes.c_double)),
+        ("lattice_v", ctypes.POINTER(ctypes.c_double)),
+        ("lattice_node_count", ctypes.c_size_t),
+    ]
+
+
 class _OffsetGridRequestV1(ctypes.Structure):
     _fields_ = [
         ("struct_size", ctypes.c_uint32),
@@ -522,6 +538,11 @@ class NativeKernels:
             *error_arguments,
         ]
         library.ufwbpp_native_cpu_drizzle_v1.restype = ctypes.c_int
+        # Optional: drizzle through the forward lattice of a mosaic canvas.
+        self.has_lattice_drizzle = hasattr(library, "ufwbpp_native_cpu_drizzle_v2")
+        if self.has_lattice_drizzle:
+            library.ufwbpp_native_cpu_drizzle_v2.argtypes = [ctypes.POINTER(_DrizzleRequestV2), *error_arguments]
+            library.ufwbpp_native_cpu_drizzle_v2.restype = ctypes.c_int
         library.ufwbpp_native_cpu_add_offset_grid_v1.argtypes = [
             ctypes.POINTER(_OffsetGridRequestV1),
             *error_arguments,
@@ -1158,11 +1179,18 @@ class NativeKernels:
         frame_weight: float = 1.0,
         threads: int | None = None,
         output_touched: NDArray[np.uint8] | None = None,
+        lattice_u: NDArray[np.float64] | None = None,
+        lattice_v: NDArray[np.float64] | None = None,
+        lattice_origin: tuple[float, float] = (0.0, 0.0),
+        lattice_spacing: float = 0.0,
     ) -> None:
         """Drizzle the source rows onto the output band accumulators in place.
 
         ``forward`` maps input pixel centres to output pixel centres (the
-        registration matrix times the scale); ``output_sum`` and
+        registration matrix times the scale), or, with a lattice (a mosaic
+        canvas), to the lattice's domain: ``lattice_u``/``lattice_v``
+        ``(rows, columns)`` hold the output coordinates of domain point
+        ``origin + (column, row)*lattice_spacing``.  ``output_sum`` and
         ``output_weight`` are ``(rows, width)`` Float64 arrays that receive
         ``sum(w*a*v)`` and ``sum(w*a)``.  ``mask`` is the reference-grid
         acceptance mask (1 accepted), ``grid``/nodes the additive offset grid
@@ -1255,9 +1283,30 @@ class NativeKernels:
                 raise ValueError("drizzle touch flags must be a C-contiguous UInt8 array of the band's shape")
             request.output_touched = output_touched.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
         error = ctypes.create_string_buffer(_ERROR_BYTES)
-        status = int(
-            self._library.ufwbpp_native_cpu_drizzle_v1(ctypes.byref(request), error, ctypes.sizeof(error))
-        )
+        if lattice_u is None:
+            status = int(
+                self._library.ufwbpp_native_cpu_drizzle_v1(ctypes.byref(request), error, ctypes.sizeof(error))
+            )
+        else:
+            if not self.has_lattice_drizzle:
+                raise NativeKernelError("the native library has no lattice drizzle (ufwbpp_native_cpu_drizzle_v2)")
+            u = np.ascontiguousarray(lattice_u, dtype=np.float64)
+            v = np.ascontiguousarray(lattice_v, dtype=np.float64)
+            if u.ndim != 2 or u.shape != v.shape:
+                raise ValueError("drizzle lattice nodes must be matching 2-D arrays")
+            keep_alive += [u, v]
+            extended = _DrizzleRequestV2()
+            extended.v1 = request
+            extended.v1.struct_size = ctypes.sizeof(_DrizzleRequestV2)
+            extended.lattice_x0, extended.lattice_y0 = (float(value) for value in lattice_origin)
+            extended.lattice_spacing = float(lattice_spacing)
+            extended.lattice_rows, extended.lattice_columns = (int(value) for value in u.shape)
+            extended.lattice_u = u.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+            extended.lattice_v = v.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+            extended.lattice_node_count = u.size
+            status = int(
+                self._library.ufwbpp_native_cpu_drizzle_v2(ctypes.byref(extended), error, ctypes.sizeof(error))
+            )
         if status != 0:
             self._raise(error, status, "native drizzle")
         del keep_alive
@@ -1376,6 +1425,7 @@ __all__ = [
     "NativeKernelError",
     "DRIZZLE_KERNELS",
     "DRIZZLE_KERNEL_ID",
+    "LATTICE_DRIZZLE_KERNEL_ID",
     "NativeKernels",
     "RADON_KERNEL_ID",
     "TILE_OFFSET_KERNEL_ID",

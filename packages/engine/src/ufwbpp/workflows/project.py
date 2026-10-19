@@ -67,7 +67,7 @@ from ..stacking.crop import histogram_rectangle
 from ..stacking.integration import CalibrationError
 from .canvas import _catalog_verifier, _solve_placements
 from .common import _fsync_directory, _rename_directory_no_replace, _safe_token
-from .contracts import ProgressEvent
+from .contracts import IntegrationMode, ProgressEvent
 from .mosaic import (
     MosaicGateError,
     MosaicStageError,
@@ -1927,12 +1927,18 @@ def _canvas_mosaic_stage(
     """Every filter's mosaic on the shared canvas, its WCS verified on catalog stars."""
 
     request, records, project_progress = run.request, run.records, run.project_progress
+    # Drizzled panels lie on the canvas this many times finer.
+    scale = (
+        int(request.e2e_request.drizzle.scale)
+        if request.e2e_request.integration_mode is IntegrationMode.DRIZZLE
+        else 1
+    )
     try:
         panels = {
             filter_key: (
                 items[0][0].filter_name,
                 [
-                    _panel_product(panel.target_key, panel.filter_name, path, _safe_token(panel.filter_name))
+                    _panel_product(panel.target_key, panel.filter_name, path, _safe_token(panel.filter_name), scale)
                     for panel, path in items
                 ],
             )
@@ -1947,6 +1953,7 @@ def _canvas_mosaic_stage(
             verifier=verifier,
             minimum_matches=request.e2e_request.min_matches,
             maximum_rms_arcsec=request.e2e_request.max_rms_arcsec,
+            scale=scale,
             progress=lambda current, total, message: project_progress.phase("mosaic", current, total, message),
         )
     except (MosaicGateError, MosaicStageError) as error:

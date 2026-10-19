@@ -2,11 +2,12 @@
 
 Before the panels run, :func:`_plan_mosaic_canvas` solves one Light of every
 panel, checks that the catalog holds enough stars in each panel to place it,
-and plans the canvas they all share; every panel run then integrates
-straight onto its window of that canvas (``E2ERequest.mosaic_canvas``).
-Afterwards :func:`_assemble_canvas_mosaics` matches and blends each filter's
-panel masters, which already share the canvas lattice, and verifies the
-canvas WCS of every mosaic against catalog stars.
+and plans the canvas they all share; every panel run then integrates (or
+drizzles) straight onto its window of that canvas
+(``E2ERequest.mosaic_canvas``).  Afterwards :func:`_assemble_canvas_mosaics`
+matches and blends each filter's panel masters, which already share the
+canvas lattice (drizzled: the canvas the drizzle scale times finer), and
+verifies the canvas WCS of every mosaic against catalog stars.
 """
 
 from __future__ import annotations
@@ -197,29 +198,49 @@ def _plan_mosaic_canvas(
     return plan, {"schemaVersion": 1, "canvas": plan.serializable(), "survey": records}
 
 
-def _panel_product(panel: str, filter_name: str, master: Path, token: str) -> PanelImage:
-    """Bind a panel run's master to its canvas window (the run's receipt)."""
+def _panel_product(panel: str, filter_name: str, master: Path, token: str, scale: int = 1) -> PanelImage:
+    """Bind a panel run's master to its canvas window (the run's receipt);
+    a master drizzled at ``scale`` lies on the window that many times finer."""
 
     run_root = master.parents[2]
     canvas = json.loads((run_root / "receipts" / "canvas.json").read_text(encoding="utf-8"))
     window = canvas["window"]
     header, shape = _read_image_header(master)
-    if header.get("OAFGRID") != window["sha256"][:32] or tuple(shape) != (window["height"], window["width"]):
+    # A filter with its own lateral colour was resampled onto its own lattice of the window.
+    lattices = {window["sha256"][:32]}
+    lateral = canvas.get("lateralColour", {}).get(filter_name, {})
+    if lateral.get("applied") is True and "sha256" in lateral:
+        lattices.add(lateral["sha256"][:32])
+    height, width = scale * int(window["height"]), scale * int(window["width"])
+    drizzled = header.get("OAFDRZ") == "NATIVE"
+    if (
+        header.get("OAFGRID") not in lattices
+        or (int(header.get("OAFDRZSC", 1) or 1) if drizzled else 1) != scale
+        or tuple(shape) != (height, width)
+    ):
         raise MosaicStageError(
             "MOSAIC_PANEL_WINDOW_MISMATCH",
             f"the {filter_name} master of panel {panel} is not on the canvas window its run recorded",
         )
-    coverage = run_root / "coverage" / f"{token}_coverageFraction.fits"
-    counts = run_root / "coverage" / f"{token}_acceptedSampleCount.fits"
     exposure = header.get("EXPTIME")
+    if drizzled:
+        # A drizzle: the frames that reached each pixel are its COVERAGE
+        # extension, and it is valid wherever a drop landed.
+        planes: dict[str, Any] = {"count_path": master, "count_hdu": "COVERAGE"}
+    else:
+        coverage = run_root / "coverage" / f"{token}_coverageFraction.fits"
+        counts = run_root / "coverage" / f"{token}_acceptedSampleCount.fits"
+        planes = {
+            "coverage_path": coverage if coverage.is_file() else None,
+            "count_path": counts if counts.is_file() else None,
+        }
     return PanelImage(
         key=panel,
         path=master,
-        origin=(int(window["canvasOrigin"][0]), int(window["canvasOrigin"][1])),
-        shape=(int(window["height"]), int(window["width"])),
+        origin=(scale * int(window["canvasOrigin"][0]), scale * int(window["canvasOrigin"][1])),
+        shape=(height, width),
         exposure_seconds=float(exposure) if isinstance(exposure, (int, float)) and exposure > 0 else None,
-        coverage_path=coverage if coverage.is_file() else None,
-        count_path=counts if counts.is_file() else None,
+        **planes,
     )
 
 
@@ -231,16 +252,19 @@ def _assemble_canvas_mosaics(
     verifier: Callable[[np.ndarray, Mapping[str, Any], Path], Mapping[str, Any]] | None,
     minimum_matches: int,
     maximum_rms_arcsec: float,
+    scale: int = 1,
     progress: Callable[[int, int, str], None] | None = None,
 ) -> tuple[dict[str, Path], dict[str, dict[str, Any] | None], dict[str, dict[str, Any]], dict[str, Any]]:
     """Every filter's mosaic on one canvas box (the union of all windows);
-    ``panels_by_filter`` maps a filter key to its name and panel masters.
+    ``panels_by_filter`` maps a filter key to its name and panel masters,
+    which lie on the canvas ``scale`` times finer when they were drizzled.
     Every filter is assembled before a failure is raised, so the receipt
     holds the gates of all of them.  A filter whose panels fall into
     several photometric components publishes its largest as the mosaic and
     the others under ``<filter>/component<k>/`` with their receipts; the
     summary lists them under ``photometricComponents``."""
 
+    projection = plan.projection.scaled(scale) if scale > 1 else plan.projection
     boxes = [panel.box for _, panels in panels_by_filter.values() for panel in panels]
     canvas_box = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
     paths: dict[str, Path] = {}
@@ -256,7 +280,7 @@ def _assemble_canvas_mosaics(
             result = assemble_filter(
                 filter_name,
                 panels,
-                projection=plan.projection,
+                projection=projection,
                 canvas_box=canvas_box,
                 output_directory=directory,
                 verifier=verifier,
@@ -303,6 +327,7 @@ def _assemble_canvas_mosaics(
         )
     return paths, qualities, receipts, {
         "canvasBox": list(canvas_box),
+        "scale": scale,
         "version": CANVAS_MOSAIC_VERSION,
         "photometricComponents": components,
     }

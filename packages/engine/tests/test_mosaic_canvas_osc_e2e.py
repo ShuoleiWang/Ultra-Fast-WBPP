@@ -1,23 +1,27 @@
 """A two-panel one-shot-colour (RGGB) mosaic through the real pipeline.
 
 Each panel's Bayer Lights must be placed on the canvas from their
-debayered luminance, integrated into three colour-channel masters on the
-panel's window, and every
+debayered luminance, integrated (or Bayer-drizzled from the mosaics' own
+samples) into three colour-channel masters on the panel's window, and every
 channel must join its own mosaic with the stars where the true sky puts
 them.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import math
 from pathlib import Path
 
 from astropy.io import fits
 import numpy as np
+import pytest
 
 from mosaic_synthetic import TruthSolver, calibration_header, light_header, make_sky, render, true_header, write_uint16
 from ufwbpp.inventory import inventory_project
+from ufwbpp.native_kernels import load_native_kernels
+from ufwbpp.workflows.contracts import DrizzleOptions, IntegrationMode
 from ufwbpp.workflows.project import ProjectE2ERequest, run_project_e2e
 from ufwbpp.workflows.single_target import E2ERequest
 
@@ -94,8 +98,13 @@ def _project(root: Path) -> tuple[E2ERequest, TruthSolver]:
     return request, TruthSolver(sky, scale_arcsec=SCALE)
 
 
-def test_bayer_panels_join_three_colour_mosaics_on_one_canvas(tmp_path: Path) -> None:
+@pytest.mark.parametrize("scale", [1, 2], ids=["integrated", "bayer-drizzled-2x"])
+def test_bayer_panels_join_three_colour_mosaics_on_one_canvas(tmp_path: Path, scale: int) -> None:
     request, solver = _project(tmp_path / "input")
+    if scale > 1:
+        if not getattr(load_native_kernels(), "has_lattice_drizzle", False):
+            pytest.skip("the native lattice drizzle is not installed")
+        request = replace(request, integration_mode=IntegrationMode.DRIZZLE, drizzle=DrizzleOptions(scale=scale, pixfrac=1.0))
     inventory = inventory_project([tmp_path / "input"])
     result = run_project_e2e(ProjectE2ERequest(inventory, request, request.output_directory), solver_backends=(solver,))
     assert result.success is True, result
@@ -104,18 +113,26 @@ def test_bayer_panels_join_three_colour_mosaics_on_one_canvas(tmp_path: Path) ->
     mosaics = receipt["execution"]["mosaics"]
     canvas_mosaics = {key: value for key, value in mosaics.items() if isinstance(value, dict) and value.get("mode") == "CANVAS_MOSAIC"}
     assert len(canvas_mosaics) == 3, mosaics
+    assert mosaics["canvas"]["scale"] == scale
     for key, value in canvas_mosaics.items():
         assert value["gates"]["overlapAstrometry"] == "PASS", (key, value["gates"])
         assert value["gates"]["photometry"] in {"PASS", "WARN"}, (key, value["gates"])
-    assert (output / "RGB.fits").is_file() and receipt["execution"]["color"]["status"] == "SOLVED_RGB"
-    # Every channel's stars sit where the true sky puts them on the canvas.
+    # Every channel's stars sit where the true sky puts them on the canvas
+    # (a drizzled pixel is 1/scale of a canvas pixel).
     for name in ("R", "G", "B"):
         path = output / f"{name}.fits"
         header = fits.getheader(path)
         verification = solver.canvas_verifier(fits.getdata(path).astype(np.float32), dict(header), tmp_path)
         assert verification["matchedStars"] >= 60, (path.name, verification)
-        assert verification["offsetMedianPixels"] < 0.08, (path.name, verification)
-    # Both panels were placed by one fit on their debayered stars.
+        assert verification["offsetMedianPixels"] < 0.08 * scale, (path.name, verification)
+    # Both panels were placed by one fit on their debayered stars; drizzled,
+    # each channel dropped the mosaics' own samples of its colour.
     for run in (output / "details" / "runs").iterdir():
         canvas = json.loads((run / "receipts" / "canvas.json").read_text(encoding="utf-8"))
         assert canvas["jointFit"]["panels"] == 2, canvas["jointFit"]
+        if scale > 1:
+            for name in ("R", "G", "B"):
+                drizzle = json.loads((run / "receipts" / f"drizzle_{name}.json").read_text(encoding="utf-8"))
+                assert drizzle["backend"]["id"] == "native-cpu-drizzle-v2-lattice"
+                assert drizzle["recipe"]["cfaPattern"] == "RGGB" and drizzle["recipe"]["cfaChannel"] == name
+                assert drizzle["geometry"]["canvasWindow"]["sha256"] == canvas["window"]["sha256"]

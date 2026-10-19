@@ -315,12 +315,14 @@ redistribution permissions are separate; see [licensing](licensing.md).
   other. The distortion is one SIP for all panels or one per panel, by BIC.
   Each Light is warped through the window's lattice shifted by its own
   residual field (`measure_frame_field`, fitted on the inlier stars of its
-  registration: lateral colour, a meridian flip, another night), so every
-  Light is warped once, from calibrated pixels onto the canvas, by the
-  native lattice warp
+  registration: lateral colour, a meridian flip, another night). So every
+  Light is warped once, from calibrated pixels onto the canvas, by the native lattice warp
   (`ufwbpp_native_cpu_warp_lanczos3_lattice_v1`, value-identical to its NumPy
-  reference). The window's WCS is verified on catalog stars instead of being
-  solved blind. `photometry.py` matches the panels of a filter in their
+  reference). A drizzle drops every Light through its registration and the
+  window's forward lattice (window coordinates at reference nodes; a filter
+  with its own lateral colour, `measure_lateral_colour`, has its own) onto a copy of the window the
+  drizzle scale times finer (`ufwbpp_native_cpu_drizzle_v2`). The window's WCS is verified on catalog
+  stars instead of being solved blind. `photometry.py` matches the panels of a filter in their
   overlaps (one robust network for all scales from star photometry, one for
   the additive planes with an area-weighted minimum-norm gauge), `blend.py`
   blends them by inverse variance with edge tapers, except on the protected

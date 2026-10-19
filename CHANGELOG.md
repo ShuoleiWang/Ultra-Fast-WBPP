@@ -4,6 +4,13 @@ All notable changes are documented here. The format follows Keep a Changelog and
 
 ## [Unreleased]
 
+### Mosaic panels drizzle onto their shared canvas
+
+- A mosaic project with `integrationMode: drizzle` drops each calibrated Light through its registration matrix and a forward lattice onto the shared canvas at 1×–4×. Mono filters with measured lateral colour use their own lattice; Bayer channels retain their own samples.
+- Native ABI `ufwbpp_native_cpu_drizzle_v2` adds the optional lattice (`native-cpu-drizzle-v2-lattice`). Without a lattice, v1 remains the reference path. Drizzled panel verification preserves the science, weight and coverage extensions, and the mosaic records its scale and weights pixels by their sample depth.
+- Missing lattice support is refused before the panel run. Ordinary mosaic region weights remain supported; region weights combined with canvas drizzle are explicitly refused (`MOSAIC_REGION_WEIGHTS_UNSUPPORTED`).
+- Synthetic pipeline tests cover distorted mono panels, lateral colour and RGGB at ordinary resolution and 2× drizzle. Native tests cover area conservation, thread/band invariance and ABI compatibility; a NumPy square-polygon oracle checks every pixel of a nonlinear lattice. Real raw-to-solved mosaic-drizzle validation remains open.
+
 ### Mosaic panels keep the clean part of partly clouded Lights
 
 - The unattended selection's region weight maps now apply on a mosaic panel's canvas window. A partly clouded Light weighs zero where the cloud was and full weight elsewhere, as it does on a single target. The map is read at the reference-frame position of window nodes 64 px apart, through the window's lattice. A blanked cell stays blanked, and window nodes outside the reference frame carry weight 1.

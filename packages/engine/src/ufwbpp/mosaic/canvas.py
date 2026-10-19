@@ -7,8 +7,9 @@ panel orientation modulo a half turn (the smallest canvas for a mosaic shot
 with one camera angle, whether or not some panels went through a meridian
 flip) and its pixel scale is the panels' scale at their centres.  Every
 panel run resamples its Lights onto an integer-offset window of this lattice
-(:func:`window_grid`), so all panels and filters share one pixel grid and the
-mosaic and colour products never resample a master again.  Whether two
+(:func:`window_grid`), or drizzles them onto it through the window's forward
+lattice (:func:`forward_lattice`), so all panels and filters share one pixel
+grid and the mosaic and colour products never resample a master again.  Whether two
 panels overlap is decided on their footprint polygons on the canvas, not on
 their bounding boxes (:func:`panels_connected`).
 """
@@ -17,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from astropy.io import fits
 from astropy.wcs import WCS
@@ -147,6 +148,17 @@ class CanvasProjection:
 
     def wcs(self, origin: tuple[int, int] = (0, 0)) -> WCS:
         return celestial_wcs(self.header(origin))
+
+    def scaled(self, factor: int) -> "CanvasProjection":
+        """The canvas ``factor`` times finer, its pixel ``factor*i`` centred
+        on pixel ``i`` of this one (the canvas of drizzled panels)."""
+
+        return CanvasProjection(
+            self.projection,
+            self.crval,
+            (factor * (self.crpix[0] - 1.0) + 1.0, factor * (self.crpix[1] - 1.0) + 1.0),
+            ((self.cd[0][0] / factor, self.cd[0][1] / factor), (self.cd[1][0] / factor, self.cd[1][1] / factor)),
+        )
 
     @property
     def pixel_scale_arcsec(self) -> float:
@@ -470,10 +482,14 @@ def window_grid(
     reference_shape: tuple[int, int],
     *,
     spacing: int = LATTICE_SPACING,
+    forward_domain: tuple[float, float, float, float] | None = None,
 ) -> OutputGrid:
     """The canvas window as an output grid of a panel run: the reference
     pixel coordinates of its lattice nodes, through the canvas projection
-    and the reference's own solution (distortion included)."""
+    and the reference's own solution (distortion included).  With
+    ``forward_domain`` (x0, y0, x1, y1 in reference pixels, every point the
+    run's Lights reach) the grid also holds the forward map a drizzle drops
+    through: the window coordinates of reference nodes covering it."""
 
     height, width = shape
     rows = (height - 1 + spacing - 1) // spacing + 1
@@ -511,6 +527,15 @@ def window_grid(
         usable[indices[~converged]] = False
     reference_x[~usable] = np.nan
     reference_y[~usable] = np.nan
+    forward: dict[str, Any] = {}
+    if forward_domain is not None:
+        x0 = math.floor(forward_domain[0] / spacing) * spacing - spacing
+        y0 = math.floor(forward_domain[1] / spacing) * spacing - spacing
+        forward_columns = int(math.ceil((forward_domain[2] - x0) / spacing)) + 2
+        forward_rows = int(math.ceil((forward_domain[3] - y0) / spacing)) + 2
+        forward = forward_lattice(
+            projection, origin, reference_header, (float(x0), float(y0)), (forward_rows, forward_columns), spacing=spacing
+        )
     grid = OutputGrid(
         width=int(width),
         height=int(height),
@@ -519,9 +544,59 @@ def window_grid(
         reference_y=reference_y.reshape(rows, columns),
         canvas_origin=(int(origin[0]), int(origin[1])),
         wcs=projection.header(origin),
+        **forward,
     )
     grid.validate()
     return grid
+
+
+# Fixed-point iterations that invert a lateral-colour field (a few pixels
+# across a frame, so each iteration gains three or more decimal places).
+_SHIFT_INVERSE_ITERATIONS = 6
+
+
+def forward_lattice(
+    projection: CanvasProjection,
+    origin: tuple[int, int],
+    reference_header: Mapping[str, Any],
+    lattice_origin: tuple[float, float],
+    lattice_shape: tuple[int, int],
+    *,
+    spacing: int = LATTICE_SPACING,
+    shift: Callable[[NDArray[np.float64], NDArray[np.float64]], tuple[NDArray[np.float64], NDArray[np.float64]]]
+    | None = None,
+) -> dict[str, Any]:
+    """The forward map a drizzle drops through, as the ``forward_*`` fields
+    of an :class:`OutputGrid`: the window coordinates of the
+    registration-reference points ``lattice_origin + (column, row)*spacing``
+    (``lattice_shape`` is ``(rows, columns)``), through the reference's own
+    solution and the canvas projection.
+
+    With ``shift`` (a filter's lateral colour: a Light of that filter shows
+    at reference point ``p + shift(p)`` what the reference shows at ``p``)
+    the lattice is that filter's: its node at reference point ``q`` lands
+    where the reference point ``p`` with ``p + shift(p) = q`` lands, so the
+    filter's Lights drop onto the same canvas pixels the window's lattice
+    resamples them onto."""
+
+    rows, columns = lattice_shape
+    node_y, node_x = np.mgrid[:rows, :columns].astype(np.float64) * float(spacing)
+    reference_x = node_x.ravel() + float(lattice_origin[0])
+    reference_y = node_y.ravel() + float(lattice_origin[1])
+    if shift is not None:
+        point_x, point_y = reference_x, reference_y
+        for _ in range(_SHIFT_INVERSE_ITERATIONS):
+            dx, dy = shift(point_x, point_y)
+            point_x, point_y = reference_x - dx, reference_y - dy
+        reference_x, reference_y = point_x, point_y
+    reference = celestial_wcs(reference_header)
+    ra, dec = reference.all_pix2world(reference_x, reference_y, 0)
+    window_x, window_y = projection.world_to_canvas(np.asarray(ra), np.asarray(dec))
+    return {
+        "forward_x": np.ascontiguousarray((window_x - origin[0]).reshape(rows, columns)),
+        "forward_y": np.ascontiguousarray((window_y - origin[1]).reshape(rows, columns)),
+        "forward_origin": (float(lattice_origin[0]), float(lattice_origin[1])),
+    }
 
 
 __all__ = [
@@ -534,6 +609,7 @@ __all__ = [
     "PanelFootprint",
     "canvas_window",
     "celestial_wcs",
+    "forward_lattice",
     "frame_boundary",
     "panels_connected",
     "plan_canvas",

@@ -20,6 +20,7 @@ from ufwbpp.mosaic.canvas import (
     PanelFootprint,
     canvas_window,
     celestial_wcs,
+    forward_lattice,
     panels_connected,
     plan_canvas,
     polygons_overlap,
@@ -138,6 +139,66 @@ def test_the_window_lattice_maps_canvas_pixels_into_the_distorted_reference() ->
         inside = (exact_x > 0) & (exact_x < footprint.shape[1] - 1) & (exact_y > 0) & (exact_y < footprint.shape[0] - 1)
         assert np.max(np.abs(lattice_x[0, inside] - exact_x[inside])) < 2e-3
         assert np.max(np.abs(lattice_y[0, inside] - exact_y[inside])) < 2e-3
+
+
+def test_the_forward_lattice_drops_reference_points_where_the_window_lattice_samples_them() -> None:
+    """The forward map (a drizzle) and the window lattice (the warp) are
+    inverse: a reference point lands on the window pixel that samples it,
+    and a filter's lateral colour moves the landing of ``p + shift(p)`` to
+    where ``p`` lands."""
+
+    footprint = _grid_footprints(step_degrees=0.9, rotations=(1.0,))[0]
+    plan = plan_canvas([footprint])
+    ra, dec = footprint.boundary_world()
+    origin, shape = canvas_window(plan.projection, ra, dec)
+    height, width = footprint.shape
+    domain = (-3.0, -3.0, width + 2.0, height + 2.0)
+    grid = window_grid(plan.projection, origin, shape, footprint.header, footprint.shape, forward_domain=domain)
+    assert grid.has_forward_lattice and grid.forward_origin == (-32.0, -32.0)
+    rows, columns = grid.forward_x.shape
+    assert grid.forward_origin[0] + (columns - 1) * grid.spacing >= domain[2] + grid.spacing
+    assert grid.forward_origin[1] + (rows - 1) * grid.spacing >= domain[3] + grid.spacing
+    assert "forwardLattice" in grid.serializable() and grid.digest != window_grid(
+        plan.projection, origin, shape, footprint.header, footprint.shape
+    ).digest
+
+    def forward(x: np.ndarray, y: np.ndarray, nodes_x: np.ndarray, nodes_y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        # The kernel's bilinear arithmetic on the forward lattice.
+        gx = (x - grid.forward_origin[0]) / grid.spacing
+        gy = (y - grid.forward_origin[1]) / grid.spacing
+        cx = np.clip(np.floor(gx), 0, columns - 2).astype(int)
+        cy = np.clip(np.floor(gy), 0, rows - 2).astype(int)
+        fx, fy = gx - cx, gy - cy
+        out = []
+        for nodes in (nodes_x, nodes_y):
+            top = nodes[cy, cx] + fx * (nodes[cy, cx + 1] - nodes[cy, cx])
+            bottom = nodes[cy + 1, cx] + fx * (nodes[cy + 1, cx + 1] - nodes[cy + 1, cx])
+            out.append(top + fy * (bottom - top))
+        return out[0], out[1]
+
+    # Window nodes with a finite reference position: their reference point
+    # must come back onto them.
+    valid = np.isfinite(grid.reference_x)
+    node_y, node_x = np.mgrid[: grid.node_shape[0], : grid.node_shape[1]].astype(np.float64) * grid.spacing
+    back_x, back_y = forward(grid.reference_x[valid], grid.reference_y[valid], grid.forward_x, grid.forward_y)
+    assert np.max(np.abs(back_x - node_x[valid])) < 2e-3 and np.max(np.abs(back_y - node_y[valid])) < 2e-3
+
+    # A lateral colour of up to 1.5 px: the filter's point q = p + shift(p)
+    # lands where p lands.
+    def shift(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        u, v = (x - width / 2.0) / width, (y - height / 2.0) / height
+        return 1.5 * u**3 + 0.3 * u, -1.2 * v**3 + 0.2 * v
+
+    shifted = forward_lattice(
+        plan.projection, origin, footprint.header, grid.forward_origin, grid.forward_x.shape, spacing=grid.spacing, shift=shift
+    )
+    rng = np.random.default_rng(7)
+    px = rng.uniform(0.0, width - 1.0, 200)
+    py = rng.uniform(0.0, height - 1.0, 200)
+    dx, dy = shift(px, py)
+    landing_x, landing_y = forward(px, py, grid.forward_x, grid.forward_y)
+    filter_x, filter_y = forward(px + dx, py + dy, shifted["forward_x"], shifted["forward_y"])
+    assert np.max(np.hypot(filter_x - landing_x, filter_y - landing_y)) < 2e-3
 
 
 def test_tan_sip_fit_recovers_the_distortion_a_pure_tan_misses() -> None:

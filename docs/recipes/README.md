@@ -10,7 +10,7 @@ A recipe is a versioned scientific contract, not a loose collection of GUI toggl
 | Undersampled mono with measured dithers | [Drizzle](drizzle.md) | Native 1×–4× drizzle of the ordinary integration's inputs; NGC 7331 2× real-data run recorded |
 | Strong gradients/transparency changes | [XISF and normalization](normalization-and-xisf.md) | Stellar scale and guarded background correction; no PixInsight-equivalence claim |
 | Required final celestial WCS | [Astrometry](astrometry.md) then [offline catalogs](offline-solver-catalogs.md) | Real managed Astrometry.net solve; solver/indexes are user-installed and no field is guaranteed before it solves |
-| Several panels, nights and filters of one mosaic | [Mosaics](project-mosaic-rgb.md) | Synthetic sets through the real pipeline (optical distortion, lateral colour, Bayer, a bright galaxy across an overlap) and real M31 mosaics: a 2×2 that publishes with the Tycho-2 set or the Gaia tiles, and five panels, one of them cloudy |
+| Several panels, nights and filters of one mosaic | [Mosaics](project-mosaic-rgb.md) | Synthetic sets through the real pipeline (optical distortion, lateral colour, Bayer, 2× canvas drizzle, a bright galaxy across an overlap) and real M31 mosaics: a 2×2 that publishes with the Tycho-2 set or the Gaia tiles, and five panels, one of them cloudy |
 | One-shot colour (Bayer) | [OSC / CFA](osc-cfa.md) | Synthetic RGGB set built from real mono Lights: channel photometry exact, 1× debayer widens stars 5–10 %, 2× Bayer drizzle recovers full resolution; no real OSC data yet |
 
 ## Built-in contracts

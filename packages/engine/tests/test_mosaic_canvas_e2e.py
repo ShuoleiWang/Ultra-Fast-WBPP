@@ -2,19 +2,21 @@
 
 The panels differ in transparency, sky level, seeing and pointing, and the
 optics have a barrel distortion the solver's pure TAN solution ignores.  The
-project must plan the canvas from one solved Light per panel, integrate
-every panel straight onto its canvas window, and blend a mosaic whose stars
-sit where the true sky puts them.
+project must plan the canvas from one solved Light per panel, integrate (or
+drizzle) every panel straight onto its canvas window, and blend a mosaic
+whose stars sit where the true sky puts them.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import math
 from pathlib import Path
 
 from astropy.io import fits
 import numpy as np
+import pytest
 
 from mosaic_synthetic import (
     TruthSolver,
@@ -26,6 +28,8 @@ from mosaic_synthetic import (
     write_uint16,
 )
 from ufwbpp.inventory import inventory_project
+from ufwbpp.native_kernels import load_native_kernels
+from ufwbpp.workflows.contracts import DrizzleOptions, IntegrationMode
 from ufwbpp.workflows.project import ProjectE2ERequest, run_project_e2e
 from ufwbpp.workflows.single_target import E2ERequest
 
@@ -102,8 +106,14 @@ def _project(root: Path) -> tuple[E2ERequest, TruthSolver]:
     return request, TruthSolver(sky, scale_arcsec=SCALE)
 
 
-def test_two_panels_integrate_onto_one_canvas_and_blend_where_the_sky_is(tmp_path: Path) -> None:
+@pytest.mark.parametrize("scale", [1, 2], ids=["integrated", "drizzled-2x"])
+def test_two_panels_integrate_onto_one_canvas_and_blend_where_the_sky_is(tmp_path: Path, scale: int) -> None:
     request, solver = _project(tmp_path / "input")
+    if scale > 1:
+        kernels = load_native_kernels()
+        if kernels is None or not getattr(kernels, "has_lattice_drizzle", False):
+            pytest.skip("the native lattice drizzle is not installed")
+        request = replace(request, integration_mode=IntegrationMode.DRIZZLE, drizzle=DrizzleOptions(scale=scale, pixfrac=0.8))
     inventory = inventory_project([tmp_path / "input"])
     result = run_project_e2e(
         ProjectE2ERequest(inventory, request, request.output_directory),
@@ -116,17 +126,19 @@ def test_two_panels_integrate_onto_one_canvas_and_blend_where_the_sky_is(tmp_pat
     assert header["OAFWCSPR"] == "CANVAS_CATALOG_VERIFIED"
     mosaic = fits.getdata(mosaic_path).astype(np.float64)
     # The mosaic spans both panels: wider than one frame.
-    assert mosaic.shape[1] > SHAPE[1] + 40
+    assert mosaic.shape[1] > scale * (SHAPE[1] + 40)
     receipt = json.loads((output / "receipt.json").read_text(encoding="utf-8"))
     mosaics = receipt["execution"]["mosaics"]
     assert mosaics["r"]["mode"] == "CANVAS_MOSAIC"
+    assert mosaics["canvas"]["scale"] == scale
     assert mosaics["r"]["gates"]["photometry"] in {"PASS", "WARN"}
     assert mosaics["r"]["gates"]["overlapAstrometry"] == "PASS"
-    # Every star of the true sky inside the mosaic sits on its canvas pixel.
+    # Every star of the true sky inside the mosaic sits on its canvas pixel
+    # (a drizzled pixel is 1/scale of a canvas pixel).
     verification = solver.canvas_verifier(mosaic.astype(np.float32), dict(header), tmp_path)
     assert verification["matchedStars"] >= 60 and verification["isolatedStars"] >= 30
-    assert verification["offsetMedianPixels"] < 0.05
-    assert verification["offsetP90Pixels"] < 0.15
+    assert verification["offsetMedianPixels"] < 0.05 * scale
+    assert verification["offsetP90Pixels"] < 0.15 * scale
     # Each panel was integrated straight onto its window of the canvas.
     for run in (output / "details" / "runs").iterdir():
         canvas = json.loads((run / "receipts" / "canvas.json").read_text(encoding="utf-8"))
@@ -134,3 +146,4 @@ def test_two_panels_integrate_onto_one_canvas_and_blend_where_the_sky_is(tmp_pat
         assert canvas["distortion"]["rmsPixels"] < 0.15
         master = next((run / "products").rglob("master_light_*_wcs.fits"))
         assert fits.getheader(master)["OAFGRID"] == canvas["window"]["sha256"][:32]
+        assert fits.getheader(master).get("OAFDRZSC", 1) == scale

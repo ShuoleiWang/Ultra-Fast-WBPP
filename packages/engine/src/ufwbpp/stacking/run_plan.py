@@ -212,8 +212,11 @@ def _resolve_frame_fields(
 
     if not fields:
         return {}
-    if parameters.output_grid is None:
-        raise CalibrationError("FRAME_FIELDS_UNSUPPORTED", "per-Light shift fields need a mosaic panel's canvas window")
+    if parameters.output_grid is None or parameters.channel_grids or parameters.capture_drizzle_inputs:
+        raise CalibrationError(
+            "FRAME_FIELDS_UNSUPPORTED",
+            "per-Light shift fields need a canvas window without filter lattices or a drizzle",
+        )
     canonical = {os.path.normcase(str(path)): path for path in light_paths}
     result: dict[Path, ShiftField] = {}
     for key, item in fields.items():
@@ -635,6 +638,13 @@ def _plan_run(
     resolved_transforms = _resolve_transforms(lights, transforms)
     resolved_quality_weights = _resolve_quality_weights(lights, quality_weights)
     resolved_region_weight_maps = _resolve_region_weight_maps(lights, region_weight_maps)
+    if resolved_region_weight_maps and parameters.output_grid is not None and parameters.capture_drizzle_inputs:
+        # The integration reads a region map on the canvas window through the
+        # window's lattice; the drizzle onto the canvas does not yet.
+        raise CalibrationError(
+            "MOSAIC_REGION_WEIGHTS_UNSUPPORTED",
+            "selection region weight maps are not supported when drizzling onto a mosaic canvas yet",
+        )
     resolved_frame_fields = _resolve_frame_fields(lights, frame_fields, parameters)
     resolved_stellar_scale_hints = _resolve_stellar_scale_hints(
         lights, light_info, stellar_scale_hints, aliases, identity_cache
