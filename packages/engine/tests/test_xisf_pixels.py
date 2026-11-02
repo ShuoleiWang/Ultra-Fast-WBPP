@@ -62,7 +62,7 @@ def _write(path: Path, codec: str | None = None) -> np.ndarray:
     return values[:, :, 0]
 
 
-def _clone_image(path: Path, *, image_id: str, image_type: str) -> None:
+def _clone_image(path: Path, *, image_id: str, image_type: str | None) -> None:
     raw = path.read_bytes()
     header_length = struct.unpack("<I", raw[8:12])[0]
     root = ET.fromstring(raw[16 : 16 + header_length])
@@ -70,7 +70,14 @@ def _clone_image(path: Path, *, image_id: str, image_type: str) -> None:
     parent = next(element for element in root.iter() if image in list(element))
     clone = ET.fromstring(ET.tostring(image, encoding="utf-8"))
     clone.set("id", image_id)
-    clone.set("imageType", image_type)
+    if image_type is None:
+        # Untyped, as older PixInsight writes its rejection maps: no
+        # imageType, FITS keywords or properties.
+        del clone.attrib["imageType"]
+        for child in list(clone):
+            clone.remove(child)
+    else:
+        clone.set("imageType", image_type)
     parent.append(clone)
     header = ET.tostring(root, encoding="utf-8")
     path.write_bytes(
@@ -152,11 +159,14 @@ def test_xisf_bounds_are_strictly_parsed_and_nonunit_float_bounds_fail_closed() 
     assert captured.value.code == "XISF_FLOAT_BOUNDS_UNSUPPORTED"
 
 
-def test_unique_science_primary_allows_explicit_rejection_auxiliaries(tmp_path: Path) -> None:
+@pytest.mark.parametrize("typed", [True, False], ids=["typed", "untyped"])
+def test_unique_science_primary_allows_rejection_auxiliaries(
+    tmp_path: Path, typed: bool
+) -> None:
     source = tmp_path / "multi.xisf"
     _write(source)
-    _clone_image(source, image_id="rejection_low", image_type="RejectionMapLow")
-    _clone_image(source, image_id="rejection_high", image_type="RejectionMapHigh")
+    _clone_image(source, image_id="rejection_low", image_type="RejectionMapLow" if typed else None)
+    _clone_image(source, image_id="rejection_high", image_type="RejectionMapHigh" if typed else None)
 
     receipt = convert_xisf_to_fits(source, tmp_path / "out.fits")
 
@@ -169,7 +179,7 @@ def test_unique_science_primary_allows_explicit_rejection_auxiliaries(tmp_path: 
     ]
 
 
-def test_multiple_science_images_and_decode_budget_fail_closed(tmp_path: Path) -> None:
+def test_ambiguous_or_unknown_images_and_decode_budget_fail_closed(tmp_path: Path) -> None:
     source = tmp_path / "ambiguous.xisf"
     _write(source)
     _clone_image(source, image_id="second", image_type="MasterFlat")
@@ -177,6 +187,14 @@ def test_multiple_science_images_and_decode_budget_fail_closed(tmp_path: Path) -
         convert_xisf_to_fits(source, tmp_path / "ambiguous.fits")
     assert raised.value.code == "XISF_SCIENCE_IMAGE_AMBIGUOUS"
     assert not (tmp_path / "ambiguous.fits").exists()
+
+    unknown = tmp_path / "unknown.xisf"
+    _write(unknown)
+    _clone_image(unknown, image_id="rejection_map", image_type=None)
+    with pytest.raises(CalibrationError) as raised:
+        convert_xisf_to_fits(unknown, tmp_path / "unknown.fits")
+    assert raised.value.code == "XISF_MULTI_IMAGE_UNSUPPORTED"
+    assert not (tmp_path / "unknown.fits").exists()
 
     compressed = tmp_path / "budget.xisf"
     _write(compressed, "zlib")

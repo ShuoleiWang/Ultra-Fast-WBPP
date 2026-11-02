@@ -4,6 +4,10 @@ All notable changes are documented here. The format follows Keep a Changelog and
 
 ## [Unreleased]
 
+### XISF masters with untyped rejection maps calibrate
+
+- Older PixInsight ImageIntegration versions store a master's rejection maps as images `rejection_low` and `rejection_high` with no `imageType` and no FITS keywords; newer versions declare `RejectionMapLow`/`RejectionMapHigh` on the same ids. A master dark integrated in February 2025 with that layout failed calibration with `XISF_MULTI_IMAGE_UNSUPPORTED`. An extra image that declares no type is now recognized as a rejection map by these two ids and recorded under that type in the conversion receipt; any other untyped or unknown extra image still fails closed.
+
 ### Mosaic panels drizzle onto their shared canvas
 
 - A mosaic project with `integrationMode: drizzle` drops each calibrated Light through its registration matrix and a forward lattice onto the shared canvas at 1×–4×. Mono filters with measured lateral colour use their own lattice; Bayer channels retain their own samples.
