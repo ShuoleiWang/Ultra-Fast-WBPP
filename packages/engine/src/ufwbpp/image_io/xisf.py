@@ -382,6 +382,12 @@ def _select_science_image(
         "REJECTIONMAPLOW", "REJECTIONMAPHIGH", "REJECTIONMAP", "WEIGHTMAP",
         "COVERAGEMAP",
     }
+    # Older PixInsight ImageIntegration writes its rejection maps under these
+    # fixed ids with no imageType and no FITS keywords.
+    untyped_rejection_maps = {
+        "rejection_low": "RejectionMapLow",
+        "rejection_high": "RejectionMapHigh",
+    }
     candidates = [
         image for image in images
         if _compact_image_type(_declared_image_type(image)) in science_types
@@ -399,8 +405,9 @@ def _select_science_image(
     for image in images:
         if image is selected:
             continue
-        image_type = _compact_image_type(_declared_image_type(image))
-        if image_type not in auxiliary_types:
+        image_id = str(image.get("id") or "")
+        image_type = _declared_image_type(image) or untyped_rejection_maps.get(image_id, "")
+        if _compact_image_type(image_type) not in auxiliary_types:
             raise CalibrationError(
                 "XISF_MULTI_IMAGE_UNSUPPORTED",
                 "non-science XISF images must be recognized auxiliary maps",
@@ -409,8 +416,8 @@ def _select_science_image(
         geometry = image.get("geometry")
         auxiliaries.append(
             {
-                "id": str(image.get("id") or ""),
-                "type": _declared_image_type(image),
+                "id": image_id,
+                "type": image_type,
                 "geometry": [int(value) for value in geometry]
                 if isinstance(geometry, (tuple, list))
                 else [],
