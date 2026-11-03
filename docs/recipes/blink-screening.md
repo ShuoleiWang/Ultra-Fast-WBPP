@@ -94,6 +94,7 @@ Applied after the absolute criteria; a frame already carrying the equivalent abs
 | `GATE_MULTI_FAMILY_CLOUD_HARD` | `BLINK_CLOUD_THICK` | EXCLUDE |
 | `GATE_SOURCE_RETENTION_STRONG` / `GATE_SOURCE_RETENTION_REVIEW` (nightly) | `BLINK_SOURCES_LOW` (only if not already set) | ATTENTION |
 | `GATE_TEMPORAL_EXTINCTION_*`, `GATE_NIGHT_ZEROPOINT_SHIFT_REVIEW` | covered by `BLINK_EXTINCTION` | — |
+| `GATE_FIELD_OFFSET_HARD` | `BLINK_FIELD_MISMATCH` (covers less than 85 % of the field its group has in common: an off-target or re-centred frame) | EXCLUDE |
 | `GATE_COMMON_FOOTPRINT_REVIEW` | `BLINK_FIELD_MISMATCH` (overlap below 0.5: wrong field or a large offset) | ATTENTION |
 | `GATE_REGISTRATION_REVIEW` with a successful registration | `BLINK_REGISTRATION_WEAK` | ATTENTION |
 | `GATE_BACKGROUND_STRONG` / `GATE_BACKGROUND_REVIEW`, `GATE_NOISE_REVIEW` | `BLINK_NIGHT_OUTLIER` | ATTENTION |

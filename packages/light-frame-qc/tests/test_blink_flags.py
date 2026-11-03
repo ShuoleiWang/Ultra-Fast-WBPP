@@ -249,6 +249,7 @@ def test_gate_codes_map_to_flags_notes_and_never_duplicate() -> None:
         assert code not in GATE_FLAG_MAPPING
     for code in (
         "GATE_OCCLUSION_HARD",
+        "GATE_FIELD_OFFSET_HARD",
         "GATE_SPATIAL_DIMMING_STRONG",
         "GATE_MULTI_FAMILY_CLOUD_HARD",
         "GATE_MEASUREMENT_FAILED",

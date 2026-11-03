@@ -6,11 +6,20 @@ from dataclasses import replace
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from ufwbpp.workflows.single_target import run_e2e
 from ufwbpp.selection import SelectionParameters
-from test_e2e import FakeSolver, _request, synthetic_project  # noqa: F401  (fixture re-export)
+from test_e2e import (  # noqa: F401  (fixture re-export)
+    FakeSolver,
+    _header,
+    _request,
+    _stars,
+    _subpixel_shift,
+    _write,
+    synthetic_project,
+)
 
 
 def _master_hashes(output: Path) -> set[tuple[str, str]]:
@@ -24,19 +33,29 @@ def _master_hashes(output: Path) -> set[tuple[str, str]]:
     return hashes
 
 
-def test_unattended_policy_keeps_thin_evidence_review_frame_with_reduced_weight(
+def test_unattended_policy_downweights_thin_evidence_and_excludes_an_off_target_light(
     tmp_path: Path, synthetic_project: dict[str, tuple[Path, ...]]
 ) -> None:
+    # A Light re-centred off target on the main night: 1392 x 384 px off on a
+    # 6252 x 4176 sensor (as on a real M31 panel), on the 128 px field.
+    y, x = np.indices((128, 128), dtype=np.float64)
+    response = np.clip(0.82 + 0.18 * (1.0 - ((x - 63.5) ** 2 + (y - 63.5) ** 2) / (2 * 92.0**2)), 0.72, 1.0)
+    sky = _subpixel_shift(_stars((128, 128)), -1392 / 6252 * 128, -384 / 4176 * 128)
+    off_target = _write(
+        tmp_path / "LIGHT" / "light_R_off_target.fits",
+        1014.0 + sky * response + np.random.default_rng(29).normal(0.0, 1.0, sky.shape),
+        _header("Light", exposure=60.0, observed_at="2026-01-01T20:09:00Z"),
+    )
     output = tmp_path / "unattended"
     request = replace(
-        _request(synthetic_project, output, lights=synthetic_project["lights"]),
+        _request(synthetic_project, output, lights=(*synthetic_project["lights"], off_target)),
         selection=SelectionParameters(policy="unattended-v1"),
     )
     result = run_e2e(request, solver_backends=(FakeSolver(),))
     assert result.success is True
     review_path = str(synthetic_project["lights"][8].resolve(strict=True))
     assert review_path in result.passed_light_paths
-    assert result.excluded_light_paths == ()
+    assert result.excluded_light_paths == (str(off_target.resolve(strict=True)),)
 
     manifest = json.loads((output / "qc" / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["manualReviewApprovals"]["defaultDisposition"] == "DECIDED_BY_SELECTION_POLICY"
@@ -50,7 +69,8 @@ def test_unattended_policy_keeps_thin_evidence_review_frame_with_reduced_weight(
     assert kept["weightMultiplier"] == pytest.approx(0.5 * kept["psfFactor"])
     assert 0.5 < kept["psfFactor"] < 2.0
     assert any("GATE_INSUFFICIENT_NIGHT_BASELINE" in reason["code"] for reason in kept["reasons"])
-    assert manifest["selection"]["counts"] == {"KEEP": 8, "EXCLUDE": 0, "KEEP_REDUCED_WEIGHT": 1}
+    assert manifest["selection"]["counts"] == {"KEEP": 8, "EXCLUDE": 1, "KEEP_REDUCED_WEIGHT": 1}
+    assert decisions[off_target.name]["reasons"][0]["code"] == "SEL_GUARD_GATE_FIELD_OFFSET_HARD"
 
     selection = json.loads((output / "qc" / "selection.json").read_text(encoding="utf-8"))
     reports = selection["counterfactual"]
@@ -65,6 +85,12 @@ def test_unattended_policy_keeps_thin_evidence_review_frame_with_reduced_weight(
     receipt = json.loads((output / "receipt.json").read_text(encoding="utf-8"))
     assert receipt["qualityControl"]["selectionPolicy"] == "unattended-v1"
     assert receipt["qualityControl"]["selection"] == "qc/selection.json"
+    # The screening record names the reason and carries a review preview.
+    screened = {Path(item["path"]).name: item for item in receipt["qualityControl"]["screening"]["frames"]}
+    off = screened[off_target.name]
+    assert off["disposition"] == "HARD_FAIL" and off["admitted"] is False
+    assert any(message.startswith("Off target: the frame covers 7") for message in off["evidence"]), off
+    assert (output / off["reviewPreview"]).is_file()
     pixel = json.loads((output / "receipts" / "pixel-pipeline.json").read_text(encoding="utf-8"))
     weights = {
         Path(path).name: float(record["qualityWeight"])

@@ -4,6 +4,7 @@ from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
+import pytest
 
 from lightframeqc.analysis import analyze_measurements
 from lightframeqc.config import DEFAULT_CONFIG
@@ -304,14 +305,18 @@ def test_local_cloud_covering_less_than_half_the_frame_is_sent_to_review() -> No
     assert cloudy.features.cloud_score == 2, _snapshot(cloudy)
 
 
-def test_large_pointing_shift_uses_only_common_field_and_stays_keep() -> None:
-    """A changed footprint is not a wall when the overlap itself is healthy."""
+@pytest.mark.parametrize(("reference_index", "overlap_fraction"), [(0, 0.75), (5, 1.0)])
+def test_large_pointing_shift_uses_only_common_field_and_is_off_the_group_field(
+    reference_index: int, overlap_fraction: float
+) -> None:
+    """A changed footprint is not a wall when the overlap itself is healthy,
+    but the frame is off its group's common field, also as the reference."""
 
     measurements = [
         _measurement(
             f"dither_{index:02d}",
             minute=index * 10,
-            reference_weight=100.0 if index == 0 else 0.0,
+            reference_weight=100.0 if index == reference_index else 0.0,
         )
         for index in range(8)
     ]
@@ -351,9 +356,13 @@ def test_large_pointing_shift_uses_only_common_field_and_stays_keep() -> None:
     assert result.decision is Decision.KEEP, _snapshot(result)
     assert result.features.star_completeness == 1.0, _snapshot(result)
     assert result.features.detected_source_ratio == 1.0, _snapshot(result)
-    assert result.features.overlap_fraction == 0.75, _snapshot(result)
+    assert result.features.overlap_fraction == overlap_fraction, _snapshot(result)
     assert result.features.largest_missing_region == 0.0, _snapshot(result)
     assert result.features.occlusion_score == 0, _snapshot(result)
+    # Seven frames share the field; the shifted one covers three quarters of it.
+    coverage = {item.path: item.features.group_field_coverage for item in results}
+    assert coverage.pop(result.path) == pytest.approx(0.75, abs=0.01)
+    assert set(coverage.values()) == {1.0}
 
 
 def test_opaque_local_cloud_without_background_evidence_is_not_called_a_wall() -> None:

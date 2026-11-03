@@ -289,6 +289,10 @@ class FrameFeatures:
     spatial_dimming_p90_mag: float | None = None
     spatial_brightening_p90_mag: float | None = None
     overlap_fraction: float | None = None
+    # Share of the field at least half of the group's registered frames
+    # cover, from the registration geometry; None when the frame has no
+    # accepted registration or preview, or fewer than three of its group do.
+    group_field_coverage: float | None = None
     largest_missing_region: float | None = None
     missing_inside_outside_ratio: float | None = None
     boundary_support: float | None = None

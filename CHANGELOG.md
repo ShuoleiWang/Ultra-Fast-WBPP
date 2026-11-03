@@ -4,6 +4,26 @@ All notable changes are documented here. The format follows Keep a Changelog and
 
 ## [Unreleased]
 
+### Screening fails a Light taken off its group's field
+
+- QC now places every Light with an accepted registration on its group's reference preview and measures how much of the group's common field it covers. The common field is the area at least half of the group's registered Lights cover, sampled on a 128 × 128 lattice over their union. The integration's residual-background model uses the same majority (and at least five Lights). One off-target Light cannot move it, even when that Light is the group's reference. The QC manifest records the value as `group_field_coverage`.
+- A Light below 85 % fails the gate with `GATE_FIELD_OFFSET_HARD`. The legacy gate and the unattended policy exclude it, no approval can admit it, and Blink pre-marks it DROP as `BLINK_FIELD_MISMATCH`. The receipt's screening record lists it with a review preview and the reason, for example "Off target: the frame covers 70% of the field its group has in common, below 85%.". This is gate evidence revision 7: approvals recorded under earlier revisions must be made again.
+- Why: a six-panel M31 LRGB mosaic (753 Lights) failed 17 minutes into the run and lost five finished panels. One L Light of the last panel had been taken after a re-centring, 1392 × 384 px off target on the 6252 × 4176 sensor. Its star-cell overlap with the group reference was 0.76, above the 0.50 review gate, so the unattended policy admitted it and registration accepted it. On the canvas it widened the panel's window, and the panel's integration stopped with `RESIDUAL_BACKGROUND_UNDERCONSTRAINED`.
+  - The residual-background model then needed 70 % of every cell of the window measured, and the window is the box around all of the panel's Lights. On the box around the admitted L Lights alone, the off-target Light had 0.52 of it inside the common field and left every other L Light at 0.72–0.75; without it, they had 0.93 or more.
+  - On a single target such a Light also shrinks the shared auto-crop to its intersection.
+- The threshold: on a single target, the share the old rule counted followed a Light's field coverage within 0.03 (simulated with 8–120 Lights), and the per-Light share below is never lower, so a Light that passes at 0.85 stays at least 0.12 above the 70 % rule.
+  - On the real panel the re-centred Light measures 0.703 and the other 40 L Lights 0.971–1.000.
+  - Across the six panels' other 752 Lights (24 filter groups; panel 5 has four nights on both sides of the pier), the lowest coverage is 0.911 and no Light is flagged.
+
+### Integration judges each Light's residual sky on its own pixels
+
+- Trail rejection fits each Light's residual sky against its group, to find trails and to keep the background level where a trail's samples are dropped. Its two fail-closed checks, at least 70 % of the cells measured and the fitted surface inside the observed envelope, now count only the cells holding that Light's pixels. They used to count every cell of the integration grid.
+- Why: a mosaic panel's grid is the canvas window around all of its Lights, every filter included. One off-target Light, or a whole filter or night offset from the rest, could leave Lights squarely on their group's field short of 70 % of that window and stop the run with `RESIDUAL_BACKGROUND_UNDERCONSTRAINED`, although each was measured wherever its correction applies. A Light's correction is only ever added to its own pixels; the stack-wide target cancels wherever it is used.
+  - M31 panel 6 with the off-target L Light admitted, as under the old gate: the other L Lights have 0.97–1.00 of their own cells inside the common field, against 0.72–0.75 of the window. The off-target Light itself has 0.70, at the limit.
+- Still fails closed: a Light with more than 30 % of its cells where the group has no reference (fewer than half of its Lights, or fewer than five, reach there) stops the run as before.
+- The error names the failing Light by its integration input, the registered file named after it (`NNNNN_<Light file stem>.fits`), instead of its index in the group, which nothing in the failure record mapped back to a file.
+- Both checks only got looser and the fit is unchanged, so a run that succeeded before gives the same masters. Rerun with this change and the off-target gate, the six-panel M31 project (752 Lights) gives L, R, G and B masters byte-identical to main's. Its lowest share was 0.82 of the window under the old rule (panel 5) and is 0.90 of a Light's own cells under the new one. In the receipt, the per-frame `validCellFraction` (share of all grid cells) is replaced by `validFrameCellFraction` (share of the frame's own cells).
+
 ### XISF masters with untyped rejection maps calibrate
 
 - Older PixInsight ImageIntegration versions store a master's rejection maps as images `rejection_low` and `rejection_high` with no `imageType` and no FITS keywords; newer versions declare `RejectionMapLow`/`RejectionMapHigh` on the same ids. A master dark integrated in February 2025 with that layout failed calibration with `XISF_MULTI_IMAGE_UNSUPPORTED`. An extra image that declares no type is now recognized as a rejection map by these two ids and recorded under that type in the conversion receipt; any other untyped or unknown extra image still fails closed.

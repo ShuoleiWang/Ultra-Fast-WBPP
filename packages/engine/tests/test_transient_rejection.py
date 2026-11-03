@@ -1,6 +1,7 @@
 from dataclasses import replace
 
 import numpy as np
+import pytest
 
 from ufwbpp.stacking.integration import (
     IntegrationParameters, _RejectionSigmaFloor,
@@ -36,6 +37,10 @@ def _model(values):
 
 def _floor():
     return _RejectionSigmaFloor(True, .5, 10, 0, 0, 0, 0, 0, 0, 3, "test")
+
+
+def _names(count):
+    return [f"light_{index:02d}.fits" for index in range(count)]
 
 
 def test_faint_trail_wings_rejected_without_touching_common_structure():
@@ -89,7 +94,10 @@ def test_spatial_rejection_respects_per_pixel_minimum_and_missing_coverage():
     assert not mask[:, 285:295, 305:315].any()
 
 
-def test_group_sky_alignment_preserves_full_stack_mean_and_prevents_mask_stripes():
+@pytest.mark.parametrize("panel_columns", [0, 96])
+def test_group_sky_alignment_preserves_full_stack_mean_prevents_mask_stripes_and_judges_frames_on_their_own_cells(
+    panel_columns,
+):
     values, distance = _scene(trail=False)
     yy, xx = np.mgrid[:640, :640]
     # One otherwise valid exposure has an additive sky difference, exactly the
@@ -98,13 +106,17 @@ def test_group_sky_alignment_preserves_full_stack_mean_and_prevents_mask_stripes
     weights = np.arange(1,16,dtype=np.float64)
     weights /= weights.sum()
     preview = values.reshape(15,160,4,160,4).mean((2,4))
-    alignment = fit_residual_background(preview,4,weights)
+    # A mosaic panel's grid can be wider than the group's field: 96 more
+    # columns (3 of 8 cell columns) that only the panel's other Lights cover.
+    preview = np.pad(preview,((0,0),(0,0),(0,panel_columns)),constant_values=np.nan)
+    alignment = fit_residual_background(preview,4,weights,_names(15))
     assert alignment is not None
     normalized=values.copy()
     alignment.apply_rows(normalized,0)
     before=np.einsum('i,iyx->yx',weights,values)
     after=np.einsum('i,iyx->yx',weights,normalized)
-    np.testing.assert_allclose(after,before,rtol=0,atol=3e-5)
+    # Float32 rounding of the corrected samples grows with the pixel value.
+    np.testing.assert_allclose(after,before,rtol=1e-7,atol=3e-5)
     # Identical science pixels are compared with/without one sample's sky;
     # background-subtracted astrophysical flux and all-weight mean are intact.
     stripe=abs(distance)<7
@@ -118,6 +130,14 @@ def test_group_sky_alignment_preserves_full_stack_mean_and_prevents_mask_stripes
     for y0 in range(0,640,37): alignment.apply_rows(tiled[:,y0:y0+37],y0)
     np.testing.assert_array_equal(tiled,normalized)
     assert alignment.serializable()['maximumWeightedCorrection'] < 1e-12
+    # Seven Lights, fewer than the reference needs, reach one cell further
+    # right and down than the rest: 9 of the 25 cells holding their pixels
+    # have no group reference, so they are measured on 64 % and fail closed,
+    # naming the first of them.
+    preview[7:,128:] = np.nan
+    preview[7:,:,128:] = np.nan
+    with pytest.raises(ValueError, match="^light_00.fits: group residual background is underconstrained$"):
+        fit_residual_background(preview,4,weights,_names(15))
 
 
 def test_long_trail_detection_reaches_observed_image_endpoints():
@@ -136,7 +156,7 @@ def test_only_added_rejections_receive_sky_alignment_and_original_mad_stays_fixe
     values[2]+=24
     weights=np.full(15,1/15)
     preview=values.reshape(15,160,4,160,4).mean((2,4))
-    alignment=fit_residual_background(preview,4,weights)
+    alignment=fit_residual_background(preview,4,weights,_names(15))
     assert alignment is not None
     alignment.apply_coordinates(preview,np.arange(160)*4+1.5,np.arange(160)*4+1.5)
     model=replace(detect_transient_trails(preview,4),background_alignment=alignment)
@@ -220,7 +240,7 @@ def test_vectorized_cell_statistics_match_per_frame_reference(monkeypatch) -> No
         return real_robust_fit(nodes, valid, sigma_nodes)
 
     monkeypatch.setattr(module, "_robust_fit", spy_robust_fit)
-    module.fit_residual_background(preview, 9, np.ones(n))
+    module.fit_residual_background(preview, 9, np.ones(n), _names(n))
     assert len(seen) == n
     actual_nodes = np.stack(seen)
     assert actual_nodes.shape == expected_nodes.shape

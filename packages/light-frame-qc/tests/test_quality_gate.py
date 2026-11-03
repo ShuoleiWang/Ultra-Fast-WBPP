@@ -569,7 +569,7 @@ def test_policy_digest_is_canonical_and_changes_with_thresholds() -> None:
 def test_evidence_revision_is_fixed_and_invalidates_previous_policy_digest() -> None:
     policy = GatePolicy()
     legacy = policy.serializable()
-    assert legacy.pop("evidence_revision") == 6
+    assert legacy.pop("evidence_revision") == 7
     previous_digest = "sha256:" + hashlib.sha256(
         json.dumps(legacy, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()

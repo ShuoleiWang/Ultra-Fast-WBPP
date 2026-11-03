@@ -54,13 +54,19 @@ class GatePolicy:
     # the cohort's clear envelope instead of passing without extinction
     # evidence, and uniform extinction below thick cloud is recorded and kept
     # unless another cloud family agrees.
-    evidence_revision: int = field(default=6, init=False)
+    # Revision 7: a frame off its group's common field fails hard.
+    evidence_revision: int = field(default=7, init=False)
     minimum_pass_group_frames: int = 8
     minimum_night_frames_for_pass: int = 3
     minimum_registration_matches: int = 30
     minimum_registration_fraction: float = 0.25
     maximum_registration_rms: float = 1.5
     minimum_overlap_fraction: float = 0.50
+    # A frame covering less of its group's common field was taken off target.
+    # The integration's residual sky needs 70 % of the cells holding a frame's
+    # pixels inside that field, and a frame that passes here keeps more;
+    # normal dithers and flips cover 0.90 or more.
+    minimum_group_field_coverage: float = 0.85
     minimum_detected_sources: int = 20
     minimum_morphology_stars: int = 15
     finite_fraction_review: float = 0.999
@@ -156,6 +162,8 @@ class GatePolicy:
             raise ValueError("source retention thresholds are invalid")
         if not 0 <= self.night_boundary_hours < 24:
             raise ValueError("night_boundary_hours must be in [0, 24)")
+        if not 0 < self.minimum_group_field_coverage <= 1:
+            raise ValueError("minimum_group_field_coverage must be in (0, 1]")
         if not (
             0
             <= self.weak_occlusion_area
@@ -785,6 +793,20 @@ def evaluate_quality_gate(
                         "Common-field coverage is insufficient or unavailable.",
                         value=overlap,
                         threshold=policy.minimum_overlap_fraction,
+                    ),
+                )
+            field_coverage = _finite(result.features.group_field_coverage)
+            if field_coverage is not None and field_coverage < policy.minimum_group_field_coverage:
+                _add_family(
+                    families,
+                    _evidence(
+                        "GATE_FIELD_OFFSET_HARD",
+                        EvidenceFamily.REGISTRATION,
+                        EvidenceSeverity.HARD_FAIL,
+                        f"Off target: the frame covers {field_coverage:.0%} of the field its group "
+                        f"has in common, below {policy.minimum_group_field_coverage:.0%}.",
+                        value=field_coverage,
+                        threshold=policy.minimum_group_field_coverage,
                     ),
                 )
 
