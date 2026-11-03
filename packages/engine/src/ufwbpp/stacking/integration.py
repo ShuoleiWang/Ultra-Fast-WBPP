@@ -1398,7 +1398,10 @@ def _prepare_transient_rejection(
         ) as pool:
             list(pool.map(block_means, range(len(expressions))))
     try:
-        background = fit_residual_background(preview, factor, weights)
+        # A Light's input is its registered file, named after the Light.
+        background = fit_residual_background(
+            preview, factor, weights, [Path(expression.source_path).name for expression in expressions]
+        )
     except ValueError as error:
         raise CalibrationError("RESIDUAL_BACKGROUND_UNDERCONSTRAINED", str(error)) from error
     if background is not None:

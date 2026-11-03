@@ -91,7 +91,7 @@ class SelectionDecision:
 
 顺序：护栏 → 权重 → 灰区 → 反事实确认。
 
-1. 护栏（EXCLUDE）：`GATE_NOT_A_LIGHT_FRAME`、`GATE_MEASUREMENT_*`、`GATE_IDENTITY_*`、`GATE_FINITE_FRACTION_HARD`、`GATE_NEAR_CONSTANT_IMAGE`、`GATE_FRAGMENTED_TRAILING_HARD`、`GATE_COHERENT_TRAILING_HARD`、`GATE_OCCLUSION_HARD`（面积 > 0.50 时；≤ 0.50 转区域图）、配准失败、`T < 0.50`（归一化 `minimum_scale`）、`extra_extinction_mag > 0.75`。
+1. 护栏（EXCLUDE）：`GATE_NOT_A_LIGHT_FRAME`、`GATE_MEASUREMENT_*`、`GATE_IDENTITY_*`、`GATE_FINITE_FRACTION_HARD`、`GATE_NEAR_CONSTANT_IMAGE`、`GATE_FRAGMENTED_TRAILING_HARD`、`GATE_COHERENT_TRAILING_HARD`、`GATE_OCCLUSION_HARD`（面积 > 0.50 时；≤ 0.50 转区域图）、`GATE_FIELD_OFFSET_HARD`（对本组公共视场的覆盖率 < 0.85，偏离目标）、配准失败、`T < 0.50`（归一化 `minimum_scale`）、`extra_extinction_mag > 0.75`。
 2. 证据不足类 REVIEW（`GATE_INSUFFICIENT_COHORT`、`GATE_NIGHT_UNRESOLVED`、`GATE_INSUFFICIENT_NIGHT_BASELINE`、`GATE_MORPHOLOGY_SAMPLE_REVIEW`、`GATE_SOURCE_COUNT_MISSING`、`GATE_FINITE_FRACTION_REVIEW`、`GATE_COMMON_FOOTPRINT_REVIEW`、`GATE_REFERENCE_NOT_CONNECTED`）：KEEP，`c_i = 0.5`。
 3. 缺陷类 REVIEW（云、消光、背景、噪声、对焦、拖长、遮挡 REVIEW）：进入灰区：按优先级表取阈值（例如 resolution 下 `fwhm_night_ratio > 1.3` 直接 EXCLUDE；depth 下 > 2.0 才 EXCLUDE），其余 KEEP 并降权 `c_i = 0.5–0.8`；局部云/遮挡且 `region_weights=True` → KEEP_WITH_MAP。
 4. 反事实确认：对第 3 步产生的每个 EXCLUDE，以及权重最低的 10% KEEP 帧，计算 ΔQ；EXCLUDE 仅在 `ΔQ_depth,lo > +0.005 mag` 或 `ΔQ_background,lo > 0.05 σ` 时成立，否则降级为 KEEP（`c_i = 0.5`）；KEEP 帧若 `ΔQ_depth,hi < −0.01 mag` 且 `ΔQ_background,hi < 0`（去掉它反而更差）则恢复 `c_i = 1`。

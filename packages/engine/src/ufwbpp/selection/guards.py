@@ -21,6 +21,9 @@ HARD_GATE_CODES: frozenset[str] = frozenset(
         "GATE_COHERENT_TRAILING_HARD",
         # Until region weight maps exist, a hard occlusion cannot be used partially.
         "GATE_OCCLUSION_HARD",
+        # Off target: the integration's sky model and crop need the group's
+        # common field, and on a mosaic panel the frame would widen the window.
+        "GATE_FIELD_OFFSET_HARD",
         # GATE_MULTI_FAMILY_CLOUD_HARD is deliberately absent: a uniform
         # transparency loss is modelled by the normalization scale, so it is a
         # gray-zone defect; the transparency and extinction guards below bound it.

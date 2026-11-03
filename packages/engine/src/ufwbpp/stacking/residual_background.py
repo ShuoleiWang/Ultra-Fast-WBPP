@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
@@ -94,11 +94,13 @@ def _robust_fit(nodes: NDArray, valid: NDArray, sigma_nodes: float) -> NDArray:
 
 
 def fit_residual_background(values: NDArray[np.float32], bin_factor: int,
-                            weights: NDArray[np.float64]) -> ResidualBackgroundAlignment | None:
+                            weights: NDArray[np.float64],
+                            names: Sequence[str]) -> ResidualBackgroundAlignment | None:
     """Estimate only frame-dependent, coarse residual sky; shared objects cancel.
 
     No rejected single-reference grid is reused or accepted with relaxed gates.
     Spatial holdout validates each new group-relative model independently.
+    Errors name the failing frame by ``names``.
     """
     n,height,width=values.shape
     cell=max(4,int(np.ceil(128/bin_factor)))
@@ -137,12 +139,18 @@ def fit_residual_background(values: NDArray[np.float32], bin_factor: int,
             final=nanmedian_rows(np.where(clipped,padded,np.float32(np.nan)))
             fitted=enough & (final_counts>=16)
             nodes[fitted,iy,ix]=final[fitted]
+    # The cells holding each frame's pixels. A frame's correction is applied
+    # only there (the stack-wide target cancels wherever it is used), so the
+    # frame is judged only there: a mosaic panel's grid also spans cells that
+    # only the panel's other Lights reach.
+    own=np.logical_or.reduceat(np.logical_or.reduceat(finite,ys,axis=1),xs,axis=2)
     yy,xx=np.indices(nodes.shape[1:]);checker=(yy+xx)%2==0
     fields=[];evidence=[]
     for frame,observed in enumerate(nodes):
         valid=np.isfinite(observed);training=valid & checker;holdout=valid & ~checker
-        if np.mean(valid)<.7 or min(np.sum(training),np.sum(holdout))<8:
-            raise ValueError(f"frame {frame}: group residual background is underconstrained")
+        fraction=np.count_nonzero(valid)/max(1,np.count_nonzero(own[frame]))
+        if fraction<.7 or min(np.sum(training),np.sum(holdout))<8:
+            raise ValueError(f"{names[frame]}: group residual background is underconstrained")
         sigma_nodes=896/(cell*bin_factor)
         trial=_robust_fit(observed,training,sigma_nodes)
         before=observed[holdout];after=before-trial[holdout]
@@ -156,11 +164,11 @@ def fit_residual_background(values: NDArray[np.float32], bin_factor: int,
         field=_robust_fit(observed,valid,sigma_nodes) if improved else np.zeros_like(observed)
         if improved:
             observed_span=float(np.ptp(observed[valid]))
-            if np.ptp(field)>1.25*observed_span+6*after_rms:
-                raise ValueError(f"frame {frame}: residual background exceeds observed envelope")
+            if np.ptp(field[own[frame]])>1.25*observed_span+6*after_rms:
+                raise ValueError(f"{names[frame]}: residual background exceeds observed envelope")
         fields.append(field)
         evidence.append({"frameIndex":frame,"status":"APPLIED" if improved else "NOT_BENEFICIAL",
-                         "validCellFraction":float(np.mean(valid)),"holdoutCells":int(np.sum(holdout)),
+                         "validFrameCellFraction":fraction,"holdoutCells":int(np.sum(holdout)),
                          "holdoutBeforeRms":before_rms,"holdoutAfterRms":after_rms,
                          "holdoutImprovement":1-after_rms/max(before_rms,1e-12)})
     if not any(item['status']=='APPLIED' for item in evidence): return None

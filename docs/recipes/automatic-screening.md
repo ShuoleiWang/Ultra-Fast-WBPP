@@ -35,6 +35,13 @@ Extinction is judged on every night, and uniform thin cloud is kept:
 - Reviewing those frames instead cost signal on the reference project. On 2026-09-12, four R and G Lights at 0.35–0.91 mag had only extinction evidence. Excluding them took the R master's effective-noise gain against PixInsight from 1.023 to 0.960 and G's from 1.033 to 1.011. Keeping them leaves both unchanged.
 - This changes gate evidence, so the policy's evidence revision is 6: REVIEW approvals recorded under earlier revisions are invalid and must be made again.
 
+A Light taken off its group's field fails the gate. QC places every Light with an accepted registration on the group's reference preview. The group's common field is the area at least half of them cover, the majority the integration's residual-background model also uses (with at least five Lights); one off-target Light cannot move it, even as the reference. A Light that covers less than 85 % of that field gets `GATE_FIELD_OFFSET_HARD` ("Off target: …"), so no automatic route admits it and no approval can, and Blink pre-marks it DROP (`BLINK_FIELD_MISMATCH`).
+
+- The integration's residual-background model needs 70 % of the cells holding a Light's pixels inside the common field, and a Light that passes this gate keeps more.
+- Dithers and meridian flips cover 0.90 or more.
+- On a six-panel M31 mosaic, a Light re-centred 1392 × 384 px off target on a 6252 × 4176 sensor covered 0.703. It had been admitted, and it stopped the panel's integration 17 minutes into the run (`RESIDUAL_BACKGROUND_UNDERCONSTRAINED`).
+- This changes gate evidence (evidence revision 7).
+
 Review and production runs share a disposable cache of complete measured groups. Images are still read and content-checked, and quality gates and approvals are evaluated again. Identical measured cohorts can reuse stellar analysis; changed inputs, group membership, configuration, implementation or numerical-library versions invalidate that entry. The cache uses bounded JSON and falls back to calculation if unavailable. Set `UFWBPP_QC_CACHE_DIR=off` to disable it for comparisons. Diagnostic reports record measurement, analysis and gate times separately.
 
 The astroalign 2.6.2 bootstrap reuses repeated star-coordinate and triangle-pair calculations while preserving its search, fits and tolerances; other versions use the public implementation. One seeded synthetic failed-match benchmark improved from 9.65 s to 5.12 s. This is a bootstrap microbenchmark, not a full-project speed claim.

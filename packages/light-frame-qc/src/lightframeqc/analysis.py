@@ -1181,6 +1181,60 @@ def _analyze_frame(task: _FrameTask) -> tuple[RegistrationResult, FrameFeatures,
     return registration, features, grid
 
 
+# Lattice points per axis over the union of a group's registered footprints.
+FIELD_LATTICE_POINTS = 128
+
+
+def _group_field_coverage(
+    frames: list[FrameMeasurement], registrations: list[RegistrationResult]
+) -> list[float | None]:
+    """Each frame's share of the field its group has in common.
+
+    The field is the part of the reference preview covered by at least half
+    of the frames with an accepted registration, the majority the
+    integration's sky reference is built on.  One off-target frame cannot
+    move it, even when that frame is the reference.  Frames without an
+    accepted registration or a preview, and groups with fewer than three
+    placed frames, are not judged.
+    """
+
+    coverage: list[float | None] = [None] * len(frames)
+    placed: list[tuple[int, FrameMeasurement, np.ndarray, np.ndarray]] = []
+    for index, (frame, registration) in enumerate(zip(frames, registrations, strict=True)):
+        matrix = registration.matrix
+        if not registration.accepted or matrix is None or frame.preview_width <= 0 or frame.preview_height <= 0:
+            continue
+        try:
+            placed.append((index, frame, matrix, np.linalg.inv(matrix)))
+        except np.linalg.LinAlgError:
+            continue
+    if len(placed) < 3:
+        return coverage
+    # The footprints on the reference preview: a frame covers [0, w) x [0, h)
+    # of its own preview, as in _reference_point_is_in_source.
+    corners = []
+    for _, frame, matrix, _ in placed:
+        width, height = frame.preview_width, frame.preview_height
+        mapped = np.asarray([[0, 0, 1], [width, 0, 1], [width, height, 1], [0, height, 1]], dtype=np.float64) @ matrix.T
+        corners.append(mapped[:, :2] / mapped[:, 2:])
+    points = np.concatenate(corners)
+    low, high = points.min(axis=0), points.max(axis=0)
+    steps = (np.arange(FIELD_LATTICE_POINTS) + 0.5) / FIELD_LATTICE_POINTS
+    xx, yy = np.meshgrid(low[0] + steps * (high[0] - low[0]), low[1] + steps * (high[1] - low[1]))
+    lattice = np.stack((xx.ravel(), yy.ravel(), np.ones(xx.size)))
+    inside = np.empty((len(placed), xx.size), dtype=bool)
+    for row, (_, frame, _, inverse) in enumerate(placed):
+        source = inverse @ lattice
+        x, y = source[0] / source[2], source[1] / source[2]
+        inside[row] = (x >= 0) & (x < frame.preview_width) & (y >= 0) & (y < frame.preview_height)
+    field = np.count_nonzero(inside, axis=0) >= (len(placed) + 1) // 2
+    total = np.count_nonzero(field)
+    if total:
+        for row, (index, _, _, _) in enumerate(placed):
+            coverage[index] = np.count_nonzero(inside[row] & field) / total
+    return coverage
+
+
 def _analyze_group(
     group_id: str,
     frames: list[FrameMeasurement],
@@ -1201,9 +1255,10 @@ def _analyze_group(
     # Frames are independent once the reference is fixed; the group steps
     # below (morphology, consensus, scores) see them in their original order.
     analyses = runner.map(_analyze_frame, tasks) if runner is not None else [_analyze_frame(task) for task in tasks]
+    coverages = _group_field_coverage(frames, [registration for registration, _, _ in analyses])
     results: list[FrameResult] = []
     ordered_measurements: list[FrameMeasurement] = []
-    for frame, (registration, features, grid) in zip(frames, analyses, strict=True):
+    for frame, (registration, features, grid), coverage in zip(frames, analyses, coverages, strict=True):
         confidence = _confidence(len(frames), registration, config)
         warnings: list[str] = []
         if len(frames) < config.minimum_group_frames:
@@ -1211,6 +1266,7 @@ def _analyze_group(
         if not registration.accepted:
             warnings.extend(registration.reason_codes)
         features.detected_source_ratio = _detected_ratio(frame, reference)
+        features.group_field_coverage = coverage
         if (
             features.overlap_fraction is not None
             and features.overlap_fraction < config.minimum_overlap_fraction

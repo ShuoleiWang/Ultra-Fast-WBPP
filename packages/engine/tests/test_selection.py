@@ -140,6 +140,11 @@ def test_policy_decisions_follow_guards_gray_zone_and_priority() -> None:
             review_codes=("GATE_SPATIAL_DIMMING_REVIEW",),
             spatial_dimming_p90_mag=0.25,
         ),
+        _features(
+            "/a/off-target.fits",
+            gate_disposition="HARD_FAIL",
+            hard_fail_codes=("GATE_FIELD_OFFSET_HARD",),
+        ),
     ]
     by_path = {item.path: item for item in decide(frames, unattended)}
     assert by_path["/a/pass.fits"].action == "KEEP" and by_path["/a/pass.fits"].confidence == 1.0
@@ -161,6 +166,9 @@ def test_policy_decisions_follow_guards_gray_zone_and_priority() -> None:
     assert opaque.reasons[0][0] == "SEL_GUARD_TRANSPARENCY_BELOW_NORMALIZATION_FLOOR"
     assert by_path["/a/trail.fits"].action == "EXCLUDE"
     assert by_path["/a/trail.fits"].reasons[0][0] == "SEL_GUARD_GATE_COHERENT_TRAILING_HARD"
+    off_target = by_path["/a/off-target.fits"]
+    assert off_target.action == "EXCLUDE" and not off_target.soft
+    assert off_target.reasons[0][0] == "SEL_GUARD_GATE_FIELD_OFFSET_HARD"
     cloud = by_path["/a/cloud-review.fits"]
     assert cloud.action == "KEEP" and cloud.confidence == pytest.approx(0.6)
     # Balanced priority: the soft frame keeps 0.6 confidence times a PSF factor
@@ -171,14 +179,18 @@ def test_policy_decisions_follow_guards_gray_zone_and_priority() -> None:
     # An approval promotes a review frame to full weight; guards still win.
     approved = {
         item.path: item
-        for item in decide(frames, unattended, approved_paths=["/a/cloud-review.fits", "/a/trail.fits"])
+        for item in decide(
+            frames, unattended, approved_paths=["/a/cloud-review.fits", "/a/trail.fits", "/a/off-target.fits"]
+        )
     }
     assert approved["/a/cloud-review.fits"].confidence == 1.0
     assert approved["/a/trail.fits"].action == "EXCLUDE"
+    assert approved["/a/off-target.fits"].action == "EXCLUDE"
     # Diagnostic policy keeps everything the guards allow at full weight.
     everything = {item.path: item for item in decide(frames, replace(unattended, policy="include-all"))}
     assert everything["/a/soft-psf.fits"].confidence == 1.0
     assert everything["/a/opaque.fits"].action == "EXCLUDE"
+    assert everything["/a/off-target.fits"].action == "EXCLUDE"
     with pytest.raises(ValueError):
         decide(frames, SelectionParameters())
 
