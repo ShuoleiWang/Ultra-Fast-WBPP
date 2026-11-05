@@ -24,7 +24,11 @@ from ..mosaic.astrometry import (
     refine_solution,
 )
 from ..platform import remove_file
-from ..solvers.catalog_correspondence import CatalogCorrespondenceError
+from ..solvers.catalog_correspondence import (
+    CLIPPED_RESIDUAL_STATISTIC,
+    CatalogCorrespondenceError,
+    clipped_residual,
+)
 from ..solvers.base import (
     SolveRequest,
     SolverBackend,
@@ -37,6 +41,7 @@ from ..solvers.base import (
 from ..solvers.process import (
     verify_solver_execution_result,
 )
+from .common import _safe_token
 from .contracts import IntegrationMode, E2EError
 
 # Catalog matches a refitted solution needs, the floor a mosaic panel's reference uses.
@@ -44,6 +49,10 @@ _REFINEMENT_MINIMUM_MATCHES = 30
 # A refit replaces the solver's solution only when its residual on stars it was
 # not fitted to is at most this fraction of the solver's on the same stars.
 _REFINEMENT_MAXIMUM_RESIDUAL_RATIO = 0.8
+# A solve may seed the refit when it misses the RMS gate by at most this factor.
+# A worse one can match the catalog in only part of the field: the fit then looks
+# clean on the stars it has and is wrong at the edges (from about 5.8" on real masters).
+_REFIT_SEED_MAXIMUM_RMS_RATIO = 1.5
 # The refit's catalog verification on each master, recorded as that master's
 # last accepted solve; its artifacts sit beside the master.
 CATALOG_REFIT_VERIFICATION_BACKEND = "catalog-refit-verification"
@@ -274,9 +283,10 @@ def _grid_sample_points(shape: tuple[int, int]) -> np.ndarray:
 
 
 def _wcs_grid_disagreement(
-    left: fits.Header, right: fits.Header, shape: tuple[int, int]
+    left: fits.Header, right: fits.Header, shape: tuple[int, int], **inverse: Any
 ) -> float | None:
-    """Maximum pixel disagreement of two solutions of one grid, both ways."""
+    """Maximum pixel disagreement of two solutions of one grid, both ways;
+    ``inverse`` holds options of ``all_world2pix``."""
 
     try:
         left_wcs = WCS(left, relax=False).celestial
@@ -284,8 +294,8 @@ def _wcs_grid_disagreement(
     except Exception:
         return None
     samples = _grid_sample_points(shape)
-    in_right = right_wcs.all_world2pix(left_wcs.all_pix2world(samples, 0), 0)
-    in_left = left_wcs.all_world2pix(right_wcs.all_pix2world(samples, 0), 0)
+    in_right = right_wcs.all_world2pix(left_wcs.all_pix2world(samples, 0), 0, **inverse)
+    in_left = left_wcs.all_world2pix(right_wcs.all_pix2world(samples, 0), 0, **inverse)
     if not (np.all(np.isfinite(in_right)) and np.all(np.isfinite(in_left))):
         return None
     return float(
@@ -402,14 +412,7 @@ def _unify_same_grid_solutions(
             "shapes": {name: list(value) for name, value in shapes.items()},
         }
     shape = next(iter(shapes.values()))
-    adopted = min(
-        sorted(products),
-        key=lambda name: (
-            _accepted_solve_rms_pixels(solver_records.get(name, {})),
-            name != "L",
-            name,
-        ),
-    )
+    adopted = _lowest_rms_filter(products, solver_records)
     adopted_header = headers[adopted]
     adopted_cards = [card for card in adopted_header.cards if _WCS_CARD_PATTERN.match(card.keyword)]
     adopted_rms = _accepted_solve_rms_pixels(solver_records.get(adopted, {}))
@@ -491,6 +494,107 @@ def _unify_same_grid_solutions(
     return record
 
 
+def _lowest_rms_filter(products: Mapping[str, Path], solver_records: Mapping[str, Any]) -> str:
+    """The solve a shared grid adopts: lowest RMS, then luminance, then name."""
+
+    return min(
+        sorted(products),
+        key=lambda name: (_accepted_solve_rms_pixels(solver_records.get(name, {})), name != "L", name),
+    )
+
+
+def _refit_seed_attempt(record: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The attempt of a filter whose solve missed only the RMS gate, if it has one."""
+
+    attempts = record.get("attempts")
+    if not isinstance(attempts, list):
+        return None
+    return next((item for item in reversed(attempts) if isinstance(item, Mapping) and item.get("refitSeedWcs")), None)
+
+
+def _inherit_same_grid_solution(
+    unsolved: Mapping[str, Path],
+    solved: Mapping[str, Path],
+    *,
+    products_dir: Path,
+    staging: Path,
+    solver_records: Mapping[str, Any],
+    grid_signatures: Mapping[str, Sequence[int]],
+) -> tuple[dict[str, Any], dict[str, Path]]:
+    """Give masters whose own solve failed the solve of the grid they share.
+
+    Masters cropped to one rectangle of the shared reference frame share every
+    pixel, so one fresh solve maps them all.  Each unsolved master is copied to
+    its product path with the lowest-RMS solve; with no accepted solve, the
+    lowest-RMS one that missed only the RMS gate takes its place, so the master
+    of a one-filter run can seed the refit with its own solve.  A master counts
+    as solved only once the catalog refit verifies on its own pixels, and is
+    otherwise removed by ``_withdraw_inherited_solutions``.  Pixel values are
+    untouched.
+    """
+
+    if solved:
+        adopted = _lowest_rms_filter(solved, solver_records)
+        adopted_header, shape = _read_image_header(solved[adopted])
+    else:
+        seeds = {name: attempt for name in unsolved if (attempt := _refit_seed_attempt(solver_records[name])) is not None}
+        if not seeds:
+            return {"status": "NOT_APPLICABLE", "reason": "no filter has a solve that missed only the RMS gate"}, {}
+        adopted = min(
+            sorted(seeds),
+            key=lambda name: (seeds[name]["result"]["astrometricQuality"]["rmsPixels"], name != "L", name),
+        )
+        adopted_header = fits.Header([fits.Card(key, value) for key, value in seeds[adopted]["refitSeedWcs"].items()])
+        shape = _read_image_header(unsolved[adopted])[1]
+    grid = grid_signatures.get(adopted)
+    for name, candidate in sorted(unsolved.items()):
+        signature = grid_signatures.get(name)
+        if not grid or not signature or list(signature) != list(grid) or _read_image_header(candidate)[1] != shape:
+            return {"status": "NOT_APPLICABLE", "reason": f"{name} is not on the grid of {adopted}"}, {}
+    cards = [card for card in adopted_header.cards if _WCS_CARD_PATTERN.match(card.keyword)]
+    inherited: dict[str, Path] = {}
+    for name, candidate in sorted(unsolved.items()):
+        token = _safe_token(name)
+        target = products_dir / token / f"master_light_{token}_wcs.fits"
+        if os.path.lexists(target):
+            raise E2EError("UNEXPECTED_OUTPUT_EXISTS", "an unsolved filter already has a product", path=str(target))
+        shutil.copyfile(candidate, target)
+        _rewrite_wcs_cards(
+            target,
+            cards,
+            stamps={
+                "OAFSTATE": ("SOLVED", "Ultra-Fast WBPP E2E product state"),
+                "OAFWCS": ("SOLVED", "Same-grid solve verified by the catalog refit"),
+                "OAFWCSSG": (adopted, "Filter whose same-grid solve is shared"),
+                "OAFWCSPR": ("INHERITED_SAME_GRID", "WCS provenance of this grid"),
+            },
+            history=(
+                f"Ultra-Fast WBPP: own solve failed; same-grid {adopted} solve taken for the catalog refit"
+                if solved
+                else f"Ultra-Fast WBPP: no solve passed the RMS gate; the {adopted} solve seeds the catalog refit"
+            ),
+            error_code="SAME_GRID_WCS_INHERIT_FAILED",
+        )
+        _verify_rewritten_wcs(target, adopted_header, shape, error_code="SAME_GRID_WCS_INHERIT_INVALID")
+        solver_records[name].update(output=str(target.relative_to(staging)), sameGridSolveInherited=adopted)
+        inherited[name] = target
+    return {
+        "status": "PENDING_CATALOG_REFIT",
+        "adoptedFilter": adopted,
+        "adoptedSolve": "ACCEPTED" if solved else "MISSED_ONLY_THE_RMS_GATE",
+        "filters": sorted(inherited),
+    }, inherited
+
+
+def _withdraw_inherited_solutions(inherited: Mapping[str, Path], solver_records: Mapping[str, Any]) -> None:
+    """Remove inherited products the catalog refit did not verify; their filters stay unsolved."""
+
+    for name, path in inherited.items():
+        remove_file(path, missing_ok=True)
+        solver_records[name]["output"] = None
+        solver_records[name].pop("sameGridSolveInherited", None)
+
+
 def _rewrite_wcs_cards(
     path: Path,
     cards: Sequence[fits.Card],
@@ -537,7 +641,9 @@ def _verify_rewritten_wcs(
 
     after_header, after_shape = _read_image_header(path)
     validation = validate_wcs_header(after_header, image_shape=after_shape)
-    residual = _wcs_grid_disagreement(expected, after_header, shape)
+    # At astropy's default tolerance of 1e-4 px, the inverse's own convergence
+    # noise can exceed the 1e-6 px limit below on an identical WCS.
+    residual = _wcs_grid_disagreement(expected, after_header, shape, tolerance=1e-9, maxiter=100, quiet=True)
     if (
         not validation.valid
         or after_shape != shape
@@ -565,8 +671,9 @@ def _refine_solved_wcs(
     astrometry.net reports a SIP order of 2, which leaves the cubic distortion
     of a fast corrected optical train in place.  The refit (TAN+SIP, order by
     the BIC) is written to every master when its residual on held-out stars
-    beats the solver's and it passes catalog verification on each master;
-    otherwise the solver's solution stays.  Pixel values are untouched.
+    beats the solver's and it passes catalog verification on each master, the
+    RMS gate judged on ``clipped_residual``; otherwise the solver's solution
+    stays.  Pixel values are untouched.
     """
 
     catalog = catalog_source_from_backends(backends)
@@ -618,9 +725,13 @@ def _refine_solved_wcs(
     validation = validate_wcs_header(refined, image_shape=shape)
     if not validation.valid:
         return {**record, "code": "WCS_REFINEMENT_INVALID", "message": validation.message}
+    record["verificationStatistic"] = CLIPPED_RESIDUAL_STATISTIC
+
     # Every master is verified with the refit before any of them is rewritten.
-    def verify(item: tuple[str, Path]) -> tuple[bool, dict[str, Any] | None, dict[str, Any] | None]:
-        """(verification directory created, accepted quality, failure) of one master."""
+    def verify(
+        item: tuple[str, Path],
+    ) -> tuple[bool, tuple[dict[str, Any], dict[str, Any]] | None, dict[str, Any] | None]:
+        """(verification directory created, accepted quality and residual, failure) of one master."""
 
         path = item[1]
         directory = path.parent / "catalog-refit-verification"
@@ -631,12 +742,19 @@ def _refine_solved_wcs(
         try:
             quality = dict(verifier(np.asarray(fits.getdata(path, memmap=False), dtype=np.float32), dict(refined), directory))
             matched = int(quality.get("matchedStars") or 0)
-            rms = float(quality.get("rmsArcsec", math.inf))
+            residual = clipped_residual(directory, gate_arcsec=max_rms_arcsec)
         except Exception as error:
             return True, None, {"code": getattr(error, "code", "WCS_REFINEMENT_UNVERIFIED"), "message": str(error)}
+        rms = residual["rmsArcsec"]
         if quality.get("catalogManaged") is True and matched >= min_matches and rms <= max_rms_arcsec:
-            return True, quality, None
-        return True, None, {"code": "WCS_REFINEMENT_UNVERIFIED", "message": f"{matched} managed catalog matches at {rms:.3g}\""}
+            # What the gate judged is what the master's solve publishes; the
+            # correspondence table beside the master holds every pair.
+            return True, ({**quality, "rmsArcsec": rms, "rmsPixels": residual["rmsPixels"]}, residual), None
+        return True, None, {
+            "code": "WCS_REFINEMENT_UNVERIFIED",
+            "message": f"{matched} managed catalog matches at {rms:.3g}\"",
+            "verificationResidual": residual,
+        }
 
     ordered = sorted(masters.items())
     with ThreadPoolExecutor(max_workers=max(1, min(workers, len(ordered))), thread_name_prefix="ufwbpp-refit") as pool:
@@ -647,9 +765,10 @@ def _refine_solved_wcs(
             if created:
                 shutil.rmtree(masters[name].parent / "catalog-refit-verification", ignore_errors=True)
         return {**record, **outcomes[failed][2], "unverifiedFilter": failed}
-    verified = {name: quality for name, (_, quality, _) in outcomes.items()}
+    verified = {name: accepted for name, (_, accepted, _) in outcomes.items()}
     rewritten: dict[str, Any] = {}
     for filter_name, path in sorted(masters.items()):
+        quality, residual = verified[filter_name]
         before_sha256 = sha256_digest(path)
         _rewrite_wcs_cards(
             path,
@@ -672,7 +791,7 @@ def _refine_solved_wcs(
                 "accepted": True,
                 "result": {
                     "backendId": CATALOG_REFIT_VERIFICATION_BACKEND,
-                    "astrometricQuality": verified[filter_name],
+                    "astrometricQuality": quality,
                 },
                 "artifact": {
                     "path": solver_records[filter_name].get("output"),
@@ -685,8 +804,10 @@ def _refine_solved_wcs(
             "sha256Before": before_sha256,
             "sha256After": after_sha256,
             "wcsValidation": validation,
-            "verifiedMatches": int(verified[filter_name]["matchedStars"]),
-            "verifiedRmsArcsec": float(verified[filter_name]["rmsArcsec"]),
+            "verifiedMatches": int(quality["matchedStars"]),
+            "verifiedRmsArcsec": float(quality["rmsArcsec"]),
+            "verifiedRawRmsArcsec": residual["rawRmsArcsec"],
+            "verifiedOutliers": residual["outliers"],
         }
     record.update(status="APPLIED", rewritten=rewritten)
     return record
@@ -1004,9 +1125,12 @@ def _solve_one(
                 min_matches=min_matches,
                 max_rms_arcsec=max_rms_arcsec,
             )
+            # A solve that misses only the RMS gate is checked like an accepted
+            # one: the catalog refit may start from it.
+            missed_only_rms = validation.code == "SOLVER_RMS_ABOVE_MAXIMUM"
             hint_validation = (
                 _validate_solution_against_hints(result, hints)
-                if validation.valid
+                if validation.valid or missed_only_rms
                 else WcsValidation(
                     False,
                     "SOLVER_HINT_VALIDATION_SKIPPED",
@@ -1035,6 +1159,13 @@ def _solve_one(
             "executionVerified": verified,
             "accepted": False,
         }
+        if (
+            missed_only_rms
+            and hint_validation.valid
+            and verified
+            and result.astrometric_quality.rms_arcsec <= _REFIT_SEED_MAXIMUM_RMS_RATIO * max_rms_arcsec
+        ):
+            attempt["refitSeedWcs"] = {key: result.header[key] for key in result.header if _WCS_CARD_PATTERN.match(key)}
         if not validation.valid or not hint_validation.valid or not verified:
             attempts.append(attempt)
             if not _discard_owned_solver_output(output_path):

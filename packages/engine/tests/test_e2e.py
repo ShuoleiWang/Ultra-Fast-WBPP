@@ -39,7 +39,13 @@ from ufwbpp.workflows.single_target import (
     _unify_same_grid_solutions,
     _validate_cross_filter_wcs,
 )
-from ufwbpp.workflows.solve import _SolverHints, _solve_one
+from ufwbpp.workflows.solve import (
+    _SolverHints,
+    _inherit_same_grid_solution,
+    _solve_one,
+    _verify_rewritten_wcs,
+    _withdraw_inherited_solutions,
+)
 from ufwbpp.workflows.registration import _build_registration_masters, _register_lights
 from ufwbpp.workflows.screening import _drizzle_sampling_evidence, _inferred_solver_hints
 from ufwbpp.workflows.sharing import _share_safe_receipt_core, _share_safe_string
@@ -1559,15 +1565,25 @@ def test_single_admitted_light_stops_before_calibration_and_preserves_qc(
     assert receipt["message"] == result.message
 
 
+@pytest.mark.parametrize(
+    ("solver", "inheritance"),
+    (
+        (FailingSolver(), "NOT_APPLICABLE"),
+        # It missed only the RMS gate, but no catalog refit can verify it.
+        (FakeSolver(rms_arcsec=3.0), "WITHDRAWN"),
+    ),
+)
 def test_solver_failure_blocks_final_publication_and_retains_unsolved_evidence(
     tmp_path: Path,
     synthetic_project: dict[str, tuple[Path, ...]],
+    solver: Any,
+    inheritance: str,
 ) -> None:
     output = tmp_path / "solver-miss"
 
     result = run_e2e(
         _request(synthetic_project, output),
-        solver_backends=(FailingSolver(),),
+        solver_backends=(solver,),
     )
 
     assert result.success is False
@@ -1588,6 +1604,8 @@ def test_solver_failure_blocks_final_publication_and_retains_unsolved_evidence(
     assert receipt["state"] == "UNSOLVED_WORKING"
     assert receipt["astrometry"]["status"] == "UNSOLVED"
     assert receipt["astrometry"]["filters"]["R"]["status"] == "UNSOLVED"
+    assert receipt["astrometry"]["sameGridInheritance"]["status"] == inheritance
+    assert not list(evidence.rglob("master_light_*_wcs.fits"))
     assert receipt["artifacts"]
     assert all(not item["path"].startswith("work/") for item in receipt["artifacts"])
 
@@ -1609,6 +1627,16 @@ def test_solver_failure_blocks_final_publication_and_retains_unsolved_evidence(
             FakeSolver(rms_arcsec=3.0),
             "validation",
             "SOLVER_RMS_ABOVE_MAXIMUM",
+        ),
+        (
+            FakeSolver(rms_arcsec=3.1),
+            "validation",
+            "SOLVER_RMS_ABOVE_MAXIMUM",
+        ),
+        (
+            FakeSolver(rms_arcsec=3.0, center_ra_degrees=230.0),
+            "hintValidation",
+            "SOLVER_CENTER_OUTSIDE_HINT_RADIUS",
         ),
         (
             FakeSolver(field_width_degrees=0.8),
@@ -1641,6 +1669,8 @@ def test_scientifically_wrong_but_mathematically_valid_solution_is_rejected(
 
     assert solved is False
     assert attempts[0][validation_key]["code"] == code
+    # Only a solve that missed nothing but the RMS gate, and that narrowly, may seed the catalog refit.
+    assert ("refitSeedWcs" in attempts[0]) is (code == "SOLVER_RMS_ABOVE_MAXIMUM" and solver.rms_arcsec <= 3.0)
     assert not output.exists()
 
 
@@ -1805,9 +1835,10 @@ def test_masters_with_different_crops_are_not_unified(tmp_path: Path) -> None:
     assert _validate_cross_filter_wcs(products).valid is False
 
 
-@pytest.mark.parametrize("catalog", ("dense", "exact", "unverified", "sparse", "none"))
-def test_solved_grid_is_refitted_on_catalog_stars(tmp_path: Path, catalog: str) -> None:
-    from mosaic_synthetic import TruthSolver, make_sky, render, true_header
+@pytest.mark.parametrize("unsolved_filters", ((), ("R",), ("L", "R")))
+@pytest.mark.parametrize("catalog", ("dense", "exact", "unverified", "sparse", "none", "misplaced", "wrong", "half-wrong"))
+def test_solved_grid_is_refitted_on_catalog_stars(tmp_path: Path, catalog: str, unsolved_filters: tuple[str, ...]) -> None:
+    from mosaic_synthetic import Sky, TruthSolver, make_sky, render, true_header
     from ufwbpp.mosaic.canvas import celestial_wcs
     from ufwbpp.workflows.canvas import _catalog_verifier
 
@@ -1819,6 +1850,7 @@ def test_solved_grid_is_refitted_on_catalog_stars(tmp_path: Path, catalog: str) 
     tan = {key: value for key, value in truth.items() if not key.startswith(("A_", "B_"))}
     tan.update(CTYPE1="RA---TAN", CTYPE2="DEC--TAN")
     products: dict[str, Path] = {}
+    unsolved: dict[str, Path] = {}
     pixels: dict[str, np.ndarray] = {}
     for filter_name, seed in (("L", 1), ("R", 2)):
         image = render(sky, truth, shape, fwhm=3.0, background=100.0, noise=2.0, rng=np.random.default_rng(seed))
@@ -1826,11 +1858,38 @@ def test_solved_grid_is_refitted_on_catalog_stars(tmp_path: Path, catalog: str) 
         header["OAFSTATE"] = "SOLVED"
         header["OAFWCS"] = "SOLVED"
         (tmp_path / filter_name).mkdir()
-        products[filter_name] = tmp_path / filter_name / "master.fits"
-        fits.PrimaryHDU(image.astype(np.float32), header).writeto(products[filter_name])
+        products[filter_name] = tmp_path / filter_name / f"master_light_{filter_name}_wcs.fits"
+        if filter_name in unsolved_filters:
+            # Its own solve failed a gate: only its unsolved master exists.
+            unsolved[filter_name] = tmp_path / f"{filter_name}-unsolved.fits"
+            fits.PrimaryHDU(image.astype(np.float32), fits.Header([("OAFSTATE", "UNSOLVED_WORKING")])).writeto(unsolved[filter_name])
+        else:
+            fits.PrimaryHDU(image.astype(np.float32), header).writeto(products[filter_name])
         # A copy: on Windows a mapped file cannot take the rewritten, longer header.
-        pixels[filter_name] = fits.getdata(products[filter_name], memmap=False)
-    records = {name: {"output": f"{name}/master.fits", "attempts": [{"accepted": True, "artifact": {}}]} for name in products}
+        pixels[filter_name] = fits.getdata(unsolved.get(filter_name, products[filter_name]), memmap=False)
+    records = {
+        name: {"output": f"{name}/master_light_{name}_wcs.fits", "attempts": [{"accepted": True, "artifact": {}}]}
+        for name in products
+    }
+    for name in unsolved:
+        records[name] = {"status": "UNSOLVED", "output": None, "attempts": [{"accepted": False, "code": "SOLVER_RMS_ABOVE_MAXIMUM"}]}
+    if unsolved:
+        solved = {name: path for name, path in products.items() if name not in unsolved}
+        grids = {"L": [0, 0, 600, 900], "R": [0, 0, 600, 900]}
+        arguments = {"products_dir": tmp_path, "staging": tmp_path, "solver_records": records}
+        if not solved:
+            # No filter passed, and none has a solve that missed only the RMS gate.
+            assert _inherit_same_grid_solution(unsolved, solved, **arguments, grid_signatures=grids)[1] == {}
+            # Both solves missed only the RMS gate: the lower-RMS one seeds the refit.
+            for name, rms_pixels in (("L", 1.5), ("R", 1.2)):
+                records[name]["attempts"][0].update(result={"astrometricQuality": {"rmsPixels": rms_pixels}}, refitSeedWcs=dict(tan))
+        # Masters cropped to another rectangle never take each other's solve.
+        assert _inherit_same_grid_solution(unsolved, solved, **arguments, grid_signatures={**grids, "R": [1, 0, 601, 900]})[1] == {}
+        assert not any(products[name].exists() for name in unsolved)
+        inheritance, inherited = _inherit_same_grid_solution(unsolved, solved, **arguments, grid_signatures=grids)
+        assert inheritance["adoptedFilter"] == ("L" if solved else "R")
+        assert inheritance["adoptedSolve"] == ("ACCEPTED" if solved else "MISSED_ONLY_THE_RMS_GATE")
+        assert inherited == {name: products[name] for name in unsolved}
     before = {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in products.items()}
     backends = [TruthSolver(sky, scale_arcsec=2.0)] if catalog != "none" else [SimpleNamespace()]
     verifier = _catalog_verifier(backends)
@@ -1840,6 +1899,14 @@ def test_solved_grid_is_refitted_on_catalog_stars(tmp_path: Path, catalog: str) 
         verifier = lambda image, header, directory: (  # noqa: E731
             {**accept(image, header, directory), "matchedStars": 3} if directory.parent.name == "R" else accept(image, header, directory)
         )
+    # The masters verify on another catalog than the refit's, as on an old
+    # Tycho-2 index: a tenth of its stars misplaced ("misplaced"), or a refit
+    # off from it at every star ("wrong") or on nearly half the stars ("half-wrong").
+    moved_fraction, moved_arcsec = {"misplaced": (0.1, 8.0), "wrong": (1.0, 3.0), "half-wrong": (0.4, 8.0)}.get(catalog, (0.0, 0.0))
+    if moved_fraction:
+        moved = np.arange(sky.dec.size) < moved_fraction * sky.dec.size
+        verifying = Sky(sky.ra, sky.dec + moved * moved_arcsec / 3600.0, sky.flux)
+        verifier = _catalog_verifier([TruthSolver(verifying, scale_arcsec=2.0, match_radius_pixels=6.0)])
 
     record = _refine_solved_wcs(
         products,
@@ -1851,7 +1918,7 @@ def test_solved_grid_is_refitted_on_catalog_stars(tmp_path: Path, catalog: str) 
         workers=2,
     )
 
-    if catalog != "dense":
+    if catalog not in ("dense", "misplaced"):
         # No catalog, too few stars to pay for a detection, no gain on held-out
         # stars, or a master that does not verify: the solver's WCS stays.
         expected = {
@@ -1859,13 +1926,24 @@ def test_solved_grid_is_refitted_on_catalog_stars(tmp_path: Path, catalog: str) 
             "sparse": ("KEPT_SOLVER_WCS", "MOSAIC_CATALOG_TOO_SPARSE"),
             "exact": ("KEPT_SOLVER_WCS", "WCS_REFINEMENT_NOT_BETTER"),
             "unverified": ("KEPT_SOLVER_WCS", "WCS_REFINEMENT_UNVERIFIED"),
+            "wrong": ("KEPT_SOLVER_WCS", "WCS_REFINEMENT_UNVERIFIED"),
+            "half-wrong": ("KEPT_SOLVER_WCS", "WCS_REFINEMENT_UNVERIFIED"),
         }[catalog]
         assert (record["status"], record.get("code")) == expected
+        if catalog in ("wrong", "half-wrong"):
+            # Too many stars are off to call them outliers: all of them count.
+            assert record["verificationResidual"]["outliers"] == 0
+            assert record["verificationResidual"]["rmsArcsec"] == record["verificationResidual"]["rawRmsArcsec"] > 2.0
         assert {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in products.items()} == before
         assert all(len(item["attempts"]) == 1 for item in records.values())
         assert not any((path.parent / "catalog-refit-verification").exists() for path in products.values())
+        if unsolved:
+            # Not verified on their own pixels: these masters keep no product and stay unsolved.
+            _withdraw_inherited_solutions(inherited, records)
+            assert not any(products[name].exists() or records[name]["output"] for name in unsolved)
         return
     assert record["status"] == "APPLIED"
+    assert record["verificationStatistic"] == "correspondence-clipped-rms-v1"
     assert record["referenceFilter"] == "L" and record["order"] >= 3
     assert record["holdoutRmsArcsec"] < 0.2 * record["solverRmsArcsec"]
     for name, path in products.items():
@@ -1873,12 +1951,19 @@ def test_solved_grid_is_refitted_on_catalog_stars(tmp_path: Path, catalog: str) 
         header = fits.getheader(path)
         assert header["OAFWCSRF"] == record["order"]
         assert header["OAFSTATE"] == "SOLVED" and header["OAFWCS"] == "SOLVED"
+        assert header.get("OAFWCSPR") == ("INHERITED_SAME_GRID" if name in unsolved else None)
         # The refit's own verification is the master's accepted solve, bound to its bytes.
         solver_attempt, refit_attempt = records[name]["attempts"]
-        assert solver_attempt == {"accepted": True, "artifact": {}}
+        assert solver_attempt["accepted"] is (name not in unsolved)
         assert refit_attempt["accepted"] is True and refit_attempt["backendId"] == "catalog-refit-verification"
         assert refit_attempt["result"]["astrometricQuality"]["catalogManaged"] is True
-        assert refit_attempt["artifact"]["path"] == f"{name}/master.fits"
+        verified = record["rewritten"][name]
+        assert refit_attempt["result"]["astrometricQuality"]["rmsArcsec"] == verified["verifiedRmsArcsec"] <= 2.0
+        if catalog == "misplaced":
+            # The misplaced stars alone fail the plain RMS; they cannot decide the outcome.
+            assert verified["verifiedRawRmsArcsec"] > 2.0
+            assert 0.05 < verified["verifiedOutliers"] / verified["verifiedMatches"] <= 0.15
+        assert Path(refit_attempt["artifact"]["path"]) == Path(name, f"master_light_{name}_wcs.fits")
         assert refit_attempt["artifact"]["sha256"] == "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
     assert _validate_cross_filter_wcs(products).valid is True
     # The refit maps every pixel where the true solution does, corners included.
@@ -1887,6 +1972,11 @@ def test_solved_grid_is_refitted_on_catalog_stars(tmp_path: Path, catalog: str) 
     exact = np.column_stack(celestial_wcs(truth).all_pix2world(xx.ravel(), yy.ravel(), 0))
     error = np.hypot((refit[:, 0] - exact[:, 0]) * np.cos(np.radians(exact[:, 1])), refit[:, 1] - exact[:, 1]) * 3600
     assert error.max() < 0.3 * 2.0
+    # A master carrying exactly its WCS passes the rewrite check, however slowly the inverse converges.
+    strong = fits.Header(list(true_header((150.0, 2.0), shape, scale_arcsec=2.0, distortion=40.0).items()))
+    strong["OAFSTATE"] = strong["OAFWCS"] = "SOLVED"
+    fits.PrimaryHDU(pixels["L"], strong).writeto(tmp_path / "strong.fits")
+    _verify_rewritten_wcs(tmp_path / "strong.fits", strong, shape, error_code="UNEXPECTED_REWRITE_INVALID")
 
 
 @pytest.mark.parametrize("mutation", ("rotate90", "mirror", "sip-edge"))

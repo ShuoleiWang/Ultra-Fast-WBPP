@@ -280,7 +280,8 @@ redistribution permissions are separate; see [licensing](licensing.md).
   `workflows/solve.py` owns final solve/geometry verification and the
   catalog refit of the published solution (`_refine_solved_wcs`: TAN+SIP,
   order by the BIC, written only when it beats the solver's solution on
-  held-out stars and passes catalog verification on every master).
+  held-out stars and passes catalog verification on every master, the RMS
+  gate judged without the stars the catalog misplaces).
 - The engine has one subpackage per domain: `workflows/`, `stacking/`,
   `calibration/`, `image_io/`, `selection/`, `quality/`, `blink/`, `solvers/`,
   `products/` and `platform/`. Its modules import without cycles, and private
@@ -324,7 +325,10 @@ redistribution permissions are separate; see [licensing](licensing.md).
   drizzle scale times finer (`ufwbpp_native_cpu_drizzle_v2`). The window's WCS is verified on catalog
   stars instead of being solved blind. `photometry.py` matches the panels of a filter in their
   overlaps (one robust network for all scales from star photometry, one for
-  the additive planes with an area-weighted minimum-norm gauge), `blend.py`
+  the additive cubics about each panel's centre from the overlaps and
+  from each panel's sky bins, which hold the panels to one sky level and so
+  remove a gradient they share; the other filters take their sky bins only
+  where the reference filter, assembled first, found sky), `blend.py`
   blends them by inverse variance with edge tapers, except on the protected
   set (`protect.py`): a bright star or core in an overlap takes its small
   scales from one panel. `assemble.py` gates the result and verifies the

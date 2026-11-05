@@ -103,7 +103,8 @@ def fit_residual_background(values: NDArray[np.float32], bin_factor: int,
     Errors name the failing frame by ``names``.
     """
     n,height,width=values.shape
-    cell=max(4,int(np.ceil(128/bin_factor)))
+    # At least 5 x 5 blocks: a cell's background selection keeps 85 % of them and needs 16 samples.
+    cell=max(5,int(np.ceil(128/bin_factor)))
     ys=list(range(0,height,cell));xs=list(range(0,width,cell))
     if n<5 or len(xs)<4 or len(ys)<4:
         return None

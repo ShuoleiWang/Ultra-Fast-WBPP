@@ -262,7 +262,9 @@ def _assemble_canvas_mosaics(
     holds the gates of all of them.  A filter whose panels fall into
     several photometric components publishes its largest as the mosaic and
     the others under ``<filter>/component<k>/`` with their receipts; the
-    summary lists them under ``photometricComponents``."""
+    summary lists them under ``photometricComponents``.  The reference
+    filter (L, else R, G, B, as for colour) is assembled first and the
+    others take their sky only where it found sky."""
 
     projection = plan.projection.scaled(scale) if scale > 1 else plan.projection
     boxes = [panel.box for _, panels in panels_by_filter.values() for panel in panels]
@@ -273,7 +275,11 @@ def _assemble_canvas_mosaics(
     components: dict[str, list[dict[str, Any]]] = {}
     failures: dict[str, MosaicGateError] = {}
     total = len(panels_by_filter)
-    for position, (filter_key, (filter_name, panels)) in enumerate(sorted(panels_by_filter.items()), start=1):
+    reference = next((key for key in ("l", "r", "g", "b") if key in panels_by_filter), min(panels_by_filter))
+    order = [reference, *sorted(key for key in panels_by_filter if key != reference)]
+    sky_reference: tuple[str, Mapping[str, tuple[np.ndarray, np.ndarray]]] | None = None
+    for position, filter_key in enumerate(order, start=1):
+        filter_name, panels = panels_by_filter[filter_key]
         directory = output_root / filter_key
         directory.mkdir(parents=True)
         try:
@@ -286,12 +292,15 @@ def _assemble_canvas_mosaics(
                 verifier=verifier,
                 minimum_matches=minimum_matches,
                 maximum_rms_arcsec=maximum_rms_arcsec,
+                sky_reference=sky_reference,
             )
         except MosaicGateError as error:
             failures[filter_key] = error
             if progress is not None:
                 progress(position, total, f"{filter_name}: mosaic failed its gates")
             continue
+        if filter_key == reference:
+            sky_reference = (filter_name, result.sky_bins)
         paths[filter_key] = result.science_path
         qualities[filter_key] = result.quality
         receipts[filter_key] = result.receipt

@@ -72,7 +72,14 @@ from .products import _drizzle_candidates, _ordinary_candidates, _promote_proper
 from .registration import _build_registration_masters, _register_lights
 from .screening import _panels_below_registration_minimum, _registration_anchor_exclusions, _screen_lights
 from .sharing import _sanitize_shareable_tree, _share_safe_receipt_core, _share_safe_value
-from .solve import _refine_solved_wcs, _same_grid_signatures, _unify_same_grid_solutions, _validate_cross_filter_wcs
+from .solve import (
+    _inherit_same_grid_solution,
+    _refine_solved_wcs,
+    _same_grid_signatures,
+    _unify_same_grid_solutions,
+    _validate_cross_filter_wcs,
+    _withdraw_inherited_solutions,
+)
 from .sources import (
     _SourceIdentity,
     _stage_e2e_xisf_inputs,
@@ -631,20 +638,42 @@ def run_e2e_stages(
         # ``scale`` pixels per native pixel, so the same angular agreement is
         # ``scale`` times as many of their own pixels.
         grid_pixels_per_native = float(request.drizzle.scale) if drizzle_mode else 1.0
+        grid_signatures = _same_grid_signatures(
+            integration_mode=request.integration_mode,
+            pixel_pipeline_receipt=pixel_pipeline_receipt,
+            coverage=coverage,
+        )
+        own_solves = dict(solved_products)
+        # A master whose own solve missed a gate takes the solve of the grid it
+        # shares with a solved master or, with no solved master, the solve that
+        # missed only the RMS gate; it is solved only when the catalog refit
+        # below verifies on its own pixels.
+        same_grid_inheritance: dict[str, Any] = {
+            "status": "NOT_APPLICABLE",
+            "reason": "only when a filter did not solve and the catalog refit runs",
+        }
+        inherited: dict[str, Path] = {}
+        if not all_solved and request.catalog_refit and request.pipeline_parameters.output_grid is None:
+            same_grid_inheritance, inherited = _inherit_same_grid_solution(
+                {name: path for name, path in candidates.items() if name not in own_solves},
+                own_solves,
+                products_dir=products_dir,
+                staging=staging,
+                solver_records=solver_records,
+                grid_signatures=grid_signatures,
+            )
+            all_solved = bool(inherited)
+            solved_products.update(inherited)
         same_grid_unification: dict[str, Any] = {
             "status": "NOT_APPLICABLE",
             "reason": "single filter",
         }
-        if all_solved and len(solved_products) > 1:
+        if all_solved and len(own_solves) > 1:
             same_grid_unification = _unify_same_grid_solutions(
-                solved_products,
+                own_solves,
                 solver_records=solver_records,
                 tolerance_pixels=float(request.same_grid_wcs_tolerance_pixels) * grid_pixels_per_native,
-                grid_signatures=_same_grid_signatures(
-                    integration_mode=request.integration_mode,
-                    pixel_pipeline_receipt=pixel_pipeline_receipt,
-                    coverage=coverage,
-                ),
+                grid_signatures=grid_signatures,
             )
             if same_grid_unification["status"] == "MISMATCH":
                 all_solved = False
@@ -653,7 +682,7 @@ def run_e2e_stages(
             catalog_refinement: dict[str, Any] = {"status": "DISABLED", "reason": "solver.catalogRefit is false"}
         elif request.pipeline_parameters.output_grid is not None:
             catalog_refinement = {"status": "NOT_APPLICABLE", "reason": "a mosaic panel carries its canvas WCS"}
-        elif not all_solved or (len(solved_products) > 1 and same_grid_unification["status"] != "APPLIED"):
+        elif not all_solved or (len(own_solves) > 1 and same_grid_unification["status"] != "APPLIED"):
             catalog_refinement = {"status": "NOT_APPLICABLE", "reason": "the filters do not carry one verified solution"}
         else:
             catalog_refinement = _refine_solved_wcs(
@@ -665,6 +694,19 @@ def run_e2e_stages(
                 max_rms_arcsec=request.max_rms_arcsec,
                 workers=request.workers,
             )
+        if inherited and catalog_refinement.get("status") == "APPLIED":
+            for name in inherited:
+                solver_records[name]["status"] = "SOLVED"
+            product_paths_staged.extend(inherited.values())
+            same_grid_inheritance["status"] = "VERIFIED_BY_CATALOG_REFIT"
+        elif inherited:
+            _withdraw_inherited_solutions(inherited, solver_records)
+            for name in inherited:
+                del solved_products[name]
+            same_grid_inheritance.update(
+                status="WITHDRAWN", reason="the catalog refit did not verify the shared solve on every master"
+            )
+            all_solved = False
         cross_filter_validation = (
             _validate_cross_filter_wcs(solved_products, tolerance_pixels=0.05 * grid_pixels_per_native)
             if all_solved
@@ -687,6 +729,7 @@ def run_e2e_stages(
             },
             "crossFilterValidation": cross_filter_validation.serializable(),
             "sameGridUnification": same_grid_unification,
+            "sameGridInheritance": same_grid_inheritance,
             "catalogRefinement": catalog_refinement,
             "filters": solver_records,
         }

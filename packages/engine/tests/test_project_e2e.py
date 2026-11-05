@@ -253,20 +253,22 @@ class FakePanelRunner:
         misplaced_panel: str | None = None,
         master_shape: tuple[int, int] = (8, 8),
         rotate_filter: str | None = None,
+        inherited_filter: str | None = None,
         exclusive_stars_panel: str | None = None,
     ) -> None:
         self.calls = 0
         self.drift_source = drift_source
         # Masters with a SIP solution, one channel with an invalid corner
         # pixel, a canvas panel whose master is not on its window, one
-        # channel solved 1 degree off the others, and a canvas panel whose
-        # masters hold stars only where no other panel reaches (its
-        # overlaps are starless: no photometric link).
+        # channel solved 1 degree off the others, one that took R's solve,
+        # and a canvas panel whose masters hold stars only where no other
+        # panel reaches (its overlaps are starless: no photometric link).
         self.sip = sip
         self.invalid_corner_filter = invalid_corner_filter
         self.misplaced_panel = misplaced_panel
         self.master_shape = master_shape
         self.rotate_filter = rotate_filter
+        self.inherited_filter = inherited_filter
         self.exclusive_stars_panel = exclusive_stars_panel
         # (panel, the placement the joint fit sent it), in run order.
         self.placements: list[tuple[str | None, Any]] = []
@@ -311,6 +313,9 @@ class FakePanelRunner:
             solved_header["FILTER"] = filter_name
             solved_header["OAFSTATE"] = "SOLVED"
             solved_header["OAFWCS"] = "SOLVED"
+            if filter_name == self.inherited_filter:
+                solved_header["OAFWCSSG"] = "R"
+                solved_header["OAFWCSPR"] = "INHERITED_SAME_GRID"
             product = output / "products" / filter_name / f"master_light_{filter_name}_wcs.fits"
             product.parent.mkdir(parents=True)
             value = {"R": 10.0, "G": 8.0, "B": 6.0, "L": 12.0}.get(filter_name, 5.0)
@@ -886,20 +891,51 @@ def test_publish_file_copies_when_the_volume_has_no_hard_links(
         project_module._publish_file(source, destination)
 
 
-def test_missing_rgb_channel_publishes_solved_mono_only(tmp_path: Path) -> None:
-    inventory, base, _ = _project(tmp_path, filters=("R", "G"))
+@pytest.mark.parametrize(
+    ("layout", "green_provenance"),
+    [
+        ("mosaic", "CANVAS_CATALOG_VERIFIED"),
+        ("single-target", "FRESH_SOLVE_UNCHANGED_GRID"),
+        ("single-target-inherited-solve", "SAME_GRID_CATALOG_VERIFIED"),
+    ],
+)
+def test_missing_rgb_channel_publishes_solved_mono_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, layout: str, green_provenance: str
+) -> None:
+    import ufwbpp.workflows.project as project_module
+
+    # Channels on one grid never need the optional backend, installed or not.
+    monkeypatch.setattr(project_module, "load_reproject_provider", lambda: (None, "reproject is not installed"))
+    if layout == "mosaic":
+        inventory, base, _ = _project(tmp_path, filters=("R", "G"))
+        solver: Any = _mosaic_solver()
+    else:
+        inventory, base = _single_target_project(tmp_path, ("R", "G"))
+        solver = ManagedCopySolver()
+    inherited = layout.endswith("inherited-solve")
     result = run_project_e2e(
         ProjectE2ERequest(inventory, base, base.output_directory),
-        solver_backends=(_mosaic_solver(),),
-        panel_runner=FakePanelRunner(),
-        reproject_provider=FakeReproject().provider(),
+        solver_backends=(solver,),
+        panel_runner=FakePanelRunner(inherited_filter="G" if inherited else None),
     )
     assert result.success is True
     assert result.code == "PROJECT_MONO_SUCCEEDED"
     assert result.color_product_path is None
+    assert result.mono_filters == ("G", "R")
     receipt = json.loads(Path(result.receipt_path).read_text(encoding="utf-8"))
     assert receipt["execution"]["color"]["status"] == "NOT_CREATED_MISSING_RGB_CHANNELS"
     assert receipt["execution"]["color"]["missingRequiredChannels"] == ["b"]
+    # Published byte for byte: the non-reference channel was not resampled.
+    green = receipt["execution"]["alignment"]["g"]
+    assert green["output"]["sha256"] == green["source"]["sha256"]
+    # A channel that took its grid's solve does not claim a fresh solve of its own.
+    assert green["astrometryProvenance"]["type"] == green_provenance
+    assert green["astrometryProvenance"]["freshSolveOnThisPixelGrid"] is (green_provenance == "FRESH_SOLVE_UNCHANGED_GRID")
+    assert green["astrometryProvenance"].get("sameGridSolveInherited") == ("R" if inherited else None)
+    assert (green["wcsProvenance"] == "INHERITED_SAME_GRID") is inherited
+    artifact = next(item for item in receipt["finalProducts"]["artifacts"] if item.get("filter") == "G")
+    assert artifact["finalGate"]["freshSolveOnThisPixelGrid"] is (green_provenance == "FRESH_SOLVE_UNCHANGED_GRID")
+    assert receipt["finalProducts"]["resultGate"]["propagatedAlignedChannelsVerified"] is True
 
 
 def test_luminance_channel_participates_in_lrgb_instead_of_being_ignored(tmp_path: Path) -> None:
@@ -1236,7 +1272,11 @@ def test_mosaic_failures_publish_unsolved_only(tmp_path: Path) -> None:
         assert runner.calls == 0
 
 
-def test_misplaced_panel_master_and_source_drift_fail_without_success_tree(tmp_path: Path) -> None:
+def test_misplaced_master_and_source_drift_fail_without_success_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ufwbpp.workflows.project as project_module
+
     inventory, base, _ = _project(tmp_path / "misplaced", filters=("R",))
     misplaced = run_project_e2e(
         ProjectE2ERequest(inventory, base, base.output_directory),
@@ -1257,6 +1297,19 @@ def test_misplaced_panel_master_and_source_drift_fail_without_success_tree(tmp_p
     assert drift.success is False
     assert drift.code == "SOURCE_CHANGED"
     assert not Path(base2.output_directory).exists()
+
+    # A channel on another grid with no backend to resample it: refused, not published unaligned.
+    monkeypatch.setattr(project_module, "load_reproject_provider", lambda: (None, "reproject is not installed"))
+    inventory3, base3 = _single_target_project(tmp_path / "off-grid", ("R", "G"))
+    off_grid = run_project_e2e(
+        ProjectE2ERequest(inventory3, base3, base3.output_directory),
+        solver_backends=(ManagedCopySolver(),),
+        panel_runner=FakePanelRunner(rotate_filter="G"),
+    )
+    assert off_grid.success is False
+    assert off_grid.code == "CHANNEL_ALIGNMENT_BACKEND_UNAVAILABLE"
+    assert "reproject is not installed" in str(off_grid.message)
+    assert not Path(base3.output_directory).exists()
 
 
 def _single_target_project(tmp_path: Path, filters: tuple[str, ...]) -> tuple[Any, E2ERequest]:
@@ -1321,14 +1374,17 @@ def test_rgb_sip_cube_publishes_spatial_gui_astrometry(tmp_path: Path) -> None:
 
 
 def test_reprojected_channel_uses_reference_quality_and_declares_propagated_provenance(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    import ufwbpp.workflows.project as project_module
+
+    # The backend is loaded only now that a channel's grid differs.
+    monkeypatch.setattr(project_module, "load_reproject_provider", lambda: (FakeReproject().provider(), None))
     inventory, base = _single_target_project(tmp_path, ("R", "G", "B"))
     result = run_project_e2e(
         ProjectE2ERequest(inventory, base, base.output_directory),
         solver_backends=(ManagedCopySolver(),),
         panel_runner=FakePanelRunner(rotate_filter="G"),
-        reproject_provider=FakeReproject().provider(),
     )
     assert result.success is True
     receipt = json.loads(Path(result.receipt_path).read_text(encoding="utf-8"))
@@ -1338,6 +1394,7 @@ def test_reprojected_channel_uses_reference_quality_and_declares_propagated_prov
     assert provenance["type"] == "PROPAGATED_VERIFIED"
     assert provenance["freshSolveOnThisPixelGrid"] is False
     assert provenance["qualityAppliesTo"] == "REFERENCE_SOLVED_WCS_PROPAGATED_TO_VERIFIED_GRID"
+    assert provenance["reprojection"]["backendId"] == "fake-reproject"
     assert provenance["reprojection"]["sampleCount"] == 9
     assert provenance["reprojection"]["maximumNinePointResidualPixelsBeforeAlignment"] > 0.05
     assert provenance["reprojection"]["maximumNinePointResidualPixelsAfterAlignment"] <= 0.05

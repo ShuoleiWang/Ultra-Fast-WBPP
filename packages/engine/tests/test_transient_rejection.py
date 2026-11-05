@@ -140,6 +140,17 @@ def test_group_sky_alignment_preserves_full_stack_mean_prevents_mask_stripes_and
         fit_residual_background(preview,4,weights,_names(15))
 
 
+@pytest.mark.parametrize("bin_factor", [32, 64])
+def test_group_sky_alignment_fits_at_the_block_size_of_a_large_group(bin_factor):
+    # Above about 150 Lights of a 25 Mpx grid the blocks are 32 px or more.
+    preview = (100 + np.random.default_rng(3).normal(0, .1, (15, 120, 180))).astype(np.float32)
+    preview[2] += (24 + .2 * np.mgrid[:120, :180][1]).astype(np.float32)
+    alignment = fit_residual_background(preview, bin_factor, np.ones(15) / 15, _names(15))
+    assert alignment is not None
+    statuses = [item["status"] for item in alignment.evidence]
+    assert statuses[2] == "APPLIED"
+
+
 def test_long_trail_detection_reaches_observed_image_endpoints():
     values,_=_scene(trail=False)
     values[1,:,300:304]+=100
@@ -183,7 +194,7 @@ def _reference_fit_residual_background(values, bin_factor, weights):
     from ufwbpp.stacking import residual_background as module
 
     n, height, width = values.shape
-    cell = max(4, int(np.ceil(128 / bin_factor)))
+    cell = max(5, int(np.ceil(128 / bin_factor)))
     ys = list(range(0, height, cell)); xs = list(range(0, width, cell))
     if n < 5 or len(xs) < 4 or len(ys) < 4:
         return None

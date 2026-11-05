@@ -29,7 +29,7 @@ filter is WARN (``MOSAIC_PHOTOMETRIC_COMPONENTS``).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -53,6 +53,7 @@ from .photometry import (
     ScaleObservation,
     ScaleSolution,
     measure_edge,
+    measure_sky,
     photometric_components,
     scale_observations,
     solve_planes,
@@ -60,7 +61,7 @@ from .photometry import (
 )
 
 
-CANVAS_MOSAIC_VERSION = "ultra-fast-wbpp-canvas-mosaic-v4"
+CANVAS_MOSAIC_VERSION = "ultra-fast-wbpp-canvas-mosaic-v5"
 PHOTOMETRY_PASS = 0.003
 PHOTOMETRY_WARN = 0.01
 # An overlap fails photometry only when its corrected ratio lies beyond the
@@ -108,6 +109,9 @@ class FilterMosaic:
     # The filter's other photometric components, largest first: each a
     # mosaic of its own panels on the same canvas box.
     components: tuple["FilterMosaic", ...] = ()
+    # Where this filter found sky (PlaneSolution.sky of every component):
+    # the other filters' reference when this is the deepest.
+    sky_bins: Mapping[str, tuple[NDArray[np.float64], NDArray[np.float64]]] = field(default_factory=dict)
 
 
 def _verdict(value: float, passing: float, warning: float) -> str:
@@ -288,6 +292,7 @@ def _assemble_component(
     minimum_matches: int,
     maximum_rms_arcsec: float,
     durable: bool,
+    sky_reference: tuple[str, Mapping[str, tuple[NDArray[np.float64], NDArray[np.float64]]]] | None,
 ) -> FilterMosaic:
     """Match, blend and gate one photometric component; the receipt holds
     its gates and verdict, nothing is raised."""
@@ -297,7 +302,8 @@ def _assemble_component(
     except MosaicPhotometryError as error:
         raise MosaicGateError(error.code, f"{filter_name}: " + str(error).removeprefix(f"{error.code}: ")) from error
     x0, y0, x1, y1 = canvas_box
-    planes = solve_planes(panels, edges, scales, (y1 - y0, x1 - x0))
+    skies = [measure_sky(panel) for panel in panels]
+    planes = solve_planes(panels, edges, skies, scales, (y1 - y0, x1 - x0), sky_reference[1] if sky_reference else None)
     noises = {panel.key: panel_noise(panel) for panel in panels}
     widths: dict[str, float] = {}
     for edge in edges:
@@ -435,6 +441,7 @@ def _assemble_component(
                 "gainGradient": list(scales.gradients[panel.key]),
                 "logScaleError": scales.log_scale_errors[panel.key],
                 "plane": list(planes.coefficients[panel.key]),
+                "planeCentre": list(planes.centres[panel.key]),
                 "noise": noises[panel.key],
                 "fwhmPixels": fwhm[panel.key],
                 "exposureSeconds": panel.exposure_seconds,
@@ -452,14 +459,19 @@ def _assemble_component(
             "edges": photometry_records,
             "unmeasuredOverlaps": unmeasured,
         },
-        "background": {"algorithm": BACKGROUND_ALGORITHM, **planes.diagnostics, "residuals": residuals},
+        "background": {
+            "algorithm": BACKGROUND_ALGORITHM,
+            **({"skyReferenceFilter": sky_reference[0]} if sky_reference else {}),
+            **planes.diagnostics,
+            "residuals": residuals,
+        },
         "blend": blend,
         "fluxConservation": flux,
         "canvasWcsVerification": verification,
         "gates": gates,
         "verdict": _worst([value for value in gates.values() if value != "NOT_MEASURED"]),
     }
-    return FilterMosaic(science_path, noise_path, coverage_path, mask_path, receipt, quality)
+    return FilterMosaic(science_path, noise_path, coverage_path, mask_path, receipt, quality, sky_bins=planes.sky)
 
 
 def _failed_gates(receipt: Mapping[str, Any]) -> list[str]:
@@ -477,6 +489,7 @@ def assemble_filter(
     minimum_matches: int = 12,
     maximum_rms_arcsec: float = 2.0,
     durable: bool = True,
+    sky_reference: tuple[str, Mapping[str, tuple[NDArray[np.float64], NDArray[np.float64]]]] | None = None,
 ) -> FilterMosaic:
     """Match, blend and verify one filter's panels on the canvas box.
 
@@ -484,7 +497,8 @@ def assemble_filter(
     (``mosaic_<F>.fits`` in ``output_directory``); every other component is
     assembled in ``component<k>/`` as ``mosaic_<F>_component<k>.fits`` with
     its own receipt.  A FAIL in any component fails the filter, after every
-    component was gated.
+    component was gated.  ``sky_reference`` is another filter's name and
+    :attr:`FilterMosaic.sky_bins`: the sky is taken only where it found sky.
     """
 
     edges: list[EdgeMeasurement] = []
@@ -524,6 +538,7 @@ def assemble_filter(
                 minimum_matches=minimum_matches,
                 maximum_rms_arcsec=maximum_rms_arcsec,
                 durable=durable,
+                sky_reference=sky_reference,
             )
         )
     main, others = results[0], results[1:]
@@ -570,6 +585,7 @@ def assemble_filter(
         receipt,
         main.quality,
         tuple(others),
+        {key: bins for result in results for key, bins in result.sky_bins.items()},
     )
 
 
