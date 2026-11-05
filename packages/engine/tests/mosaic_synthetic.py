@@ -12,6 +12,7 @@ and verifies a WCS by matching detected stars to it.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import math
 from pathlib import Path
 from typing import Any, Mapping
@@ -30,6 +31,7 @@ from ufwbpp.solvers.base import (
     SolverStatus,
     WcsParity,
 )
+from ufwbpp.solvers.catalog_correspondence import CORRESPONDENCE_ARTIFACT_NAME
 
 
 @dataclass(frozen=True)
@@ -198,9 +200,10 @@ class TruthSolver:
 
     backend_id = "truth-solver"
 
-    def __init__(self, sky: Sky, *, scale_arcsec: float) -> None:
+    def __init__(self, sky: Sky, *, scale_arcsec: float, match_radius_pixels: float = 2.0) -> None:
         self.sky = sky
         self.scale_arcsec = scale_arcsec
+        self.match_radius_pixels = match_radius_pixels
         self.catalog_star_source = TruthCatalog(sky)
         self.inputs: list[str] = []
 
@@ -257,7 +260,7 @@ class TruthSolver:
         predicted = np.column_stack(wcs.all_world2pix(self.sky.ra, self.sky.dec, 1))
         height, width = image.shape
         inside = (predicted[:, 0] > 3) & (predicted[:, 0] < width - 3) & (predicted[:, 1] > 3) & (predicted[:, 1] < height - 3)
-        rows, catalog_rows, distances = match_mutual_nearest(detected, predicted[inside], 2.0)
+        rows, catalog_rows, distances = match_mutual_nearest(detected, predicted[inside], self.match_radius_pixels)
         rms = float(np.sqrt(np.mean(np.square(distances)))) if distances.size else math.inf
         # The geometry is judged on isolated stars away from the edges: a
         # blended pair pulls a detector's centroid by up to a pixel.
@@ -267,7 +270,17 @@ class TruthSolver:
         matched = candidates[catalog_rows]
         isolated = (separation[catalog_rows].min(axis=1) >= 6.0) & (matched[:, 0] > 7) & (matched[:, 0] < width - 7) & (matched[:, 1] > 7) & (matched[:, 1] < height - 7)
         clean = distances[isolated]
-        (artifact_dir / "verification.json").write_text("{}", encoding="utf-8")
+        (artifact_dir / CORRESPONDENCE_ARTIFACT_NAME).write_text(
+            json.dumps(
+                {
+                    "matches": [
+                        {"residualPixels": float(distance), "residualArcsec": float(distance) * self.scale_arcsec}
+                        for distance in distances
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
         return {
             **_quality(int(rows.size), rms, self.scale_arcsec).serializable(),
             "isolatedStars": int(clean.size),

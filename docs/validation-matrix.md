@@ -4,6 +4,45 @@ Support, compatibility, implementation, and optimization are separate claims. Th
 
 Before tagging a candidate, regenerate the source-test summary and platform evidence from that exact commit. Report optional hardware skips explicitly, retain private data outside Git, and publish only sanitized summaries. Until those checks are complete, the correct status is alpha; in particular, gradient-free output and general PixInsight/WBPP equivalence are not established.
 
+## Projects without full RGB, inherited solves and the mosaic sky network on one tree (2026-11-05)
+
+Real data on the tree that combines these changes, M3 Pro, macOS 27, the Gaia DR2 tiles installed, one native library, one run per arm.
+
+| Check | Evidence | Status |
+|---|---|---|
+| A project without full RGB | M31 panel 1 R+G (11 + 12 Lights): the previous main stops after 41 s with `PROJECT_UNEXPECTED_FAILURE` at the alignment assert and publishes nothing. This tree publishes R and G; G is `EXACT_GEOMETRY_COPY`, byte for byte the run's master, and both channels carry one WCS. | Passing |
+| Full RGB against the previous main | M31 panel 1 L+R+G+B (32, 11, 12, 13 Lights): L, R, G and B file-identical, LRGB pixel data identical. | Passing |
+| Inherited solves | RCS2 J0327-1326 R+G (20 + 21 Lights): G's own solve is rejected at 2.481″ and it takes R's; refit order 3 on 202 stars, held-out 0.188″, G 23 pairs at 0.938″, R 22 at 0.919″. L+R+G+B (149, 20, 21, 18 Lights): L, G and B take R's solve; refit order 3 on 155 stars, held-out 0.159″. The project receipt labels those channels `SAME_GRID_CATALOG_VERIFIED`, with `sameGridSolveInherited` R and no fresh solve claimed; R stays `FRESH_SOLVE_UNCHANGED_GRID`. L, R and B pixel data equal an earlier run's. G differs (median −1.06 ADU) with the same 21 Lights admitted: 59 rejected Lights left the input folders in between, and that moved G's FWHM reference and normalization anchor. | Passing |
+| Mosaic sky network | M31 six panels, 713 Lights, `unattended-v1`: `PROJECT_COLOR_SUCCEEDED` in 1332 s, `mosaic-cubic-network-reference-sky-v2`, verdict WARN per filter as before (photometry in all four; residual background in L). The masters differ from an earlier run on 714 Lights with the same admitted Lights. The extra Light had failed screening, but the canvas survey solves the middle of each panel's Light list, so removing it moved the canvas and every window. The earlier code on the same 713 Lights gives file-identical masters, so the difference comes from the input, not from this tree. The overlap χ² moved with the input (L 1.53 → 1.91, B 0.91 → 1.99), and on P1 L the sky bins went from 1347 to 818. | Passing; the gates held, and why the fit is this sensitive to the shift is not explained |
+| Synthetic | The mono project test on a mosaic, a single target and an inherited solve, with `reproject` reported missing; a channel on another grid with no backend fails closed; the refit test's `unsolved_filters`. | Passing |
+| Not validated | A channel really on another grid ran only with a fake backend on synthetic channels: a real run's cross-filter gate refuses it first. A real install without `reproject` was simulated, not run. Windows ran only in hosted CI. `evaluate_masters` was not run on the mosaic. | Open |
+
+## A solve that misses only the RMS gate seeds the catalog refit (2026-11-05)
+
+Each case ran from a frozen copy of the engine without this change and again with it, on the same Mac, one run per arm.
+
+| Check | Evidence | Status |
+|---|---|---|
+| Runs where a filter solves | SDSS J1004+4112 at 15, 18, 19, 23, 26, 28, 33 and 41 frames (solver 1.95–1.96″, accepted), RCS2 J0327-1326 LRGB (L, G, B 2.48″ rejected, R 1.88″ accepted) and RCS2 L alone (1.87″ accepted): pixels, WCS and master files identical in both arms. The LRGB composite keeps its pixels and WCS; its file differs. | Passing; the seed is not used here |
+| Runs that reach the seed | RCS2 G alone and B alone: `ASTROMETRY_REQUIRED` at 2.47″ and 2.46″ before; now order 3 on 202 stars at 0.164″ (held-out 0.189″, 0.179″), verified on 23 pairs at 0.94″. SDSS 28 frames with the solver gate tightened to 1.9″ in a test harness: `ASTROMETRY_REQUIRED` before; now the same pixels and WCS as the normal run. | Passing |
+| Gate against real error | 12 masters re-solved with the engine's adapter, each reproducing its recorded RMS: the solver reads 1.55–2.48″ and is 2.08–2.61″ RMS off the refit over the field (p90 2.76–4.13″, largest 7.2–12.0″), accepted or not. | Measured against the Gaia refit, itself about 0.15″ |
+| Wrong seeds | 81 seeds through the real refit on SDSS 28, RCS2 L and M31 Hα P4, 78 of them damaged on purpose. The 55 reading up to 5″ reach the same WCS (0.00″). The first wrong one reads 5.81″ and ends 1.78″ off at the field edge, with held-out 0.17″. A wider scan of seeds up to 3600″ off, 180′ rotated, 3 % scaled or mirrored is refused or published with at most 0.18″ of error on RCS2 L; on SDSS 28, seeds rotated 18–24′ or scaled −0.5 %, which read above 5.8″, are published up to 3.7″ off. The 3.0″ limit keeps all of those out. | Passing with the limit |
+| Synthetic | The refit test with no accepted solve and two seeds, on every catalog case (published only with an applied refit); a run with no catalog to verify the seed (withdrawn, `ASTROMETRY_REQUIRED`); seeds refused above the limit or with hints that disagree; a 40 px SIP through the rewrite check, which the previous check fails. | Passing |
+| Not validated | A wrong fit that passes the held-out residual and the verification is not detected by either; only the limit on the seed keeps it out, and a solve accepted by the gate is not tested for it. Fields sparser than these three, Windows and a real ASTAP solve were not run. RCS2 L alone still publishes the solver's WCS, 2.49″ off, because its verification finds 10 pairs against the minimum of 12: SEP flags many bright stars of a deep stack as merged and the detector drops them (17 of 29 Tycho-2 stars on the RCS2 L master of the LRGB run, against 5–6 on G and R). | Open |
+
+## Catalog refit verification without the stars the catalog misplaces (2026-11-05)
+
+Real data: SDSS J1004+4112, 50 unique 300 s L Lights from three nights, 6252x4176, 0.65″/px Newtonian, M3 Pro, macOS 27, default recipe with the Gaia DR2 tiles installed.
+
+| Check | Evidence | Status |
+|---|---|---|
+| Cause | 28-frame master: 17 pairs at 2.10″ on Tycho-2 index 4107, median 0.88″. All 17 stars reach 65535 ADU in the raw Lights, but no pair is ambiguous and the choice of centroid moves 15 of the 17 residuals by under 0.1″. Each star's residual repeats to within 0.07″ between four stacks. The Tycho-to-Gaia and Gaia-to-image offsets correlate at 0.94 with a slope that implies a catalog epoch near 1989; removing that motion leaves 0.23″. | Measured from the image and the two indexes; not checked against Gaia DR3 proper motions, because the catalog service could not be reached from the run |
+| Frame sets | Plain → clipped RMS at 15, 18, 19, 23, 26, 28, 33 and 41 frames: 2.05 → 0.97, 2.10 → 0.99, 2.12 → 1.26, 2.10 → 0.99, 1.84 → 0.97, 2.11 → 0.99, 1.92 → 1.00, 1.92 → 1.00″, with 3 or 4 of 15–18 pairs left out. Five failed on the plain RMS; all eight pass. The refit is order 3 on 172–186 stars at 0.15″ (held-out 0.16–0.17″). | 15, 18, 23, 26, 28, 33 and 41 frames rerun end to end in 46–64 s, refit `APPLIED`. The 26 and 41-frame masters, which passed before the change, are file-identical to their earlier runs; the 28-frame pixels are unchanged. The 19-frame master was re-scored, not rerun |
+| Other project | RCS2 J0327-1326 L, R, G, B: 12–23 pairs, 0.92–0.95″, no pair left out. | Re-scored from the published masters; no rerun |
+| A wrong WCS | The 28-frame refit damaged on purpose. 1″ shift: 2.16″. 5′ rotation: 2.63″. 0.1 % scale: 2.24″. Each leaves no outlier and fails. 0.5″ shift, 2′ rotation and 0.05 % scale pass at 1.26–1.79″. | Passing |
+| Synthetic | The refit test with a tenth of the verifying catalog 8″ off (plain RMS over the gate, refit applied), every star 3″ off and 40 % of the stars 8″ off (both refused, nothing left out). | Passing; a plain RMS or the missing 30 % bound fails the matching cases |
+| Not validated | An error confined to under 30 % of the verification stars cannot be told from proper motion by this statistic; the held-out Gaia residual has to catch it. The NGC 7331 reference Lights are no longer available, so that project was not rerun. Windows was not run. The solver's own gate and a mosaic canvas's verification still judge the plain RMS. | Open |
+
 ## Off-target Lights fail screening; residual sky judged per Light (2026-11-02)
 
 | Check | Evidence | Status |

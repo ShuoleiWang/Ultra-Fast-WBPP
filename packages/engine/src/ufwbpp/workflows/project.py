@@ -60,7 +60,7 @@ from ..products.color import (
     ColorProductResult,
     build_color_product,
 )
-from ..products.reprojection import ReprojectProvider
+from ..products.reprojection import ReprojectProvider, load_reproject_provider
 from ..products.preview import render_auto_stretch_preview
 from ..solvers.base import SolverBackend, canonical_wcs_sha256, validate_wcs_header
 from ..stacking.crop import histogram_rectangle
@@ -1211,7 +1211,7 @@ def _align_channel(
     *,
     filter_name: str,
     reference_filter: str,
-    provider: ReprojectProvider,
+    provider: ReprojectProvider | None,
     tolerance_pixels: float,
     minimum_coverage: float,
 ) -> dict[str, Any]:
@@ -1255,6 +1255,14 @@ def _align_channel(
             path=str(source),
         )
 
+    # Only a channel on another grid needs the optional backend.
+    if provider is None:
+        provider, reason = load_reproject_provider()
+        if provider is None:
+            raise ProjectE2EError(
+                "CHANNEL_ALIGNMENT_BACKEND_UNAVAILABLE",
+                f"{filter_name} is not on the grid of {reference_filter}: {reason}",
+            )
     function = provider.reproject_function
     if not callable(function):
         raise ProjectE2EError(
@@ -1324,6 +1332,8 @@ def _align_channel(
         "mode": "REPROJECTED_INDEPENDENT_SOLVE",
         "referenceFilter": reference_filter,
         "wcsProvenance": "REPROJECTED_INDEPENDENT_SOLVE",
+        "backendId": provider.backend_id,
+        "backendVersion": provider.version,
         "maximumFivePointErrorPixelsBeforeAlignment": error,
         "maximumNinePointResidualPixelsBeforeAlignment": error,
         "maximumNinePointResidualPixelsAfterAlignment": output_error,
@@ -1570,19 +1580,12 @@ class _ColorOutputs(NamedTuple):
 def _check_project_request(
     request: ProjectE2ERequest,
     solver_backends: Sequence[SolverBackend],
-    reproject_provider: ReprojectProvider | None,
-) -> tuple[Path, Path, ProjectLayout, ReprojectProvider | None, tuple[Any, ...], Any, dict[str, Any]]:
+) -> tuple[Path, Path, ProjectLayout, tuple[Any, ...], Any, dict[str, Any]]:
     """Refuse a request that cannot run before anything is created."""
 
     output, evidence, layout = _validate_request(request)
     if not solver_backends:
         raise ProjectE2EError("SOLVER_CHAIN_EMPTY", "at least one final-solve backend is required")
-    if reproject_provider is None and not layout.is_mosaic and {"r", "g", "b"}.issubset(set(layout.filter_keys)):
-        from ..products.reprojection import load_reproject_provider
-
-        reproject_provider, reason = load_reproject_provider()
-        if reproject_provider is None:
-            raise ProjectE2EError("CHANNEL_ALIGNMENT_BACKEND_UNAVAILABLE", reason or "reproject is unavailable")
 
     output.parent.mkdir(parents=True, exist_ok=True)
     sources = _all_sources(request.e2e_request)
@@ -1623,7 +1626,7 @@ def _check_project_request(
                 "SELECTION_SOURCE_AMBIGUOUS",
                 "selection digests name more than one current Light: " + ", ".join(ambiguous),
             )
-    return output, evidence, layout, reproject_provider, sources, explicit_selection, run_digests
+    return output, evidence, layout, sources, explicit_selection, run_digests
 
 
 def _prepare_shared_calibration(run: _ProjectRun) -> _SharedMasters:
@@ -2073,7 +2076,6 @@ def _align_channels(run: _ProjectRun, final_sources: dict[str, tuple[str, Path]]
                 "output": _source_identity(destination),
             }
         else:
-            assert reproject_provider is not None
             alignment = _align_channel(
                 source,
                 reference_path,
@@ -2084,6 +2086,7 @@ def _align_channels(run: _ProjectRun, final_sources: dict[str, tuple[str, Path]]
                 tolerance_pixels=request.channel_wcs_tolerance_pixels,
                 minimum_coverage=request.minimum_channel_alignment_coverage,
             )
+        source_header = fits.getheader(source)
         source_solution = _astrometry_gui_evidence(source, final_quality[key])
         reference_solution = _astrometry_gui_evidence(
             reference_path, final_quality[reference_key]
@@ -2097,8 +2100,8 @@ def _align_channels(run: _ProjectRun, final_sources: dict[str, tuple[str, Path]]
                 "referenceSolution": reference_solution,
                 "sourceSolution": source_solution,
                 "reprojection": {
-                    "backendId": reproject_provider.backend_id if reproject_provider else None,
-                    "backendVersion": reproject_provider.version if reproject_provider else None,
+                    "backendId": alignment["backendId"],
+                    "backendVersion": alignment["backendVersion"],
                     "coverageFraction": alignment["coverageFraction"],
                     "sampleCount": alignment["sampleCount"],
                     "maximumNinePointResidualPixelsBeforeAlignment": alignment[
@@ -2109,6 +2112,18 @@ def _align_channels(run: _ProjectRun, final_sources: dict[str, tuple[str, Path]]
                     ],
                 },
                 "qualityAppliesTo": "REFERENCE_SOLVED_WCS_PROPAGATED_TO_VERIFIED_GRID",
+            }
+        elif source_header.get("OAFWCSPR") == "INHERITED_SAME_GRID":
+            # Its own solve missed a gate: the solve is its grid's, and the
+            # catalog refit verified it on this master's own pixels.
+            alignment["wcsProvenance"] = "INHERITED_SAME_GRID"
+            output_quality[key] = final_quality[key]
+            provenance = {
+                "type": "SAME_GRID_CATALOG_VERIFIED",
+                "freshSolveOnThisPixelGrid": False,
+                "sameGridSolveInherited": source_header["OAFWCSSG"],
+                "sourceSolution": source_solution,
+                "qualityAppliesTo": "INHERITED_WCS_VERIFIED_ON_THIS_GRID",
             }
         else:
             output_quality[key] = final_quality[key]
@@ -2343,7 +2358,12 @@ def _verify_and_publish(run: _ProjectRun, panels_by_filter: dict[str, list[tuple
                 "mosaicCoverageOverlapSeamPassed": True,
                 "propagatedAlignedChannelsVerified": all(
                     value["type"]
-                    in {"FRESH_SOLVE_UNCHANGED_GRID", "PROPAGATED_VERIFIED", "CANVAS_CATALOG_VERIFIED"}
+                    in {
+                        "FRESH_SOLVE_UNCHANGED_GRID",
+                        "SAME_GRID_CATALOG_VERIFIED",
+                        "PROPAGATED_VERIFIED",
+                        "CANVAS_CATALOG_VERIFIED",
+                    }
                     for value in astrometry_provenance.values()
                 ),
                 "rgbState": (
@@ -2435,9 +2455,7 @@ def run_project_e2e(
                 ),
             ),
         )
-    output, evidence, layout, reproject_provider, sources, explicit_selection, run_digests = _check_project_request(
-        request, solver_backends, reproject_provider
-    )
+    output, evidence, layout, sources, explicit_selection, run_digests = _check_project_request(request, solver_backends)
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", suffix=PROJECT_STAGING_SUFFIX, dir=output.parent))
     # The published directory holds only the final channels, ``previews`` and
     # ``receipt.json`` at its top level; every intermediate stage lives under

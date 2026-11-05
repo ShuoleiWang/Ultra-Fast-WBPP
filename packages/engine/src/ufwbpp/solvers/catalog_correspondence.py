@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import hashlib
+import json
 import math
 import os
 from pathlib import Path
@@ -55,6 +56,13 @@ _ENDIAN_MARKERS = {"04:03:02:01": "<", "01:02:03:04": ">"}
 _DECODE_CHUNK_ROWS = 262144
 _MATCH_CHUNK_ROWS = 256
 _STAR_TABLE_COLUMNS = ("kdtree_header_stars", "kdtree_range_stars", "kdtree_data_stars")
+
+# ``clipped_residual``, named in the receipts that gate on it.  A pair further
+# than this many sigma of the bulk is an outlier, and at least this fraction of
+# the pairs must not be: the limits of the SIP fit's own clip.
+CLIPPED_RESIDUAL_STATISTIC = "correspondence-clipped-rms-v1"
+_OUTLIER_SIGMA = 4.0
+_MINIMUM_INLIER_FRACTION = 0.7
 
 
 class CatalogCorrespondenceError(RuntimeError):
@@ -806,6 +814,36 @@ def verify_solution(
     )
 
 
+def clipped_residual(artifact_dir: Path, *, gate_arcsec: float) -> dict[str, Any]:
+    """The RMS of a verification's correspondence table without the stars its catalog misplaces.
+
+    The all-sky Tycho-2 indexes hold positions from around 1990 and no proper
+    motions: 35 years on, a star of 100 mas/yr is 3.5" from its catalog position
+    however right the WCS, and a few such stars decide the plain RMS.  A pair
+    is an outlier when its residual exceeds both 4 sigma of the bulk and the
+    gate; when more than 30 % of the pairs are, all of them count.  The result
+    never exceeds the plain RMS, and a WCS error that moves most stars raises
+    the median and with it the limit, so it stays in the RMS.
+    """
+
+    matches = json.loads((artifact_dir / CORRESPONDENCE_ARTIFACT_NAME).read_text(encoding="utf-8"))["matches"]
+    if not matches:
+        raise CatalogCorrespondenceError("CORRESPONDENCE_UNIQUE_MATCHES_MISSING", "the correspondence table is empty")
+    arcsec = np.asarray([item["residualArcsec"] for item in matches], dtype=np.float64)
+    pixels = np.asarray([item["residualPixels"] for item in matches], dtype=np.float64)
+    # The residual radius of a star is Rayleigh, whose median is sqrt(2 ln 2) sigma.
+    sigma = float(np.median(arcsec)) / math.sqrt(2.0 * math.log(2.0))
+    inliers = arcsec <= max(_OUTLIER_SIGMA * sigma, gate_arcsec)
+    if np.count_nonzero(inliers) < _MINIMUM_INLIER_FRACTION * arcsec.size:
+        inliers = np.ones(arcsec.size, dtype=bool)
+    return {
+        "rmsArcsec": float(np.sqrt(np.mean(np.square(arcsec[inliers])))),
+        "rmsPixels": float(np.sqrt(np.mean(np.square(pixels[inliers])))),
+        "rawRmsArcsec": float(np.sqrt(np.mean(np.square(arcsec)))),
+        "outliers": int(arcsec.size - np.count_nonzero(inliers)),
+    }
+
+
 def bind_installed_set(
     quality: AstrometricQuality,
     snapshot: Mapping[str, Any],
@@ -876,6 +914,7 @@ def bind_installed_set(
 
 
 __all__ = [
+    "CLIPPED_RESIDUAL_STATISTIC",
     "CORRESPONDENCE_ARTIFACT_NAME",
     "MATCH_ARTIFACT_NAME",
     "VERIFICATION_METHOD",
@@ -886,6 +925,7 @@ __all__ = [
     "IndexStars",
     "IndexSummary",
     "bind_installed_set",
+    "clipped_residual",
     "detect_field_stars",
     "field_geometry",
     "match_mutual_nearest",

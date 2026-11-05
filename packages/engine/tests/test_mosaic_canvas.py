@@ -337,21 +337,23 @@ def test_overlap_photometry_passes_and_fails_only_beyond_its_measurement_error(
 
 
 def _six_panels(
-    root: Path, *, curvature: float = 0.0
+    root: Path, *, curvature: float = 0.0, shared: float = 0.0, halo: float = 300.0, noise: float = 2.0
 ) -> tuple[list[PanelImage], dict[str, float], tuple[int, int], np.ndarray, np.ndarray]:
     """Six panels of one sky with a bright galaxy whose core sits in the
-    middle overlap: each panel with its own transparency, sky plane, seeing
-    and noise.  With ``curvature`` every panel's sky also bends by that
+    middle overlap (its halo starts at ``halo`` ADU): each panel with its own transparency, sky plane, seeing and noise.  With
+    ``curvature`` every panel's sky also bends about its own centre by that
     many ADU per canvas unit squared, in u² with the sign of its row and in
-    v² with the sign of its column: curvature the overlaps can see (a
-    strip along a panel's edge spans it in one direction only)."""
+    v² with the sign of its column: curvature the overlaps can see (a strip
+    along a panel's edge spans it in one direction only).  With ``shared``
+    every panel carries the same canvas gradient of that size, which no
+    overlap can see.  ``noise`` is every panel's pixel noise."""
 
     rng = np.random.default_rng(7)
     width, height, step_x, step_y = 640, 480, 540, 380
     canvas_w, canvas_h = 2 * step_x + width, step_y + height
     yy, xx = np.mgrid[:canvas_h, :canvas_w].astype(float)
     r = np.hypot(xx - canvas_w / 2, (yy - canvas_h / 2 - 10) / 0.5)
-    galaxy = 300 * np.exp(-r / 160.0) + 30000 * np.exp(-r / 5.0)
+    galaxy = halo * np.exp(-r / 160.0) + 30000 * np.exp(-r / 5.0)
     count = int(canvas_w * canvas_h / 1200)
     sx, sy = rng.uniform(5, canvas_w - 5, count), rng.uniform(5, canvas_h - 5, count)
     flux = 10 ** rng.uniform(3.0, 5.0, count)
@@ -372,8 +374,10 @@ def _six_panels(
             u = (xx[y0 : y0 + height, x0 : x0 + width] - (canvas_w - 1) / 2) / (max(canvas_w, canvas_h) / 2)
             v = (yy[y0 : y0 + height, x0 : x0 + width] - (canvas_h - 1) / 2) / (max(canvas_w, canvas_h) / 2)
             image = render(2.5 + 0.4 * index)[y0 : y0 + height, x0 : x0 + width] * scale
-            image += plane[0] + plane[1] * u + plane[2] * v + rng.normal(0, 2.0, (height, width))
-            image += curvature * ((1 if row else -1) * u * u + (1 if column % 2 else -1) * v * v)
+            image += plane[0] + plane[1] * u + plane[2] * v + rng.normal(0, noise, (height, width))
+            image += shared * (u - 0.5 * v + 0.6 * u * u)
+            bend_u, bend_v = u - u.mean(), v - v.mean()
+            image += curvature * ((1 if row else -1) * bend_u * bend_u + (1 if column % 2 else -1) * bend_v * bend_v)
             path = root / f"P{index}.fits"
             fits.writeto(path, image.astype(np.float32))
             coverage = root / f"P{index}_coverage.fits"
@@ -384,16 +388,17 @@ def _six_panels(
     return panels, scales, (canvas_w, canvas_h), render(3.5), galaxy
 
 
-def _sky_residual_rms(mosaic: np.ndarray, truth: np.ndarray, galaxy: np.ndarray) -> float:
+def _sky_residual_rms(mosaic: np.ndarray, truth: np.ndarray, galaxy: np.ndarray, terms: int = 6) -> float:
     """RMS of the 64 px binned sky residual (stars and the galaxy masked)
-    after the unobservable common quadratic, which every panel could carry."""
+    after the first ``terms`` of a common quadratic (by default all of it,
+    which every panel could carry; 1 leaves only the common level out)."""
 
     height, width = mosaic.shape
     difference = mosaic - truth
     yy, xx = np.mgrid[:height, :width].astype(float)
     u = (xx.ravel() - (width - 1) / 2) / (max(width, height) / 2)
     v = (yy.ravel() - (height - 1) / 2) / (max(width, height) / 2)
-    design = np.column_stack((np.ones(u.size), u, v, u * u, u * v, v * v))
+    design = np.column_stack((np.ones(u.size), u, v, u * u, u * v, v * v))[:, :terms]
     faint = np.isfinite(difference.ravel()) & (galaxy.ravel() < 30)
     common, *_ = np.linalg.lstsq(design[faint], difference.ravel()[faint], rcond=None)
     residual = difference - (design @ common).reshape(difference.shape)
@@ -408,8 +413,15 @@ def _sky_residual_rms(mosaic: np.ndarray, truth: np.ndarray, galaxy: np.ndarray)
     return float(np.sqrt(np.mean(np.square(binned))))
 
 
-def test_six_panels_are_matched_by_one_network_and_blended_without_a_background_step(tmp_path: Path) -> None:
-    panels, true_scales, (width, height), sky, galaxy = _six_panels(tmp_path)
+@pytest.mark.parametrize(("shared", "halo"), [(0.0, 300.0), (12.0, 60.0)])
+def test_six_panels_are_matched_by_one_network_and_blended_without_a_background_step(
+    tmp_path: Path, shared: float, halo: float
+) -> None:
+    """With a gradient every panel shares (about 37 ADU from corner to
+    corner, unseen by any overlap) and a halo that leaves sky in the outer
+    panels, the panels' sky removes it as well."""
+
+    panels, true_scales, (width, height), sky, galaxy = _six_panels(tmp_path, shared=shared, halo=halo)
     projection = CanvasProjection("TAN", (10.0, 41.0), (1.0, 1.0), ((-1 / 3600, 0.0), (0.0, 1 / 3600)))
     output = tmp_path / "mosaic"
     output.mkdir()
@@ -436,16 +448,74 @@ def test_six_panels_are_matched_by_one_network_and_blended_without_a_background_
     # by a small fraction of the noise: no panel-shaped steps are left.
     mosaic = fits.getdata(result.science_path).astype(float)
     assert _sky_residual_rms(mosaic, sky * true_scales[reference], galaxy) < 0.25  # pixel noise 2.0; the injected planes reach 10
+    if shared:
+        # Up to the level alone: what is left is mostly the halo's faint
+        # edge, which passes for sky up to half the pixel noise.
+        assert _sky_residual_rms(mosaic, sky * true_scales[reference], galaxy, terms=1) < 0.9
+
+
+def _kept_light(mosaic: Path, truth: np.ndarray, galaxy: np.ndarray, faint: float, bright: float) -> float:
+    """The fraction of the galaxy's light the mosaic keeps in 32 px bins
+    whose true galaxy (in ``truth``'s units) lies between ``faint`` and
+    ``bright``, against the mosaic's own level where there is no galaxy."""
+
+    difference = fits.getdata(mosaic).astype(float) - truth
+    usable = np.isfinite(difference) & (ndimage.gaussian_filter(np.abs(truth - ndimage.median_filter(truth, 9)), 2.0) <= 0.2)
+    height, width = difference.shape
+    light, residual = np.array(
+        [
+            (np.median(galaxy[i : i + 32, j : j + 32]), np.median(difference[i : i + 32, j : j + 32][usable[i : i + 32, j : j + 32]]))
+            for i in range(0, height - 31, 32)
+            for j in range(0, width - 31, 32)
+            if usable[i : i + 32, j : j + 32].sum() > 300
+        ]
+    ).T
+    zone = (light >= faint) & (light <= bright)
+    return 1.0 + float(np.mean(residual[zone] - np.median(residual[light < 0.1]))) / float(np.mean(light[zone]))
+
+
+def test_a_noisier_filter_takes_its_sky_where_the_reference_found_it(tmp_path: Path) -> None:
+    """A filter three times noisier passes the halo's faint edge for sky up
+    to half its own noise and takes it out in its own colour; with the
+    reference filter's sky it keeps about what the reference keeps."""
+
+    projection = CanvasProjection("TAN", (10.0, 41.0), (1.0, 1.0), ((-1 / 3600, 0.0), (0.0, 1 / 3600)))
+    kept: dict[tuple[str, str], float] = {}
+    sky_reference = None
+    # R's halo is half of L's: the same edge, 1-6 ADU in L and 0.5-3 in R.
+    for name, halo, noise, references in (("L", 60.0, 2.0, ("own",)), ("R", 30.0, 6.0, ("own", "L"))):
+        (tmp_path / name).mkdir()
+        panels, true_scales, (width, height), sky, galaxy = _six_panels(tmp_path / name, halo=halo, noise=noise)
+        for source in references:
+            output = tmp_path / f"mosaic_{name}_{source}"
+            output.mkdir()
+            result = assemble_filter(
+                name,
+                panels,
+                projection=projection,
+                canvas_box=(0, 0, width, height),
+                output_directory=output,
+                verifier=None,
+                sky_reference=sky_reference if source == "L" else None,
+            )
+            scale = true_scales[result.receipt["photometry"]["scaleReference"]]
+            kept[name, source] = _kept_light(result.science_path, sky * scale, galaxy * scale, halo / 60.0, halo / 10.0)
+            if name == "L":
+                sky_reference = ("L", result.sky_bins)
+    assert kept["R", "own"] / kept["L", "own"] - 1.0 < -0.6  # its own sky took nearly all of the edge (-0.98)
+    assert abs(kept["R", "L"] / kept["L", "own"] - 1.0) < 0.2  # -0.11
 
 
 def test_quadratic_sky_per_panel_is_removed_where_the_overlaps_see_its_curvature(tmp_path: Path) -> None:
-    """Each panel's sky bends by 8 ADU per canvas unit squared (about half
-    the pixel noise across a panel), in u² with the sign of its row and in
-    v² with the sign of its column.  The strips along the panels' edges
-    span them in one direction, so the network sees these terms: the
-    mosaic's sky is within 0.1 pixel noise of the truth, and the fitted
+    """Each panel's sky bends about its own centre by 8 ADU per canvas unit
+    squared (about half the pixel noise across a panel), in u² with the
+    sign of its row and in v² with the sign of its column.  The strips
+    along the panels' edges span them in one direction, so the network
+    sees these terms: the mosaic's sky is within 0.15 pixel noise of the
+    truth (the shape priors keep what a strip sees only across its width
+    in the panel), and the fitted
     curvature differences between rows and columns have the injected sign
-    and 40-115 % of its size (the prior shrinks what a strip sees weakly)."""
+    and 35-115 % of its size (the prior shrinks what a strip sees weakly)."""
 
     panels, true_scales, (width, height), sky, galaxy = _six_panels(tmp_path, curvature=8.0)
     projection = CanvasProjection("TAN", (10.0, 41.0), (1.0, 1.0), ((-1 / 3600, 0.0), (0.0, 1 / 3600)))
@@ -453,10 +523,10 @@ def test_quadratic_sky_per_panel_is_removed_where_the_overlaps_see_its_curvature
     output.mkdir()
     result = assemble_filter("L", panels, projection=projection, canvas_box=(0, 0, width, height), output_directory=output, verifier=None)
     receipt = result.receipt
-    assert receipt["gates"]["residualBackground"] == "PASS" and receipt["background"]["terms"] == 6
+    assert receipt["gates"]["residualBackground"] == "PASS" and receipt["background"]["terms"] == 10
     reference = receipt["photometry"]["scaleReference"]
     mosaic = fits.getdata(result.science_path).astype(float)
-    assert _sky_residual_rms(mosaic, sky * true_scales[reference], galaxy) < 0.2  # 0.1 of the pixel noise 2.0
+    assert _sky_residual_rms(mosaic, sky * true_scales[reference], galaxy) < 0.3  # 0.15 of the pixel noise 2.0
     planes = {panel["key"]: panel["plane"] for panel in receipt["panels"]}
     gains = {panel["key"]: panel["scale"] for panel in receipt["panels"]}
     # The additive terms are fitted on the scaled panels, so a difference of
@@ -471,7 +541,7 @@ def test_quadratic_sky_per_panel_is_removed_where_the_overlaps_see_its_curvature
     for left, right in (("P0", "P2"), ("P2", "P4"), ("P1", "P3"), ("P3", "P5")):
         expected = 8.0 * (gains[left] + gains[right]) * (1.0 if left in ("P0", "P1") else -1.0)
         recovered = planes[right][5] - planes[left][5]
-        assert 0.4 * abs(expected) < recovered * np.sign(expected) < 1.15 * abs(expected)
+        assert 0.35 * abs(expected) < recovered * np.sign(expected) < 1.15 * abs(expected)
 
 
 def _two_seeings(root: Path) -> tuple[list[PanelImage], list[tuple[int, int]], tuple[int, int]]:
@@ -712,12 +782,12 @@ def test_six_by_six_networks_solve_through_sparse_normal_equations() -> None:
     tracemalloc.start()
     started = time.perf_counter()
     scales = solve_scales(panels, scale_observations(edges))
-    planes = solve_planes(panels, edges, scales, (5 * step_y + height, 5 * step_x + width))
+    planes = solve_planes(panels, edges, [], scales, (5 * step_y + height, 5 * step_x + width))
     elapsed = time.perf_counter() - started
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     assert elapsed < 20.0
-    assert peak < 24 * 1024 * 1024
+    assert peak < 40 * 1024 * 1024  # ten terms a panel: an overlap row spans 20 columns (was 12)
     assert len(scales.edges) == len(edges)
     reference = scales.reference
     for panel in panels:
@@ -725,14 +795,14 @@ def test_six_by_six_networks_solve_through_sparse_normal_equations() -> None:
     # The fitted planes match the injected ones (in the reference panel's
     # gain units) up to the unobservable common polynomial: every pairwise
     # difference agrees to the bin noise.
-    fitted = {key: np.asarray(value) * gains[reference] for key, value in planes.coefficients.items()}
+    boxes = [panel.box for panel in panels]
+    bx1, by1 = max(box[2] for box in boxes), max(box[3] for box in boxes)
+    centre, length = ((bx1 - 1) / 2.0, (by1 - 1) / 2.0), max(bx1, by1) / 2.0
     for edge in edges:
-        difference = (fitted[edge.left] - fitted[edge.right]) - (truth[edge.left] - truth[edge.right])
-        model = np.column_stack((np.ones(edge.bin_x.size), *(
-            ((edge.bin_x - planes.centre[0]) / planes.length) ** p * ((edge.bin_y - planes.centre[1]) / planes.length) ** q
-            for p, q in ((1, 0), (0, 1), (2, 0), (1, 1), (0, 2))
-        ))) @ difference
-        assert np.max(np.abs(model)) < 0.3
+        u, v = (edge.bin_x - centre[0]) / length, (edge.bin_y - centre[1]) / length
+        injected = np.column_stack((np.ones_like(u), u, v, u * u, u * v, v * v)) @ (truth[edge.left] - truth[edge.right])
+        fitted = planes.evaluate(edge.left, edge.bin_x, edge.bin_y) - planes.evaluate(edge.right, edge.bin_x, edge.bin_y)
+        assert np.max(np.abs(gains[reference] * fitted - injected)) < 0.3
 
 
 def test_the_sparse_robust_solver_equals_its_dense_counterpart() -> None:

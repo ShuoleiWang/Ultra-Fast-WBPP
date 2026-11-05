@@ -36,6 +36,7 @@ from ufwbpp.solvers.catalog_correspondence import (
     CatalogCorrespondenceError,
     CorrespondenceParameters,
     IndexSummary,
+    clipped_residual,
     field_geometry,
     match_mutual_nearest,
     rank_indexes,
@@ -526,6 +527,11 @@ def test_verify_solution_recovers_exact_matches_and_evidence_shape(tmp_path: Pat
     assert table["coordinateOrigin"] == 1
     assert table["indexIdentities"] == [INDEX_IDENTITY]
     assert len(table["matches"]) == quality.matched_stars
+    # With no star off, the clipped residual of this table is its plain RMS.
+    residual = clipped_residual(tmp_path, gate_arcsec=2.0)
+    assert residual["outliers"] == 0
+    assert residual["rmsArcsec"] == residual["rawRmsArcsec"] == pytest.approx(quality.rms_arcsec)
+    assert residual["rmsPixels"] == pytest.approx(quality.rms_pixels)
     assert [row["indexId"] for row in table["matches"]] == sorted(row["indexId"] for row in table["matches"])
     assert all(row["indexMag"] is not None for row in table["matches"])
     match = json.loads(verification.match_path.read_text(encoding="utf-8"))

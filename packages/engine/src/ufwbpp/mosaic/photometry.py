@@ -16,14 +16,22 @@ same pixels seen by two panels.  Two quantities tie the panels together:
   with enough common stars are the edges of the panels' photometric graph;
   each connected component is solved on its own, with its own gauge
   (:func:`photometric_components`);
-* an additive **quadratic** per panel (six terms), from the binned
-  differences of the scaled panels in the overlaps.  Only differences are
-  observable: a common polynomial added to every panel changes no overlap,
-  so the solution keeps the area-weighted consensus sky (the minimum-norm
-  solution) and removes only what the panels disagree on.  Real large-scale
-  sky, a galaxy halo or IFN, is identical in the panels and therefore never
-  removed.  Bins where the uncertainty of the scale times the local
-  brightness could reach a tenth of the noise are left out, so a bright
+* an additive **cubic** per panel (ten terms about the panel's own
+  centre), from the binned differences of the scaled panels in the
+  overlaps and from each panel's own sky.  The overlaps see only
+  differences, so a gradient every panel carries (light pollution,
+  airglow, moonlight) and one handed along the chain of panels are
+  invisible to them; the sky bins, a panel's background away from any
+  galaxy, nebula or bright star, hold all panels to one sky level, the
+  gradient correction a person gives each panel before a mosaic, made
+  jointly.  A panel a galaxy fills has hardly any sky, so its overlaps and
+  a prior on its tilt and bending decide it, and the galaxy's light is not
+  taken for sky; the common level is the area-weighted consensus.  Every
+  filter takes its sky where the reference filter (the deepest) found it,
+  so a noisier filter cannot pass a halo's faint edge for sky and take it
+  out in its own colour.  Bins
+  where the uncertainty of the scale times the local brightness could
+  reach a tenth of the noise are left out of the overlaps, so a bright
   galaxy's residual can never be absorbed into a panel's polynomial; those
   bins then give an independent "extended-structure" scale that is compared
   with the stars'.
@@ -44,11 +52,12 @@ import zlib
 from astropy.io import fits
 import numpy as np
 from numpy.typing import NDArray
+from scipy import ndimage
 from scipy.sparse import csr_matrix, diags
 
 
 PHOTOMETRY_ALGORITHM = "mosaic-star-photometry-gain-plane-network-v1"
-BACKGROUND_ALGORITHM = "mosaic-quadratic-network-min-norm-v1"
+BACKGROUND_ALGORITHM = "mosaic-cubic-network-reference-sky-v2"
 BIN_PIXELS = 32
 MINIMUM_OVERLAP_STARS = 8
 MINIMUM_STAR_SNR = 30.0
@@ -72,14 +81,53 @@ HUBER_THRESHOLD = 1.5
 SCALE_LEAK_FRACTION = 0.1
 # Aperture radius in units of each panel's own FWHM.
 APERTURE_FWHM = 2.5
-# The additive model per panel: 1, u, v, u², uv, v².  The prior on a
-# panel's three curvature terms: its bending across itself is within
-# QUADRATIC_PRIOR_NOISE times the per-pixel noise of a panel difference
-# (0.14 of one panel's) unless the overlaps show more (the strips along a
-# panel's edges hardly measure its curvature across them; without the prior
-# the minimum-norm solution carries noise into the panel).
-PLANE_TERMS = 6
+# The additive model per panel: a cubic in u, v about the panel's centre,
+# the powers of its terms in POWERS.  The priors on its shape: its tilt
+# across itself is within TILT_PRIOR_NOISE, its bending within
+# QUADRATIC_PRIOR_NOISE and its cubic terms within CUBIC_PRIOR_NOISE times
+# the per-pixel noise of a panel difference (0.14 of one panel's) unless the
+# overlaps or the sky show more.  The strips along a panel's edges hardly measure it
+# across them, and a shape all panels share not at all (the sky bins below
+# do); left free, both took tilts from the gauge and from what a strip barely sees,
+# which put a 10-20 % sky gradient into a six-panel M31 mosaic whose
+# panels were flat to 2 %.  The priors stand for what an overlap carries
+# beyond its noise (a scale error times structure, flats that differ), which
+# does not average down as its bins do: a panel with more than
+# PRIOR_REFERENCE_BINS overlap bins tightens them by the square root of the
+# ratio, to at most a third.  On that mosaic's ~6000 bins a panel, with the
+# cubic terms taking what a quadratic left at the panels' edges: red sky
+# 2.6 -> 1.8 %, red-green 3.0 -> 1.3 % on the same masters, the galaxy within
+# 1.1 ADU of the sky's trend.  Ten times tighter priors, or cubic terms
+# twice as free, opened the overlap where two panels only touch at a corner;
+# small panels whose overlaps see a clean tilt need the priors untightened.
+POWERS = ((0, 0), (1, 0), (0, 1), (2, 0), (1, 1), (0, 2), (3, 0), (2, 1), (1, 2), (0, 3))
+PLANE_TERMS = len(POWERS)
+TILT_PRIOR_NOISE = 0.3
 QUADRATIC_PRIOR_NOISE = 0.1
+CUBIC_PRIOR_NOISE = 0.03
+PRIOR_REFERENCE_BINS = 600
+# The sky: medians of SKY_BIN_PIXELS bins of every panel.  A bin is sky
+# while it lies within a bound above the fitted sky (twice that below) and
+# is not next to a bin that does not: a galaxy's or a bright star's light
+# only ever adds.  The bound starts at SKY_REJECTION robust spreads of the
+# darkest quarter of the bins about the overlaps-only fit, sky even where a
+# galaxy fills most of the mosaic, and halves with every refit down to
+# SKY_TOLERANCE of the panel's pixel noise, at most SKY_ITERATIONS times.
+# A bound re-measured on the bins it keeps shrinks onto ever fewer of them
+# along a halo and left a shared gradient in place; at a fifth of the noise
+# the red sky of one M31 panel that a quadratic could not flatten that far
+# was rejected whole and stayed 4 % high.  At half the noise a halo's edge
+# fainter than that can pass for sky, and in a noisier filter that edge
+# reaches further: R, G and B took M31's outer disk for sky in two to a
+# hundred times as many bins as L (P3: 790-947 against 7) and removed
+# it in its own colour, which tinted the disk's faint parts, 4-6 % of the
+# sky, by 10-30 % panel by panel (green in one, teal in another).  So a
+# filter with a reference (the deepest filter's kept bins) keeps only bins
+# lying wholly inside the reference's sky.
+SKY_BIN_PIXELS = 64
+SKY_REJECTION = 2.5
+SKY_TOLERANCE = 0.5
+SKY_ITERATIONS = 12
 # Unknowns per panel of the gain network: ln scale and the two gradients.
 _GAIN_TERMS = 3
 # Singular values of a normal matrix below this fraction of its largest are
@@ -402,6 +450,45 @@ def measure_edge(left: PanelImage, right: PanelImage) -> EdgeMeasurement | None:
         edge.bin_right = median_b[good].astype(np.float64)
         edge.bin_noise = noise[good].astype(np.float64)
     return edge
+
+
+@dataclass(frozen=True)
+class SkyBins:
+    """One panel's background in SKY_BIN_PIXELS bins: each bin's place on
+    the panel's bin grid, its canvas centre and its median, and the panel's
+    pixel noise (the median of its bins' robust scatter)."""
+
+    key: str
+    row: NDArray[np.int64]
+    column: NDArray[np.int64]
+    x: NDArray[np.float64]
+    y: NDArray[np.float64]
+    value: NDArray[np.float64]
+    noise: float
+
+
+def measure_sky(panel: PanelImage) -> SkyBins:
+    """The median of every bin of a panel at least half of which is valid,
+    from every second pixel each way."""
+
+    x0, y0, x1, y1 = panel.box
+    values = panel.read(x0, y0, x1, y1)[::2, ::2]
+    side = SKY_BIN_PIXELS // 2
+    rows, columns = values.shape[0] // side, values.shape[1] // side
+    blocks = values[: rows * side, : columns * side].reshape(rows, side, columns, side).transpose(0, 2, 1, 3).reshape(rows, columns, -1)
+    good = np.isfinite(blocks).sum(axis=2) >= 0.5 * side * side
+    row, column = np.nonzero(good)
+    median = np.nanmedian(blocks[good], axis=1) if good.any() else np.empty(0)
+    scatter = np.nanmedian(np.abs(blocks[good] - median[:, None]), axis=1) if good.any() else np.empty(0)
+    return SkyBins(
+        panel.key,
+        row,
+        column,
+        x0 + (column + 0.5) * SKY_BIN_PIXELS,
+        y0 + (row + 0.5) * SKY_BIN_PIXELS,
+        median.astype(np.float64),
+        1.4826 * float(np.median(scatter)) if scatter.size else 0.0,
+    )
 
 
 @dataclass
@@ -790,45 +877,88 @@ class MosaicPhotometryError(RuntimeError):
 
 
 def _polynomial_terms(u: NDArray[np.float64], v: NDArray[np.float64]) -> NDArray[np.float64]:
-    """The six terms of the additive model at (u, v): 1, u, v, u², uv, v²."""
+    """The terms of the additive model at (u, v), one column per POWERS entry."""
 
-    return np.column_stack((np.ones_like(u), u, v, u * u, u * v, v * v))
+    return np.column_stack([u**p * v**q for p, q in POWERS])
 
 
 @dataclass
 class PlaneSolution:
-    """b_k(x, y) = c0 + c1*u + c2*v + c3*u² + c4*u*v + c5*v², u and v the
-    canvas offsets from its centre in units of ``length``: subtracted from
+    """b_k(x, y) = sum of c_i * u^p * v^q over POWERS, u and v the canvas
+    offsets from panel k's centre in units of ``length``: subtracted from
     each scaled panel."""
 
     coefficients: dict[str, tuple[float, ...]]
-    centre: tuple[float, float]
+    centres: dict[str, tuple[float, float]]
     length: float
     diagnostics: dict[str, Any]
+    # The canvas centres (x, y) of the bins kept as sky, per panel: another
+    # filter's reference.
+    sky: dict[str, tuple[NDArray[np.float64], NDArray[np.float64]]] = field(default_factory=dict)
 
     def evaluate(self, key: str, x: NDArray[np.float64], y: NDArray[np.float64]) -> NDArray[np.float64]:
-        c0, c1, c2, c3, c4, c5 = self.coefficients[key]
-        u = (np.asarray(x, dtype=np.float64) - self.centre[0]) / self.length
-        v = (np.asarray(y, dtype=np.float64) - self.centre[1]) / self.length
-        return c0 + c1 * u + c2 * v + c3 * u * u + c4 * u * v + c5 * v * v
+        u = (np.asarray(x, dtype=np.float64) - self.centres[key][0]) / self.length
+        v = (np.asarray(y, dtype=np.float64) - self.centres[key][1]) / self.length
+        top = max(max(p, q) for p, q in POWERS)
+        upow, vpow = [np.ones_like(u), u], [np.ones_like(v), v]
+        for _ in range(2, top + 1):
+            upow.append(upow[-1] * u)
+            vpow.append(vpow[-1] * v)
+        value = np.zeros(np.broadcast_shapes(u.shape, v.shape))
+        for c, (p, q) in zip(self.coefficients[key], POWERS):
+            value += c * upow[p] * vpow[q]
+        return value
+
+
+def _inside_reference_sky(sky: SkyBins, reference: tuple[NDArray[np.float64], NDArray[np.float64]]) -> NDArray[np.bool_]:
+    """The bins of ``sky`` lying wholly inside bins the reference filter kept
+    as sky; its bins have the same size on that filter's own grid."""
+
+    reference_x, reference_y = reference
+    if reference_x.size == 0:
+        return np.zeros(sky.value.size, dtype=bool)
+    half = SKY_BIN_PIXELS / 2.0
+    origin_x = float((reference_x[0] - half) % SKY_BIN_PIXELS)
+    origin_y = float((reference_y[0] - half) % SKY_BIN_PIXELS)
+    cells = set(
+        zip(
+            np.rint((reference_x - half - origin_x) / SKY_BIN_PIXELS).astype(int).tolist(),
+            np.rint((reference_y - half - origin_y) / SKY_BIN_PIXELS).astype(int).tolist(),
+        )
+    )
+    inside = np.ones(sky.value.size, dtype=bool)
+    for dx in (-half, half - 1.0):
+        for dy in (-half, half - 1.0):
+            column = np.floor((sky.x + dx - origin_x) / SKY_BIN_PIXELS).astype(int).tolist()
+            row = np.floor((sky.y + dy - origin_y) / SKY_BIN_PIXELS).astype(int).tolist()
+            inside &= np.fromiter((cell in cells for cell in zip(column, row)), dtype=bool, count=len(column))
+    return inside
 
 
 def solve_planes(
     panels: Sequence[PanelImage],
     edges: Sequence[EdgeMeasurement],
+    skies: Sequence[SkyBins],
     scales: ScaleSolution,
     canvas_shape: tuple[int, int],
+    reference_sky: Mapping[str, tuple[NDArray[np.float64], NDArray[np.float64]]] | None = None,
 ) -> PlaneSolution:
-    """The additive quadratic of every panel from the binned overlap
-    differences of the scaled panels, keeping the area-weighted consensus
-    sky."""
+    """The additive polynomial of every panel about its own centre from the
+    binned overlap differences of the scaled panels and from the panels'
+    sky, keeping the area-weighted consensus level.  With ``reference_sky``
+    (another filter's :attr:`PlaneSolution.sky`) a panel it covers takes
+    its sky only inside the reference's."""
 
     order = [panel.key for panel in panels]
     index = {key: position for position, key in enumerate(order)}
     height, width = canvas_shape
-    centre = ((width - 1) / 2.0, (height - 1) / 2.0)
+    centres = {
+        panel.key: ((panel.box[0] + panel.box[2] - 1) / 2.0, (panel.box[1] + panel.box[3] - 1) / 2.0) for panel in panels
+    }
     length = max(width, height) / 2.0
-    design = _Design(PLANE_TERMS * len(order))
+    # The unknowns: PLANE_TERMS per panel, then the sky level of the sky bins.
+    level = PLANE_TERMS * len(order)
+    overlaps: list[tuple[NDArray[np.int64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]] = []
     edge_records = []
     galaxy_checks = []
     bin_noises: dict[str, list[NDArray[np.float64]]] = {key: [] for key in order}
@@ -844,7 +974,7 @@ def solve_planes(
         difference = left - right
         # sqrt(2) times the noise of the difference (bin_noise is already
         # that of the difference): the unit of the robust weights, the leak
-        # mask and the curvature prior below.
+        # mask and the shape prior below.
         noise = np.hypot(ci * edge.bin_noise, cj * edge.bin_noise)
         bin_noises[edge.left].append(noise)
         bin_noises[edge.right].append(noise)
@@ -852,13 +982,13 @@ def solve_planes(
         structure = structure - float(np.median(structure))
         relative_error = scales.ratio_error(edge.left, edge.right, float(np.mean(edge.bin_x)), float(np.mean(edge.bin_y)))
         background = np.abs(structure) * relative_error <= SCALE_LEAK_FRACTION * noise
-        u = (edge.bin_x[background] - centre[0]) / length
-        v = (edge.bin_y[background] - centre[1]) / length
-        terms = _polynomial_terms(u, v)
+        x, y = edge.bin_x[background], edge.bin_y[background]
+        terms_left = _polynomial_terms((x - centres[edge.left][0]) / length, (y - centres[edge.left][1]) / length)
+        terms_right = _polynomial_terms((x - centres[edge.right][0]) / length, (y - centres[edge.right][1]) / length)
         columns = np.broadcast_to(
-            np.concatenate((PLANE_TERMS * i + offsets, PLANE_TERMS * j + offsets)), (u.size, 2 * PLANE_TERMS)
+            np.concatenate((PLANE_TERMS * i + offsets, PLANE_TERMS * j + offsets)), (x.size, 2 * PLANE_TERMS)
         )
-        design.add(columns, np.hstack((terms, -terms)), difference[background], noise[background])
+        overlaps.append((columns, np.hstack((terms_left, -terms_right)), difference[background], noise[background]))
         edge_records.append(
             {
                 "left": edge.left,
@@ -871,31 +1001,121 @@ def solve_planes(
         galaxy_checks.append((edge, i, j, difference, noise, structure, background))
     coefficients = {key: (0.0,) * PLANE_TERMS for key in order}
     diagnostics: dict[str, Any] = {"algorithm": BACKGROUND_ALGORITHM, "terms": PLANE_TERMS, "edges": edge_records}
-    measured = design.count
-    if measured:
-        # The curvature prior of every panel, in the units of its terms: a
-        # bin's difference noise is that of a median of BIN_PIXELS² pixel
-        # differences, so a pixel's is BIN_PIXELS / 1.2533 of it.
-        for position, panel in enumerate(panels):
-            stacked = np.concatenate(bin_noises[panel.key]) if bin_noises[panel.key] else np.empty(0)
-            pixel_noise = float(np.median(stacked)) * BIN_PIXELS / 1.2533 / math.sqrt(2.0) if stacked.size else 0.0
-            if not pixel_noise > 0.0:
-                continue
-            half_u, half_v = panel.shape[1] / 2.0 / length, panel.shape[0] / 2.0 / length
-            sigmas = QUADRATIC_PRIOR_NOISE * pixel_noise / np.asarray([half_u * half_u, half_u * half_v, half_v * half_v])
-            columns = (PLANE_TERMS * position + np.asarray([3, 4, 5])).reshape(-1, 1)
-            design.add(columns, np.ones((3, 1)), np.zeros(3), sigmas)
-        solution, weights, residual, _ = _robust_solve(design, robust_rows=measured)
-        residual, weights = residual[:measured], weights[:measured]
-        planes = solution.reshape(len(order), PLANE_TERMS)
-        # Minimum norm: the common polynomial every panel could carry is the
+    measured = sum(block[2].size for block in overlaps)
+    # The tilt and curvature prior of every panel, in the units of its
+    # terms: a bin's difference noise is that of a median of BIN_PIXELS²
+    # pixel differences, so a pixel's is BIN_PIXELS / 1.2533 of it.
+    priors: list[tuple[NDArray[np.int64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]] = []
+    for position, panel in enumerate(panels):
+        stacked = np.concatenate(bin_noises[panel.key]) if bin_noises[panel.key] else np.empty(0)
+        pixel_noise = float(np.median(stacked)) * BIN_PIXELS / 1.2533 / math.sqrt(2.0) if stacked.size else 0.0
+        if not pixel_noise > 0.0:
+            continue
+        half_u, half_v = panel.shape[1] / 2.0 / length, panel.shape[0] / 2.0 / length
+        shape_noise = {1: TILT_PRIOR_NOISE, 2: QUADRATIC_PRIOR_NOISE, 3: CUBIC_PRIOR_NOISE}
+        tighten = min(1.0, max(1.0 / 3.0, math.sqrt(PRIOR_REFERENCE_BINS / stacked.size)))
+        sigmas = pixel_noise * tighten * np.asarray([shape_noise[p + q] / (half_u**p * half_v**q) for p, q in POWERS[1:]])
+        columns = (PLANE_TERMS * position + np.arange(1, PLANE_TERMS)).reshape(-1, 1)
+        priors.append((columns, np.ones((PLANE_TERMS - 1, 1)), np.zeros(PLANE_TERMS - 1), sigmas))
+    # A sky bin reads its panel's polynomial plus the common sky level.
+    skies = [sky for sky in skies if sky.value.size]
+    sky_value = np.concatenate([scales.gain(sky.key, sky.x, sky.y) * sky.value for sky in skies]) if skies else np.empty(0)
+    sky_terms = np.vstack(
+        [np.hstack((_polynomial_terms((sky.x - centres[sky.key][0]) / length, (sky.y - centres[sky.key][1]) / length), np.ones((sky.x.size, 1)))) for sky in skies]
+        or [np.empty((0, PLANE_TERMS + 1))]
+    )
+    sky_columns = np.vstack(
+        [np.broadcast_to(np.append(PLANE_TERMS * index[sky.key] + offsets, level), (sky.x.size, PLANE_TERMS + 1)) for sky in skies]
+        or [np.empty((0, PLANE_TERMS + 1), dtype=np.int64)]
+    )
+    # Sky only where the reference found it; a panel it lacks finds its own.
+    allowed = (
+        np.concatenate(
+            [
+                _inside_reference_sky(sky, reference_sky[sky.key])
+                if reference_sky is not None and sky.key in reference_sky
+                else np.ones(sky.value.size, dtype=bool)
+                for sky in skies
+            ]
+        )
+        if skies
+        else np.empty(0, dtype=bool)
+    )
+
+    def fit(kept: NDArray[np.bool_], sigma: NDArray[np.float64]) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+        rows = _Design(level + 1)
+        for block in overlaps:
+            rows.add(*block)
+        # The bound, not a robust weight, keeps light out of the sky rows.
+        robust_rows = rows.count
+        rows.add(sky_columns[kept], sky_terms[kept], sky_value[kept], sigma[kept])
+        for block in priors:
+            rows.add(*block)
+        solution, weights, residual, _ = _robust_solve(rows, robust_rows=robust_rows)
+        return solution, weights[:measured], residual[:measured]
+
+    def grown(rejected: NDArray[np.bool_]) -> NDArray[np.bool_]:
+        """The rejected bins and their neighbours on each panel's grid."""
+
+        out, start = rejected.copy(), 0
+        for sky in skies:
+            stop = start + sky.value.size
+            grid = np.zeros((int(sky.row.max()) + 1, int(sky.column.max()) + 1), dtype=bool)
+            grid[sky.row, sky.column] = rejected[start:stop]
+            out[start:stop] = ndimage.binary_dilation(grid, np.ones((3, 3), dtype=bool))[sky.row, sky.column]
+            start = stop
+        return out
+
+    kept = np.zeros(sky_value.size, dtype=bool)
+    kept_sky: dict[str, tuple[NDArray[np.float64], NDArray[np.float64]]] = {}
+    if measured or skies:
+        solution, weights, residual = fit(kept, np.ones(kept.size)) if measured else (np.zeros(level + 1), np.empty(0), np.empty(0))
+        if skies:
+            floor = SKY_TOLERANCE * np.concatenate([sky.noise * scales.gain(sky.key, sky.x, sky.y) for sky in skies])
+            excess = sky_value - np.einsum("ij,ij->i", sky_terms, solution[sky_columns])
+            # Each panel's first sky is cut from its own darkest quarter: a
+            # gradient across the mosaic puts whole panels above the others'.
+            centre, bound, start = np.empty(excess.size), np.empty(excess.size), 0
+            for sky in skies:
+                stop = start + sky.value.size
+                pool = excess[start:stop][allowed[start:stop]]
+                low, quartile = np.percentile(pool if pool.size else excess[start:stop], [5.0, 25.0])
+                centre[start:stop], bound[start:stop] = quartile, SKY_REJECTION * max(float(quartile - low) / 0.97, 1e-9)
+                start = stop
+            spread = float(np.median(bound)) / SKY_REJECTION
+            for _ in range(SKY_ITERATIONS):
+                limit = np.maximum(bound, floor)
+                candidate = (excess <= centre + limit) & (excess >= centre - 2.0 * limit)
+                candidate &= ~grown(~candidate) & allowed
+                if not candidate.any() or (np.array_equal(candidate, kept) and np.all(bound <= floor)):
+                    break
+                kept = candidate
+                # A sky bin is as uncertain as the bound that admitted it:
+                # the spread about a fit that has yet to remove a gradient
+                # weighted the sky below the shape prior, and a quarter of
+                # the pixel noise pulled the overlaps apart.
+                solution, weights, residual = fit(kept, floor)
+                excess = sky_value - np.einsum("ij,ij->i", sky_terms, solution[sky_columns])
+                centre = float(np.median(excess[kept]))
+                spread = max(1.4826 * float(np.median(np.abs(excess[kept] - centre))), 1e-9)
+                bound /= 2.0
+            start, by_panel = 0, {}
+            for sky in skies:
+                mask = kept[start : start + sky.value.size]
+                by_panel[sky.key] = int(mask.sum())
+                kept_sky[sky.key] = (sky.x[mask], sky.y[mask])
+                start += sky.value.size
+            diagnostics["sky"] = {"binPixels": SKY_BIN_PIXELS, "bins": int(sky_value.size), "skyBins": by_panel, "spread": spread}
+        planes = solution[:level].reshape(len(order), PLANE_TERMS)
+        # Only a level common to all panels is unobservable: it is the
         # area-weighted consensus, which stays in the data.
         areas = np.asarray([panel.shape[0] * panel.shape[1] for panel in panels], dtype=np.float64)
-        planes = planes - (areas[:, None] * planes).sum(axis=0) / areas.sum()
+        planes[:, 0] -= float(np.sum(areas * planes[:, 0]) / areas.sum())
         coefficients = {key: tuple(float(value) for value in planes[index[key]]) for key in order}
-        diagnostics["chi2PerBin"] = float(np.mean(np.square(residual)))
-        diagnostics["robustWeightsBelowOne"] = int(np.count_nonzero(weights < 1.0))
-    solution = PlaneSolution(coefficients, centre, length, diagnostics)
+        if measured:
+            diagnostics["chi2PerBin"] = float(np.mean(np.square(residual)))
+            diagnostics["robustWeightsBelowOne"] = int(np.count_nonzero(weights < 1.0))
+    solution = PlaneSolution(coefficients, centres, length, diagnostics, kept_sky)
     # The extended-structure scale check: with the polynomials fixed, the
     # bright bins' remaining difference regressed on their structure.
     checks = []
@@ -938,7 +1158,9 @@ __all__ = [
     "PlaneSolution",
     "ScaleObservation",
     "ScaleSolution",
+    "SkyBins",
     "measure_edge",
+    "measure_sky",
     "photometric_components",
     "scale_observations",
     "solve_planes",
