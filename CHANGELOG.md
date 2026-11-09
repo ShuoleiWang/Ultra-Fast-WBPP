@@ -19,7 +19,7 @@ All notable changes are documented here. The format follows Keep a Changelog and
 
 ### CI runs on a supported macOS runner and drops checks that found nothing
 
-- GitHub no longer runs `macos-14` jobs (`The configuration 'macos-14-arm64-us-default' is not supported`): the macOS Python job was cancelled before its first step, and the CI gate failed. The macOS Python and Rust jobs now run on `macos-15`.
+- GitHub no longer runs `macos-14` jobs (`The configuration 'macos-14-arm64-us-default' is not supported`): the macOS Python job was cancelled before its first step, and the CI gate failed. The macOS Python and Rust jobs now run on `macos-15`, and so does the release workflow's macOS bundle. The app still supports macOS 14: the pinned macOS 14 runtime libraries replace the build machine's, and the bundle's deployment audit fails any Mach-O slice that needs more than 14.0.
 - CodeQL analyses only the Python code, on pushes to main and pull requests. In its first two months the Rust and workflow analyses raised no alert and the JavaScript one a single alert, against hundreds in Python. The weekly scheduled scan is gone too.
 - Dependabot version updates are removed: of 27 pull requests since September, none was merged. Dependency review still checks every pull request that changes a dependency.
 
