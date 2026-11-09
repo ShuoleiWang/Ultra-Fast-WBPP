@@ -78,6 +78,7 @@ const EN = {
   english: "English",
   chinese: "简体中文",
   browserDemo: "BROWSER DEMO",
+  demoProjectName: "Clearly labelled browser demo",
   engineReady: "Local engine ready",
   engineUnavailable: "Scientific engine unavailable",
   detectingHardware: "Detecting hardware…",
@@ -778,6 +779,7 @@ const ZH: Record<MessageKey, string> = {
   english: "English",
   chinese: "简体中文",
   browserDemo: "浏览器演示",
+  demoProjectName: "带标注的浏览器演示",
   engineReady: "本机引擎就绪",
   engineUnavailable: "科学引擎未连接",
   detectingHardware: "正在检测硬件…",
@@ -1278,8 +1280,17 @@ export function translateCurrent(key: MessageKey): string {
   return MESSAGES[language][key];
 }
 
+/** `?lang=zh-CN` or `?lang=en` picks the browser demo's language (documentation screenshots); never in the desktop app. */
+function requestedLanguage(): UiLanguage | undefined {
+  if ("__TAURI_INTERNALS__" in window) return undefined;
+  const value = new URLSearchParams(window.location.search).get("lang");
+  return value === "zh-CN" || value === "en" ? value : undefined;
+}
+
 function storedLanguage(): UiLanguage {
   if (typeof window === "undefined") return "en";
+  const requested = requestedLanguage();
+  if (requested) return requested;
   try {
     return window.localStorage.getItem(STORAGE_KEY) === "zh-CN" ? "zh-CN" : "en";
   } catch {

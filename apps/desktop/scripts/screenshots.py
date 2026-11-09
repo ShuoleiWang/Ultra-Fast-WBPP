@@ -1,9 +1,9 @@
 """Documentation screenshots of the desktop shell from the browser demo.
 
-Renders the four demo stages in light and dark appearance with headless
-Chrome against a running Vite dev server (``npm run dev`` in apps/desktop),
-then frames each capture as a macOS window (rounded corners, traffic lights,
-shadow) for the README:
+Renders the demo stages in English and Simplified Chinese, light and dark,
+with headless Chrome against a running Vite dev server (``npm run dev`` in
+apps/desktop), then frames each capture as a macOS window (rounded corners,
+traffic lights, shadow) for the READMEs:
 
     .venv/bin/python apps/desktop/scripts/screenshots.py [http://localhost:1420]
 
@@ -23,15 +23,17 @@ ROOT = Path(__file__).resolve().parents[3]
 OUT = ROOT / "assets" / "branding"
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 WIDTH, HEIGHT = 1280, 840
-STAGES = {"frames": 4000, "review": 5000, "run": 4300, "result": 16000}
+STAGES = {"frames": 4000, "blink": 6000, "run": 4300, "result": 16000}
+# The file-name suffix of each interface language.
+LANGUAGES = {"en": "", "zh-CN": "-zh-CN"}
 
 
-def capture(url: str, stage: str, dark: bool, target: Path) -> None:
+def capture(url: str, stage: str, dark: bool, language: str, target: Path) -> None:
     flags = [CHROME, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--force-device-scale-factor=2",
              f"--window-size={WIDTH},{HEIGHT}", f"--virtual-time-budget={STAGES[stage]}", f"--screenshot={target}"]
     if dark:
         flags += ["--force-dark-mode", "--enable-features=WebContentsForceDark:inversion_method/cielab_based,image_behavior/none"]
-    flags.append(f"{url}/?demo={stage}&mac=1")
+    flags.append(f"{url}/?demo={stage}&mac=1&lang={language}")
     subprocess.run(flags, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -63,15 +65,16 @@ def main() -> int:
     url = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:1420"
     OUT.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
-        for stage in STAGES:
-            for dark in (False, True):
-                raw = Path(tmp) / f"{stage}-{'dark' if dark else 'light'}.png"
-                capture(url, stage, dark, raw)
-                shot = Image.open(raw)
-                framed = frame(shot, dark)
-                target = OUT / f"ultra-fast-wbpp-{stage}-{'dark' if dark else 'light'}.png"
-                framed.save(target, "PNG", optimize=True)
-                print(target.relative_to(ROOT), framed.size)
+        for language, suffix in LANGUAGES.items():
+            for stage in STAGES:
+                for dark in (False, True):
+                    appearance = "dark" if dark else "light"
+                    raw = Path(tmp) / f"{stage}-{appearance}{suffix}.png"
+                    capture(url, stage, dark, language, raw)
+                    framed = frame(Image.open(raw), dark)
+                    target = OUT / f"ultra-fast-wbpp-{stage}-{appearance}{suffix}.png"
+                    framed.save(target, "PNG", optimize=True)
+                    print(target.relative_to(ROOT), framed.size)
     return 0
 
 

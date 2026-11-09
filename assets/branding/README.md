@@ -2,14 +2,17 @@
 
 ## Screenshots
 
-`ultra-fast-wbpp-{frames,review,run,result}-{light,dark}.png` are rendered by
+`ultra-fast-wbpp-{frames,blink,run,result}-{light,dark}[-zh-CN].png` are
+rendered by
 [`apps/desktop/scripts/screenshots.py`](../../apps/desktop/scripts/screenshots.py):
 headless Chrome captures the app's clearly labelled browser demo at each
-stage (`?demo=frames|review|run|result`, light and dark appearance) and the
-script frames the capture as a macOS window. The numbers shown are interface
-placeholders, not measurements, and no acquisition data, raw files or local
-paths are included. Re-run the script after interface changes; the native
-application shows the user's real frames and masters.
+stage (`?demo=frames|blink|run|result`, light and dark appearance), in
+English and, with the `-zh-CN` suffix, in Simplified Chinese (`&lang=zh-CN`),
+and the script frames the capture as a macOS window. The numbers shown are
+interface placeholders, not measurements, and no acquisition data, raw files or
+local paths are included. Re-run the script against `npm run dev` in
+`apps/desktop` after interface changes; the native application shows the
+user's real frames and masters.
 
 ## Application icon and mark
 

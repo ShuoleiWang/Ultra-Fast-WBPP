@@ -676,7 +676,7 @@ export function useWorkflow(t: Translator) {
     if (nativeRuntime) return;
     setDemoMode(true);
     setExecutionMode("demo");
-    setProjectName("Clearly labelled browser demo");
+    setProjectName(t("demoProjectName"));
     setSources(
       emptySources().map((source) => ({
         ...source,

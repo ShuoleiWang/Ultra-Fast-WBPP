@@ -47,7 +47,7 @@ If you downloaded the checked files yourself and want Ultra-Fast WBPP to generat
 ultra-fast-wbpp catalog verify astrometry-net-4107-4112 --configure
 ```
 
-The default managed directory is `~/.ultra-fast-wbpp/catalogs/astrometry-net` on macOS/Linux and `%LOCALAPPDATA%\Ultra-Fast-WBPP\catalogs\astrometry-net` on Windows. An installation made under the project's former name (`~/.openastroflow`, `%LOCALAPPDATA%\OpenAstroFlow`) is used in place while the new directory does not exist: the installed-set receipt and `astrometry.cfg` record their absolute location, so the data root is never moved. `UFWBPP_DATA_DIR` or `--catalog-dir` selects another location. The generated `astrometry.cfg` is discovered automatically; `UFWBPP_ASTROMETRY_CONFIG` selects a specific config.
+The default managed directory is `~/.ultra-fast-wbpp/catalogs/astrometry-net` on macOS/Linux and `%LOCALAPPDATA%\Ultra-Fast-WBPP\catalogs\astrometry-net` on Windows. An installation made under the project's former name (`~/.openastroflow`, `%LOCALAPPDATA%\OpenAstroFlow`) is used in place while the new directory does not exist; the engine never moves it. `UFWBPP_DATA_DIR` or `--catalog-dir` selects another location. The generated `astrometry.cfg` is discovered automatically; `UFWBPP_ASTROMETRY_CONFIG` selects a specific config.
 
 ## 3. Confirm runtime readiness
 
@@ -58,7 +58,7 @@ ultra-fast-wbpp doctor
 
 The first command re-hashes checked index files and validates the generated config. The second probes the complete engine. Neither command claims universal sky/scale coverage: coverage for a final master becomes proven only when that image solves and passes the match/RMS/WCS gates.
 
-Alongside `astrometry.cfg`, installation creates an immutable `installed-set-<catalog>-<identity>.json`. It contains only relative index paths plus their sizes and SHA-256 values, the checked manifest digest, config digest, citation, and an `installedSetIdentity`. Engine integrations can bind a solver's `.match` index evidence to real local files without trusting `INDEXID` alone:
+Alongside `astrometry.cfg`, installation creates an `installed-set-<catalog>-<identity>.json`. It contains only relative index paths plus their sizes and SHA-256 values, the checked manifest digest, config digest, citation, and an `installedSetIdentity`. Only the config digest ever changes, when a moved folder is re-pointed ([below](#moving-to-another-computer)); the index entries and the identity stay the same. Engine integrations can bind a solver's `.match` index evidence to real local files without trusting `INDEXID` alone:
 
 ```python
 from ufwbpp.catalogs import installed_set_identity_for_solver_indexes
@@ -79,6 +79,10 @@ ultra-fast-wbpp catalog remove-plan astrometry-net-4107-4112
 ```
 
 This prints exact candidate paths and reclaimable bytes but never removes anything. Artifacts shared with another checked manifest, `astrometry.cfg`, and unrelated indexes are retained. Deletion is intentionally left to a later GUI flow with a separate confirmation and shared-reference check.
+
+## Moving to another computer
+
+A copied catalog folder works on another computer without a new download. Install the solver program there (`brew install astrometry-net` on macOS, ASTAP with a star database on Windows), copy the whole catalog folder to the same place under that computer's data root (the default directory above, or under `UFWBPP_DATA_DIR`), then open the app or run `ultra-fast-wbpp catalog doctor`. Before the `doctor`, `run` and `run-project` commands and `catalog list`, `doctor`, `verify` and `install`, the engine finds a generated `astrometry.cfg` that still names the old folder, writes it again for the new one and re-binds the installed-set receipts to it; the index files are not touched and are still verified against their receipts before every solve. Each re-pointing is reported in one line on stderr. An `astrometry.cfg` edited by hand is never changed, and a failure is one line on stderr that leaves the solver unconfigured.
 
 ## Sources and scope
 

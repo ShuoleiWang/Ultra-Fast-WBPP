@@ -11,11 +11,11 @@ Use Python 3.11 or 3.12, Node.js 22, Rust 1.88 or newer, and CMake 3.28 or newer
 From a fresh checkout on macOS or Linux:
 
 ```bash
-make bootstrap
+make bootstrap BOOTSTRAP_PYTHON=python3.12
 make desktop-dev
 ```
 
-`make demo` opens the browser UI preview without the native engine. On Windows, create `.venv` with `py -3.12 -m venv .venv`, then use `.venv\Scripts\python.exe` for the pip and pytest commands in the Makefile. See the [Windows support limits](docs/windows.md) before working on that target. Development dependency ranges are intentionally resolved by pip; they are not a reproducible binary-release lock.
+`BOOTSTRAP_PYTHON` names the interpreter `.venv` is created from; plain `make bootstrap` uses `python3`, which Homebrew now ships as 3.14 ([building from source](docs/building-from-source.md)). `make demo` opens the browser UI preview without the native engine. On Windows, create `.venv` with `py -3.12 -m venv .venv`, then use `.venv\Scripts\python.exe` for the pip and pytest commands in the Makefile. See the [Windows support limits](docs/windows.md) before working on that target. Development dependency ranges are intentionally resolved by pip; they are not a reproducible binary-release lock.
 
 ## Before opening a change
 

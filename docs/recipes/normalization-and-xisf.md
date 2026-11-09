@@ -1,6 +1,6 @@
 # XISF pixels and stellar/background normalization
 
-> **Pre-1.0 boundary:** one retained real mono MasterFlat validates the bounded XISF decode bridge. Global normalization passed one private 38-frame B run but still lacks retained multi-condition acceptance. The former optional LocalNormalization implementation has been retired. The supported normalization remains stellar scaling plus guarded spatial background correction; it does not claim PixInsight algorithmic equivalence.
+> **Pre-1.0 boundary:** one retained real mono MasterFlat validates the bounded XISF decode bridge. Global normalization was first accepted on one private 38-frame B run; it has since run in every real project of the [validation matrix](../validation-matrix.md) (the NGC 7331 L/R/G/B reference project, the six-night NGC 6822 campaign with a moonlit night, SDSS J1004+4112, RCS2 J0327-1326 and M31 mosaics), and its masters are compared with PixInsight WBPP's by the master evaluator on NGC 7331 and by background flatness on NGC 6822. The former optional LocalNormalization implementation has been retired. The supported normalization remains stellar scaling plus guarded spatial background correction; it does not claim PixInsight algorithmic equivalence.
 
 ## XISF execution boundary
 

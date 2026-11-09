@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -444,6 +445,7 @@ def test_configure_adopts_semantically_identical_existing_config_without_replaci
     assert configured["installedSet"]["config"]["sha256"] == hashlib.sha256(existing).hexdigest()
 
 
+@pytest.mark.parametrize("moved", (False, True))
 @pytest.mark.parametrize(
     ("artifact", "identity"),
     (
@@ -453,7 +455,7 @@ def test_configure_adopts_semantically_identical_existing_config_without_replaci
     ),
 )
 def test_installed_set_api_binds_solver_index_to_actual_verified_bytes(
-    tmp_path: Path, artifact: str, identity: str
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], artifact: str, identity: str, moved: bool
 ) -> None:
     payload = b"checked-catalog-bytes"
     manifests = tmp_path / "manifests"
@@ -466,6 +468,24 @@ def test_installed_set_api_binds_solver_index_to_actual_verified_bytes(
         manifest_dir=manifests,
         transport=FakeTransport(payload),
     )
+    if moved:
+        # A folder copied to another computer names its old place until the
+        # next command re-points it; a config edited by hand is left alone.
+        copy = tmp_path / "other-computer" / "catalogs"
+        shutil.copytree(root, copy)
+        generated = (copy / "astrometry.cfg").read_bytes()
+        assert catalog_doctor(catalog_root=copy, manifest_dir=manifests)["ok"] is False
+        doctor = ["catalog", "doctor", "--catalog-dir", str(copy), "--manifest-dir", str(manifests), "--json"]
+        (copy / "astrometry.cfg").write_bytes(generated + b"# edited by hand\n")
+        assert main(doctor) == 3
+        assert (copy / "astrometry.cfg").read_bytes() == generated + b"# edited by hand\n"
+        (copy / "astrometry.cfg").write_bytes(generated)
+        capsys.readouterr()
+        assert main(doctor) == 0
+        assert json.loads(capsys.readouterr().out)["ok"] is True
+        assert f"add_path {copy}\n" in (copy / "astrometry.cfg").read_text(encoding="utf-8")
+        assert catalog_doctor(catalog_root=root, manifest_dir=manifests)["ok"] is True
+        root = copy
     receipts = verified_installed_set_identities(
         catalog_root=root, manifest_dir=manifests
     )

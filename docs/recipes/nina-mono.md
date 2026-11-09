@@ -1,6 +1,6 @@
 # N.I.N.A. mono preprocessing
 
-This guide's retained real-data evidence is one 38-frame B-channel mono run. R/G/B/L are processed as independent mono groups. Synthetic shared-calibration, seam-correction, and post-reprojection WCS-provenance regressions pass; retained real multi-panel/color acceptance remains pending.
+R/G/B/L are processed as independent mono groups. The [validation matrix](../validation-matrix.md) records real mono projects processed this way on one M3 Pro: the four-night NGC 7331 L/R/G/B reference project (61 Lights), the six-night NGC 6822 L/R/G/B campaign (97 Lights), L/R/G/B projects of SDSS J1004+4112 and RCS2 J0327-1326, and M31 mosaics of four to six panels with their colour products. The first retained acceptance was a single 38-frame B-channel run.
 
 ## Inputs
 
@@ -20,10 +20,12 @@ A uniform whole-night zeropoint shift below 0.50 mag is not a defect by itself w
 
 ## Calibration matching
 
-- Bias matches camera, geometry, binning, gain, offset, and readout mode.
-- Dark additionally matches exposure within the recipe tolerance and temperature within the configured window.
-- Flat additionally matches filter and CFA state. A master Flat is never selected by filename alone.
-- Ambiguous compatible masters fail planning instead of choosing the newest file.
+The desktop's `mono-standard-v1` pairs calibration by WBPP's rules ([calibration](calibration.md)):
+
+- A Bias, Dark or Flat of another size, binning or colour (mono or a Bayer pattern) never calibrates a Light, and a Flat needs the Light's filter.
+- A group with the Light's camera, gain, offset and readout mode is preferred; another one is used with a `*_SETTINGS_DIFFER` warning. Without a Dark of the Light's exposure the closest one is subtracted unscaled (`DARK_EXPOSURE_DIFFERS`), and a Dark more than 3 °C away is used with `DARK_TEMPERATURE_DIFFERS`.
+- Grouping keywords in the path (`NIGHT_1/`, `DATE_2026-03-22`) give each night its own Flats.
+- Several equally good candidates: the first by name is used, with a `BIAS_MATCH_AMBIGUOUS`, `DARK_MATCH_AMBIGUOUS` or `FLAT_MATCH_AMBIGUOUS` warning. The command line's `strict-v1` still refuses an ambiguous choice.
 
 ## Output
 
@@ -31,13 +33,15 @@ Each target/filter produces a calibrated linear master FITS, coverage and reject
 
 For ordinary integration, `coverage/coverage.json` points to three per-filter FITS maps produced by the same rejection decisions used for the master: accepted sample count, accepted/total coverage fraction, and rejection count. Registration quality weights are combined with noise weights before the pixel reduction; the receipt records all three vectors instead of merely displaying an unused score.
 
-Before ordinary rejection/integration, the default global normalization measures an audited multiplicative scale from robust same-filter matched-star aperture ratios and explicitly removes the source/reference exposure ratio already handled by calibration. With that scale fixed, it fits only an additive sky surface from paired low/mid-intensity pixels on the common registered grid. Bright stars and bright target cores are excluded; background covariance never sets stellar scale. The additive surface uses 128-pixel nodes with a seven-node Gaussian smoothing sigma (about 896 pixels), checkerboard holdout validation, and sky-relative amplitude/roughness gates. An already-flat or underconstrained field falls back to one scalar offset; an excessive correction fails closed. The private 38-frame B run passed stellar-scale, photometry, and background checks; multi-condition retained acceptance is still pending, so this must not be described as PixInsight ImageIntegration equivalence.
+Before ordinary rejection/integration, the default global normalization measures an audited multiplicative scale from robust same-filter matched-star aperture ratios and explicitly removes the source/reference exposure ratio already handled by calibration. With that scale fixed, it fits only an additive sky surface from paired low/mid-intensity pixels on the common registered grid. Bright stars and bright target cores are excluded; background covariance never sets stellar scale. The additive surface uses 128-pixel nodes with a seven-node Gaussian smoothing sigma (about 896 pixels), checkerboard holdout validation, and sky-relative amplitude/roughness gates. An already-flat or underconstrained field falls back to one scalar offset; an excessive correction fails closed. The private 38-frame B run passed stellar-scale, photometry, and background checks, and the later real projects of the validation matrix (several nights, a moonlit night, mosaic panels) ran the default normalization; this must still not be described as PixInsight ImageIntegration equivalence.
 
-## Explicit REVIEW approval
+## Which Lights are stacked
 
-The native GUI runs the real read-only Quality Gate before recipe execution and lists every Light's evidence. For exactly one target × filter panel, an operator can approve a `REVIEW` row in place. The GUI sends the preflight source SHA-256 and policy digest; the trusted runtime recomputes the complete request digest and repeats QC, so changed bytes/policy/request context fail closed and the source must still be uniquely classified `REVIEW`. Multi-panel GUI runs cannot safely replay that context across panel subruns, so their REVIEW rows stay explicitly excluded. `HARD_FAIL` is never promotable.
+In the desktop, your decisions decide: every Light is reviewed in **Blink & select** (闪视筛片 in the Chinese interface) and each channel is confirmed, and the run receives those decisions as an explicit selection ([blink screening](blink-screening.md)). The desktop has no REVIEW approval: its quality-gate table is read-only evidence, and its run request always carries an empty `reviewSelections` (the native controller starts a run only with a completed Blink review and no review selections). The quality gate still runs inside the run and records its dispositions.
 
-The headless two-run workflow remains available for one exact E2E source set. Run once to a new output directory and inspect its thumbnail/evidence. Read that frame's `sha256` value from the output receipt's `sources` array, place it in `sourceSha256`, and copy `gatePolicyDigest` plus `manualReviewApprovals.requestDigest` from `qc/manifest.json` into a new recipe:
+## Explicit REVIEW approval (command line)
+
+Without a selection, a headless run under the default `legacy-gate` policy admits the quality gate's PASS frames and excludes REVIEW frames. `HARD_FAIL` is never promotable. A `REVIEW` frame can be admitted with the headless two-run workflow, for one exact E2E source set. Run once to a new output directory and inspect its thumbnail/evidence. Read that frame's `sha256` value from the output receipt's `sources` array, place it in `sourceSha256`, and copy `gatePolicyDigest` plus `manualReviewApprovals.requestDigest` from `qc/manifest.json` into a new recipe:
 
 ```json
 {

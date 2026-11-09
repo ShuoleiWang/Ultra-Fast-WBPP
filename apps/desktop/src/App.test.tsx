@@ -82,6 +82,16 @@ describe("Ultra-Fast WBPP browser development mode", () => {
     expect(screen.getByRole("heading", { name: "拖入 N.I.N.A. 拍摄文件夹" })).toBeInTheDocument();
   });
 
+  it("opens the browser demo in the language its address asks for", () => {
+    window.history.replaceState({}, "", "/?lang=zh-CN");
+    try {
+      render(<App />);
+      expect(screen.getByRole("heading", { name: "拖入 N.I.N.A. 拍摄文件夹" })).toBeInTheDocument();
+    } finally {
+      window.history.replaceState({}, "", "/");
+    }
+  });
+
   it("falls back to English when localStorage is unavailable", () => {
     vi.spyOn(window.localStorage, "getItem").mockImplementation(() => {
       throw new DOMException("blocked", "SecurityError");

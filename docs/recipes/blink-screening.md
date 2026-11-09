@@ -21,7 +21,7 @@ Only a decoded main image painted in the visible view counts as reviewed; prefet
 
 The blink view:
 
-- **Channel chips** (`L · 16/44 viewed`, with a check after confirmation), one per channel (target × filter × camera geometry × exposure bucket); keys `1`–`4` switch.
+- **Channel step rail**: one step per channel (target × filter × camera geometry × exposure bucket) in its filter's colour, with its key number, filter and target, frames viewed and kept (`16/44 viewed`, with a check after confirmation, `12/44 kept`) and its state (not started, in progress, done). A channel header states the frame count, the night span and the reference frame, and a finished channel offers *Next channel*. Keys `1`–`9` pick a channel and `Tab` / `Shift+Tab` step to the next or previous one; stepping, playback and the counters stay inside the current channel.
 - **Stage**: the current frame at 1/8 scale in a viewport shared by every frame of the channel (all previews share the reference's grid and size), wheel to zoom at the cursor, drag to pan, double-click to fit; the 1/4-scale image replaces it when zoomed past 1.2×. The overlay shows name, night, decision and the flag chips with their values (`Sky ×2.43`, `Stars 55 %`, `Ext 0.23 mag`), and marks the reference. *Compare with reference* splits the stage reference | current with the same viewport; holding `C` A/B-blinks the two.
 - **Filmstrip**: thumbnails sorted chronologically, with an optional flagged-first order, grouped by night with a header row (`2026-08-20 · 23 frames · sky ×2.2 · 0 kept`) that carries **Drop night** / **Keep night** buttons. A tile shows the decision colour bar, flag dots and the reference star.
 - **Metrics** (inspector, or a strip under the stage): sky and sky ratio, stars and ratio, extinction, native FWHM and ratio, ellipticity, registration RMS and matches, overlap, background shape, score rank and z, every flag with its message and threshold, the gate disposition and codes, and the notes.
@@ -33,12 +33,14 @@ The blink view:
 | `Space`, `K`, `D` | Toggle keep/drop, keep and next, drop and next |
 | `F`, `Shift+F` | Next / previous flagged frame |
 | `R` | Jump to the reference |
-| `C` (hold) | Compare with the reference (A/B while held) |
-| `P`, `[`, `]`, `Esc` | Play / pause at 2–8 frames per second, slower, faster, stop |
+| `C` | Hold: show the reference while held (A/B); tap (under 0.3 s): switch *Compare with reference* on or off |
+| `P`, `[`, `]`, `Esc` | Play / pause at 2, 4 or 8 frames per second, slower, faster, stop |
 | `N` | Drop the current frame's whole night (undoable) |
 | `Z`, `Cmd/Ctrl+Z` | Undo (up to 100 steps) |
-| `+`, `−`, `0` | Zoom in, out, fit |
-| `1`–`4` | Channel |
+| `+` or `=`, `-`, `0` | Zoom in, out, fit |
+| `1`–`9` | Pick that channel |
+| `Tab`, `Shift+Tab` | Next / previous channel (while the focus is not on a button) |
+| Shift-click a filmstrip tile | Set every frame from the last clicked tile to this one to the opposite of this tile's decision (one undo step) |
 
 Playback starts only on request. *Kept only* is available after all frames in the current channel have been viewed; it cannot skip unseen frames during the initial review. Playback pauses when you step by hand.
 

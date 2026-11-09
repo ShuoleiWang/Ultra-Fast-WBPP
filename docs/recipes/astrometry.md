@@ -18,7 +18,7 @@ The default large-frame profile uses `--downsample 4 --objs 500 --depth 10-500 -
 
 The headless runtime discovers an app-managed config through the compatibility variable `UFWBPP_ASTROMETRY_CONFIG` (or `ASTROMETRY_NET_CONFIG`), then the standard Ultra-Fast WBPP data directories. Embedders can pass `config_path` and an immutable `AstrometryNetSolveProfile` directly. Arbitrary command strings are not accepted as a profile, and the config path is never added to probe arguments.
 
-Use the [offline catalog recipe](offline-solver-catalogs.md) to inspect compatible scales, explicitly accept the versioned provider notice, download/resume checked artifacts, generate `astrometry.cfg`, and create an immutable installed-set receipt. Nothing is fetched automatically by a solve.
+Use the [offline catalog recipe](offline-solver-catalogs.md) to inspect compatible scales, explicitly accept the versioned provider notice, download/resume checked artifacts, generate `astrometry.cfg`, and create an installed-set receipt. Nothing is fetched automatically by a solve.
 
 When a center or scale hint exists, its first attempt receives 25% of the total timeout, capped at 30 seconds. If that attempt times out, exits without solving, or produces no exact solved marker, the remaining budget is used for a more conservative attempt with gentler downsampling, up to 1000 sources/depth, and no center or scale constraints. The process-group timeout is still the hard boundary; fallback does not extend the configured total budget.
 

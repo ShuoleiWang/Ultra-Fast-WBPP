@@ -24,8 +24,10 @@ from .solvers.catalogs import (
     CatalogError,
     catalog_doctor,
     catalog_list,
+    default_catalog_root,
     install_bundled_catalog,
     install_catalog,
+    relocate_catalog,
     remove_catalog_plan,
     verify_catalog,
 )
@@ -586,13 +588,37 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _install_bundled_catalog() -> None:
-    """A self-contained build installs its bundled index set on first use.
+def _prepare_catalog(args: argparse.Namespace) -> None:
+    """Make the managed catalog usable before a command reads it.
 
-    A failure leaves the solver unconfigured, which ``doctor`` and the run's
-    readiness gate report; it never stops the command itself.
+    A catalog folder moved or copied from another computer is pointed at the
+    place it now sits, and a self-contained build installs its bundled index
+    set on first use.  A failure leaves the solver unconfigured, which
+    ``doctor`` and the run's readiness gate report; it never stops the command.
     """
 
+    if args.command == "catalog":
+        if args.catalog_command not in {"list", "doctor", "verify", "install"}:
+            return
+        roots = [Path(args.catalog_dir) if args.catalog_dir else default_catalog_root()]
+    elif args.command in {"doctor", "run", "run-project"}:
+        from .solvers.astrometry_net import discover_astrometry_config
+
+        config = discover_astrometry_config()
+        roots = [default_catalog_root(), *([Path(config).parent] if config else [])]
+    else:
+        return
+    for root in dict.fromkeys(roots):
+        try:
+            previous = relocate_catalog(catalog_root=root)
+        except (CatalogError, OSError, ValueError) as error:
+            code = getattr(error, "code", type(error).__name__)
+            sys.stderr.write(f"moved catalog folder not re-pointed ({code}): {error}\n")
+        else:
+            if previous is not None:
+                sys.stderr.write(f"catalog folder moved from {previous}; re-pointed to {root.expanduser().absolute()}\n")
+    if args.command == "catalog" and args.catalog_command not in {"list", "doctor"}:
+        return
     try:
         install_bundled_catalog()
     except (CatalogError, OSError, ValueError, KeyError) as error:
@@ -606,10 +632,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     platform_services.reconfigure_utf8_stdio()
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if args.command in {"doctor", "run", "run-project"} or (
-        args.command == "catalog" and args.catalog_command in {"list", "doctor"}
-    ):
-        _install_bundled_catalog()
+    _prepare_catalog(args)
     try:
         if args.command == "doctor":
             payload = doctor_payload()

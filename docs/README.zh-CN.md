@@ -4,7 +4,7 @@
 
 <h1 align="center">Ultra-Fast WBPP</h1>
 
-<p align="center"><b>多晚的天文素材进去，经过校验、已解算的主图出来。一分钟左右，不是一整晚。</b></p>
+<p align="center"><b>几晚的深空素材拖进来，经过校验、带天文坐标的主图出来。一分钟左右，不用等一整晚。</b></p>
 
 <p align="center">
   <a href="https://github.com/ShuoleiWang/Ultra-Fast-WBPP/actions/workflows/ci.yml"><img src="https://github.com/ShuoleiWang/Ultra-Fast-WBPP/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -17,164 +17,171 @@
 <p align="center">
   <a href="../README.md">English</a> ·
   <a href="#为什么用-ultra-fast-wbpp">为什么</a> ·
-  <a href="#值得一提的功能">功能</a> ·
   <a href="#界面">界面</a> ·
   <a href="#下载">下载</a> ·
   <a href="#快速开始">快速开始</a> ·
+  <a href="getting-started.zh-CN.md">上手指南</a> ·
   <a href="README.md">文档索引</a> ·
   <a href="../CONTRIBUTING.md">参与贡献</a>
 </p>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="../assets/branding/ultra-fast-wbpp-result-dark.png">
-  <img src="../assets/branding/ultra-fast-wbpp-result-light.png" alt="Ultra-Fast WBPP 结果页：已解算的主图、筛片摘要与已校验的产品" width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/branding/ultra-fast-wbpp-blink-dark-zh-CN.png">
+  <img src="../assets/branding/ultra-fast-wbpp-blink-light-zh-CN.png" alt="Ultra-Fast WBPP 闪视筛片：一个通道的 Light 按夜晚排成胶片条，当前帧与参考帧对照，测量标记与保留/丢弃决定" width="100%">
 </picture>
 
-<p align="center"><i>原生窗口：一个项目就是一份文档。浅色/深色随系统。（截图来自带标注的浏览器演示；原生应用显示的是你的真实帧与主图。）</i></p>
+<p align="center"><i>闪视筛片：一个通道的每张 Light 都已对齐、统一拉伸，测量值就在旁边。浅色/深色随系统。（截图来自带标注的浏览器演示；原生应用显示的是你自己的帧和主图。）</i></p>
 
 ## 为什么用 Ultra-Fast WBPP
 
-<table align="center">
-  <tr>
-    <th align="center">同一批 61 张 Light（26 MP，四晚，L R G B），同一台 Mac</th>
-  </tr>
-  <tr>
-    <td align="center">PixInsight WBPP 3.0.1 &nbsp;<b>24 分 11 秒</b>&nbsp; → &nbsp;Ultra-Fast WBPP &nbsp;<b>76 秒</b>&nbsp;（从原始 Light 到已解算、已校验的主图）</td>
-  </tr>
-</table>
-
-- **快在关键处。** 热点循环是多线程原生内核，与 NumPy 参考实现逐位一致；每张 Light 只解码一次，在内存里完成校准并直接重采样进堆栈。优化目标由真实运行的追踪器决定，而不是凭感觉：四个版本里从 170 秒 → 97 秒 → 82 秒 → 76 秒，凡承诺逐位一致的步骤主图都逐位一致。
-- **机器能为自己辩护的筛片。** 每张 Light 由测量证据判定（透明度、消光、原生分辨率 PSF、拖线、遮挡、视场一致性），复核页与正式运行用的是同一份代码。无人值守策略（配方选项）更进一步：用积分过程中*就地*测量的留一反事实复核每一帧，只有主图因它而更好，它才留下；局部有云或局部遮挡的帧通过逐帧区域权重图保留清晰部分，而不是整帧丢弃。
-- **未经校验绝不发布。** 原始素材只读，结果只写入新目录，每个产品都带有含哈希与全部算法标识的回执；桌面端校验最终天球坐标后才显示"完成"。跑两次得到相同的字节。
-- **用标准对比 WBPP，而不是用眼睛。** [`tools/validation/evaluate_masters.py`](../tools/validation/evaluate_masters.py) 把主图与同一批数据的 PixInsight WBPP 主图在 PSF、噪声增益、深度、背景平坦度、伪影、测光上逐项打分并给出置信区间。历史测量中，四个滤镜的分箱噪声增益为 1.01–1.03；标准门禁尚未全部测量，当前不认证完整等价性（[评估标准](master-evaluation-standard.md)）。
+- **一晚的 WBPP 变成一分钟左右。** 61 张 Light（26 MP，四晚，L R G B），PixInsight WBPP 3.0.1 在一台 M3 Pro 上跑了 **24 分 11 秒**。同一批 Light、同一台 Mac，Ultra-Fast WBPP 用 **76 秒**出了已解算、已校验的主图（[features §1](features.md#1-speed-76-seconds-for-61--26-mp-lights)，英文）。
+- **每一帧的去留都有看得见的理由。** 每张 Light 都测量天光、消光、星点数、原生分辨率的 PSF、拖线、云、遮挡和视场一致性。你在闪视筛片里看着数字做决定，正式运行严格按你的决定执行（[闪视筛片](recipes/blink-screening.md)）。
+- **天球坐标是校验过的，不是假定的。** 每张主图都做天文定位（星图解析），并对星表恒星核验之后才发布。装了 Gaia 分块星表后，WCS 还会在星表恒星上重新拟合，真实数据上约 0.15″（[天文定位](recipes/astrometry.md)）。
+- **免费、开源。** MIT 许可，支持 macOS Apple Silicon 和 Windows x64，不需要 PixInsight。你的 Light 永远不会被改写，结果只写进新文件夹，不向任何地方上传。
 
 ### 与 PixInsight WBPP 对比
 
 | | Ultra-Fast WBPP | PixInsight WBPP |
 |---|---|---|
-| 61 × 26 MP Light，M3 Pro | **76 秒** | 24 分 11 秒（WBPP 3.0.1，默认流程，含 LocalNormalization） |
-| 筛片 | 测量证据 → 带理由的门禁判定；无人值守策略再加积分内反事实复核，局部云、遮挡用区域权重图 | 整帧加权与阈值剔除 |
-| 可信度 | 素材只读、结果只新建、含哈希与算法标识的回执、"完成"前校验 WCS、重跑逐位一致 | 控制台日志 |
-| 主图质量 | 历史 G₈ 1.01–1.03；当前评价器不会忽略失败项或未测量门禁 | 参考基准 |
-| Drizzle | 原生 1×–4×，是普通主图的精确测光孪生；支持 Bayer drizzle | DrizzleIntegration |
+| 61 × 26 MP Light，四晚，L R G B，M3 Pro | **76 秒** | 24 分 11 秒（WBPP 3.0.1，默认流程，含 LocalNormalization） |
+| 筛片 | 每张 Light 都有测量证据，由你在闪视筛片里复核；命令行的无人值守策略再加积分内部的留一复核，以及应对局部云的区域权重图 | 整帧加权与阈值剔除 |
+| 校准配对 | 按 WBPP 的规则，逐晚配对（`NIGHT_…`、`DATE_…` 文件夹）；为 WBPP 准备好的文件夹原样导入 | WBPP 的规则 |
+| 天文定位 | 每张主图都解算并在星表恒星上核验；装了 Gaia 分块星表时再按 TAN-SIP（最高 3 阶）重新拟合 | 默认流程里的天文解算 |
+| 马赛克 | 所有面板一起做一次天测拟合，放到同一张画布上，按重叠区恒星匹配；真实的六面板 M31（713 张 Light）已成功发布 | 不属于 WBPP |
+| 可信度 | 素材只读、结果只新建、带哈希与算法标识的回执、显示"完成"前校验 WCS、单色主图重跑逐位一致 | 控制台日志 |
+| 主图质量 | 与同一批数据的 WBPP 主图相比，历史 G₈ 1.01–1.03；不认证完全等价 | 参考基准 |
+| Drizzle | 原生 1×–4×，输入与积分完全相同；支持 Bayer drizzle | DrizzleIntegration |
 | 平台与许可 | macOS Apple Silicon、Windows x64 · MIT，不需要 PixInsight | macOS、Windows、Linux · 商业授权 |
-| 预处理之后 | 线性主图、预览、回执；不做后期 | 完整的处理平台 |
+| 预处理之后 | 线性主图、`SuperL.fits`、预览、回执；不做后期 | 完整的处理平台 |
 
-WBPP 的耗时是对相同输入、其默认流程的一次测量；两者的阶段并不完全相同。完整的对比、每一行背后的证据以及本项目*不做*什么，见 [docs/features.md](features.md)（英文）。单色已在真实数据上验证，马赛克在真实的 M31 单色马赛克（2×2 和五面板）上验证过，彩色相机目前仅有合成数据验证。
+WBPP 的耗时是对相同输入、其默认流程的一次测量；两者的处理阶段并不完全相同，而且那批参考 Light 已不在手边，无法重测。之后的版本在同一项目上测得 64–67 秒，加上 Gaia 星表重拟合为 79 秒，各一次（[CHANGELOG](../CHANGELOG.md)）。完整的对比、每一行背后的证据，以及本项目*不做*什么，见 [docs/features.md](features.md)（英文）。
 
-## 值得一提的功能
+## 适合谁
 
-- **速度与确定性。** 原生 Lanczos-3 重采样、拒绝与归约内核与 NumPy 逐值一致（分别快 17.6× / 4.5× / 5.4×）；校准与重采样融合为一遍；在任何平台都构建出相同结果的确定性 Lanczos-3 权重表；Windows 上确定性的星点提取；对极少数允许移动像素的改动有容差门。→ [features §1–2](features.md#1-speed-76-seconds-for-61--26-mp-lights)、[benchmarks](../benchmarks/README.md)
-- **无人值守筛片（配方选项）。** 护栏、灰区、优先级（深度 / 平衡 / 分辨率）、原生分辨率 PSF 星点小图、按置信度缩放的权重、最多三轮重积分的反事实 oracle、区域权重图。用真实帧上的缺陷注入验证：每种缺陷都被处理，干净帧与良性对照零误伤。→ [features §3](features.md#3-frame-selection-a-machine-can-defend)、[架构](architecture.md#unattended-light-selection)
-- **积分科学。** 跨夜、跨子午线翻转的射影配准；按每帧自身噪声判定的拒绝尺度模型 v2；用快速 Radon 变换按整条长度找出卫星拖线并按走廊剔除；在传感器坐标系分离残余平场结构的归一化；所有通道共用一个网格并互相校验解算结果。→ [features §4](features.md#4-integration-science)
-- **Drizzle 与彩色。** 原生 1×–4× drizzle，输入与普通积分完全相同（2×：半光半径小 2.5–4.4%，有效噪声低 6–7%，通量比 0.993–0.994）；Bayer Light 作为彩色通道组处理，逐通道平场缩放，Bayer drizzle。→ [drizzle](recipes/drizzle.md)、[OSC](recipes/osc-cfa.md)
-- **校验后发布。** `SEED` 与 `SOLVED` WCS 的区分；每张主图独立解算并对星表校验（Windows 上 ASTAP 的解由引擎对管理索引星表校验）；每个产品都有回执；桌面端在显示成功前再校验一次。→ [天文解算](recipes/astrometry.md)、[Windows](windows.md)
-- **不碍事的桌面端。** 一次导入所有夜晚，逐通道完成并确认 Blink 人工筛片，每个通道有独立参考帧，算法提供质量提示，诚实的失败状态，浅色/深色，中英双语，可复现的图标与截图。→ [blink 筛片](recipes/blink-screening.md)、[桌面端指南](../apps/desktop/README.md)、[设计记录](gui-redesign-plan.md)
-- **两个平台，一个平台层。** 在 M3 Pro 与 Ryzen 7 5800H Windows 笔记本上验证（同一项目 267–289 秒）；Windows 静态 CRT 包逐个 DLL 导入做了验证。→ [硬件](hardware.md)、[Windows](windows.md)
-- **给贡献者的工具。** 真实运行追踪器（Perfetto）、主图评估器、容差门、缺陷注入 harness、原生 vs NumPy 基准、内核的一条构建-测试-安装链、安装包验证、公开树与链接检查。→ [features §10](features.md#10-tools-contributors-actually-get)
+- 你用 N.I.N.A. 或类似的序列软件拍单色或彩色相机的深空，一个目标拍好几晚，想要校准、叠加好、带天文坐标的线性主图，又不想盯着脚本跑一晚上。
+- 你有 PixInsight，想继续用它做后期：主图在 PI 里就是普通的线性 FITS，WCS 已经校验过。
+- 你没有 PixInsight，想要一条免费的预处理路线，而且它的结果是用标准和 WBPP 量过的，不是口头说说。
+- 你想知道一帧*为什么*被保留或丢弃，并且自己拿主意。
+
+它只做预处理：不拉伸、不去梯度、不做反卷积、不做色彩校准。
 
 ## 界面
 
-| 导入 | 筛片 |
+| 1 · 导入 | 2 · 闪视筛片 |
 |---|---|
-| <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/branding/ultra-fast-wbpp-frames-dark.png"><img src="../assets/branding/ultra-fast-wbpp-frames-light.png" alt="导入视图：按目标、滤镜与采集配置分组的素材，检视器中的校准检查"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/branding/ultra-fast-wbpp-review-dark.png"><img src="../assets/branding/ultra-fast-wbpp-review-light.png" alt="筛片视图：逐帧决定、目标×滤镜矩阵与底部启动栏"></picture> |
-| **处理** | **结果** |
-| <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/branding/ultra-fast-wbpp-run-dark.png"><img src="../assets/branding/ultra-fast-wbpp-run-light.png" alt="处理视图：总进度环与流水线阶段"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/branding/ultra-fast-wbpp-result-dark.png"><img src="../assets/branding/ultra-fast-wbpp-result-light.png" alt="结果视图：主图、筛片摘要与产品"></picture> |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/branding/ultra-fast-wbpp-frames-dark-zh-CN.png"><img src="../assets/branding/ultra-fast-wbpp-frames-light-zh-CN.png" alt="导入页：按目标、滤镜和采集配置分组的素材，检视器中的校准检查"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/branding/ultra-fast-wbpp-blink-dark-zh-CN.png"><img src="../assets/branding/ultra-fast-wbpp-blink-light-zh-CN.png" alt="闪视筛片：按夜晚分组的胶片条，当前帧与参考帧对照，标记与决定"></picture> |
+| **3 · 处理** | **4 · 结果** |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/branding/ultra-fast-wbpp-run-dark-zh-CN.png"><img src="../assets/branding/ultra-fast-wbpp-run-light-zh-CN.png" alt="处理页：总进度环与流水线阶段"></picture> | <picture><source media="(prefers-color-scheme: dark)" srcset="../assets/branding/ultra-fast-wbpp-result-dark-zh-CN.png"><img src="../assets/branding/ultra-fast-wbpp-result-light-zh-CN.png" alt="结果页：已解算的主图、筛片摘要与已校验的产品"></picture> |
 
-截图由 [`apps/desktop/scripts/screenshots.py`](../apps/desktop/scripts/screenshots.py) 从应用自带的带标注浏览器演示渲染；其中的数字是界面占位值，不是测量结果。
+1. **导入。** 把所有夜晚一次拖进来：Light、原始 Flat/Dark/Bias 或已有的 Master、N.I.N.A. 的文件夹结构，或者你为 PixInsight WBPP 整理好的文件夹。类型、目标、滤镜从头信息读取；校准按 WBPP 的规则逐晚配对（[校准](recipes/calibration.md)）。
+2. **闪视筛片。** 每个通道有自己的参考帧和统一的拉伸。逐帧翻或连播，与参考帧对比，保留或丢弃一帧乃至整晚，可以撤销。标记是测量得出的提示，决定权在你，每个通道都要明确确认。
+3. **处理。** 每张 Light 都看过、每个通道都确认、选好输出文件夹、解算器就绪之后，**开始处理**才会亮起。校准、配准、归一化、积分、可选的 drizzle 和逐通道天文定位作为一个任务运行，进度实时显示。
+4. **结果。** 每个滤镜一个线性 FITS，R、G、B 齐全时另有 `RGB.fits` 或 `LRGB.fits`，默认开启的 `SuperL.fits`（各宽带通道合成的超级亮度），以及 `previews/`、`receipt.json` 和 `details/`。回执、产品哈希和最终 WCS 全部校验通过，应用才显示*完成*。
 
-## 工作原理
-
-```mermaid
-flowchart LR
-  A["导入<br/>N.I.N.A. 文件夹 · FITS / XISF<br/>原始 Flat · Dark · Bias · Master"] --> B["质量门禁与筛片<br/>原生 PSF · 云 · 拖线 · 遮挡<br/>护栏 · 灰区 · 权重"]
-  B --> C["校准<br/>生成或复用 Master<br/>内容绑定的元数据"]
-  C --> D["配准<br/>Lanczos-3 · 旋转 · 子午线翻转"]
-  D --> E["归一化<br/>星点尺度 · 天光响应"]
-  E --> F["积分<br/>拒绝 v2 · 拖线走廊<br/>区域权重 · 反事实"]
-  F --> G["天文解算<br/>Astrometry.net / ASTAP · 校验 WCS"]
-  G --> H["发布<br/>主图 · drizzle · 预览 · 回执"]
-```
-
-1. **一起导入。** 把所有夜晚一次拖入：Light、原始校准帧和已有 Master。类型、目标、滤镜和采集配置来自头信息；冲突会被显示，绝不猜测。为 PixInsight WBPP 准备的文件夹可以直接导入：校准按 WBPP 的规则配对，每晚通过 `NIGHT_…`/`DATE_…` 文件夹使用自己的 Flat，所有折中都以警告显示（[校准](recipes/calibration.md#files-from-pixinsight-wbpp)）。Bayer Light 会被识别并按彩色通道组处理。
-2. **Blink 筛片。** 桌面端处理前必须人工看完每一张 Light，并逐通道确认。算法标记只作提示，不自动丢片。每个通道根据透明度、噪声、原生 PSF 和配准质量选择参考帧，预览共享配准、光度归一化和同一套拉伸。支持逐帧、连播、参考帧对比、保留/丢弃、整晚选择和撤销。只有主视图成功显示的图像才计入已看；不可显示的帧需重试或明确丢弃。控制器在启动前校验审阅记录与测量会话一致，再采用人工选择。命令行默认仍为 `selection.policy: legacy-gate`，也可显式选择 `unattended-v1`。
-3. **本地处理。** 校准、配准、归一化、稳健拒绝的积分、可选的 drizzle，以及逐通道天文解算，作为一个任务带实时进度、用满所有核心运行。
-4. **得到已校验的产品。** 线性单色与 RGB/LRGB FITS、由各宽带通道合成的超级亮度（`SuperL.fits`）、drizzle 的科学/权重/覆盖产品、检查预览、筛片报告与回执。只有回执、产品哈希与最终 WCS 全部校验通过，应用才显示*完成*。
+截图由 [`apps/desktop/scripts/screenshots.py`](../apps/desktop/scripts/screenshots.py) 从应用自带的带标注浏览器演示渲染；其中的数字是界面占位值，不是测量结果。逐步上手指南和常见问题见 [getting-started.zh-CN.md](getting-started.zh-CN.md)。
 
 ## 下载
 
-每个版本的安装包都附在 [Releases 页面](https://github.com/ShuoleiWang/Ultra-Fast-WBPP/releases)，同一次工作流运行还会附上 `SHA256SUMS-<target>` 校验文件和安装包验证清单。这些是未签名的 alpha 构建，安装前请先核对校验和。
-
-- **Windows 10 / 11 x64。** `Ultra-Fast-WBPP_<版本>_x64-setup.exe` 按用户安装到 `%LOCALAPPDATA%`，不需要管理员权限（通常选这个）；`Ultra-Fast-WBPP_<版本>_x64_en-US.msi` 按机器安装到 Program Files。因为没有 Authenticode 签名，SmartScreen 会提示"Windows 已保护你的电脑 → 更多信息 → 仍要运行"，MSI 会显示未知发布者的 UAC 提示。缺少 WebView2 时会静默安装；不需要 Visual C++ 运行库（[Windows](windows.md)）。
-- **拼接画布 Drizzle。** 面板可按 1×–4× 直接投放到共享画布。带畸变的单色、滤镜色差和 Bayer 路径已有合成流水线测试；尚未重新验证真实原始数据到已解算拼接成品的完整 Drizzle 流程。见[配方](recipes/project-mosaic-rgb.md)。
-- **macOS（Apple Silicon）。** `Ultra-Fast-WBPP_<版本>_aarch64.dmg`，ad-hoc 签名、未公证：首次打开请右键 → 打开，或在"系统设置 → 隐私与安全性"中选择"仍要打开"。
-- **然后配置天文解算器**（安装包不含）：Windows 上装 ASTAP 和星表数据库，macOS 上装 Astrometry.net 的 `solve-field`，再在应用的解算器面板下载托管索引集（约 350 MB），最后点**重新检测配置**。详见[状态与要求](#状态与要求)。
-
-## 快速开始
-
-如果不用安装包而是从源码构建，需要 Python 3.11+、Rust 1.88+、Node.js 22+、CMake 3.28+ 以及 [Tauri 开发环境](https://v2.tauri.app/start/prerequisites/)（macOS 14+ Apple Silicon 需要 Xcode；Windows 需要 Visual Studio 2022 Build Tools，可由 [`scripts/windows/bootstrap.ps1`](../scripts/windows/README.md) 安装）。
+发布版本会出现在 [Releases 页面](https://github.com/ShuoleiWang/Ultra-Fast-WBPP/releases)，附校验和与安装包验证清单。目前的用法是从源码构建（[指南](building-from-source.md)，英文），在 Mac 上一串命令：
 
 ```bash
 make bootstrap BOOTSTRAP_PYTHON=python3.12
+make desktop-dev                                     # 直接从代码目录运行应用
+# 或者，打一个本地的 .app：
+CARGO_PROFILE_RELEASE_STRIP=none make desktop-build-macos-prerelease
 ```
 
-```bash
-make desktop-dev
-```
+Windows 的构建见 [docs/windows.md](windows.md)（英文）。
 
-拖入文件夹，选择输出文件夹（下次会记住），按下**开始处理**。想先看看界面，`make demo` 会打开带标注的浏览器演示。Windows 上用 `py -3.12 -m venv .venv` 创建环境，Makefile 里的 Python 命令改用 `.venv\Scripts\python.exe`（[Windows 说明](windows.md)）。
+- **macOS。** 应用为 ad-hoc 签名、未经公证。macOS 15 起右键 → 打开的绕过方式已经失效：打开"系统设置 → 隐私与安全性"，点**仍要打开**；或者运行 `xattr -dr com.apple.quarantine "Ultra-Fast WBPP.app"`。
+- **Windows。** 安装包未签名；SmartScreen 会提示"Windows 已保护你的电脑" → 更多信息 → **仍要运行**。
 
-同一个引擎也能在命令行运行，筛片策略在配方里选择：
+### 配置解算器
+
+出于许可原因，应用不内置解算器（[许可说明](licensing.md)，英文），每台电脑都要装一个：
+
+1. **安装解算器。** macOS：`brew install astrometry-net`（得到 `solve-field`）。Windows：[ASTAP](https://www.hnsky.org/astap.htm)（`astap_cli.exe`），并把 D20 或 D50 之类的星表数据库解压到 ASTAP 的文件夹里（[Windows](windows.md)）。
+2. **在应用里下载索引集。** 在"高级选项与 solver 设置"里接受提供方条款，下载受管的 Astrometry.net 索引集（约 350 MB），再点**重新检测配置**。
+3. **可选：星表重拟合。** 畸变校正后的 WCS（真实数据上约 0.15″）需要 Gaia DR2 LITE 分块星表（587 MiB），应用暂时还不能下载它。在终端运行：`ultra-fast-wbpp catalog install astrometry-net-5205-lite --accept-provider-terms <catalog list 打印的 id> --progress-json`（[离线解算星表](recipes/offline-solver-catalogs.md)，英文）。打包好的 macOS 应用里，引擎位于 `Ultra-Fast WBPP.app/Contents/Resources/resources/ufwbpp-engine/ufwbpp-engine-aarch64-apple-darwin/ufwbpp-engine-aarch64-apple-darwin`。
+
+换电脑时把索引目录（`<数据根目录>/catalogs/astrometry-net`）整个拷到新电脑的同一位置即可，程序会自动改指向新位置；解算器程序本身仍需在新电脑上安装（[搬迁星表](recipes/offline-solver-catalogs.md)，英文）。
+
+## 快速开始
+
+拖入文件夹，在闪视筛片里看完每个通道，选一个输出文件夹（下次会记住），按下**开始处理**。想先看看界面，`make demo` 会打开带标注的浏览器演示。界面语言默认英文，切换按钮在工具栏里，选择会被记住。首次运行的指南：[getting-started.zh-CN.md](getting-started.zh-CN.md)。
+
+同一个引擎也能在命令行运行：
 
 ```bash
 .venv/bin/ultra-fast-wbpp run /data/lights /data/calibration --recipe docs/recipes/mono-standard.json --output /data/new-result --progress-json
 ```
 
-```json
-{ "selection": { "policy": "unattended-v1", "priority": "balanced" } }
-```
-
-`ultra-fast-wbpp doctor --json` 报告硬件、原生内核与求解器就绪状态；`run-project` 是桌面端使用的多目标、多滤镜路径。打包含 Python 运行时的本地 `.app`：`make desktop-build-macos-prerelease`。打包内置 `solve-field` 和索引集、拿到另一台 Mac 上无需任何配置就能运行的自包含演示版：`make desktop-build-macos-demo`。两者的构建、检查和分发步骤见[从源码构建](building-from-source.md)（英文）。
+`ultra-fast-wbpp doctor --json` 报告硬件、原生内核和解算器就绪状态；`run-project` 是桌面端使用的多目标、多滤镜路径。命令行默认的筛片策略是 `legacy-gate`；在配方里写 `{ "selection": { "policy": "unattended-v1" } }` 可开启带留一复核和区域权重的无人值守策略（[自动筛片](recipes/automatic-screening.md)，英文）。
 
 ## 状态与要求
 
-- **积极开发中的 alpha。** 真实素材流程在一台 M3 Pro（macOS）与一台 Ryzen 7 5800H 笔记本（Windows 11）上验证；其他机器运行未测量的通用配置。本地构建为 ad-hoc 签名，未公证；Windows 安装包未签名。已验证与未验证事项的清单见 [validation-matrix.md](validation-matrix.md)。
-- **单色已在真实数据上验证；彩色相机仅在合成数据上验证。** Bayer（RGGB/BGGR/GRBG/GBRG）Light 按马赛克校准、去马赛克为 R/G/B 通道主图并合成 RGB（[配方](recipes/osc-cfa.md)），但尚未处理过真实的 OSC 数据集。马赛克（所有面板共用一张画布、每帧只插值一次、所有面板一起做天测定位、按重叠区星测光匹配；[配方](recipes/project-mosaic-rgb.md)）在合成数据和真实的 M31 马赛克（L/R/G/B）上验证过：一个 2×2，用 Tycho-2 星表或 Gaia 分块都能发布；一个五面板，其中一块多云、在中天两侧拍摄。默认归一化包含空间背景校正，原 LocalNormalization 选项已下线。
-- **筛片。** 桌面端强制 Blink 人工审片，采用哪些帧由用户决定。标记规则和参考帧规则来自一个六晚数据集，不能保证识别所有缺陷。命令行默认仍为 `legacy-gate`；带反事实与区域权重的无人值守策略仍是命令行配方选项。
+- **积极开发中的 alpha。** 真实数据流程在一台 M3 Pro（macOS）和一台 Ryzen 7 5800H 笔记本（Windows 11）上验证过；其他机器运行未经测量的通用配置。已验证与未验证事项的清单见 [validation-matrix.md](validation-matrix.md)（英文）。
+- **单色已在真实数据上验证。** 彩色相机（Bayer）的 Light 在原始 Bayer 阵列上校准，再去马赛克成 R/G/B 通道主图并合成 RGB（[配方](recipes/osc-cfa.md)），但目前只有合成数据验证。马赛克已在真实的 M31 马赛克（2×2、五面板、六面板）上验证（[配方](recipes/project-mosaic-rgb.md)）；往马赛克画布上做 drizzle 目前只有合成数据的流水线测试。
+- **重跑逐位一致**对单色主图成立。RGB 重跑像素相同，但文件里的校验和关键字会不同。
+- **桌面端必须完成闪视筛片。** 这些标记在一个六晚的数据集上开发，不能保证识别每一种缺陷；哪些帧入栈由你的决定控制。
+- **天文定位需要每台电脑装解算器**（见上）。不向任何地方上传。
+- **磁盘空间**：全分辨率的中间帧约占输出卷每张 Light 每像素 12 字节。
+- **输入：** FITS 和 XISF 的 Light，原始校准帧或 Master（包括 PixInsight WBPP 的 XISF Master）。不支持：单反的 RAW 文件，以及 WBPP 已经校准或配准过的 Light（会被拒绝，请导入原始 Light）。
 
-Blink 已接入[互补显示诊断](blink-display-redesign.md)：共同尺度的星场视图保留变暗和噪声，背景差异显示空间变化，对应原生像素星区将星形与亮度分开比较。预览使用已导入且完整的 Flat + Dark/Bias；缺少校准或无法对比时会明确提示。只读对照工具复用同一套算法。 右侧检查器会自动换行长文件名与校准提示，内容按实际高度排版并纵向滚动。
-- **天文解算**需要另行安装求解器：macOS 上是 Astrometry.net 的 `solve-field` 与本地索引（[求解器设置](recipes/offline-solver-catalogs.md)），Windows 上是 ASTAP 加星表数据库以及应用托管的索引集（[Windows](windows.md)）；然后在应用中**重新检测配置**。不会向任何地方上传数据。
-- 需要保存全分辨率中间帧的磁盘空间（输出卷上约每张 Light 每像素 12 字节）。
+## 最近的能力
+
+每一项都链接到 [CHANGELOG](../CHANGELOG.md)（英文）里对应的小节。
+
+- [同一张画布上的马赛克](../CHANGELOG.md#mosaics-on-one-canvas)，[所有面板一起拟合定位](../CHANGELOG.md#mosaic-panels-are-placed-by-one-fit-of-all-panels)，并能[直接 drizzle 到画布上](../CHANGELOG.md#mosaic-panels-drizzle-onto-their-shared-canvas)。真实的六面板 M31 马赛克（713 张 Light）已成功发布（[验证矩阵](validation-matrix.md)）。
+- [星表重拟合的 WCS](../CHANGELOG.md#published-masters-can-carry-a-catalog-refitted-wcs)：在 Gaia 恒星上拟合 TAN-SIP（最高 3 阶），真实主图上留出验证约 0.15″；配套 [Gaia DR2 分块星表](../CHANGELOG.md#gaia-dr2-index-tiles-for-the-catalog-refit)，以及[不受 Tycho-2 老位置影响的核验](../CHANGELOG.md#a-catalog-refits-verification-no-longer-turns-on-a-few-stars-the-catalog-misplaces)。
+- [自己的解算没过门禁的滤镜沿用同网格的解](../CHANGELOG.md#a-filter-whose-own-solve-misses-a-gate-takes-its-grids-solve-verified-by-the-catalog-refit)，由重拟合核验；[全部解算只差 RMS 门禁的运行也能进入重拟合](../CHANGELOG.md#a-run-whose-solves-all-miss-the-rms-gate-can-still-reach-the-catalog-refit)。
+- [窄带或不完整滤镜组合的项目也能发布](../CHANGELOG.md#a-project-of-several-filters-without-full-rgb-publishes-its-masters)。
+- 筛片[保留均匀薄云](../CHANGELOG.md#screening-judges-extinction-on-every-night-and-keeps-uniform-thin-cloud)和[光学系统让所有星点都拉长的夜晚](../CHANGELOG.md#screening-keeps-a-night-whose-optics-elongate-every-star)，并[判掉偏离视场的 Light](../CHANGELOG.md#screening-fails-a-light-taken-off-its-groups-field)。
+- [导入为 PixInsight WBPP 整理的文件夹](../CHANGELOG.md#importing-files-arranged-by-pixinsight-wbpp)，[按 WBPP 的规则配对校准](../CHANGELOG.md#calibration-paired-by-wbpps-rules)。
+- [`SuperL.fits`](../CHANGELOG.md#a-super-luminance-beside-the-channels)：宽带通道按各自噪声加权合成一张更深的亮度图，星点明显更差的通道不参与。各通道主图不变。
 
 ## 数字
 
 | 项目 | 结果 | 出处 |
 |---|---|---|
-| 61 张 Light · 4 晚 · L R G B · M3 Pro | 端到端 **76 秒**（四个版本前 170 秒） | [CHANGELOG](../CHANGELOG.md)、[硬件说明](hardware.md) |
+| 61 张 Light · 4 晚 · L R G B · M3 Pro | 端到端 **76 秒**（170 → 97 → 82 → 76 秒，来自几天内的三处改动） | [features §1](features.md#1-speed-76-seconds-for-61--26-mp-lights)、[CHANGELOG](../CHANGELOG.md) |
 | PixInsight WBPP 3.0.1，同一批 Light，同一台 Mac | 24 分 11 秒 | [features §1](features.md#1-speed-76-seconds-for-61--26-mp-lights) |
 | 同一项目在 Ryzen 7 5800H 笔记本（Windows 11） | 267–289 秒 | [Windows](windows.md) |
-| 同一台机器上同一项目跑两次（macOS 与 Windows 均已验证） | 逐位一致 | [验证矩阵](validation-matrix.md) |
-| 亮度主图 vs PixInsight WBPP | 历史 G₈ ≈ 1.01–1.02；当前不认证完整等价性 | [评估标准](master-evaluation-standard.md)、[features §5](features.md#5-master-quality-against-pixinsight-wbpp) |
+| 同一台机器上同一项目跑两次 | 单色主图逐位一致；RGB 像素相同，校验和关键字不同 | [验证矩阵](validation-matrix.md) |
+| 主图 vs PixInsight WBPP（同一批帧） | 历史 G₈ 1.01–1.03；不认证完全等价 | [features §5](features.md#5-master-quality-against-pixinsight-wbpp)、[评估标准](master-evaluation-standard.md) |
 | 2× drizzle vs Lanczos-3 主图 | 半光半径小 2.5–4.4%，有效噪声低 6–7%，通量比 0.993–0.994 | [drizzle 配方](recipes/drizzle.md) |
-| 原生内核 vs NumPy 参考实现 | 重采样 17.6×、积分 4.5×、整条流水线 5.4×，像素一致 | [benchmarks](../benchmarks/README.md) |
-| 真实帧上注入的合成缺陷（薄云、局部云、结露、失焦、遮挡、拖线） | 每种缺陷都被处理，干净帧与良性对照无一被误伤 | [筛片实现记录](frame-selection-implementation.md) |
+| 真实主图的星表重拟合 | 留出的 Gaia 恒星上 0.157″（NGC 7331），解算器在同样的恒星上为 2.58″ | [天文定位](recipes/astrometry.md)、[CHANGELOG](../CHANGELOG.md#gaia-dr2-index-tiles-for-the-catalog-refit) |
 
-本项目是独立实现，不声称与 PixInsight/WBPP 在算法或像素上等价；评估标准就是它被比较的方式。
+本项目是独立实现，不声称与 PixInsight/WBPP 在算法或像素上等价；[评估标准](master-evaluation-standard.md)就是它被比较的方式。
+
+## 工作原理
+
+```mermaid
+flowchart LR
+  A["导入<br/>N.I.N.A. 或 WBPP 文件夹 · FITS / XISF<br/>原始 Flat · Dark · Bias · Master"] --> B["闪视筛片与测量标记<br/>天光 · 消光 · PSF · 拖线<br/>云 · 遮挡 · 视场"]
+  B --> C["校准<br/>按 WBPP 的规则配对<br/>生成或复用 Master"]
+  C --> D["配准<br/>Lanczos-3 · 旋转 · 子午线翻转"]
+  D --> E["归一化<br/>星点尺度 · 天光响应"]
+  E --> F["积分<br/>像素拒绝 · 拖线走廊<br/>权重 · 可选 drizzle"]
+  F --> G["天文定位<br/>Astrometry.net / ASTAP<br/>星表核验 · Gaia 重拟合"]
+  G --> H["发布<br/>主图 · SuperL · 预览 · 回执"]
+```
+
+热点循环是多线程原生内核，与 NumPy 参考实现逐值一致；每张 Light 只解码一次，在内存里完成校准并直接重采样进堆栈。执行路径、边界和科学细节见 [docs/architecture.md](architecture.md)（英文）；用户指南是各篇[配方](recipes/README.md)。
 
 ## 仓库结构
 
 | 目录 | 职责 |
 |---|---|
 | `apps/desktop` | React 界面与 Tauri 桌面桥接；它调用引擎的命令行（[指南](../apps/desktop/README.md)） |
-| `packages/engine` | `ultra-fast-wbpp` 引擎（Python 包 `ufwbpp`，每个领域一个子包）：工作流、叠加（校准、归一化、积分、drizzle）、筛片、求解器、产品、命令行 |
-| `packages/light-frame-qc` | Light 测量、原生 PSF、质量门禁、Blink 标记 |
-| `packages/registration` | 星点检测、变换估计、重采样与公共覆盖区几何 |
+| `packages/engine` | `ultra-fast-wbpp` 引擎（Python 包 `ufwbpp`）：工作流、叠加、筛片、解算器、产品、命令行 |
+| `packages/light-frame-qc`、`packages/registration` | Light 测量、原生 PSF、质量门禁、闪视标记；星点检测、变换估计、重采样 |
 | `native` | C++ 内核（重采样、拒绝、归约、drizzle、去马赛克、Lanczos 表）与 Metal |
-| `tools/validation`、`benchmarks` | 主图评估与容差门；运行追踪器、内核基准、筛片 harness（带日期的证据在 `docs/evidence`） |
+| `tools/validation`、`benchmarks` | 主图评估与容差门；运行追踪器、内核基准（带日期的证据在 `docs/evidence`） |
 | `scripts`、`packaging` | 原生构建链、引擎 sidecar 打包、安装包验证、公开树与链接检查 |
-| `docs` | [索引](README.md) · [features](features.md) · [架构](architecture.md) · [配方](recipes/README.md) · [验证](validation-matrix.md) · [Windows](windows.md) |
+| `docs` | [索引](README.md) · [上手指南](getting-started.zh-CN.md) · [features](features.md) · [架构](architecture.md) · [配方](recipes/README.md) · [验证](validation-matrix.md) |
 
-参与贡献：[CONTRIBUTING.md](../CONTRIBUTING.md) 是环境与规则，[AGENTS.md](../AGENTS.md) 是完整的工作指南（Codex 自动读取），[CLAUDE.md](../CLAUDE.md) 面向 Claude Code 会话。`make test` 运行 Python、Rust、前端与原生测试；`make check` 另加格式、lint 与公开树检查。
+参与贡献：[CONTRIBUTING.md](../CONTRIBUTING.md) 是环境与规则，[AGENTS.md](../AGENTS.md) 是完整的工作指南。`make test` 运行 Python、Rust、前端与原生测试；`make check` 另加格式、lint 与公开树检查。
 
 ## 许可
 

@@ -4,7 +4,7 @@ This guide takes a fresh clone to a Mac app you can run or hand to someone else.
 
 | Build | Command | What the person who runs it needs |
 |---|---|---|
-| Engine only (command line) | `make bootstrap` | the clone and its `.venv` |
+| Engine only (command line) | `make bootstrap BOOTSTRAP_PYTHON=python3.12` | the clone and its `.venv` |
 | Desktop app | `make desktop-build-macos-prerelease` | Apple Silicon, macOS 14+, and a plate solver they install themselves ([solver setup](recipes/offline-solver-catalogs.md)) |
 | Self-contained demo app | `make desktop-build-macos-demo` | Apple Silicon and macOS 14+. Nothing else: `solve-field` and its index set are inside the app |
 
