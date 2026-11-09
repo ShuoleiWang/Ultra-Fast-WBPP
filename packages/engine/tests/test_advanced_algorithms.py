@@ -93,9 +93,23 @@ def test_default_integration_parameters_do_not_serialize_a_combination() -> None
     assert "combination" not in IntegrationParameters().serializable()
 
 
-def test_explicit_default_combination_is_still_omitted() -> None:
-    recipe = Recipe.from_dict({"integration": {"combination": "sigma-clip-v2"}})
-    assert "integration" not in recipe.serializable()
+def test_explicit_defaults_are_still_omitted() -> None:
+    recipe = Recipe.from_dict(
+        {"integration": {"combination": "sigma-clip-v2"}, "color": {"luminance": "L"}, "superLuminance": {"enabled": True}}
+    )
+    assert not {"integration", "color", "superLuminance"} & set(recipe.serializable())
+    # Turning the super luminance off is recorded, and it cannot be the LRGB luminance then.
+    recipe = Recipe.from_dict({"superLuminance": {"enabled": False}})
+    assert recipe.serializable()["superLuminance"] == {"enabled": False}
+    assert Recipe.from_dict(recipe.serializable()) == recipe
+    with pytest.raises(RecipeError, match="superLuminance.enabled"):
+        Recipe.from_dict({"superLuminance": {"enabled": False}, "color": {"luminance": "superL"}})
+    # The super luminance as the LRGB luminance is recorded, and checked.
+    recipe = Recipe.from_dict({"color": {"luminance": "superL"}})
+    assert recipe.serializable()["color"] == {"luminance": "superL"}
+    assert Recipe.from_dict(recipe.serializable()) == recipe
+    with pytest.raises(RecipeError, match="color.luminance"):
+        Recipe.from_dict({"color": {"luminance": "Ha"}})
 
 
 # --------------------------------------------------------------------------

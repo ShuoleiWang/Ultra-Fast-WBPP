@@ -35,6 +35,7 @@ import re
 import shutil
 import stat
 import tempfile
+import time
 import traceback
 from typing import Any, Callable, Generator, Mapping, NamedTuple, Sequence
 
@@ -62,6 +63,7 @@ from ..products.color import (
 )
 from ..products.reprojection import ReprojectProvider, load_reproject_provider
 from ..products.preview import render_auto_stretch_preview
+from ..products.super_luminance import SUPER_LUMINANCE_ALGORITHM, SUPER_LUMINANCE_FILTER, build_super_luminance
 from ..solvers.base import SolverBackend, canonical_wcs_sha256, validate_wcs_header
 from ..stacking.crop import histogram_rectangle
 from ..stacking.integration import CalibrationError
@@ -2164,17 +2166,46 @@ def _align_channels(run: _ProjectRun, final_sources: dict[str, tuple[str, Path]]
     return _AlignedChannels(reference_key, reference_filter, mono_paths, output_quality, astrometry_provenance)
 
 
-def _render_previews_and_color(run: _ProjectRun, final_sources: dict[str, tuple[str, Path]], aligned: _AlignedChannels, color_builder: ColorBuilder) -> _ColorOutputs:
-    """Render the mono previews and, with R, G and B present, the colour products."""
+def _super_luminance_stage(run: _ProjectRun, final_sources: dict[str, tuple[str, Path]], aligned: _AlignedChannels) -> Path | None:
+    """The super luminance of the published broadband channels, beside them
+    as ``SuperL.fits``, when the recipe keeps it on and at least two of them
+    qualify."""
+
+    if not run.request.e2e_request.super_luminance:
+        run.records["superLuminance"] = {"algorithm": SUPER_LUMINANCE_ALGORITHM, "status": "DISABLED"}
+        return None
+    run.project_progress.phase("color", 0, 1, "combining the broadband channels into the super luminance")
+    destination = run.staging / f"{SUPER_LUMINANCE_FILTER}.fits"
+    started = time.perf_counter()
+    record = build_super_luminance(
+        aligned.mono_paths,
+        aligned.reference_key,
+        destination,
+        filter_names={key: name for key, (name, _path) in final_sources.items()},
+    )
+    record["seconds"] = round(time.perf_counter() - started, 3)
+    if record["status"] == "CREATED":
+        record["output"] = _source_identity(destination)
+    run.records["superLuminance"] = record
+    return destination if record["status"] == "CREATED" else None
+
+
+def _render_previews_and_color(run: _ProjectRun, final_sources: dict[str, tuple[str, Path]], aligned: _AlignedChannels, color_builder: ColorBuilder, super_luminance: Path | None) -> _ColorOutputs:
+    """Render the mono previews and, with R, G and B present, the colour
+    products, whose luminance is L or, when the recipe asks and one was
+    built, the super luminance."""
 
     reference_key, reference_filter, mono_paths, output_quality, astrometry_provenance = aligned
     request, staging, details, records, project_progress = run.request, run.staging, run.details, run.records, run.project_progress
     preview_root = staging / "previews"
     preview_root.mkdir()
     preview_paths: list[Path] = []
-    color_total = len(mono_paths) + int({"r", "g", "b"}.issubset(mono_paths))
+    previewed = [(final_sources[key][0], path) for key, path in sorted(mono_paths.items())]
+    if super_luminance is not None:
+        previewed.append((SUPER_LUMINANCE_FILTER, super_luminance))
+    color_total = len(previewed) + int({"r", "g", "b"}.issubset(mono_paths))
     project_progress.phase("color", 0, color_total, "rendering mono previews and color products")
-    for key, path in sorted(mono_paths.items()):
+    for name, path in previewed:
         preview = preview_root / f"{path.stem}.png"
         render_auto_stretch_preview(
             path,
@@ -2183,17 +2214,20 @@ def _render_previews_and_color(run: _ProjectRun, final_sources: dict[str, tuple[
             max_memory_bytes=request.e2e_request.pipeline_parameters.registration_memory_bytes,
         )
         preview_paths.append(preview)
-        project_progress.phase("color", len(preview_paths), color_total, f"{final_sources[key][0]}: preview rendered")
+        project_progress.phase("color", len(preview_paths), color_total, f"{name}: preview rendered")
 
     color_result: ColorProductResult | None = None
     color_paths: dict[str, Path] = {}
     if {"r", "g", "b"}.issubset(mono_paths):
+        luminance = mono_paths.get("l")
+        if request.e2e_request.color_luminance == "superL" and super_luminance is not None:
+            luminance = super_luminance
         color_result = color_builder(
             ColorProductRequest(
                 red_path=str(mono_paths["r"]),
                 green_path=str(mono_paths["g"]),
                 blue_path=str(mono_paths["b"]),
-                luminance_path=str(mono_paths["l"]) if "l" in mono_paths else None,
+                luminance_path=str(luminance) if luminance is not None else None,
                 output_directory=str(details / "color"),
                 wcs_tolerance_pixels=request.channel_wcs_tolerance_pixels,
                 preview_max_long_edge=request.e2e_request.pipeline_parameters.preview_max_long_edge,
@@ -2211,11 +2245,15 @@ def _render_previews_and_color(run: _ProjectRun, final_sources: dict[str, tuple[
             color_publication[name] = _publish_file(source, final)
             color_paths[name] = final
         records["color"] = {
-            "status": "SOLVED_LRGB" if "l" in mono_paths else "SOLVED_RGB",
+            "status": "SOLVED_LRGB" if luminance is not None else "SOLVED_RGB",
             "receipt": Path(color_result.receipt_path).relative_to(staging).as_posix(),
             "receiptSha256": sha256_digest(Path(color_result.receipt_path)),
             "publication": color_publication,
-            "luminanceParticipated": "l" in mono_paths,
+            "luminanceParticipated": luminance is not None,
+            "luminanceRequested": request.e2e_request.color_luminance,
+            "luminanceSource": (
+                None if luminance is None else SUPER_LUMINANCE_FILTER if luminance == super_luminance else final_sources["l"][0]
+            ),
             "astrometryProvenance": {
                 "type": "PROPAGATED_VERIFIED",
                 "freshSolveOnRgbCube": False,
@@ -2244,10 +2282,11 @@ def _render_previews_and_color(run: _ProjectRun, final_sources: dict[str, tuple[
     return _ColorOutputs(preview_paths, color_result, color_paths)
 
 
-def _verify_and_publish(run: _ProjectRun, panels_by_filter: dict[str, list[tuple[SciencePanel, Path]]], final_sources: dict[str, tuple[str, Path]], aligned: _AlignedChannels, color: _ColorOutputs) -> ProjectE2EResult:
+def _verify_and_publish(run: _ProjectRun, panels_by_filter: dict[str, list[tuple[SciencePanel, Path]]], final_sources: dict[str, tuple[str, Path]], aligned: _AlignedChannels, color: _ColorOutputs, super_luminance: Path | None) -> ProjectE2EResult:
     """Verify sources and products, write the receipt and publish the project atomically."""
 
     preview_paths, color_result, color_paths = color
+    luminance_participated = color_result is not None and run.records["color"]["luminanceParticipated"]
     reference_key, reference_filter, mono_paths, output_quality, astrometry_provenance = aligned
     request, output, layout, sources, staging, records, passed, excluded, project_progress = run.request, run.output, run.layout, run.sources, run.staging, run.records, run.passed, run.excluded, run.project_progress
     project_progress.phase("verify", 0, 1, "verifying source identities, final products, and receipts")
@@ -2273,6 +2312,7 @@ def _verify_and_publish(run: _ProjectRun, panels_by_filter: dict[str, list[tuple
     final_digests = _sha256_many(
         [
             *(path for _key, path in sorted(mono_paths.items())),
+            *((super_luminance,) if super_luminance is not None else ()),
             *(
                 (color_paths["linearRgb"], color_paths["previewTiff"], color_paths["previewPng"])
                 if color_result is not None
@@ -2302,6 +2342,27 @@ def _verify_and_publish(run: _ProjectRun, panels_by_filter: dict[str, list[tuple
         }
         final_artifacts.append(artifact)
     product_paths = list(mono_paths.values())
+    if super_luminance is not None:
+        # The broadband channels combined on the reference's grid keep the
+        # reference's WCS, verified there.
+        artifact = _artifact(super_luminance, staging, "SOLVED_MONO_FITS", digests=final_digests)
+        artifact["filter"] = SUPER_LUMINANCE_FILTER
+        artifact["astrometry"] = _astrometry_gui_evidence(super_luminance, output_quality[reference_key])
+        artifact["astrometryProvenance"] = {
+            "type": "PROPAGATED_VERIFIED",
+            "freshSolveOnThisPixelGrid": False,
+            "referenceFilter": reference_filter,
+            "referenceSolution": _astrometry_gui_evidence(mono_paths[reference_key], output_quality[reference_key]),
+            "qualityAppliesTo": "REFERENCE_SOLVED_WCS_PROPAGATED_TO_SUPER_LUMINANCE",
+        }
+        artifact["finalGate"] = {
+            "status": "PASS",
+            "managedCatalogRequired": True,
+            "freshSolveOnThisPixelGrid": False,
+            "propagatedReferenceWcsVerified": True,
+        }
+        final_artifacts.append(artifact)
+        product_paths.append(super_luminance)
     if color_result is not None:
         for path, kind in (
             (color_paths["linearRgb"], "LINEAR_RGB_FITS"),
@@ -2323,7 +2384,7 @@ def _verify_and_publish(run: _ProjectRun, panels_by_filter: dict[str, list[tuple
         rgb_artifact["finalGate"] = {
             "status": "PASS",
             "rgbChannelsPresent": True,
-            "luminanceParticipated": "l" in mono_paths,
+            "luminanceParticipated": luminance_participated,
             "strictGeometryAndWcsAlignment": True,
             "freshSolveOnRgbCube": False,
             "propagatedReferenceWcsVerified": True,
@@ -2347,7 +2408,8 @@ def _verify_and_publish(run: _ProjectRun, panels_by_filter: dict[str, list[tuple
         "finalProducts": {
             "monoFilters": [final_sources[key][0] for key in sorted(final_sources)],
             "rgbCreated": color_result is not None,
-            "luminanceParticipated": color_result is not None and "l" in mono_paths,
+            "superLuminance": super_luminance is not None,
+            "luminanceParticipated": luminance_participated,
             "artifacts": final_artifacts,
             "guiArtifacts": final_artifacts,
             "resultGate": {
@@ -2368,7 +2430,7 @@ def _verify_and_publish(run: _ProjectRun, panels_by_filter: dict[str, list[tuple
                 ),
                 "rgbState": (
                     "SOLVED_LRGB"
-                    if color_result is not None and "l" in mono_paths
+                    if luminance_participated
                     else "SOLVED_RGB"
                     if color_result is not None
                     else "MONO_ONLY_CHANNELS_MISSING"
@@ -2498,8 +2560,9 @@ def run_project_e2e(
         else:
             final_sources, final_quality = _single_panel_products(run, panels_by_filter, panel_quality_by_path)
             aligned = _align_channels(run, final_sources, final_quality, reproject_provider)
-        color = _render_previews_and_color(run, final_sources, aligned, color_builder)
-        return _verify_and_publish(run, panels_by_filter, final_sources, aligned, color)
+        super_luminance = _super_luminance_stage(run, final_sources, aligned)
+        color = _render_previews_and_color(run, final_sources, aligned, color_builder, super_luminance)
+        return _verify_and_publish(run, panels_by_filter, final_sources, aligned, color, super_luminance)
     except (ProjectE2EError, E2EError, ColorProductError, CalibrationError, OSError) as error:
         if not staging.exists():
             raise

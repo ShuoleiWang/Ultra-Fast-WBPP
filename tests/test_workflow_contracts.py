@@ -87,13 +87,13 @@ def test_ci_matrices() -> None:
     # supported one on Linux.
     assert jobs["python"]["strategy"]["matrix"] == {
         "include": [
-            {"os": "macos-14", "python": "3.12"},
+            {"os": "macos-15", "python": "3.12"},
             {"os": "windows-latest", "python": "3.12"},
             {"os": "ubuntu-latest", "python": "3.11"},
         ]
     }
     rust = jobs["rust"]
-    assert rust["strategy"]["matrix"]["os"] == ["ubuntu-latest", "macos-14", "windows-latest"]
+    assert rust["strategy"]["matrix"]["os"] == ["ubuntu-latest", "macos-15", "windows-latest"]
     fmt = next(step for step in rust["steps"] if "cargo fmt" in str(step.get("run", "")))
     assert fmt["if"] == "runner.os == 'Linux'"
 

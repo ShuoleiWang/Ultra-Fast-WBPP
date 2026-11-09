@@ -515,6 +515,8 @@ describe("native product workflow", () => {
     await reachRecipe();
     await userEvent.click(screen.getByText("高级选项与 solver 设置"));
     expect(screen.getByRole("checkbox", { name: /Proper coaddition/ })).not.toBeChecked();
+    // The super luminance is made by default, without a key in the recipe.
+    expect(screen.getByRole("checkbox", { name: /SuperL/ })).toBeChecked();
     // The engine's IRLS combination measured worse than the default and is not offered.
     expect(screen.queryByRole("combobox", { name: "稳健合成方式" })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
@@ -550,6 +552,16 @@ describe("native product workflow", () => {
       apodizationPixels: 64,
     });
     expect(recipe).not.toHaveProperty("integration");
+  });
+
+  it("turns the super luminance off only when its checkbox is cleared", async () => {
+    render(<App />);
+    await reachRecipe();
+    await userEvent.click(screen.getByText("高级选项与 solver 设置"));
+    await userEvent.click(screen.getByRole("checkbox", { name: /SuperL/ }));
+    await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
+    await userEvent.click(screen.getByRole("button", { name: /开始处理/ }));
+    expect(native.startRun.mock.calls[0][0].recipe.superLuminance).toBe(false);
   });
 
   it("never sends proper coaddition together with drizzle, which the engine refuses", async () => {

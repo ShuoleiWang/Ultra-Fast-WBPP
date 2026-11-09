@@ -64,7 +64,7 @@ jobs:
       matrix:
         include:
           # The interpreter the macOS and Windows bundles freeze (release.yml)...
-          - os: macos-14
+          - os: macos-15
             python: "3.12"
           - os: windows-latest
             python: "3.12"
@@ -163,7 +163,7 @@ jobs:
       fail-fast: false
       matrix:
         # Linux stays: the sidecar launcher's ETXTBSY retry test is Linux-only.
-        os: [ubuntu-latest, macos-14, windows-latest]
+        os: [ubuntu-latest, macos-15, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Linux desktop dependencies

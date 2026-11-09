@@ -164,6 +164,7 @@ export function useWorkflow(t: Translator) {
   // the recipe below is byte-for-byte the recipe sent before it existed. The
   // extra product never replaces the master.
   const [properCoadditionEnabled, setProperCoadditionEnabled] = useState(false);
+  const [superLuminanceEnabled, setSuperLuminanceEnabled] = useState(true);
   // Opt-in per session. The native recipe selects local or global normalization
   // from this flag; it must not infer the choice from a visible progress stage.
   const [catalogList, setCatalogList] = useState<CatalogListResponse>();
@@ -1075,6 +1076,7 @@ export function useWorkflow(t: Translator) {
           // drizzled master lives on a finer grid, so the coadd has no
           // same-grid solved master to inherit a verified WCS from).
           ...(properCoadditionEnabled && !drizzleEnabled ? { properCoaddition: PROPER_COADDITION_REQUEST } : {}),
+          ...(superLuminanceEnabled ? {} : { superLuminance: false as const }),
         },
         masterMetadataOverrides: masterOverrideRequests(masterOverrides),
         rawFrameMetadataOverrides: [],
@@ -1432,6 +1434,8 @@ export function useWorkflow(t: Translator) {
     setDrizzleKernel,
     properCoadditionEnabled,
     setProperCoadditionEnabled,
+    superLuminanceEnabled,
+    setSuperLuminanceEnabled,
     catalogList,
     catalogDoctor,
     solverDoctor,

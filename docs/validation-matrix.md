@@ -4,6 +4,20 @@ Support, compatibility, implementation, and optimization are separate claims. Th
 
 Before tagging a candidate, regenerate the source-test summary and platform evidence from that exact commit. Report optional hardware skips explicitly, retain private data outside Git, and publish only sanitized summaries. Until those checks are complete, the correct status is alpha; in particular, gradient-free output and general PixInsight/WBPP equivalence are not established.
 
+## Super luminance (2026-11-09)
+
+Each project ran on the previous main and on this change, on the same Mac (M3 Pro, macOS 27, Gaia DR2 tiles), one run per arm. The mosaic and RCS2 rows ran the builder on existing masters.
+
+| Check | Evidence | Status |
+|---|---|---|
+| Masters untouched | SDSS J1004+4112 L+R+G+B (41, 10, 12, 10 Lights) and M31 panel 1, one night (50 Lights): L, R, G and B byte-identical to main's, LRGB pixel data identical; 169/169 s and 149/154 s. | Verified locally |
+| Reproducible; the recipe option | A second SDSS run on this change, with `"color": {"luminance": "superL"}` from the command line: the same masters, `SuperL.fits` pixel data identical to the first run's, and LRGB built on it (`luminanceSource` `SuperL`). | Verified locally |
+| Weights and gain | Predicted against measured pixel-noise gain on the published result: SDSS 1.163/1.159 (all four channels), M31 panel 1 1.186/1.183 (G left out), RCS2 1.120/1.122, M31 six panels 1.203/1.195. Against an independent estimate of each channel's 8 px noise (variances of channel differences, where shared signal cancels): the chosen weights are within 0.3 % of the optimal gain on SDSS and RCS2. | Verified locally |
+| Weights not taken from the sky's scatter | SDSS: shared faint signal is about 87 % of L's 8 px sky variance; weights from that scatter gave R, G and B 55 % and a result as noisy as L (gain 0.96–1.02 at 1–16 px). | Verified locally |
+| Star shapes | Result against reference, on stacks at the reference's stars: SDSS FWHM ×0.996, M31 panel 1 ×1.005, M31 six panels ×0.998 with ellipticity 0.074 → 0.090 (G's excess +0.078 just inside the 0.08 limit). G of M31 panel 1 (+0.10) is left out. | Verified locally |
+| Synthetic contract | A channel 30 % wider and a narrowband channel are left out; the faintest-starred channel measures as sharp as L; shared sky structure does not move the weights; L's sky level, footprint and flux scale are kept and no step appears where a channel has no data; a project publishes `SuperL.fits` with a preview and a verified-WCS artifact, `color.luminance` decides the LRGB luminance, and `superLuminance.enabled: false` publishes none. The desktop's checkbox is checked by default and adds the block to the recipe only when cleared (UI, request and recipe-payload tests). | Tests |
+| Not validated | Windows only through hosted CI. Whether the super luminance makes a better finished image is a matter of post-processing and is not measured. One-shot colour: the debayer interpolates R and B from a quarter of the photosites and G from half, so pixel differences understate R's and B's noise more and the weights lean towards them; no real one-shot-colour data has been run. | Open |
+
 ## Projects without full RGB, inherited solves and the mosaic sky network on one tree (2026-11-05)
 
 Real data on the tree that combines these changes, M3 Pro, macOS 27, the Gaia DR2 tiles installed, one native library, one run per arm.

@@ -67,7 +67,8 @@ Light's residual shift field, the overlap matching and the blend (its stages are
 calibration grouping and pairing (planning, preflight and the run share it);
 `calibration/inputs.py` content-bound master metadata; `image_io/fits.py` FITS primitives; `solvers/process.py`
 shared solver execution; `products/publication.py` create-only colour/mosaic
-publication. Private helpers are shared only inside a subpackage, and the
+publication; `products/super_luminance.py` the `SuperL.fits` of a project's
+broadband channels. Private helpers are shared only inside a subpackage, and the
 modules import without cycles. The desktop asks the engine's `doctor --json`
 for its capabilities; there is no separate worker protocol.
 

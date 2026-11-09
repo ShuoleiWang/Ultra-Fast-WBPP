@@ -352,7 +352,9 @@ redistribution permissions are separate; see [licensing](licensing.md).
   integration. `PixelTransform` accepts affine and projective matrices.
 - `integrity.py` owns canonical JSON and SHA-256 forms; `solvers/process.py`
   owns shared external-process and publication evidence;
-  `products/publication.py` shares colour/mosaic create-only primitives.
+  `products/publication.py` shares colour/mosaic create-only primitives;
+  `products/super_luminance.py` combines a project's broadband channels into
+  `SuperL.fits`.
 - `stacking/drizzle.py` describes capabilities;
   `stacking/drizzle_native.integrate_drizzle_group` executes the native group
   contract.

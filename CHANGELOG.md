@@ -4,6 +4,25 @@ All notable changes are documented here. The format follows Keep a Changelog and
 
 ## [Unreleased]
 
+### A super luminance beside the channels
+
+- A project with two or more broadband channels (L, R, G, B) now also publishes `SuperL.fits`: the minimum-variance estimate of the reference channel's signal (L, else R, G, B) from all of them. Each channel is put on the reference's star-flux scale and weighted by the inverse variance of its sky noise in the reference's units. A channel whose stars, stacked at the reference's star positions, are more than 1.15× wider or 0.08 more elongated than the reference's, or that covers less than 98 % of the reference's pixels, is left out; narrowband channels never take part. The result keeps the reference's sky level, footprint, header and verified WCS (`PROPAGATED_VERIFIED`), gets a preview, and is listed with the solved mono products. The masters and every other product are unchanged.
+- `execution.superLuminance` records each channel's scale, sky level and noise, star FWHM, ellipticity and offset against the reference's, coverage, and its weight or the reason it was left out, then the signal-to-noise gain over the reference alone and the result's stars against the reference's. The header carries the channels, the weights and the gain (`OAFSLCH`, `OAFSLWT`, `OAFSLGN`).
+- The noise is the robust scatter of neighbouring-pixel differences on the sky, because on a deep master the sky's own scatter is mostly faint galaxies and background structure that every channel shares. On SDSS J1004+4112 (3.4 h of L) shared signal is about 87 % of L's 8 px sky variance; weights from that scatter gave R, G and B 55 % and a result no less noisy than L. Star shapes are compared on stacks at the reference's stars, so a channel's depth does not change how sharp it reads.
+- Real data, M3 Pro, macOS 27, one run per arm, previous main and this change:
+  - SDSS J1004+4112 L+R+G+B (41, 10, 12, 10 Lights): the four masters byte-identical and the same LRGB pixels, 169 s in both arms. `SuperL.fits` takes all four channels (L 0.74, R 0.075, G 0.106, B 0.079), gain 1.163 predicted and 1.159 measured on the result, star FWHM ×0.996.
+  - M31 panel 1, one night (50 Lights): the four masters byte-identical and the same LRGB pixels, 149 s and 154 s. G is left out (stars +0.10 more elongated than L's); L 0.71, R 0.13, B 0.16, gain 1.186 predicted and 1.183 measured, star FWHM ×1.005.
+  - The stage costs about 0.7 s of these runs (0.43 s to build, 0.15 s for the preview, the rest hashing).
+  - On existing masters: RCS2 J0327-1326 (L 149, R 59, G 51, B 41 Lights), all four, gain 1.12; the M31 six-panel mosaic (307 L Lights, a 136 Mpx canvas), all four in 6 s, gain 1.20, G's elongation excess +0.078 just inside the limit and the result's stars 0.074 → 0.090 in ellipticity at the same FWHM.
+- The LRGB product keeps L as its luminance. With `"color": {"luminance": "superL"}` it uses the super luminance instead, and an RGB-only project then gets an LRGB product. When no super luminance could be built it keeps L or stays RGB; `execution.color` records the luminance requested and the one used.
+- `"superLuminance": {"enabled": false}` turns the product off (`execution.superLuminance` reads `DISABLED`); asking for it as the LRGB luminance at the same time is refused. The desktop's advanced options have a *Super luminance (SuperL)* checkbox, checked by default, that sends the block only when it is cleared. A recipe without these blocks, or with their defaults, serializes and digests as before.
+
+### CI runs on a supported macOS runner and drops checks that found nothing
+
+- GitHub no longer runs `macos-14` jobs (`The configuration 'macos-14-arm64-us-default' is not supported`): the macOS Python job was cancelled before its first step, and the CI gate failed. The macOS Python and Rust jobs now run on `macos-15`.
+- CodeQL analyses only the Python code, on pushes to main and pull requests. In its first two months the Rust and workflow analyses raised no alert and the JavaScript one a single alert, against hundreds in Python. The weekly scheduled scan is gone too.
+- Dependabot version updates are removed: of 27 pull requests since September, none was merged. Dependency review still checks every pull request that changes a dependency.
+
 ### A project of several filters without full RGB publishes its masters
 
 - A single-target project of two or more filters without all of R, G and B stopped with `PROJECT_UNEXPECTED_FAILURE: AssertionError` after every filter had solved, and published nothing. The `reproject` backend was loaded only for a full R, G, B set, while channel alignment asserted it for every channel but the reference.

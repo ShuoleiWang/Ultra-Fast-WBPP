@@ -243,6 +243,26 @@ def _mosaic_solver(**kwargs: Any) -> TruthSolver:
     return TruthSolver(SKY, scale_arcsec=PANEL_SCALE, **kwargs)
 
 
+def _star_field(shape: tuple[int, int], filter_name: str) -> np.ndarray:
+    """The same stars in every filter, at the filter's own flux scale, with
+    the filter's own sky noise."""
+
+    scale, noise = {"L": (1.0, 2.0), "R": (0.4, 1.5), "G": (0.5, 1.5), "B": (0.35, 1.5)}[filter_name]
+    sky = np.random.default_rng(5)
+    count = shape[0] * shape[1] // 1500
+    rows, columns = sky.uniform(12, shape[0] - 12, count), sky.uniform(12, shape[1] - 12, count)
+    fluxes = 10 ** sky.uniform(3.0, 4.0, count)
+    sigma = 3.0 / 2.3548
+    image = np.random.default_rng(ord(filter_name[-1])).normal(0.0, noise, shape)
+    for row, column, flux in zip(rows, columns, fluxes):
+        y0, x0 = int(row) - 8, int(column) - 8
+        yy, xx = np.mgrid[y0 : y0 + 17, x0 : x0 + 17]
+        image[y0 : y0 + 17, x0 : x0 + 17] += scale * flux / (2 * np.pi * sigma**2) * np.exp(
+            -((yy - row) ** 2 + (xx - column) ** 2) / (2 * sigma**2)
+        )
+    return image.astype(np.float32)
+
+
 class FakePanelRunner:
     def __init__(
         self,
@@ -255,6 +275,7 @@ class FakePanelRunner:
         rotate_filter: str | None = None,
         inherited_filter: str | None = None,
         exclusive_stars_panel: str | None = None,
+        stars: bool = False,
     ) -> None:
         self.calls = 0
         self.drift_source = drift_source
@@ -270,6 +291,8 @@ class FakePanelRunner:
         self.rotate_filter = rotate_filter
         self.inherited_filter = inherited_filter
         self.exclusive_stars_panel = exclusive_stars_panel
+        # Single-target masters that hold a star field (see ``_star_field``).
+        self.stars = stars
         # (panel, the placement the joint fit sent it), in run order.
         self.placements: list[tuple[str | None, Any]] = []
 
@@ -328,6 +351,8 @@ class FakePanelRunner:
             panel_gain = 1.0 + 0.10 * target_index
             panel_offset = 2.0 * target_index
             master = (sky_signal * panel_gain + panel_offset).astype(np.float32)
+            if self.stars:
+                master += _star_field(self.master_shape, filter_name)
             if filter_name == self.invalid_corner_filter:
                 master[0, -1] = np.nan
             fits.writeto(
@@ -1569,6 +1594,51 @@ def test_final_crop_retained_fraction_guard_does_not_modify_channels(tmp_path: P
         _crop_final_channels(paths, minimum_retained_fraction=0.5, max_memory_bytes=8192)
     assert captured.value.code == "FINAL_AUTOCROP_TOO_SMALL"
     assert all(path.read_bytes() == before[key] for key, path in paths.items())
+
+
+@pytest.mark.parametrize(("enabled", "luminance"), [(True, "L"), (True, "superL"), (False, "L")])
+def test_project_publishes_the_super_luminance_of_its_broadband_channels(tmp_path: Path, enabled: bool, luminance: str) -> None:
+    """The super luminance of the channels is published beside them with
+    the reference's WCS and a preview unless the recipe turns it off; it is
+    the LRGB luminance only when the recipe asks for it."""
+
+    inventory, base = _single_target_project(tmp_path, ("R", "G", "B", "L"))
+    base = replace(base, super_luminance=enabled, color_luminance=luminance)
+    result = run_project_e2e(
+        ProjectE2ERequest(inventory, base, base.output_directory),
+        solver_backends=(ManagedCopySolver(),),
+        panel_runner=FakePanelRunner(master_shape=(480, 480), stars=True),
+        reproject_provider=FakeReproject().provider(),
+    )
+    assert result.success is True, result.code
+    output = Path(result.output_directory)
+    receipt = json.loads(Path(result.receipt_path).read_text(encoding="utf-8"))
+    record = receipt["execution"]["superLuminance"]
+    if not enabled:
+        assert record["status"] == "DISABLED" and receipt["finalProducts"]["superLuminance"] is False
+        assert not (output / "SuperL.fits").exists() and not (output / "previews" / "SuperL.png").exists()
+        assert receipt["execution"]["color"]["luminanceSource"] == "L"
+        return
+    assert record["status"] == "CREATED" and record["referenceFilter"] == "L"
+    assert sorted(record["channels"]) == ["b", "g", "l", "r"]
+    assert all(entry["included"] for entry in record["channels"].values())
+    assert record["effectiveGain"] > 1.1
+    super_luminance = output / "SuperL.fits"
+    header = fits.getheader(super_luminance)
+    assert header["FILTER"] == "SuperL" and header["OAFSLCH"] == "L,R,G,B"
+    assert header["CRVAL1"] == fits.getheader(output / "L.fits")["CRVAL1"]
+    assert (output / "previews" / "SuperL.png").is_file()
+    assert str(super_luminance) in result.product_paths and "SuperL" not in result.mono_filters
+    assert receipt["finalProducts"]["superLuminance"] is True
+    artifact = next(item for item in receipt["finalProducts"]["guiArtifacts"] if item.get("filter") == "SuperL")
+    assert artifact["kind"] == "SOLVED_MONO_FITS" and artifact["finalGate"]["status"] == "PASS"
+    assert artifact["astrometryProvenance"]["referenceFilter"] == "L"
+    assert artifact["sha256"] == record["sha256"] == "sha256:" + hashlib.sha256(super_luminance.read_bytes()).hexdigest()
+    color = receipt["execution"]["color"]
+    assert color["status"] == "SOLVED_LRGB" and color["luminanceRequested"] == luminance
+    assert color["luminanceSource"] == ("SuperL" if luminance == "superL" else "L")
+    inputs = json.loads((output / color["receipt"]).read_text(encoding="utf-8"))["inputs"]
+    assert Path(inputs[-1]["path"]).name == ("SuperL.fits" if luminance == "superL" else "L.fits")
 
 
 def test_project_crops_final_alignment_edges_before_rgb_and_gui_hashes(tmp_path: Path) -> None:

@@ -395,6 +395,10 @@ class E2ERequest:
     explicit_selection: ExplicitSelection | None = None
     blink_flags_policy: BlinkFlagPolicy = field(default_factory=BlinkFlagPolicy)
     drizzle: DrizzleOptions = field(default_factory=DrizzleOptions)
+    # Whether a project publishes SuperL.fits (recipe ``superLuminance.enabled``).
+    super_luminance: bool = True
+    # The luminance of a project's LRGB product: "L" or "superL" (recipe ``color.luminance``).
+    color_luminance: str = "L"
     ra_hint_degrees: float | None = None
     dec_hint_degrees: float | None = None
     field_of_view_degrees: float | None = None

@@ -2,7 +2,7 @@
 
 Two algorithms that are **off by default** and that a recipe has to ask for by name: ZOGY proper coaddition, which adds one more product per filter, and a robust IRLS combination, which changes how the ordinary master's accepted samples are averaged. A recipe that mentions neither is the recipe of every earlier release, digest included, and produces byte-identical masters.
 
-Neither is a replacement for the default path. The ordinary rejection/integration master stays the primary product of every run.
+Neither is a replacement for the default path. The ordinary rejection/integration master stays the primary product of every run. The last section covers a third opt-in choice: whether a project's LRGB product takes the super luminance as its luminance.
 
 ## Proper coaddition (Zackay & Ofek 2017)
 
@@ -94,6 +94,28 @@ The proper coadd shows no measurable point-source gain on this project, whose fr
 
 [The validation matrix](../validation-matrix.md) records the full numbers and what is and is not validated.
 
+## Super luminance as the LRGB luminance
+
+```json
+{ "color": { "luminance": "superL" } }
+```
+
+| Key | Values | Default | Meaning |
+|---|---|---|---|
+| `superLuminance.enabled` | `true`/`false` | `true` | Whether a project publishes `SuperL.fits` (the desktop's *Super luminance* checkbox) |
+| `color.luminance` | `L`, `superL` | `L` | The luminance of a project's LRGB product; `superL` needs `superLuminance.enabled` |
+
+Every project with two or more qualifying broadband channels (L, R, G, B) publishes `SuperL.fits` beside them unless the recipe turns it off (`execution.superLuminance` then reads `DISABLED`); the masters themselves do not change. It is the minimum-variance estimate of the reference channel's signal (L, else R, G, B) from all the broadband photons:
+
+- **Scale.** Each channel is put on the reference's flux scale: the median ratio of aperture fluxes at the reference's isolated, unsaturated stars.
+- **Weight.** Each channel is weighted by the inverse variance of its sky noise in the reference's units. The noise is the robust scatter of neighbouring-pixel differences on the sky, not the sky's own scatter: on a deep master that scatter is mostly faint galaxies and background structure that every channel shares. On SDSS J1004+4112 (3.4 h of L) shared signal is about 87 % of the 8 px sky variance of L; weights taken from it would put R, G and B at about 55 %, and the result would be no less noisy than L.
+- **Left out.** A channel whose stars, stacked at the reference's star positions in a 3 × 3 grid of boxes, are more than 1.15× wider or more than 0.08 more elongated than the reference's; one that covers less than 98 % of the reference's pixels; one with fewer than 20 stars to scale it. Measured at the same stars, the comparison does not depend on how deep each channel is, and an offset from the reference's star centres reads as elongation. Narrowband channels never take part.
+- **Kept from the reference.** Its sky level (each channel's own sky level is replaced by the reference's), its footprint (NaN where the reference has no data), its header and its verified WCS (`PROPAGATED_VERIFIED`).
+
+`execution.superLuminance` records, for every broadband channel, its scale, sky level and noise, star FWHM, FWHM ratio, ellipticity and its excess over the reference, the star offset from the reference's centres, coverage, and its weight or the reason it was left out; then the signal-to-noise gain over the reference alone (`effectiveGain`) and the result's stars against the reference's (`stars`, from the channels' stacks combined with the weights). The FITS header carries the channels and weights (`OAFSLCH`, `OAFSLWT`) and the gain (`OAFSLGN`).
+
+The option only decides whether the colour product uses it; an RGB-only project then gets an LRGB product. When no super luminance could be built, the product keeps L or stays RGB, and `execution.color` records the luminance requested and the one used (`luminanceRequested`, `luminanceSource`). A recipe without these blocks, or with their defaults, serializes and digests as before.
+
 ## Notes
 
-Neither option is enabled by any built-in contract. The desktop offers proper coaddition as a checkbox under advanced options; IRLS is a recipe option only, because it measured worse than the default. Leave them off unless you are measuring the difference: the default path is the one with retained real-data acceptance.
+No opt-in option above is enabled by any built-in contract. The desktop offers proper coaddition as a checkbox under advanced options, beside the super luminance's (checked by default); IRLS and the LRGB luminance are recipe options only, IRLS because it measured worse than the default. Leave them off unless you are measuring the difference: the default path is the one with retained real-data acceptance.

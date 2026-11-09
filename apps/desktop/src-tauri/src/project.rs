@@ -172,6 +172,10 @@ pub(crate) struct UiRecipeOptions {
     // than the default, and an unknown `integration` key is refused.
     #[serde(default)]
     proper_coaddition: Option<UiProperCoaddition>,
+    // The super luminance is on unless the user unchecks it; only then does
+    // the recipe carry `superLuminance`, so a default run's digest is unchanged.
+    #[serde(default = "default_super_luminance")]
+    super_luminance: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -231,6 +235,10 @@ fn default_drizzle_drop_shrink() -> f64 {
 
 fn default_drizzle_kernel() -> String {
     "square".to_owned()
+}
+
+fn default_super_luminance() -> bool {
+    true
 }
 
 const DRIZZLE_KERNELS: [&str; 4] = ["square", "circular", "gaussian", "point"];

@@ -252,6 +252,9 @@ const EN = {
   outputNotSelected: "Not selected",
   chooseOutput: "Choose output folder",
   advanced: "Advanced options and solver setup",
+  superLuminance: "Super luminance (SuperL)",
+  superLuminanceHint:
+    "Also writes SuperL.fits: L, R, G and B combined into one deeper luminance, each weighted by its noise; a channel with clearly worse stars is left out. The masters are unchanged, and it takes about a second.",
   drizzle: "Drizzle",
   drizzleHint:
     "Drops the calibrated Lights onto a finer grid with the integration's own rejection, normalization and weights.",
@@ -934,6 +937,9 @@ const ZH: Record<MessageKey, string> = {
   outputNotSelected: "尚未选择",
   chooseOutput: "选择输出文件夹",
   advanced: "高级选项与 solver 设置",
+  superLuminance: "超级亮度（SuperL）",
+  superLuminanceHint:
+    "另外写出 SuperL.fits：L、R、G、B 按各自噪声加权合成一张更深的亮度图，星点明显更差的通道不参与。各通道 master 不变，约多用一秒。",
   drizzle: "Drizzle",
   drizzleHint: "把校准后的亮场按积分自身的拒绝、归一化与权重投到更细的网格上。",
   drizzleOptions: "Drizzle 选项",
