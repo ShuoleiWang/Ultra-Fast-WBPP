@@ -6,9 +6,10 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 SELECTION_ALGORITHM = "unattended-selection-v1"
+SELECTION_ALGORITHM_V2 = "unattended-selection-v2"
 
-POLICIES = ("legacy-gate", "unattended-v1", "include-all", "explicit-v1")
-UNATTENDED_POLICIES = ("unattended-v1", "include-all")
+POLICIES = ("legacy-gate", "unattended-v1", "unattended-v2", "include-all", "explicit-v1")
+UNATTENDED_POLICIES = ("unattended-v1", "unattended-v2", "include-all")
 EXPLICIT_POLICY = "explicit-v1"
 PRIORITIES = ("depth", "balanced", "resolution")
 AGGRESSIVENESS = ("conservative", "standard", "aggressive")
@@ -49,6 +50,10 @@ class SelectionParameters:
     ``legacy-gate`` reproduces the historical behaviour exactly (PASS admitted,
     REVIEW excluded unless approved).  ``unattended-v1`` applies the guards,
     gray-zone rules and confidence weights of the selection plan.
+    ``unattended-v2`` adds the blink flags' cross-night evidence, a value
+    model and a leave-block-out counterfactual of suspect nights; its
+    thresholds are constants of ``selection.unattended_v2`` (the keys below
+    other than ``policy``, ``priority`` and ``counterfactual`` do not apply).
     ``include-all`` is a diagnostic policy that admits every frame the guards
     allow at full weight so the counterfactual can measure each one.
     ``explicit-v1`` admits exactly the Lights a supplied selection file keeps
@@ -164,8 +169,30 @@ class SelectionParameters:
         }
 
     def describe(self) -> dict[str, Any]:
-        """The receipt form: the recipe keys plus the derived thresholds."""
+        """The receipt form: the recipe keys plus the derived thresholds.
 
+        ``unattended-v2`` lists only the keys it applies (priority, the region
+        maps and the per-frame counterfactual); its own thresholds are the
+        receipt's ``unattendedV2.thresholds``.
+        """
+
+        if self.policy == "unattended-v2":
+            return {
+                "algorithm": SELECTION_ALGORITHM_V2,
+                "policy": self.policy,
+                "priority": self.priority,
+                "counterfactual": self.counterfactual,
+                "regionWeights": self.region_weights,
+                "softExclusionFractionGuard": self.soft_exclusion_fraction_guard,
+                "harmfulDepthMag": self.harmful_depth_mag,
+                "harmfulBackgroundSigma": self.harmful_background_sigma,
+                "beneficialDepthMag": self.beneficial_depth_mag,
+                "harmfulFwhmPx": self.harmful_fwhm_px,
+                "minimumCounterfactualTiles": self.minimum_counterfactual_tiles,
+                "outlierMadn": self.outlier_madn,
+                "counterfactualAction": self.counterfactual_action,
+                "maxIntegrationPasses": self.max_integration_passes,
+            }
         return {
             "algorithm": SELECTION_ALGORITHM,
             "policy": self.policy,

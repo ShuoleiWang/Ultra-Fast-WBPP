@@ -347,6 +347,9 @@ beforeEach(() => {
   mockPreviewCanvas();
   window.localStorage.setItem("ultra-fast-wbpp.language", "zh-CN");
   window.localStorage.removeItem("ultra-fast-wbpp.outputParent");
+  // These suites drive the manual Blink review; the default automatic
+  // screening has its own suite below.
+  window.localStorage.setItem("ultra-fast-wbpp.automaticScreening", "off");
   native.handlers = undefined;
   native.catalogHandlers = undefined;
   native.inspectError = undefined;
@@ -1207,6 +1210,126 @@ describe("native product workflow", () => {
   });
 });
 
+describe("automatic screening", () => {
+  beforeEach(() => window.localStorage.removeItem("ultra-fast-wbpp.automaticScreening"));
+  const importLights = async () => {
+    native.lightCount = 2;
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
+    await waitFor(() => expect(native.inspectCalibration).toHaveBeenCalled());
+    await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
+  };
+
+  it("processes in one click: the engine screens and no Blink review is needed", async () => {
+    await importLights();
+    expect(screen.getByRole("checkbox", { name: "自动筛片" })).toBeChecked();
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled());
+    await userEvent.click(screen.getByRole("button", { name: /开始处理/ }));
+    await screen.findByRole("heading", { name: "正在生成验证后的产品" });
+    expect(native.blinkMeasure).not.toHaveBeenCalled();
+    const request = native.startRun.mock.calls[0][0];
+    expect(request.recipe.automaticScreening).toBe(true);
+    expect(request).not.toHaveProperty("selection");
+    expect(request).not.toHaveProperty("blinkReview");
+    expect(request.reviewSelections).toEqual([]);
+  });
+
+  it("returns to the Blink review when unchecked, and remembers the choice", async () => {
+    await importLights();
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled());
+    await userEvent.click(screen.getByRole("checkbox", { name: "自动筛片" }));
+    expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
+    expect(screen.getByText("请先看完并确认每个通道，才能开始处理。")).toBeInTheDocument();
+    expect(window.localStorage.getItem("ultra-fast-wbpp.automaticScreening")).toBe("off");
+    await userEvent.click(screen.getByRole("checkbox", { name: "自动筛片" }));
+    expect(window.localStorage.getItem("ultra-fast-wbpp.automaticScreening")).toBeNull();
+  });
+
+  it("switches to the manual review when the user opens Blink instead", async () => {
+    await importLights();
+    await userEvent.click(screen.getByRole("button", { name: "改为手动闪视" }));
+    await screen.findByRole("heading", { name: /闪视筛片/ });
+    expect(native.blinkMeasure).toHaveBeenCalled();
+    expect(window.localStorage.getItem("ultra-fast-wbpp.automaticScreening")).toBe("off");
+  });
+
+  it("lists every Light it left out, with the reason, and the channels worth a look", async () => {
+    await importLights();
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled());
+    await userEvent.click(screen.getByRole("button", { name: /开始处理/ }));
+    await screen.findByRole("heading", { name: "正在生成验证后的产品" });
+    await act(async () =>
+      native.handlers?.onComplete({
+        jobId: "run-native-1",
+        outputDirectory: "/结果/深空 输出/盾牌座-Panel-1_2026-11-10_0010",
+        artifacts: [solvedArtifact],
+        gate: { decision: "ready", checks: readyChecks },
+        screening: {
+          admitted: 40,
+          excluded: 1,
+          counts: { PASS: 41 },
+          policy: "unattended-v2",
+          frames: [
+            {
+              name: "亮场 月光.fit",
+              target: "盾牌座 Panel 1",
+              disposition: "PASS",
+              admitted: false,
+              summary: "sky 2.1x the clean sky with 0.52 of the stars",
+              evidence: [],
+              reason: "AUTO_DROP",
+              flags: ["SEL_NIGHT_SKY_BRIGHT"],
+            },
+          ],
+          suspectChannels: [
+            {
+              target: "盾牌座 Panel 1",
+              filter: "R",
+              codes: ["SUSPECT_BLOCK_KEPT", "SEL_KEEP_SKY_BRIGHT"],
+              summary: "one bright night",
+            },
+          ],
+        },
+      }),
+    );
+    const section = await screen.findByRole("region", { name: "筛片结果" });
+    expect(within(section).getByText("自动剔除")).toBeInTheDocument();
+    expect(
+      within(section).getByText("亮天夜，星点减少 · sky 2.1x the clean sky with 0.52 of the stars"),
+    ).toBeInTheDocument();
+    expect(within(section).getByText("建议在闪视中看一下")).toBeInTheDocument();
+    // A code with no label of its own (a policy note) is not shown raw.
+    expect(within(section).getByText(/盾牌座 Panel 1 · R — 可疑的一晚经测量后保留/)).toBeInTheDocument();
+    expect(within(section).queryByText(/SEL_KEEP_SKY_BRIGHT/)).not.toBeInTheDocument();
+  });
+
+  it("installs the Gaia DR2 tiles from the solver setup once the index set is ready", async () => {
+    catalogListing.catalogs.push({
+      ...catalogListing.catalogs[0],
+      catalogId: "astrometry-net-5205-lite",
+      totalSizeBytes: 614_891_520,
+      artifactCount: 48,
+      providerTerms: { ...catalogListing.catalogs[0].providerTerms, acceptanceId: "astrometry-net-5205-lite-2026-10" },
+    });
+    try {
+      await importLights();
+      await userEvent.click(screen.getByText("高级选项与 solver 设置"));
+      const title = await screen.findByText("Gaia DR2 分块星表（可选，马赛克推荐）");
+      const card = title.closest(".catalog-install") as HTMLElement;
+      const download = within(card).getByRole("button", { name: /下载/ });
+      expect(download).toBeDisabled();
+      await userEvent.click(within(card).getByRole("checkbox"));
+      await userEvent.click(download);
+      expect(native.startCatalogInstall).toHaveBeenCalledWith({
+        catalogId: "astrometry-net-5205-lite",
+        acceptedTermsId: "astrometry-net-5205-lite-2026-10",
+      });
+    } finally {
+      catalogListing.catalogs.pop();
+    }
+  });
+});
+
 describe("Windows x64 solver route", () => {
   it("starts with a science-ready ASTAP when solve-field is absent and names the validated CPU path", async () => {
     native.platform = "windows";
@@ -1654,7 +1777,7 @@ describe("native run failure", () => {
       }),
     );
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "Gaia DR2 分块星表（astrometry-net-5205-lite）足够密；应用内暂时无法安装",
+      "Gaia DR2 分块星表（astrometry-net-5205-lite）足够密：请在“高级选项与 solver 设置”里安装",
     );
   });
 });

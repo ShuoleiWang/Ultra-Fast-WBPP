@@ -1,6 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { dispositionLabel } from "../Inspector";
-import { blinkFlagLabel, type Translator } from "../i18n";
+import { blinkFlagLabel, screeningCodeLabel, type Translator } from "../i18n";
 import { CheckIcon, FileIcon, RevealIcon, SparkIcon } from "../icons";
 import type { OutputArtifact, OutputArtifactKind, ScreeningSummary } from "../types";
 import {
@@ -187,6 +187,7 @@ export function ResultView({ workflow, t }: { workflow: Workflow; t: Translator 
 /** The decision badge of a screened frame: the user's blink decision when there was one, else the gate's disposition. */
 function screeningBadge(frame: ScreeningSummary["frames"][number], t: Translator) {
   if (frame.reason === "USER_DROP") return <span className="badge stop">{t("screeningUserDrop")}</span>;
+  if (frame.reason === "AUTO_DROP") return <span className="badge stop">{t("screeningAutoDrop")}</span>;
   if (frame.reason === "USER_KEEP_OVERRIDE")
     return <span className="badge check">{t("screeningUserKeepOverride")}</span>;
   return (
@@ -195,21 +196,51 @@ function screeningBadge(frame: ScreeningSummary["frames"][number], t: Translator
     </span>
   );
 }
+/** The localised labels of the codes that have one, without repeats. */
+function codeLabels(codes: readonly string[], t: Translator): string[] {
+  return [
+    ...new Set(codes.map((code) => screeningCodeLabel(code, t)).filter((label): label is string => Boolean(label))),
+  ];
+}
 function screeningWhy(frame: ScreeningSummary["frames"][number], t: Translator): string {
-  const flags = (frame.flags ?? []).map((code) => blinkFlagLabel(code, t));
-  if (flags.length) return flags.join("; ");
+  if (frame.reason === "AUTO_DROP") {
+    // Automatic screening's own sentence carries the numbers; its notes on
+    // the frame have no label of their own.
+    const labels = codeLabels(frame.flags ?? [], t);
+    if (frame.summary) return labels.length ? `${labels.join("; ")} · ${frame.summary}` : frame.summary;
+    if (labels.length) return labels.join("; ");
+  } else {
+    const flags = (frame.flags ?? []).map((code) => blinkFlagLabel(code, t));
+    if (flags.length) return flags.join("; ");
+  }
   return frame.evidence.length ? frame.evidence.slice(0, 2).join("; ") : frame.summary || t("noReviewEvidence");
 }
 
 /** The run's own screening: how many Lights went in and why the others did not. */
 export function ScreeningSection({ screening, t }: { screening: ScreeningSummary; t: Translator }) {
   const decided = screening.frames;
+  const suspect = screening.suspectChannels ?? [];
   return (
     <section className="panel screening-section" aria-labelledby="screening-title">
       <div className="panel-heading">
         <span id="screening-title">{t("screeningTitle")}</span>
         <small>{t("screeningSummary", { admitted: screening.admitted, excluded: screening.excluded })}</small>
       </div>
+      {suspect.length > 0 && (
+        <div className="screening-suspect" role="note">
+          <strong>{t("screeningSuspectTitle")}</strong>
+          <ul>
+            {suspect.map((channel) => (
+              <li key={`${channel.target}/${channel.filter}`}>
+                {channel.target} · {channel.filter}
+                {codeLabels(channel.codes, t).length ? ` — ${codeLabels(channel.codes, t).join("; ")}` : ""}
+                {channel.summary ? <small>{channel.summary}</small> : null}
+              </li>
+            ))}
+          </ul>
+          <p className="screening-hint">{t("screeningSuspectHint")}</p>
+        </div>
+      )}
       {decided.length === 0 ? (
         <p className="screening-clean">{t("screeningAllPassed")}</p>
       ) : (

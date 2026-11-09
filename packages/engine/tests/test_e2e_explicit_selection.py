@@ -283,12 +283,13 @@ def test_keep_against_an_exclude_flag_is_honoured_and_recorded(
     assert not registration["referencePath"].endswith(moonlit.name)
 
 
-@pytest.mark.parametrize("explicit", [False, True])
-def test_a_frame_kept_with_thin_cloud_evidence_never_anchors(explicit: bool) -> None:
+@pytest.mark.parametrize("policy", ["legacy-gate", "explicit-v1", "unattended-v2"])
+def test_a_frame_kept_with_thin_cloud_evidence_never_anchors(policy: str) -> None:
     """The gate passes uniform thin cloud (evidence revision 6); such a frame
     is integrated at its noise weight but must not become a reference: on
     the M31 mosaic a G Light at 0.47 mag otherwise anchored a panel's
-    normalization as the flattest background."""
+    normalization as the flattest background.  Under ``unattended-v2`` a
+    frame kept at reduced confidence or marked suspect never anchors either."""
 
     def gate(*codes: str) -> Any:
         return SimpleNamespace(disposition=GateDisposition.PASS, evidence=[SimpleNamespace(code=code) for code in codes])
@@ -296,11 +297,17 @@ def test_a_frame_kept_with_thin_cloud_evidence_never_anchors(explicit: bool) -> 
     screening = SimpleNamespace(
         approved_review_paths=set(),
         blink=SimpleNamespace(flags=[]),
-        gate_by_path={"/clear.fits": gate(), "/hazy.fits": gate("GATE_TEMPORAL_EXTINCTION_INFO")},
-        passed=(Path("/clear.fits"), Path("/hazy.fits")),
+        gate_by_path={"/clear.fits": gate(), "/hazy.fits": gate("GATE_TEMPORAL_EXTINCTION_INFO"), "/dim.fits": gate(), "/odd.fits": gate()},
+        passed=(Path("/clear.fits"), Path("/hazy.fits"), Path("/dim.fits"), Path("/odd.fits")),
+        selection_decisions=[
+            SimpleNamespace(path="/clear.fits", admitted=True, confidence=1.0, suspect=()),
+            SimpleNamespace(path="/dim.fits", admitted=True, confidence=0.5, suspect=()),
+            SimpleNamespace(path="/odd.fits", admitted=True, confidence=1.0, suspect=("LOW_VALUE",)),
+        ],
     )
-    request = SimpleNamespace(selection=SimpleNamespace(explicit=explicit))
-    assert _registration_anchor_exclusions(request, screening) == {"/hazy.fits"}
+    request = SimpleNamespace(selection=SimpleNamespace(explicit=policy == "explicit-v1", policy=policy))
+    expected = {"/hazy.fits"} | ({"/dim.fits", "/odd.fits"} if policy == "unattended-v2" else set())
+    assert _registration_anchor_exclusions(request, screening) == expected
 
 
 def test_incomplete_selection_fails_closed_unless_undecided_is_decided(

@@ -345,6 +345,14 @@ pub(super) fn project_request_json(
     if !request.recipe.super_luminance {
         payload["recipe"]["superLuminance"] = serde_json::json!({"enabled": false});
     }
+    // Automatic screening: the engine's policy decides, and a manual selection
+    // must not ride along (the engine refuses the two together as well).
+    if request.recipe.automatic_screening {
+        if request.selection.is_some() || !request.review_selections.is_empty() {
+            return Err(AUTOMATIC_SCREENING_CONFLICT.to_owned());
+        }
+        payload["recipe"]["selection"] = serde_json::json!({"policy": AUTOMATIC_SCREENING_POLICY});
+    }
     // Top-level, and only when the blink view produced one: the engine's
     // request loader treats the key itself as the switch to `explicit-v1`.
     if let Some(selection) = &request.selection {
@@ -352,6 +360,29 @@ pub(super) fn project_request_json(
             serde_json::to_value(selection).map_err(|error| error.to_string())?;
     }
     Ok(payload)
+}
+
+/// The engine policy that screens the Lights when the user leaves it to the app.
+pub(crate) const AUTOMATIC_SCREENING_POLICY: &str = "unattended-v2";
+const AUTOMATIC_SCREENING_CONFLICT: &str =
+    "AUTOMATIC_SCREENING_CONFLICT: automatic screening takes no manual selection";
+
+/// A run is admitted either by automatic screening or by a completed Blink
+/// review of the exact measured set, never by both.
+pub(super) fn validate_screening(
+    request: &ProjectRunRequest,
+    sessions_root: &Path,
+) -> Result<(), String> {
+    if request.recipe.automatic_screening {
+        if request.selection.is_some()
+            || request.blink_review.is_some()
+            || !request.review_selections.is_empty()
+        {
+            return Err(AUTOMATIC_SCREENING_CONFLICT.to_owned());
+        }
+        return Ok(());
+    }
+    validate_blink_review(request, sessions_root)
 }
 
 pub(super) fn create_private_request(value: &serde_json::Value) -> Result<PathBuf, String> {

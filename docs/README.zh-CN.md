@@ -44,7 +44,7 @@
 </table>
 
 - **快在关键处。** 热点循环是多线程原生内核，与 NumPy 参考实现逐位一致；每张 Light 只解码一次，在内存里完成校准并直接重采样进堆栈。优化目标由真实运行的追踪器决定，而不是凭感觉：四个版本里从 170 秒 → 97 秒 → 82 秒 → 76 秒，凡承诺逐位一致的步骤主图都逐位一致。
-- **机器能为自己辩护的筛片。** 每张 Light 由测量证据判定（透明度、消光、原生分辨率 PSF、拖线、遮挡、视场一致性），复核页与正式运行用的是同一份代码。无人值守策略（配方选项）更进一步：用积分过程中*就地*测量的留一反事实复核每一帧，只有主图因它而更好，它才留下；局部有云或局部遮挡的帧通过逐帧区域权重图保留清晰部分，而不是整帧丢弃。
+- **机器能为自己辩护的筛片。** 每张 Light 由测量证据判定（透明度、消光、原生分辨率 PSF、拖线、遮挡、视场一致性），复核页与正式运行用的是同一份代码。桌面端默认开启的自动筛片（`unattended-v2`）把每一帧和本通道干净夜晚对比，所以能抓住整晚的月光或薄雾；均匀薄云按权重保留，流程建模不了的帧才剔除；可疑的整晚在积分过程中*就地*测量“去掉它会不会更好”；每一张被剔除的帧都列出原因。局部有云或局部遮挡的帧通过逐帧区域权重图保留清晰部分，而不是整帧丢弃。
 - **未经校验绝不发布。** 原始素材只读，结果只写入新目录，每个产品都带有含哈希与全部算法标识的回执；桌面端校验最终天球坐标后才显示"完成"。跑两次得到相同的字节。
 - **用标准对比 WBPP，而不是用眼睛。** [`tools/validation/evaluate_masters.py`](../tools/validation/evaluate_masters.py) 把主图与同一批数据的 PixInsight WBPP 主图在 PSF、噪声增益、深度、背景平坦度、伪影、测光上逐项打分并给出置信区间。历史测量中，四个滤镜的分箱噪声增益为 1.01–1.03；标准门禁尚未全部测量，当前不认证完整等价性（[评估标准](master-evaluation-standard.md)）。
 
@@ -65,11 +65,11 @@ WBPP 的耗时是对相同输入、其默认流程的一次测量；两者的阶
 ## 值得一提的功能
 
 - **速度与确定性。** 原生 Lanczos-3 重采样、拒绝与归约内核与 NumPy 逐值一致（分别快 17.6× / 4.5× / 5.4×）；校准与重采样融合为一遍；在任何平台都构建出相同结果的确定性 Lanczos-3 权重表；Windows 上确定性的星点提取；对极少数允许移动像素的改动有容差门。→ [features §1–2](features.md#1-speed-76-seconds-for-61--26-mp-lights)、[benchmarks](../benchmarks/README.md)
-- **无人值守筛片（配方选项）。** 护栏、灰区、优先级（深度 / 平衡 / 分辨率）、原生分辨率 PSF 星点小图、按置信度缩放的权重、最多三轮重积分的反事实 oracle、区域权重图。用真实帧上的缺陷注入验证：每种缺陷都被处理，干净帧与良性对照零误伤。→ [features §3](features.md#3-frame-selection-a-machine-can-defend)、[架构](architecture.md#unattended-light-selection)
+- **自动筛片（桌面端默认）。** `unattended-v2` 在 `unattended-v1` 的护栏、灰区、原生分辨率 PSF 星点小图、反事实 oracle 和区域权重图之上，以通道的干净夜为基线，能识别整夜均匀的月光或雾霾，并在积分中把可疑的一夜作为整体衡量。在 RCS2 J0327-1326 上，它保留了人工筛片保留的全部 Light，另多保留 29 张，分箱噪声持平或更低（G₈ 1.005–1.017），星点大小相差不到 0.5 %；六格 M31 马赛克（713 张 Light）无需人工审片即可得到经过校验的主图。`unattended-v1` 用真实帧上的缺陷注入验证过：每种缺陷都被处理，干净帧与良性对照零误伤。→ [自动筛片](recipes/automatic-screening.md)、[features §3](features.md#3-frame-selection-a-machine-can-defend)、[架构](architecture.md#unattended-light-selection)
 - **积分科学。** 跨夜、跨子午线翻转的射影配准；按每帧自身噪声判定的拒绝尺度模型 v2；用快速 Radon 变换按整条长度找出卫星拖线并按走廊剔除；在传感器坐标系分离残余平场结构的归一化；所有通道共用一个网格并互相校验解算结果。→ [features §4](features.md#4-integration-science)
 - **Drizzle 与彩色。** 原生 1×–4× drizzle，输入与普通积分完全相同（2×：半光半径小 2.5–4.4%，有效噪声低 6–7%，通量比 0.993–0.994）；Bayer Light 作为彩色通道组处理，逐通道平场缩放，Bayer drizzle。→ [drizzle](recipes/drizzle.md)、[OSC](recipes/osc-cfa.md)
 - **校验后发布。** `SEED` 与 `SOLVED` WCS 的区分；每张主图独立解算并对星表校验（Windows 上 ASTAP 的解由引擎对管理索引星表校验）；每个产品都有回执；桌面端在显示成功前再校验一次。→ [天文解算](recipes/astrometry.md)、[Windows](windows.md)
-- **不碍事的桌面端。** 一次导入所有夜晚，逐通道完成并确认 Blink 人工筛片，每个通道有独立参考帧，算法提供质量提示，诚实的失败状态，浅色/深色，中英双语，可复现的图标与截图。→ [blink 筛片](recipes/blink-screening.md)、[桌面端指南](../apps/desktop/README.md)、[设计记录](gui-redesign-plan.md)
+- **不碍事的桌面端。** 一次导入所有夜晚，按开始即可：自动筛片替你决定并说明每一张剔除的理由；也可以取消勾选，逐通道完成并确认 Blink 人工筛片，每个通道有独立参考帧，算法提供质量提示，诚实的失败状态，浅色/深色，中英双语，可复现的图标与截图。→ [blink 筛片](recipes/blink-screening.md)、[桌面端指南](../apps/desktop/README.md)、[设计记录](gui-redesign-plan.md)
 - **两个平台，一个平台层。** 在 M3 Pro 与 Ryzen 7 5800H Windows 笔记本上验证（同一项目 267–289 秒）；Windows 静态 CRT 包逐个 DLL 导入做了验证。→ [硬件](hardware.md)、[Windows](windows.md)
 - **给贡献者的工具。** 真实运行追踪器（Perfetto）、主图评估器、容差门、缺陷注入 harness、原生 vs NumPy 基准、内核的一条构建-测试-安装链、安装包验证、公开树与链接检查。→ [features §10](features.md#10-tools-contributors-actually-get)
 
@@ -97,7 +97,7 @@ flowchart LR
 ```
 
 1. **一起导入。** 把所有夜晚一次拖入：Light、原始校准帧和已有 Master。类型、目标、滤镜和采集配置来自头信息；冲突会被显示，绝不猜测。为 PixInsight WBPP 准备的文件夹可以直接导入：校准按 WBPP 的规则配对，每晚通过 `NIGHT_…`/`DATE_…` 文件夹使用自己的 Flat，所有折中都以警告显示（[校准](recipes/calibration.md#files-from-pixinsight-wbpp)）。Bayer Light 会被识别并按彩色通道组处理。
-2. **Blink 筛片。** 桌面端处理前必须人工看完每一张 Light，并逐通道确认。算法标记只作提示，不自动丢片。每个通道根据透明度、噪声、原生 PSF 和配准质量选择参考帧，预览共享配准、光度归一化和同一套拉伸。支持逐帧、连播、参考帧对比、保留/丢弃、整晚选择和撤销。只有主视图成功显示的图像才计入已看；不可显示的帧需重试或明确丢弃。控制器在启动前校验审阅记录与测量会话一致，再采用人工选择。命令行默认仍为 `selection.policy: legacy-gate`，也可显式选择 `unattended-v1`。
+2. **筛片。** 默认开启自动筛片：程序剔除流程建模不了的帧，并逐张列出原因（[自动筛片](recipes/automatic-screening.md)，英文）。取消勾选则手动 Blink 筛片：人工看完每一张 Light，并逐通道确认。算法标记只作提示，不自动丢片。每个通道根据透明度、噪声、原生 PSF 和配准质量选择参考帧，预览共享配准、光度归一化和同一套拉伸。支持逐帧、连播、参考帧对比、保留/丢弃、整晚选择和撤销。只有主视图成功显示的图像才计入已看；不可显示的帧需重试或明确丢弃。控制器在启动前校验审阅记录与测量会话一致，再采用人工选择。命令行默认仍为 `selection.policy: legacy-gate`，也可在配方里选择 `unattended-v1` 或 `unattended-v2`。
 3. **本地处理。** 校准、配准、归一化、稳健拒绝的积分、可选的 drizzle，以及逐通道天文解算，作为一个任务带实时进度、用满所有核心运行。
 4. **得到已校验的产品。** 线性单色与 RGB/LRGB FITS、由各宽带通道合成的超级亮度（`SuperL.fits`）、drizzle 的科学/权重/覆盖产品、检查预览、筛片报告与回执。只有回执、产品哈希与最终 WCS 全部校验通过，应用才显示*完成*。
 
@@ -131,7 +131,7 @@ make desktop-dev
 ```
 
 ```json
-{ "selection": { "policy": "unattended-v1", "priority": "balanced" } }
+{ "selection": { "policy": "unattended-v2" } }
 ```
 
 `ultra-fast-wbpp doctor --json` 报告硬件、原生内核与求解器就绪状态；`run-project` 是桌面端使用的多目标、多滤镜路径。打包含 Python 运行时的本地 `.app`：`make desktop-build-macos-prerelease`。打包内置 `solve-field` 和索引集、拿到另一台 Mac 上无需任何配置就能运行的自包含演示版：`make desktop-build-macos-demo`。两者的构建、检查和分发步骤见[从源码构建](building-from-source.md)（英文）。
@@ -140,7 +140,7 @@ make desktop-dev
 
 - **积极开发中的 alpha。** 真实素材流程在一台 M3 Pro（macOS）与一台 Ryzen 7 5800H 笔记本（Windows 11）上验证；其他机器运行未测量的通用配置。本地构建为 ad-hoc 签名，未公证；Windows 安装包未签名。已验证与未验证事项的清单见 [validation-matrix.md](validation-matrix.md)。
 - **单色已在真实数据上验证；彩色相机仅在合成数据上验证。** Bayer（RGGB/BGGR/GRBG/GBRG）Light 按马赛克校准、去马赛克为 R/G/B 通道主图并合成 RGB（[配方](recipes/osc-cfa.md)），但尚未处理过真实的 OSC 数据集。马赛克（所有面板共用一张画布、每帧只插值一次、所有面板一起做天测定位、按重叠区星测光匹配；[配方](recipes/project-mosaic-rgb.md)）在合成数据和真实的 M31 马赛克（L/R/G/B）上验证过：一个 2×2，用 Tycho-2 星表或 Gaia 分块都能发布；一个五面板，其中一块多云、在中天两侧拍摄。默认归一化包含空间背景校正，原 LocalNormalization 选项已下线。
-- **筛片。** 桌面端强制 Blink 人工审片，采用哪些帧由用户决定。标记规则和参考帧规则来自一个六晚数据集，不能保证识别所有缺陷。命令行默认仍为 `legacy-gate`；带反事实与区域权重的无人值守策略仍是命令行配方选项。
+- **筛片。** 桌面端默认用 `unattended-v2` 自动筛片；取消勾选“自动筛片”后必须完成 Blink 人工审片，采用哪些帧由用户决定。标记规则、参考帧规则和自动策略的阈值都来自同一台相机和同一个观测点，不能保证识别所有缺陷。命令行默认仍为 `legacy-gate`；`unattended-v1` 和 `unattended-v2` 是配方选项。
 
 Blink 已接入[互补显示诊断](blink-display-redesign.md)：共同尺度的星场视图保留变暗和噪声，背景差异显示空间变化，对应原生像素星区将星形与亮度分开比较。预览使用已导入且完整的 Flat + Dark/Bias；缺少校准或无法对比时会明确提示。只读对照工具复用同一套算法。 右侧检查器会自动换行长文件名与校准提示，内容按实际高度排版并纵向滚动。
 - **天文解算**需要另行安装求解器：macOS 上是 Astrometry.net 的 `solve-field` 与本地索引（[求解器设置](recipes/offline-solver-catalogs.md)），Windows 上是 ASTAP 加星表数据库以及应用托管的索引集（[Windows](windows.md)）；然后在应用中**重新检测配置**。不会向任何地方上传数据。

@@ -265,3 +265,115 @@ def test_region_weight_maps_weight_samples_and_are_recorded(
     # The counterfactual still reports every admitted frame.
     frames = [frame for report in selection["counterfactual"].values() for frame in report["frames"]]
     assert len(frames) == 8
+
+
+def test_unattended_v2_lists_every_automatic_drop_with_codes_and_a_preview(
+    tmp_path: Path, synthetic_project: dict[str, tuple[Path, ...]]
+) -> None:
+    """The desktop contract of ``unattended-v2``: ``policy``, ``AUTO_DROP`` frames
+    with ``SEL_*`` codes, a summary sentence, evidence and a preview, and the
+    ``suspectChannels`` list; the singleton night is kept at full confidence."""
+
+    import re
+
+    y, x = np.indices((128, 128), dtype=np.float64)
+    response = np.clip(0.82 + 0.18 * (1.0 - ((x - 63.5) ** 2 + (y - 63.5) ** 2) / (2 * 92.0**2)), 0.72, 1.0)
+    sky = _subpixel_shift(_stars((128, 128)), -1392 / 6252 * 128, -384 / 4176 * 128)
+    off_target = _write(
+        tmp_path / "LIGHT" / "light_R_off_target.fits",
+        1014.0 + sky * response + np.random.default_rng(29).normal(0.0, 1.0, sky.shape),
+        _header("Light", exposure=60.0, observed_at="2026-01-01T20:09:00Z"),
+    )
+    output = tmp_path / "unattended-v2"
+    request = replace(
+        _request(synthetic_project, output, lights=(*synthetic_project["lights"], off_target)),
+        selection=SelectionParameters(policy="unattended-v2"),
+    )
+    result = run_e2e(request, solver_backends=(FakeSolver(),))
+    assert result.success is True
+    singleton = str(synthetic_project["lights"][8].resolve(strict=True))
+    assert singleton in result.passed_light_paths
+    assert result.excluded_light_paths == (str(off_target.resolve(strict=True)),)
+
+    receipt = json.loads((output / "receipt.json").read_text(encoding="utf-8"))
+    quality = receipt["qualityControl"]
+    assert quality["selectionPolicy"] == "unattended-v2"
+    screening = quality["screening"]
+    assert screening["policy"] == "unattended-v2"
+    assert isinstance(screening["suspectChannels"], list)
+    for channel in screening["suspectChannels"]:
+        assert set(channel) == {"target", "filter", "codes", "summary"}
+    dropped = [item for item in screening["frames"] if item.get("reason") == "AUTO_DROP"]
+    assert len(dropped) == 1
+    drop = dropped[0]
+    assert Path(drop["path"]).name == off_target.name and drop["admitted"] is False
+    assert drop["flags"] and all(re.fullmatch(r"[A-Z0-9_]+", code) for code in drop["flags"])
+    assert drop["flags"][0] == "SEL_GUARD_GATE_FIELD_OFFSET_HARD"
+    assert drop["summary"].endswith(".") and drop["summary"][0].isupper()
+    assert 1 <= len(drop["evidence"]) <= 8
+    assert (output / drop["reviewPreview"]).is_file()
+    # The gate's own non-PASS frames keep their entries (the singleton night is REVIEW and admitted).
+    singleton_record = next(item for item in screening["frames"] if Path(item["path"]).name == Path(singleton).name)
+    assert singleton_record["disposition"] == "REVIEW" and singleton_record["admitted"] is True
+    assert "reason" not in singleton_record
+
+    manifest = json.loads((output / "qc" / "manifest.json").read_text(encoding="utf-8"))
+    decisions = {Path(item["path"]).name: item for item in manifest["selection"]["frames"]}
+    kept = decisions[Path(singleton).name]
+    assert kept["action"] == "KEEP" and kept["confidence"] == 1.0 and kept["firm"] is False
+    assert any(reason["code"].startswith("SEL_KEEP_INSUFFICIENT_EVIDENCE_") for reason in kept["reasons"])
+    assert decisions[off_target.name]["firm"] is True
+    v2 = manifest["selection"]["unattendedV2"]
+    assert v2["thresholds"]["algorithm"] == "unattended-selection-v2"
+    assert v2["thresholds"]["transparencyFloor"] == 0.25
+    assert v2["thresholds"]["gradientAmplitude"] == "not measured in-run"
+    assert v2["counts"]["excludedFirm"] == 1
+    assert len(v2["channels"]) == 1
+    # The blink evidence the policy used is part of the result.
+    assert (output / "qc" / "blink.json").is_file()
+
+    selection = json.loads((output / "qc" / "selection.json").read_text(encoding="utf-8"))
+    assert selection["unattendedV2"]["blocks"] == [] or all("outcome" in block for block in selection["unattendedV2"]["blocks"])
+    assert selection["integrationPasses"] == 1
+    pixel = json.loads((output / "receipts" / "pixel-pipeline.json").read_text(encoding="utf-8"))
+    weights = {
+        Path(path).name: float(record["qualityWeight"])
+        for path, record in pixel["registration"].items()
+        if isinstance(record, dict) and "qualityWeight" in record
+    }
+    assert len(weights) == 9 and all(weight > 0 for weight in weights.values())
+
+
+def test_project_screening_aggregates_the_automatic_policy_and_suspect_channels() -> None:
+    from ufwbpp.workflows.project import _project_screening
+
+    legacy = {"screening": {"counts": {"PASS": 3}, "admitted": 3, "excluded": 0, "frames": [], "selectionPolicy": "legacy-gate"}}
+    assert "policy" not in _project_screening([legacy])
+    automatic = [
+        {
+            "screening": {
+                "counts": {"PASS": 4, "REVIEW": 1},
+                "admitted": 4,
+                "excluded": 1,
+                "frames": [{"path": "a", "reason": "AUTO_DROP", "flags": ["SEL_GUARD_OVERLAP"]}],
+                "selectionPolicy": "unattended-v2",
+                "policy": "unattended-v2",
+                "suspectChannels": [{"target": "M 31 P1", "filter": "L", "codes": ["NO_SKY_BASELINE"], "summary": "x."}],
+            }
+        },
+        {
+            "screening": {
+                "counts": {"PASS": 2},
+                "admitted": 2,
+                "excluded": 0,
+                "frames": [],
+                "selectionPolicy": "unattended-v2",
+                "policy": "unattended-v2",
+                "suspectChannels": [],
+            }
+        },
+    ]
+    summary = _project_screening(automatic)
+    assert summary["policy"] == "unattended-v2" and summary["selectionPolicy"] == "unattended-v2"
+    assert summary["suspectChannels"] == [{"target": "M 31 P1", "filter": "L", "codes": ["NO_SKY_BASELINE"], "summary": "x."}]
+    assert summary["frames"][0]["reason"] == "AUTO_DROP" and summary["counts"] == {"PASS": 6, "REVIEW": 1}

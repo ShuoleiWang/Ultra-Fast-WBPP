@@ -139,7 +139,13 @@ an acceptance test pass.
 [`ufwbpp.selection`](../packages/engine/src/ufwbpp/selection/)
 turns the Light Frame QC evidence into per-frame decisions without a human
 review gate when a recipe sets `selection.policy` to `unattended-v1` (the
-default `legacy-gate` keeps the historical PASS-only admission). Guards
+default `legacy-gate` keeps the historical PASS-only admission).
+`unattended-v2`, the desktop's default, adds the Blink flags' cross-night
+channel statistics, a per-frame value model, firm exclusions no fraction
+guard can undo and a leave-block-out counterfactual of suspect nights; it
+lives in `selection/unattended_v2.py` and is described in the
+[automatic screening recipe](recipes/automatic-screening.md). What follows
+describes `unattended-v1`, whose machinery v2 reuses. Guards
 exclude frames the pipeline cannot use (hard gate failures, failed
 registration, transparency below the normalization floor, extreme extinction);
 REVIEW codes that only mean "not enough evidence" keep the frame at reduced

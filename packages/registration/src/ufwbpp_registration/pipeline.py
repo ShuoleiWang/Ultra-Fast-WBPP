@@ -238,6 +238,9 @@ class DetectionConfig:
     minimum_source_pixels: int = 5
     maximum_stars: int = 1200
     background_box: int = 64
+    # SEP object flags a detection may carry and still count (a bit mask);
+    # 0 keeps only clean detections.
+    accepted_flags: int = 0
 
     def __post_init__(self) -> None:
         if self.preview_long_edge < 256:
@@ -246,6 +249,8 @@ class DetectionConfig:
             raise ValueError("detection_sigma must be in [1, 20]")
         if self.minimum_source_pixels < 1 or self.maximum_stars < 20:
             raise ValueError("invalid source-count limits")
+        if not 0 <= self.accepted_flags <= 0xFF:
+            raise ValueError("accepted_flags must be a SEP flag mask in [0, 255]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -662,7 +667,7 @@ def detect_stars(image: FloatImage, config: DetectionConfig) -> StarCatalog:
         & (flux > 0)
         & (a > 0)
         & (b > 0)
-        & (flags == 0)
+        & ((flags & ~config.accepted_flags) == 0)
     )
     x, y, flux, peak, a, b = (
         values[finite_rows] for values in (x, y, flux, peak, a, b)

@@ -327,7 +327,46 @@ const EN = {
   astrometryFailedHint:
     "Plate solving did not verify a WCS for every channel. The integrated masters are discarded when solving fails: check the solver setup (solve-field with its helper tools, or ASTAP with its star database, and the offline catalog), then run again.",
   mosaicCatalogHint:
-    "The installed catalog holds too few stars in a mosaic panel to place it. The Gaia DR2 tiles (astrometry-net-5205-lite) are dense enough; the app cannot install them yet, so install them from the command line as the offline catalog guide describes, then run again.",
+    "The installed catalog holds too few stars in a mosaic panel to place it. The Gaia DR2 tiles (astrometry-net-5205-lite) are dense enough: install them under Advanced options and solver setup, then run again.",
+  gaiaInstallTitle: "Gaia DR2 tiles (optional, recommended for mosaics)",
+  gaiaInstallBody:
+    "With these tiles every master's sky coordinates are refitted on Gaia stars (about 0.15″ on real masters), and mosaic panels that hold too few Tycho-2 stars can still be placed.",
+  automaticScreening: "Automatic screening",
+  automaticScreeningTitle: "Automatic screening",
+  automaticScreeningHint:
+    "The engine judges every Light (cloud, moonlit nights, trails, focus, field) and weights the rest; the result lists every frame it left out and why. Uncheck to review every frame in Blink yourself.",
+  blinkInstead: "Review in Blink instead",
+  screeningAutoDrop: "Left out automatically",
+  screeningSuspectTitle: "Worth a look in Blink",
+  screeningSuspectHint:
+    "Automatic screening was unsure about these channels. To decide them yourself, uncheck Automatic screening, review them in Blink and process again.",
+  selectionCode_SEL_NIGHT_SKY_BRIGHT: "Bright-sky night with lost stars",
+  selectionCode_SEL_PATCHY_CLOUD: "Patchy cloud",
+  selectionCode_SEL_BACKGROUND_SHAPE: "Background changed shape with the sky",
+  selectionCode_SEL_TRANSPARENCY_FLOOR: "Too little transparency",
+  selectionCode_SEL_VALUE_NEGLIGIBLE: "Adds almost nothing to the stack",
+  selectionCode_SEL_PSF_BEYOND_MEDIAN: "Stars much wider than the channel's",
+  selectionCode_SEL_TRAILING: "Trailed stars",
+  selectionCode_SEL_SOURCES_LOW: "Lost most of its stars",
+  selectionCode_SEL_GUARD_OVERLAP: "Shifted far from the channel's reference",
+  selectionCode_SEL_GUARD_FEW_STARS: "Too few stars",
+  selectionCode_SEL_GUARD_REGISTRATION_FAILED: "Could not be registered",
+  selectionCode_SEL_BLOCK_COUNTERFACTUAL_REMOVED: "The master measured better without this night",
+  selectionCode_SEL_COUNTERFACTUAL_CONFIRMED_HARMFUL: "The master measured better without this frame",
+  selectionCode_SEL_OCCLUSION_AREA_EXCLUDED: "Part of the field blocked",
+  selectionCode_SEL_REGION_MOSTLY_BLANK: "Mostly lost to cloud or an obstruction",
+  selectionCode_guard: "Failed the quality gate",
+  selectionCode_SEL_GUARD_GATE_FIELD_OFFSET_HARD: "Off the target field",
+  selectionCode_SEL_GUARD_GATE_COHERENT_TRAILING_HARD: "Trailed stars",
+  selectionCode_SEL_GUARD_GATE_FRAGMENTED_TRAILING_HARD: "Trailed stars",
+  selectionCode_SEL_GUARD_GATE_MULTI_FAMILY_CLOUD_HARD: "Thick cloud",
+  selectionCode_SEL_GUARD_GATE_SPATIAL_DIMMING_STRONG: "Patchy cloud",
+  selectionCode_SEL_GUARD_GATE_SOURCE_RETENTION_STRONG: "Lost most of its stars",
+  selectionCode_SEL_GUARD_GATE_OCCLUSION_HARD: "Part of the field blocked",
+  selectionCode_SUSPECT_BLOCK_KEPT: "A suspect night was measured and kept",
+  selectionCode_SUSPECT_BLOCK_UNMEASURED: "A suspect night could not be measured",
+  selectionCode_NO_SKY_BASELINE: "No clean night to compare the sky with",
+  selectionCode_SOFT_GUARD_KEPT: "Some frames kept only to reach the minimum count",
   unsolvedEvidenceHint: "The receipts, QC previews and coverage maps of this attempt are kept for diagnosis at",
   runDescription:
     "Only a solved, receipt-verified result can become complete. Cancellation and failures never publish a partial success.",
@@ -665,6 +704,48 @@ export type BlinkFlagCode = (typeof BLINK_FLAG_CODES)[number];
 const isBlinkFlagCode = (code: string): code is BlinkFlagCode => (BLINK_FLAG_CODES as readonly string[]).includes(code);
 export function blinkFlagLabel(code: string, t: Translator): string {
   return isBlinkFlagCode(code) ? t(`blinkFlag_${code}`) : code;
+}
+
+/** Automatic screening's reason codes with a localised label (`selectionCode_*`); unknown codes show as themselves. */
+export const SELECTION_CODES = [
+  "SEL_NIGHT_SKY_BRIGHT",
+  "SEL_PATCHY_CLOUD",
+  "SEL_BACKGROUND_SHAPE",
+  "SEL_TRANSPARENCY_FLOOR",
+  "SEL_VALUE_NEGLIGIBLE",
+  "SEL_PSF_BEYOND_MEDIAN",
+  "SEL_TRAILING",
+  "SEL_SOURCES_LOW",
+  "SEL_GUARD_OVERLAP",
+  "SEL_GUARD_FEW_STARS",
+  "SEL_GUARD_REGISTRATION_FAILED",
+  "SEL_BLOCK_COUNTERFACTUAL_REMOVED",
+  "SEL_COUNTERFACTUAL_CONFIRMED_HARMFUL",
+  "SEL_OCCLUSION_AREA_EXCLUDED",
+  "SEL_REGION_MOSTLY_BLANK",
+  "SEL_GUARD_GATE_FIELD_OFFSET_HARD",
+  "SEL_GUARD_GATE_COHERENT_TRAILING_HARD",
+  "SEL_GUARD_GATE_FRAGMENTED_TRAILING_HARD",
+  "SEL_GUARD_GATE_MULTI_FAMILY_CLOUD_HARD",
+  "SEL_GUARD_GATE_SPATIAL_DIMMING_STRONG",
+  "SEL_GUARD_GATE_SOURCE_RETENTION_STRONG",
+  "SEL_GUARD_GATE_OCCLUSION_HARD",
+  "SUSPECT_BLOCK_KEPT",
+  "SUSPECT_BLOCK_UNMEASURED",
+  "NO_SKY_BASELINE",
+  "SOFT_GUARD_KEPT",
+] as const;
+type SelectionCode = (typeof SELECTION_CODES)[number];
+const isSelectionCode = (code: string): code is SelectionCode => (SELECTION_CODES as readonly string[]).includes(code);
+/**
+ * The label of a blink flag or an automatic-screening code; the quality gate's
+ * own hard failures share one label.  Other codes (the policy's notes on a
+ * frame) have none: the engine's sentence explains them.
+ */
+export function screeningCodeLabel(code: string, t: Translator): string | undefined {
+  if (isSelectionCode(code)) return t(`selectionCode_${code}`);
+  if (code.startsWith("SEL_GUARD_GATE_")) return t("selectionCode_guard");
+  return isBlinkFlagCode(code) ? t(`blinkFlag_${code}`) : undefined;
 }
 export function blinkFlagHint(code: string, t: Translator): string {
   return isBlinkFlagCode(code) ? t(`blinkFlagHint_${code}`) : "";
@@ -1005,7 +1086,45 @@ const ZH: Record<MessageKey, string> = {
   astrometryFailedHint:
     "板解算未能为每个通道验证 WCS。解算失败时不会保留积分后的 master：请检查解算器配置（solve-field 及其辅助工具，或 ASTAP 及其星表数据库，以及离线星表），然后重新运行。",
   mosaicCatalogHint:
-    "已安装的星表在某块马赛克面板里星数太少，无法定位这块面板。Gaia DR2 分块星表（astrometry-net-5205-lite）足够密；应用内暂时无法安装，请按离线星表指南用命令行安装后重新运行。",
+    "已安装的星表在某块马赛克面板里星数太少，无法定位这块面板。Gaia DR2 分块星表（astrometry-net-5205-lite）足够密：请在“高级选项与 solver 设置”里安装，然后重新运行。",
+  gaiaInstallTitle: "Gaia DR2 分块星表（可选，马赛克推荐）",
+  gaiaInstallBody:
+    "装上后，每张主图的天文坐标都会在 Gaia 恒星上重新拟合（真实主图上约 0.15″）；Tycho-2 星数不够的马赛克面板也能定位。",
+  automaticScreening: "自动筛片",
+  automaticScreeningTitle: "自动筛片",
+  automaticScreeningHint:
+    "程序逐张判断每张 Light（云、月光夜、拖线、跑焦、偏离视场），其余按质量加权；结果页会列出每一张被剔除的帧和原因。取消勾选则在闪视里逐张手动筛片。",
+  blinkInstead: "改为手动闪视",
+  screeningAutoDrop: "自动剔除",
+  screeningSuspectTitle: "建议在闪视中看一下",
+  screeningSuspectHint: "自动筛片对这些通道拿不准。如需自己决定：取消勾选“自动筛片”，在闪视里看一遍，再重新处理。",
+  selectionCode_SEL_NIGHT_SKY_BRIGHT: "亮天夜，星点减少",
+  selectionCode_SEL_PATCHY_CLOUD: "成片云",
+  selectionCode_SEL_BACKGROUND_SHAPE: "背景形状随天空亮度改变",
+  selectionCode_SEL_TRANSPARENCY_FLOOR: "透明度过低",
+  selectionCode_SEL_VALUE_NEGLIGIBLE: "对叠加几乎没有贡献",
+  selectionCode_SEL_PSF_BEYOND_MEDIAN: "星点比本通道明显更宽",
+  selectionCode_SEL_TRAILING: "星点拖线",
+  selectionCode_SEL_SOURCES_LOW: "星点丢失过多",
+  selectionCode_SEL_GUARD_OVERLAP: "相对通道参考帧偏移过大",
+  selectionCode_SEL_GUARD_FEW_STARS: "星点太少",
+  selectionCode_SEL_GUARD_REGISTRATION_FAILED: "无法配准",
+  selectionCode_SEL_BLOCK_COUNTERFACTUAL_REMOVED: "去掉这一晚后主图更好",
+  selectionCode_SEL_COUNTERFACTUAL_CONFIRMED_HARMFUL: "去掉这一帧后主图更好",
+  selectionCode_SEL_OCCLUSION_AREA_EXCLUDED: "视场部分被遮挡",
+  selectionCode_SEL_REGION_MOSTLY_BLANK: "大部分被云或遮挡物挡住",
+  selectionCode_guard: "未通过质量门",
+  selectionCode_SEL_GUARD_GATE_FIELD_OFFSET_HARD: "偏离目标视场",
+  selectionCode_SEL_GUARD_GATE_COHERENT_TRAILING_HARD: "星点拖线",
+  selectionCode_SEL_GUARD_GATE_FRAGMENTED_TRAILING_HARD: "星点拖线",
+  selectionCode_SEL_GUARD_GATE_MULTI_FAMILY_CLOUD_HARD: "厚云",
+  selectionCode_SEL_GUARD_GATE_SPATIAL_DIMMING_STRONG: "成片云",
+  selectionCode_SEL_GUARD_GATE_SOURCE_RETENTION_STRONG: "星点丢失过多",
+  selectionCode_SEL_GUARD_GATE_OCCLUSION_HARD: "视场部分被遮挡",
+  selectionCode_SUSPECT_BLOCK_KEPT: "可疑的一晚经测量后保留",
+  selectionCode_SUSPECT_BLOCK_UNMEASURED: "可疑的一晚无法测量",
+  selectionCode_NO_SKY_BASELINE: "没有干净的夜晚可对比天空亮度",
+  selectionCode_SOFT_GUARD_KEPT: "部分帧只为凑足最少张数而保留",
   unsolvedEvidenceHint: "本次尝试的收据、QC 预览与覆盖图保留在：",
   runDescription: "只有解算并通过收据校验的结果才会完成；取消或失败不会发布半套成功。",
   cancel: "安全取消",

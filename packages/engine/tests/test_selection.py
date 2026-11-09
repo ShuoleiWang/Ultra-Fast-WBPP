@@ -597,3 +597,336 @@ def test_counterfactual_is_invariant_to_io_bands_and_masks_nan_samples(band_rows
         return report.serializable()
 
     assert run(band_rows, True) == run(64, False)
+
+
+# --- unattended-v2 ---------------------------------------------------------
+
+from lightframeqc.blink_flags import (  # noqa: E402
+    BlinkFlagPolicy,
+    BlinkFrameInput,
+    channel_statistics,
+    compute_flags,
+)
+
+from ufwbpp.selection import (  # noqa: E402
+    V2_THRESHOLDS,
+    blink_context,
+    confirmed_harmful_blocks,
+    decide_v2,
+)
+from ufwbpp.selection.unattended_v2 import suspect_channels  # noqa: E402
+
+NGC6822_FIXTURE = (
+    Path(__file__).resolve().parents[2]
+    / "light-frame-qc"
+    / "tests"
+    / "fixtures"
+    / "blink"
+    / "ngc6822-features.json"
+)
+
+
+def _blink_input(item: FrameSelectionFeatures, **overrides) -> BlinkFrameInput:
+    base = dict(
+        path=item.path,
+        channel_id=item.group_id,
+        target=item.target,
+        filter_name=item.filter_name,
+        night=item.night_id,
+        observed_at=None,
+        airmass=1.2,
+        sky=800.0,
+        sky_mad=20.0,
+        star_count=item.star_count,
+        transparency=item.transparency,
+        extinction_mag=item.extra_extinction_mag,
+        fwhm_native=item.fwhm_native,
+        ellipticity=item.ellipticity,
+        eccentricity=None,
+        registration_ok=item.registration_ok,
+        matched_stars=item.matched_stars,
+        registration_rms=item.registration_rms,
+        overlap=item.overlap_fraction,
+        background_shape=0.05,
+        gate_disposition=item.gate_disposition,
+        gate_codes=(*item.hard_fail_codes, *item.review_codes),
+    )
+    base.update(overrides)
+    return BlinkFrameInput(**base)
+
+
+def _v2(
+    features: list[FrameSelectionFeatures],
+    blink_overrides: dict[str, dict] | None = None,
+    priority: str = "balanced",
+    **kwargs,
+):
+    inputs = [_blink_input(item, **(blink_overrides or {}).get(item.path, {})) for item in features]
+    flags = compute_flags(inputs, BlinkFlagPolicy())
+    context = blink_context(inputs, flags, channel_statistics(inputs))
+    parameters = SelectionParameters(policy="unattended-v2", priority=priority)
+    return decide_v2(features, parameters, context, **kwargs)
+
+
+# Feature paths in a run are resolved paths, the form the blink context keys
+# by; bare names are already that form on every OS ("/v2/x" is not on Windows).
+def _clean_group(count: int = 10, night: str = "2026-09-12") -> list[FrameSelectionFeatures]:
+    return [_features(f"v2-clean-{index}.fits", night_id=night) for index in range(count)]
+
+
+def test_v2_keeps_uniform_extinction_down_to_a_quarter_of_the_clean_transparency() -> None:
+    frames = _clean_group() + [
+        _features("v2-thin.fits", transparency=0.40, extra_extinction_mag=0.98, detected_source_ratio=0.6,
+                  gate_disposition="REVIEW", review_codes=("GATE_SOURCE_RETENTION_REVIEW",)),
+        _features("v2-quarter.fits", transparency=0.26, extra_extinction_mag=1.45),
+        _features("v2-thick.fits", transparency=0.20, extra_extinction_mag=1.75),
+    ]
+    decisions, summaries, _ = _v2(frames)
+    by_path = {item.path: item for item in decisions}
+    thin = by_path["v2-thin.fits"]
+    # 0.40x: kept at full confidence; the noise weight carries the loss.
+    assert thin.admitted and thin.confidence == 1.0 and thin.firm is False
+    assert any(code == "SEL_KEEP_RETENTION_EXPLAINED" for code, _ in thin.reasons)
+    assert by_path["v2-quarter.fits"].admitted
+    thick = by_path["v2-thick.fits"]
+    assert not thick.admitted and thick.firm
+    assert thick.reasons[0][0] == "SEL_TRANSPARENCY_FLOOR"
+    assert summaries["group-a"].transparency_median == pytest.approx(0.98)
+    # Every v2 decision carries its value and the components the receipt shows.
+    assert all(item.components is not None and item.block == "2026-09-12" for item in decisions)
+    assert thin.value is not None and thin.value < by_path["v2-clean-0.fits"].value
+    assert "LOW_VALUE" in thin.suspect
+    record = thin.serializable()
+    assert record["firm"] is False and record["components"]["transparencyRelative"] == pytest.approx(0.40 / 0.98)
+
+
+def test_v2_small_cohort_is_kept_at_full_confidence() -> None:
+    frames = [
+        _features(f"v2-small-{index}.fits", gate_disposition="REVIEW",
+                  review_codes=("GATE_INSUFFICIENT_COHORT", "GATE_INSUFFICIENT_NIGHT_BASELINE"))
+        for index in range(6)
+    ]
+    decisions, summaries, blocks = _v2(frames)
+    assert all(item.admitted and item.confidence == 1.0 for item in decisions)
+    assert all(
+        any(code == "SEL_KEEP_INSUFFICIENT_EVIDENCE_GATE_INSUFFICIENT_COHORT" for code, _ in item.reasons)
+        for item in decisions
+    )
+    # Six equal frames: the completeness factor is 1 and nothing is suspect.
+    assert all(item.weight_multiplier == 1.0 for item in decisions)
+    assert blocks == []
+    channels = suspect_channels(decisions, frames, summaries, blocks, {})
+    assert channels == []
+
+
+def test_v2_soft_exclusions_stop_at_the_minimum_count_guard() -> None:
+    # Five good frames, three with a wide PSF and three of negligible value:
+    # six soft exclusions against a guard of max(2, ceil(11 / 2)) = 6 kept, so
+    # the five lowest-valued frames go and the best remaining wide frame is
+    # kept at half confidence.
+    frames = (
+        [_features(f"v2-good-{index}.fits") for index in range(5)]
+        + [_features(f"v2-wide-{index}.fits", fwhm_native=6.0) for index in range(3)]
+        + [
+            _features(f"v2-faint-{index}.fits", transparency=0.26, extra_extinction_mag=1.46, star_count=700)
+            for index in range(3)
+        ]
+    )
+    decisions, _, _ = _v2(frames)
+    by_path = {item.path: item for item in decisions}
+    excluded = [item for item in decisions if not item.admitted]
+    assert len(excluded) == 5 and all(not item.firm and item.soft for item in excluded)
+    assert {item.reasons[0][0] for item in excluded if "faint" in item.path} == {"SEL_VALUE_NEGLIGIBLE"}
+    assert {item.reasons[0][0] for item in excluded if "wide" in item.path} == {"SEL_PSF_BEYOND_MEDIAN"}
+    guarded = [item for item in decisions if any(code == "SEL_SOFT_GUARD_KEPT" for code, _ in item.reasons)]
+    assert len(guarded) == 1 and "wide" in guarded[0].path
+    assert guarded[0].admitted and guarded[0].confidence == 0.5
+    assert all(by_path[f"v2-good-{index}.fits"].admitted for index in range(5))
+    # A two-frame group never loses a frame to a soft rule.
+    pair = [_features("v2-p0.fits"), _features("v2-p1.fits", fwhm_native=7.0)]
+    pair_decisions, _, _ = _v2(pair)
+    assert all(item.admitted for item in pair_decisions)
+
+
+def test_v2_overlap_and_psf_cut_offs_exclude_firmly_and_softly() -> None:
+    frames = _clean_group() + [
+        _features("v2-offset.fits", overlap_fraction=0.88),
+        _features("v2-wide.fits", fwhm_native=4.0 * 1.35),
+        _features("v2-wide-ok.fits", fwhm_native=4.0 * 1.25),
+        _features("v2-moon.fits", star_count=600),
+    ]
+    overrides = {"v2-moon.fits": {"sky": 800.0 * 1.9}}
+    decisions, _, _ = _v2(frames, overrides)
+    by_path = {item.path: item for item in decisions}
+    offset = by_path["v2-offset.fits"]
+    assert not offset.admitted and offset.firm and offset.reasons[0][0] == "SEL_GUARD_OVERLAP"
+    wide = by_path["v2-wide.fits"]
+    assert not wide.admitted and not wide.firm and wide.reasons[0][0] == "SEL_PSF_BEYOND_MEDIAN"
+    # Inside the cut-off ``balanced`` weights by noise alone; ``resolution``
+    # adds (F_median / F) ** 2 below its own 1.2 cut-off.
+    ok = by_path["v2-wide-ok.fits"]
+    assert ok.admitted and ok.psf_factor == 1.0
+    sharp_decisions, _, _ = _v2(
+        frames + [_features("v2-wide-slight.fits", fwhm_native=4.0 * 1.15)], overrides, priority="resolution"
+    )
+    sharp = {item.path: item for item in sharp_decisions}
+    assert not sharp["v2-wide-ok.fits"].admitted
+    assert sharp["v2-wide-slight.fits"].psf_factor == pytest.approx(1.15**-2)
+    # The blink combined rule (sky >= 1.6x and source ratio <= 0.60) is firm.
+    moon = by_path["v2-moon.fits"]
+    assert not moon.admitted and moon.firm and moon.reasons[0][0] == "SEL_NIGHT_SKY_BRIGHT"
+    assert moon.components["skyRatio"] == pytest.approx(1.9)
+    # The completeness factor cancels the registration score's reward for lost stars.
+    assert by_path["v2-clean-0.fits"].completeness_factor == 1.0
+    assert by_path["v2-clean-0.fits"].weight_multiplier == 1.0
+
+
+def test_v2_multi_family_cloud_and_patchy_cloud_without_a_map_are_firm() -> None:
+    frames = _clean_group() + [
+        _features("v2-two-families.fits", gate_disposition="HARD_FAIL",
+                  hard_fail_codes=("GATE_MULTI_FAMILY_CLOUD_HARD",), review_codes=("GATE_SPATIAL_DIMMING_REVIEW",)),
+        _features("v2-patch.fits", gate_disposition="REVIEW", review_codes=("GATE_SPATIAL_DIMMING_REVIEW",),
+                  spatial_dimming_p90_mag=0.3),
+    ]
+    decisions, _, _ = _v2(frames, region_maps_unavailable="region weight maps are not applied when drizzling onto a mosaic canvas")
+    by_path = {item.path: item for item in decisions}
+    assert by_path["v2-two-families.fits"].reasons[0][0] == "SEL_GUARD_GATE_MULTI_FAMILY_CLOUD_HARD"
+    patch = by_path["v2-patch.fits"]
+    assert not patch.admitted and patch.firm and patch.reasons[0][0] == "SEL_PATCHY_CLOUD"
+    assert "mosaic canvas" in patch.reasons[0][1]
+
+
+def test_v2_reproduces_the_ngc6822_screening_from_the_blink_fixture() -> None:
+    """All 23 moonlit L frames firm-excluded, no dark-night frame excluded, the
+    light-cloud R/G/B frames the maintainer kept are kept (one known exception)."""
+
+    raw = json.loads(NGC6822_FIXTURE.read_text(encoding="utf-8"))
+    frames = raw["frames"]
+    inputs = [
+        BlinkFrameInput.from_mapping({key: value for key, value in frame.items() if key not in {"id", "userDecision"}})
+        for frame in frames
+    ]
+    flags = compute_flags(inputs, BlinkFlagPolicy())
+
+    def features_of(item: BlinkFrameInput) -> FrameSelectionFeatures:
+        hard = tuple(code for code in item.gate_codes if code.endswith("_HARD"))
+        review = tuple(code for code in item.gate_codes if not code.endswith(("_HARD", "_INFO")))
+        return _features(
+            item.path,
+            group_id=item.channel_id,
+            filter_name=item.filter_name,
+            target=item.target,
+            night_id=item.night,
+            is_reference=item.is_qc_reference,
+            star_count=item.star_count,
+            registration_ok=item.registration_ok,
+            registration_estimated=item.transform is not None,
+            registration_rms=item.registration_rms,
+            matched_stars=item.matched_stars,
+            transparency=item.transparency,
+            extra_extinction_mag=item.extinction_mag,
+            fwhm_native=item.fwhm_native,
+            ellipticity=item.ellipticity,
+            orientation_coherence=None,
+            spatial_dimming_p90_mag=None,
+            detected_source_ratio=None,
+            overlap_fraction=item.overlap,
+            occlusion_area=None,
+            occlusion_density=None,
+            gate_disposition=item.gate_disposition or "HARD_FAIL",
+            hard_fail_codes=hard,
+            review_codes=review,
+            fwhm_night_ratio=None,
+            fwhm_group_ratio=None,
+        )
+
+    features = [features_of(item) for item in inputs]
+    context = blink_context(inputs, flags, channel_statistics(inputs))
+    decisions, summaries, blocks = decide_v2(features, SelectionParameters(policy="unattended-v2"), context)
+    by_path = {item.path: item for item in decisions}
+    user = {frame["path"]: frame["userDecision"] for frame in frames}
+
+    moonlit = [frame["path"] for frame in frames if frame["filter_name"] == "L" and frame["night"] == "2026-08-20"]
+    assert len(moonlit) == 23
+    assert all(not by_path[path].admitted and by_path[path].firm for path in moonlit)
+    assert sum("SEL_NIGHT_SKY_BRIGHT" in {code for code, _ in by_path[path].reasons} for path in moonlit) >= 20
+    dark = [frame["path"] for frame in frames if frame["filter_name"] == "L" and frame["night"] == "2026-08-17"]
+    assert len(dark) == 18 and all(by_path[path].admitted for path in dark)
+    kept_rgb = [
+        frame["path"] for frame in frames if frame["filter_name"] in {"R", "G", "B"} and user[frame["path"]] == "KEEP"
+    ]
+    excluded_kept = [path for path in kept_rgb if not by_path[path].admitted]
+    assert len(excluded_kept) == 1 and "G_0_CAA0.00°_2026-09-06_23-43-53" in excluded_kept[0]
+    assert by_path[excluded_kept[0]].reasons[0][0] == "SEL_SOURCES_LOW"
+    # The clean L baseline is the dark night; the moonlit night never forms a block.
+    assert summaries["L"].clean_count == 17 and summaries["L"].sky_clean is not None
+    assert not any(block.group_id == "L" for block in blocks)
+    receipt = selection_receipt(SelectionParameters(policy="unattended-v2"), features, decisions)
+    json.dumps(receipt)
+
+
+def _night_stack(seed: int = 5):
+    """Nine frames: six clean and a three-frame night with a shared bright, non-polynomial sky."""
+
+    rng = np.random.default_rng(seed)
+    frames, rows, width = 9, 128, 96
+    samples = np.empty((frames, rows, width), dtype=np.float32)
+    yy, xx = np.indices((rows, width), dtype=np.float64)
+    structure = 6.0 * np.exp(-(((yy - 40.0) ** 2 + (xx - 70.0) ** 2) / (2 * 18.0**2))) + 3.0 * np.sin(yy / 9.0)
+    for index in range(frames):
+        frame = 100.0 + rng.normal(0.0, 1.0, (rows, width))
+        if index >= 6:
+            frame += structure
+        samples[index] = frame
+    for cy, cx in ((20, 30), (70, 60), (100, 15)):
+        samples[:, cy - 1 : cy + 2, cx - 1 : cx + 2] += 400.0
+    accepted = np.ones(samples.shape, dtype=bool)
+    weights = np.full(frames, 1.0 / frames)
+    return samples, accepted, weights
+
+
+def test_leave_block_out_measures_a_bright_night_and_leaves_frame_results_unchanged() -> None:
+    samples, accepted, weights = _night_stack()
+    integrated = _integrate(samples, accepted, weights)
+    paths = [f"/n/{index}.fits" for index in range(9)]
+
+    def run(blocks):
+        accumulator = LeaveOneOutAccumulator(
+            paths, minimum_blocks=12, background_segment_blocks=2, statistics_rows=32, blocks=blocks
+        )
+        for first_row in (0, 32, 64, 96):
+            accumulator(
+                TileObservation(
+                    first_row=first_row,
+                    samples=samples[:, first_row : first_row + 32],
+                    accepted=accepted[:, first_row : first_row + 32],
+                    weights=weights,
+                    integrated=integrated[first_row : first_row + 32],
+                )
+            )
+        return accumulator.finalize(bootstrap=50)
+
+    plain = run(())
+    with_block = run([("g/nightB", (6, 7, 8)), ("g/nightA", (0, 1, 2))])
+    # The frame results do not change when blocks are measured alongside.
+    assert [frame.serializable() for frame in plain.frames] == [frame.serializable() for frame in with_block.frames]
+    assert "blocks" not in plain.serializable()
+    record = with_block.serializable()
+    assert record["blockMode"] == "analytic-leave-block-out-block8-v1" and len(record["blocks"]) == 2
+    night_b = next(block for block in with_block.blocks if block.name == "g/nightB")
+    night_a = next(block for block in with_block.blocks if block.name == "g/nightA")
+    assert night_b.paths == ("/n/6.fits", "/n/7.fits", "/n/8.fits") and night_b.weight == pytest.approx(3 / 9)
+    # Removing the bright night flattens the background and removes more
+    # structure than any one of its frames alone; removing a clean night does not.
+    assert night_b.delta_background_sigma is not None and night_b.delta_background_sigma > 0
+    assert night_b.delta_background_sigma > max(
+        frame.delta_background_sigma for frame in with_block.frames[6:]
+    )
+    assert night_a.delta_background_sigma is not None and night_a.delta_background_sigma < night_b.delta_background_sigma
+    thresholds = replace(V2_THRESHOLDS, minimum_counterfactual_tiles=4)
+    harmful = confirmed_harmful_blocks(with_block, thresholds)
+    assert set(harmful) == {"g/nightB"} and harmful["g/nightB"]["because"] == "background"
+    # Too few tiles: nothing is confirmed.
+    assert confirmed_harmful_blocks(with_block, V2_THRESHOLDS) == {}
+    with pytest.raises(ValueError):
+        LeaveOneOutAccumulator(paths, blocks=[("bad", (9,))])

@@ -88,6 +88,9 @@ class CorrespondenceParameters:
     match_radius_fwhm_factor: float = 2.0
     search_radius_diagonal_fraction: float = 0.6
     minimum_matches: int = 3
+    # SEP object flags a detected source may carry and still be matched (a
+    # bit mask, see ``sep.OBJ_*``).
+    accepted_source_flags: int = 0
 
     def validate(self) -> None:
         if (
@@ -106,6 +109,12 @@ class CorrespondenceParameters:
                 raise ValueError(f"{name} must be an integer of at least {floor}")
         if isinstance(self.background_box, bool) or not isinstance(self.background_box, int) or self.background_box < 16:
             raise ValueError("background_box must be an integer of at least 16")
+        if (
+            isinstance(self.accepted_source_flags, bool)
+            or not isinstance(self.accepted_source_flags, int)
+            or not 0 <= self.accepted_source_flags <= 0xFF
+        ):
+            raise ValueError("accepted_source_flags must be a SEP flag mask in [0, 255]")
         for name, value in (
             ("minimum_match_radius_pixels", self.minimum_match_radius_pixels),
             ("match_radius_fwhm_factor", self.match_radius_fwhm_factor),
@@ -125,7 +134,18 @@ class CorrespondenceParameters:
             "matchRadiusFwhmFactor": self.match_radius_fwhm_factor,
             "searchRadiusDiagonalFraction": self.search_radius_diagonal_fraction,
             "minimumMatches": self.minimum_matches,
+            "acceptedSourceFlags": self.accepted_source_flags,
         }
+
+
+# SEP's OBJ_MERGED: the source is the result of deblending.
+SEP_OBJ_MERGED = 1
+# Verification of a known WCS also matches deblended sources: on a deep stack
+# SEP deblends the bright stars an all-sky Tycho-2 index holds (an L stack of
+# 149 Lights kept 12 of its 29 such stars clean), so a stack that grew deeper
+# lost the matches its verification needs.  Fits and registration keep their
+# clean-only detections.
+VERIFICATION_PARAMETERS = CorrespondenceParameters(accepted_source_flags=SEP_OBJ_MERGED)
 
 
 @dataclass(frozen=True, slots=True)
@@ -529,6 +549,7 @@ def detect_field_stars(
         minimum_source_pixels=parameters.minimum_source_pixels,
         maximum_stars=parameters.maximum_stars,
         background_box=parameters.background_box,
+        accepted_flags=parameters.accepted_source_flags,
     )
     try:
         catalog = detect_stars(image, config)
@@ -626,7 +647,7 @@ def verify_solution(
     catalog-managed; ``bind_installed_set`` performs that binding.
     """
 
-    parameters = parameters or CorrespondenceParameters()
+    parameters = parameters or VERIFICATION_PARAMETERS
     parameters.validate()
     height, width = image_shape
     field = field_geometry(wcs_header, image_shape)
@@ -915,6 +936,8 @@ def bind_installed_set(
 
 __all__ = [
     "CLIPPED_RESIDUAL_STATISTIC",
+    "SEP_OBJ_MERGED",
+    "VERIFICATION_PARAMETERS",
     "CORRESPONDENCE_ARTIFACT_NAME",
     "MATCH_ARTIFACT_NAME",
     "VERIFICATION_METHOD",

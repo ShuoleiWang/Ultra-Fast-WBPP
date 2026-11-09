@@ -82,6 +82,25 @@ export function rememberOutputParent(value: string | undefined) {
     /* storage is a convenience only */
   }
 }
+/** The Gaia DR2 LITE index tiles (`astrometry-net-5205-lite`): the refit and sparse mosaic panels use them. */
+export const GAIA_CATALOG_ID = "astrometry-net-5205-lite";
+export const AUTOMATIC_SCREENING_STORAGE_KEY = "ultra-fast-wbpp.automaticScreening";
+/** Automatic screening is on unless the user turned it off; the choice is remembered. */
+export function storedAutomaticScreening(): boolean {
+  try {
+    return window.localStorage.getItem(AUTOMATIC_SCREENING_STORAGE_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+export function rememberAutomaticScreening(value: boolean) {
+  try {
+    if (value) window.localStorage.removeItem(AUTOMATIC_SCREENING_STORAGE_KEY);
+    else window.localStorage.setItem(AUTOMATIC_SCREENING_STORAGE_KEY, "off");
+  } catch {
+    /* storage is a convenience only */
+  }
+}
 
 export function buildMasterOverride(master: InspectedAsset, current?: MasterMetadataOverride): MasterMetadataOverride {
   if (current) return current;

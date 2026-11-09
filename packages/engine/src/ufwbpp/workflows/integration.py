@@ -26,6 +26,14 @@ from ..selection import (
     exclude_confirmed,
 )
 from ..selection.policy import selection_receipt
+from ..selection.unattended_v2 import (
+    POLICY_V2,
+    V2_THRESHOLDS,
+    block_indices,
+    confirmed_harmful_blocks,
+    receipt_block,
+    suspect_channels,
+)
 from ..stacking.integration import CalibrationError
 from ..stacking.parameters import PipelineResult, ShiftField
 from ..stacking.pipeline import run_portable_pipeline_fits
@@ -138,14 +146,24 @@ def _integrate_admitted_lights(
 
     selection_observers: dict[str, LeaveOneOutAccumulator] = {}
 
+    v2 = request.selection.policy == POLICY_V2
+
     def _selection_observer_factory(
         filter_name: str, ordered_paths: Sequence[str]
     ) -> LeaveOneOutAccumulator | None:
         if not request.selection.unattended or request.selection.counterfactual != "analytic":
             return None
-        accumulator = LeaveOneOutAccumulator(
-            [str(registration_source_aliases[str(staged)].resolve(strict=True)) for staged in ordered_paths]
-        )
+        originals = [str(registration_source_aliases[str(staged)].resolve(strict=True)) for staged in ordered_paths]
+        blocks: list[tuple[str, tuple[int, ...]]] = []
+        if v2 and not block_pass_used:
+            # The suspect nights of this group, measured as sets
+            # (leave-block-out); a block that is the whole group has nothing
+            # to compare with.
+            for block in screening.selection_blocks:
+                indices = block_indices(block, originals)
+                if indices and len(indices) < len(originals):
+                    blocks.append((f"{block.group_id}/{block.name}", indices))
+        accumulator = LeaveOneOutAccumulator(originals, blocks=blocks)
         selection_observers[filter_name] = accumulator
         return accumulator
 
@@ -159,6 +177,22 @@ def _integrate_admitted_lights(
     reintegration_passes: list[dict[str, Any]] = []
     admitted_at_start = len(light_subset)
     pass_index = 0
+    # unattended-v2: suspect nights are measured once; their leave-block-out
+    # results and outcomes travel to the receipt whatever the later passes see.
+    block_pass_used = False
+    block_results: dict[str, dict[str, Any]] = {}
+
+    def summarize() -> dict[str, Any]:
+        return _screening_summary(
+            screening.frame_results,
+            screening.passed,
+            screening.approved_review_paths,
+            screening.review_previews,
+            selection=screening.selection_decisions if v2 else None,
+            policy=POLICY_V2 if v2 else None,
+            suspect=screening.suspect_channels if v2 else None,
+        )
+
     while True:
         pass_index += 1
         pass_root = work / (
@@ -219,21 +253,66 @@ def _integrate_admitted_lights(
             annotated = annotate_with_counterfactual(annotated, report, request.selection)
         screening.selection_decisions = annotated
         harmful = confirmed_harmful(screening.selection_decisions)
-        if (
-            pass_index >= request.selection.max_integration_passes
-            or request.selection.counterfactual_action != "exclude"
-            or not harmful
-        ):
+        harmful_blocks: dict[str, dict[str, Any]] = {}
+        if v2 and not block_pass_used:
+            for report in selection_reports.values():
+                for block in report.blocks:
+                    block_results[block.name] = {**block.serializable(), "outcome": "KEPT", "pass": pass_index}
+                    screening.block_outcomes[block.name] = "KEPT"
+                harmful_blocks.update(confirmed_harmful_blocks(report, V2_THRESHOLDS))
+            if harmful_blocks:
+                block_pass_used = True
+        if request.selection.counterfactual_action != "exclude" or (not harmful and not harmful_blocks):
             break
-        removable, kept_reasons = _counterfactual_exclusions(
-            harmful,
-            light_subset=light_subset,
+        if pass_index >= request.selection.max_integration_passes and not harmful_blocks:
+            break
+        kept_reasons: dict[str, str] = {}
+        removable: list[str] = []
+        if harmful_blocks:
+            # A measured night is removed whole (no fraction guard); the
+            # normalization reference and the two-Light minimum still hold.
+            block_paths = {path for item in harmful_blocks.values() for path in item["paths"]}
+            block_frames = [
+                item for item in screening.selection_decisions if item.admitted and item.path in block_paths
+            ]
+            removable, kept_reasons = _counterfactual_exclusions(
+                block_frames,
+                light_subset=light_subset,
+                source_aliases=registration_source_aliases,
+                frame_results=screening.frame_results,
+                registration=registration,
+                admitted_at_start=admitted_at_start,
+                soft_exclusion_fraction_guard=request.selection.soft_exclusion_fraction_guard,
+                fraction_guard=False,
+            )
+            for name, item in harmful_blocks.items():
+                removed_here = [path for path in item["paths"] if path in removable]
+                outcome = "REMOVED" if removed_here else "KEPT"
+                block_results[name].update({"outcome": outcome, "because": item["because"], "removed": removed_here})
+                screening.block_outcomes[name] = outcome
+            screening.selection_decisions = exclude_confirmed(
+                screening.selection_decisions,
+                removable,
+                reason=(
+                    "SEL_BLOCK_COUNTERFACTUAL_REMOVED",
+                    "excluded: the master measured better without this frame's night (leave-block-out)",
+                ),
+            )
+        frame_harmful = [item for item in harmful if item.path not in set(removable)]
+        frame_removable, frame_kept = _counterfactual_exclusions(
+            frame_harmful,
+            light_subset=[
+                staged
+                for staged in light_subset
+                if str(registration_source_aliases[str(staged)].resolve(strict=True)) not in set(removable)
+            ],
             source_aliases=registration_source_aliases,
             frame_results=screening.frame_results,
             registration=registration,
             admitted_at_start=admitted_at_start,
             soft_exclusion_fraction_guard=request.selection.soft_exclusion_fraction_guard,
         )
+        kept_reasons.update(frame_kept)
         # The confirming counterfactual numbers travel with the record:
         # the next pass measures only the remaining frames.
         harmful_evidence = {
@@ -241,17 +320,19 @@ def _integrate_admitted_lights(
             for item in harmful
             if item.counterfactual is not None
         }
-        if not removable:
+        if not removable and not frame_removable:
             selection_reintegration = {
                 "status": "NOT_APPLIED",
                 "pass": pass_index,
                 "confirmedHarmful": [item.path for item in harmful],
                 "keptBecause": kept_reasons,
                 "evidence": harmful_evidence,
+                **({"confirmedHarmfulBlocks": harmful_blocks} if harmful_blocks else {}),
             }
             reintegration_passes.append(selection_reintegration)
             break
-        screening.selection_decisions = exclude_confirmed(screening.selection_decisions, removable)
+        screening.selection_decisions = exclude_confirmed(screening.selection_decisions, frame_removable)
+        removable = [*removable, *frame_removable]
         removed_set = set(removable)
         light_subset = [
             staged
@@ -274,9 +355,7 @@ def _integrate_admitted_lights(
                 consumer_source_groups=sources.pixel_groups(screening.passed),
                 internal_source_identities=trusted_source_identities,
             )
-        screening.screening = _screening_summary(
-            screening.frame_results, screening.passed, screening.approved_review_paths, screening.review_previews
-        )
+        screening.screening = summarize()
         selection_reintegration = {
             "status": "APPLIED",
             "pass": pass_index,
@@ -284,6 +363,7 @@ def _integrate_admitted_lights(
             "keptBecause": kept_reasons,
             "evidence": harmful_evidence,
             "discardedPass": pass_root.name,
+            **({"confirmedHarmfulBlocks": harmful_blocks} if harmful_blocks else {}),
         }
         reintegration_passes.append(selection_reintegration)
         _emit(
@@ -295,6 +375,17 @@ def _integrate_admitted_lights(
         )
         remove_tree(pass_root, ignore_errors=True)
     pipeline_root = pass_root
+    if v2:
+        # Block outcomes are known only now; the summary the receipt and the
+        # desktop show carries them.
+        screening.suspect_channels = suspect_channels(
+            screening.selection_decisions,
+            screening.selection_features,
+            screening.selection_summaries,
+            screening.selection_blocks,
+            screening.block_outcomes,
+        )
+        screening.screening = summarize()
     if request.selection.unattended:
         selection_block = selection_receipt(
             request.selection,
@@ -302,6 +393,17 @@ def _integrate_admitted_lights(
             screening.selection_decisions,
             selection_reports,
             region_maps=screening.selection_region_maps,
+            unattended_v2=(
+                receipt_block(
+                    V2_THRESHOLDS,
+                    screening.selection_summaries,
+                    screening.selection_decisions,
+                    screening.selection_blocks,
+                    [block_results[name] for name in sorted(block_results)],
+                )
+                if v2
+                else None
+            ),
         )
         if selection_reintegration is not None:
             applied = [item for item in reintegration_passes if item.get("status") == "APPLIED"]

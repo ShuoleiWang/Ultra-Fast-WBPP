@@ -156,6 +156,10 @@ pub(crate) struct UiRunSource {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct UiRecipeOptions {
     balanced: bool,
+    // The engine screens the Lights (`unattended-v2`) instead of a Blink
+    // review; absent means the manual review, which a request must then prove.
+    #[serde(default)]
+    automatic_screening: bool,
     drizzle_enabled: bool,
     #[serde(default = "default_drizzle_scale")]
     drizzle_scale: u32,
@@ -499,11 +503,22 @@ struct UiScreeningFrame {
     preview_data_url: Option<String>,
     /// With an explicit selection: `USER_DROP` for a Light the user dropped,
     /// `USER_KEEP_OVERRIDE` for a kept Light that carried an EXCLUDE flag.
+    /// With automatic screening: `AUTO_DROP` for a Light it left out.
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
-    /// The blink flag codes of the frame, when the run recorded them.
+    /// The blink flag codes, or automatic screening's `SEL_*` codes, of the frame.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     flags: Vec<String>,
+}
+
+/// A channel automatic screening was unsure about, worth a look in Blink.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UiSuspectChannel {
+    target: String,
+    filter: String,
+    codes: Vec<String>,
+    summary: String,
 }
 
 /// The run's Light screening: counts plus every frame that needed a decision.
@@ -514,6 +529,11 @@ struct UiScreening {
     excluded: u64,
     counts: BTreeMap<String, u64>,
     frames: Vec<UiScreeningFrame>,
+    /// The engine's selection policy when automatic screening decided.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    suspect_channels: Vec<UiSuspectChannel>,
 }
 
 struct Completion {
@@ -533,6 +553,9 @@ struct CompleteEvent {
 }
 
 const MAX_SCREENING_FRAMES: usize = 512;
+/// A screening record listing more frames than this is malformed.
+const MAX_SCREENING_RECORDS: usize = 20_000;
+const MAX_SUSPECT_CHANNELS: usize = 64;
 const MAX_SCREENING_PREVIEWS: usize = 128;
 const MAX_SCREENING_PREVIEW_BYTES: u64 = 512 * 1024;
 const MAX_SCREENING_PREVIEW_TOTAL_BYTES: usize = 24 * 1024 * 1024;

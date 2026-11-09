@@ -136,7 +136,7 @@ pub(crate) fn start<R: Runtime>(
     if registry.shutting_down.load(Ordering::Acquire) {
         return Err("application shutdown is already in progress".to_owned());
     }
-    validate_blink_review(&request, &crate::sidecar::blink_sessions_root(&app)?)?;
+    validate_screening(&request, &crate::sidecar::blink_sessions_root(&app)?)?;
     let executable = discover_engine(&app)?;
     start_with(app, registry, request, executable)
 }
