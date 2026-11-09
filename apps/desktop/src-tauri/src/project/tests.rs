@@ -90,6 +90,16 @@ fn advanced_algorithms_are_absent_unless_enabled_and_refuse_drizzle() {
     let default_value = project_request_json(&build(base.clone()), &output).unwrap();
     assert!(default_value["recipe"].get("properCoaddition").is_none());
     assert!(default_value["recipe"].get("integration").is_none());
+    assert!(default_value["recipe"].get("superLuminance").is_none());
+
+    // Unchecking the super luminance is the only way the block appears.
+    let mut without_super_luminance = base.clone();
+    without_super_luminance["superLuminance"] = serde_json::json!(false);
+    let value = project_request_json(&build(without_super_luminance), &output).unwrap();
+    assert_eq!(
+        value["recipe"]["superLuminance"],
+        serde_json::json!({"enabled": false})
+    );
 
     let mut enabled = base.clone();
     enabled["properCoaddition"] = serde_json::json!({"enabled": true, "outlierHandling": "reuse-rejection", "apodizationPixels": 64});
@@ -839,6 +849,7 @@ sys.exit(1)
                 solver_required: true,
                 calibration_workflow: default_calibration_workflow(),
                 proper_coaddition: None,
+                super_luminance: true,
             },
             master_metadata_overrides: vec![],
             raw_frame_metadata_overrides: vec![],
@@ -938,6 +949,7 @@ fn standard_master_workflow_reaches_worker_without_fabricated_metadata() {
             solver_required: true,
             calibration_workflow: "mono-standard-v1".into(),
             proper_coaddition: None,
+            super_luminance: true,
         },
         master_metadata_overrides: vec![],
         raw_frame_metadata_overrides: vec![],
@@ -1221,6 +1233,7 @@ print(json.dumps({"success":True,"code":"PROJECT_MONO_SUCCEEDED","state":"SOLVED
                 solver_required: true,
                 calibration_workflow: default_calibration_workflow(),
                 proper_coaddition: None,
+                super_luminance: true,
             },
             master_metadata_overrides: vec![],
             raw_frame_metadata_overrides: vec![UiRawFrameOverride {

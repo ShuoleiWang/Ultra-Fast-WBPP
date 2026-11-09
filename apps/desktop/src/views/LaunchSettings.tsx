@@ -153,9 +153,21 @@ export function LaunchSettings({
         <details className="disclosure" open={!workflow.solverSetupReady && workflow.nativeRuntime}>
           <summary>
             <span>{t("advanced")}</span>
-            <small>Drizzle · LN · WCS</small>
+            <small>SuperL · Drizzle · LN · WCS</small>
           </summary>
           <div className="details-content">
+            <label className={`toggle ${workflow.superLuminanceEnabled ? "enabled" : ""}`}>
+              <input
+                type="checkbox"
+                checked={workflow.superLuminanceEnabled}
+                disabled={workflow.runNavigationLocked}
+                onChange={(event) => workflow.setSuperLuminanceEnabled(event.target.checked)}
+              />
+              <span>
+                <strong>{t("superLuminance")}</strong>
+                <small>{t("superLuminanceHint")}</small>
+              </span>
+            </label>
             <label className={`toggle ${workflow.drizzleEnabled ? "enabled" : ""}`}>
               <input
                 type="checkbox"

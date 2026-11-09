@@ -23,7 +23,7 @@ A recipe is a versioned scientific contract, not a loose collection of GUI toggl
 
 ## Opt-in extras
 
-[Advanced algorithms](advanced-algorithms.md) covers the two options no built-in contract enables: ZOGY proper coaddition, which adds one more product per filter next to the ordinary master, and the robust IRLS combination of the accepted samples. Both are off by default and a recipe that omits them is unchanged, digest included.
+[Advanced algorithms](advanced-algorithms.md) covers the two options no built-in contract enables: ZOGY proper coaddition, which adds one more product per filter next to the ordinary master, and the robust IRLS combination of the accepted samples. Both are off by default and a recipe that omits them is unchanged, digest included. It also describes `SuperL.fits`, the super luminance every project with two or more qualifying broadband channels publishes beside them unless `superLuminance.enabled` is false, and `color.luminance`, which makes it the LRGB product's luminance.
 
 The GUI recommends a recipe from metadata but never silently changes one after planning. Any change produces a new canonical recipe digest and invalidates only affected downstream artifacts.
 

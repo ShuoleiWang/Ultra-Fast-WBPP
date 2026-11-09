@@ -370,6 +370,8 @@ def build_e2e_request(
         recipe_digest=_recipe_sha256(recipe),
         selection=selection,
         explicit_selection=explicit_selection,
+        super_luminance=recipe.super_luminance.enabled,
+        color_luminance=recipe.color.luminance,
     )
 
 

@@ -139,6 +139,8 @@ def _normalized_color_filter(value: Any) -> str | None:
         "L": "L",
         "LUM": "L",
         "LUMINANCE": "L",
+        # The super luminance of the broadband channels takes the L role.
+        "SUPERL": "L",
     }
     return aliases.get(token)
 

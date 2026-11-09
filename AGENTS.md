@@ -128,7 +128,8 @@ its stages), `calibration/matching.py` for calibration grouping
 and pairing (WBPP's rules; planning, preflight and the run share it),
 `calibration/inputs.py` for content-bound master metadata, `image_io/fits.py` for FITS primitives, `solvers/process.py` for
 shared solver execution, `products/publication.py` for create-only
-colour/mosaic publication, `errors.py` for errors several packages raise and
+colour/mosaic publication, `products/super_luminance.py` for the
+`SuperL.fits` beside a project's channels, `errors.py` for errors several packages raise and
 `integrity.py` for the byte forms digests are computed over. A private helper
 (`_name`) is shared only inside its subpackage; one another subpackage needs
 gets a public name. Engine modules import without cycles (only the lazy

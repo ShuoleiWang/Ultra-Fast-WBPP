@@ -22,7 +22,7 @@ The online `pip-audit 2.10.1 --local` check reported no known vulnerabilities. T
 
 Ultra-Fast WBPP therefore does not publish a Linux desktop bundle while that dependency chain remains. Linux is a source-build/development CI target only. macOS and Windows releases still rerun target-specific dependency audits, and the warning is not treated as a blanket waiver for future Tauri versions.
 
-The repository files configure Dependabot, dependency review, CodeQL, and least-privilege workflow permissions. GitHub Dependency Graph, vulnerability alerts, secret scanning, push protection, and hosted results become evidence only after they are enabled and pass on the authorized public repository. The `glib 0.18.5` warning is documented as a target-specific risk because Linux desktop bundles are unsupported; it must be reconsidered before any Linux release or when Tauri moves to a patched GTK dependency line.
+The repository files configure dependency review, CodeQL for the Python code, and least-privilege workflow permissions. GitHub Dependency Graph, vulnerability alerts, secret scanning, push protection, and hosted results become evidence only after they are enabled and pass on the authorized public repository. The `glib 0.18.5` warning is documented as a target-specific risk because Linux desktop bundles are unsupported; it must be reconsidered before any Linux release or when Tauri moves to a patched GTK dependency line.
 
 ## macOS frozen-worker entitlement
 

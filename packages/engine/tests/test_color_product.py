@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import hashlib
 import json
+import math
 from pathlib import Path
 import struct
 
@@ -249,3 +250,76 @@ def test_post_commit_parent_fsync_failure_is_not_reported_as_uncommitted(
     assert calls == 2
     assert Path(result.receipt_path).is_file()
     assert result.receipt["publication"]["parentDirectoryFsync"] == "BEST_EFFORT_AFTER_COMMIT"
+
+
+def test_super_luminance_weights_channels_by_their_pixel_noise_and_keeps_the_reference(tmp_path: Path) -> None:
+    """One field in L, R, G, B and Ha: the super luminance takes the
+    broadband channels at weights scale^2 / noise^2, leaves out G (stars 30 %
+    wider) and Ha, keeps L's flux scale, sky level and footprint, and lowers
+    L's noise by the predicted gain.  Faint structure that every channel
+    shares does not move the weights, and B, whose stars are faintest, still
+    measures as sharp as L."""
+
+    from scipy import ndimage
+
+    from ufwbpp.products.super_luminance import build_super_luminance
+
+    shape = (720, 720)
+    sky = np.random.default_rng(3)
+    count = 260
+    rows, columns = sky.uniform(12, shape[0] - 12, count), sky.uniform(12, shape[1] - 12, count)
+    fluxes = 10 ** sky.uniform(3.0, 4.2, count)
+    common = ndimage.gaussian_filter(sky.normal(0.0, 1.0, shape), 6.0)
+    common *= 6.0 / common.std()
+    # filter: (star scale, sky noise, FWHM, sky level)
+    channels = {
+        "l": (1.0, 2.0, 3.0, 300.0), "r": (0.5, 1.5, 3.0, 90.0), "g": (0.6, 1.5, 3.9, 140.0),
+        "b": (0.4, 3.0, 3.0, 70.0), "ha": (0.1, 1.0, 3.0, 20.0),
+    }
+    truth = {}
+    paths = {}
+    for index, (key, (scale, noise, fwhm, level)) in enumerate(channels.items()):
+        sigma = fwhm / 2.3548
+        image = level + scale * common
+        for row, column, flux in zip(rows, columns, fluxes):
+            y0, x0 = int(row) - 10, int(column) - 10
+            yy, xx = np.mgrid[y0 : y0 + 21, x0 : x0 + 21]
+            image[y0 : y0 + 21, x0 : x0 + 21] += scale * flux / (2 * math.pi * sigma**2) * np.exp(
+                -((yy - row) ** 2 + (xx - column) ** 2) / (2 * sigma**2)
+            )
+        truth[key] = image.copy()
+        image += np.random.default_rng(10 + index).normal(0.0, noise, shape)
+        if key == "l":
+            image[:40, :40] = np.nan
+        if key == "r":
+            image[300:310] = np.nan
+        paths[key] = tmp_path / f"{key.upper()}.fits"
+        fits.writeto(paths[key], image.astype(np.float32), fits.Header({"FILTER": key.upper(), "CRVAL1": 150.0}))
+
+    record = build_super_luminance(paths, "l", tmp_path / "SuperL.fits", filter_names={key: key.upper() for key in paths})
+
+    assert record["status"] == "CREATED", record
+    assert {key: entry["included"] for key, entry in record["channels"].items()} == {
+        "l": True, "r": True, "g": False, "b": True,
+    }
+    assert "wider" in record["channels"]["g"]["reason"]
+    assert record["channels"]["b"]["fwhmRatio"] == pytest.approx(1.0, abs=0.05)
+    for key in ("r", "b"):
+        assert record["channels"][key]["scale"] == pytest.approx(channels[key][0], rel=0.03)
+    expected = {key: channels[key][0] ** 2 / channels[key][1] ** 2 for key in ("l", "r", "b")}
+    total = sum(expected.values())
+    for key, value in expected.items():
+        assert record["channels"][key]["weight"] == pytest.approx(value / total, rel=0.1)
+    assert record["effectiveGain"] == pytest.approx(math.sqrt(total / expected["l"]), rel=0.05)
+    assert record["stars"]["fwhmRatio"] == pytest.approx(1.0, abs=0.03)
+    result = fits.getdata(tmp_path / "SuperL.fits")
+    header = fits.getheader(tmp_path / "SuperL.fits")
+    assert header["FILTER"] == "SuperL" and header["OAFSLCH"] == "L,R,B" and header["CRVAL1"] == 150.0
+    # L's footprint and sky level, with no step where R has no data; the
+    # noise falls by the predicted gain.
+    assert np.isnan(result[:40, :40]).all() and np.isfinite(result[40:]).all()
+    residual = result - truth["l"]
+    assert float(np.nanmedian(residual)) == pytest.approx(0.0, abs=0.1)
+    assert float(np.median(residual[300:310, 40:])) == pytest.approx(0.0, abs=0.3)
+    noise = 1.4826 * float(np.nanmedian(np.abs(residual - np.nanmedian(residual))))
+    assert noise == pytest.approx(channels["l"][1] / record["effectiveGain"], rel=0.05)

@@ -342,6 +342,9 @@ pub(super) fn project_request_json(
             });
         }
     }
+    if !request.recipe.super_luminance {
+        payload["recipe"]["superLuminance"] = serde_json::json!({"enabled": false});
+    }
     // Top-level, and only when the blink view produced one: the engine's
     // request loader treats the key itself as the switch to `explicit-v1`.
     if let Some(selection) = &request.selection {

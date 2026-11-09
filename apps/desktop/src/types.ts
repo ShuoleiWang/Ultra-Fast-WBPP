@@ -192,6 +192,11 @@ export interface ProjectRecipeOptions {
    * each target's solved master; the project's masters are unchanged. Absent when off.
    */
   properCoaddition?: ProperCoadditionOptions;
+  /**
+   * `SuperL.fits` beside the channels is on by default; `false` only when the
+   * user unchecks it. Absent when on, so a default run's recipe is unchanged.
+   */
+  superLuminance?: false;
 }
 export interface ReviewApprovalSelection {
   sourceSha256: string;

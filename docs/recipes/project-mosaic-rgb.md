@@ -64,11 +64,14 @@ ultra-fast-wbpp run-project \
    - A filter shot on only some panels covers those panels and is NaN elsewhere.
    - The colour cube keeps only the pixels where the R, G and B mosaics all have data; L may cover more. A filter's other photometric components are not part of the cube.
 
+8. **Super luminance.** The broadband mosaics are combined into `SuperL.fits` on the canvas, as for one target (see [advanced algorithms](advanced-algorithms.md#super-luminance-as-the-lrgb-luminance)). It keeps the reference mosaic's footprint; a filter shot on only some panels covers less than 98 % of it and is left out, so the depth does not change where its panels end.
+
 ## The published directory
 
 ```
 M31-mosaic/
   L.fits  R.fits  G.fits  B.fits   # one mosaic per filter, on the shared canvas
+  SuperL.fits                      # super luminance of the broadband mosaics
   LRGB.fits                        # linear colour cube (RGB.fits without L)
   previews/
   receipt.json

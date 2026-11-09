@@ -11,6 +11,10 @@ from .selection.parameters import SelectionParameters
 from .stacking.integration import COMBINATIONS, DEFAULT_COMBINATION
 
 
+# The luminance of the LRGB product: the L channel or the super luminance.
+COLOR_LUMINANCES = ("L", "superL")
+
+
 class RecipeError(ValueError):
     code = "RECIPE_INVALID"
 
@@ -521,6 +525,46 @@ class SelectionRecipe:
 
 
 @dataclass(frozen=True, slots=True)
+class SuperLuminanceRecipe:
+    """The optional ``superLuminance`` block: whether a project publishes
+    ``SuperL.fits`` beside its channels (default on)."""
+
+    enabled: bool = True
+
+    @classmethod
+    def from_dict(cls, raw: Any) -> SuperLuminanceRecipe:
+        value = _mapping(raw, "superLuminance")
+        _unknown(value, {"enabled"}, "superLuminance")
+        enabled = value.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise RecipeError("superLuminance.enabled must be boolean")
+        return cls(enabled=enabled)
+
+    def serializable(self) -> dict[str, Any]:
+        return {"enabled": self.enabled}
+
+
+@dataclass(frozen=True, slots=True)
+class ColorRecipe:
+    """The optional ``color`` block: the luminance of the LRGB product, the
+    L channel (default) or the super luminance of the broadband channels."""
+
+    luminance: str = "L"
+
+    @classmethod
+    def from_dict(cls, raw: Any) -> ColorRecipe:
+        value = _mapping(raw, "color")
+        _unknown(value, {"luminance"}, "color")
+        luminance = value.get("luminance", "L")
+        if luminance not in COLOR_LUMINANCES:
+            raise RecipeError("color.luminance must be one of: " + ", ".join(COLOR_LUMINANCES))
+        return cls(luminance=luminance)
+
+    def serializable(self) -> dict[str, Any]:
+        return {"luminance": self.luminance}
+
+
+@dataclass(frozen=True, slots=True)
 class Recipe:
     calibration: CalibrationRecipe = field(default_factory=CalibrationRecipe)
     selection: SelectionRecipe = field(default_factory=SelectionRecipe)
@@ -530,6 +574,8 @@ class Recipe:
         default_factory=ProperCoadditionRecipe
     )
     integration: IntegrationRecipe = field(default_factory=IntegrationRecipe)
+    super_luminance: SuperLuminanceRecipe = field(default_factory=SuperLuminanceRecipe)
+    color: ColorRecipe = field(default_factory=ColorRecipe)
     local_normalization: LocalNormalizationRecipe = field(
         default_factory=LocalNormalizationRecipe
     )
@@ -551,6 +597,8 @@ class Recipe:
                 "drizzle",
                 "properCoaddition",
                 "integration",
+                "superLuminance",
+                "color",
                 "localNormalization",
                 "outputFormat",
                 "overwrite",
@@ -596,12 +644,18 @@ class Recipe:
                 "the drizzled master lives on a finer grid, so the proper coadd "
                 "would have no same-grid solved master to inherit a verified WCS from"
             )
+        super_luminance = SuperLuminanceRecipe.from_dict(value.get("superLuminance"))
+        color = ColorRecipe.from_dict(value.get("color"))
+        if color.luminance == "superL" and not super_luminance.enabled:
+            raise RecipeError("color.luminance superL needs superLuminance.enabled: the LRGB product would have no super luminance")
         return cls(
             calibration=CalibrationRecipe.from_dict(value.get("calibration")),
             solver=SolverRecipe.from_dict(value.get("solver")),
             drizzle=DrizzleRecipe.from_dict(value.get("drizzle")),
             proper_coaddition=proper_coaddition,
             integration=IntegrationRecipe.from_dict(value.get("integration")),
+            super_luminance=super_luminance,
+            color=color,
             local_normalization=LocalNormalizationRecipe.from_dict(
                 value.get("localNormalization")
             ),
@@ -643,13 +697,17 @@ class Recipe:
                 if self.integration.combination != DEFAULT_COMBINATION
                 else {}
             ),
+            **({"superLuminance": self.super_luminance.serializable()} if not self.super_luminance.enabled else {}),
+            **({"color": self.color.serializable()} if self.color.luminance != "L" else {}),
         }
 
 
 __all__ = [
+    "COLOR_LUMINANCES",
     "COMBINATIONS",
     "DEFAULT_COMBINATION",
     "CalibrationRecipe",
+    "ColorRecipe",
     "DrizzleRecipe",
     "IntegrationRecipe",
     "ProperCoadditionRecipe",
@@ -657,6 +715,7 @@ __all__ = [
     "MasterMetadataOverrideRecipe",
     "Recipe",
     "RecipeError",
+    "SuperLuminanceRecipe",
     "Requirement",
     "ReviewApprovalRecipe",
     "RawFrameMetadataOverrideRecipe",
