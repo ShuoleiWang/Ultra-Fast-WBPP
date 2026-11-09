@@ -44,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-latest]
+        os: [macos-15, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -68,7 +68,9 @@ jobs:
         # bundles its own OpenSSL and links libmpdec statically, so the overlay
         # would find nothing to replace and the pinned ABI smoke could not hold.
         # The venv keeps pip out of Homebrew's externally managed site-packages
-        # and is what the local macOS build uses as well.
+        # and is what the local macOS build uses as well. The runner's macOS may
+        # be newer than the bundle's: the overlay and the deployment audit keep
+        # every Mach-O slice at 14.0, so the app still declares macOS 14.
         shell: bash
         run: |
           brew install python@3.12
