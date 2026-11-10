@@ -59,7 +59,7 @@ def test_ci_gate_needs_every_job_and_accepts_a_skip_only_for_an_unselected_area(
     assert "if" not in jobs["source-check"] and "needs" not in jobs["source-check"]
     assert '"${result}" == skipped && "${selected}" == false' in step["run"]
     assert 'require "Changed areas" "${CHANGES_RESULT}" true' in step["run"]
-    assert 'require "Public tree and links" "${SOURCE_CHECK_RESULT}" true' in step["run"]
+    assert 'require "Source checks" "${SOURCE_CHECK_RESULT}" true' in step["run"]
 
 
 def test_ci_selects_jobs_in_a_job_not_with_workflow_path_filters() -> None:
@@ -70,8 +70,12 @@ def test_ci_selects_jobs_in_a_job_not_with_workflow_path_filters() -> None:
     changes = document["jobs"]["changes"]["steps"]
     assert changes[0]["with"]["fetch-depth"] == 0
     assert "scripts/ci_changed_areas.py" in changes[1]["run"]
-    source = document["jobs"]["source-check"]["steps"][1]["run"]
-    assert "scripts/check_public_tree.py" in source and "scripts/check_local_links.py" in source
+    source = document["jobs"]["source-check"]["steps"]
+    assert "scripts/check_public_tree.py" in source[1]["run"] and "scripts/check_local_links.py" in source[1]["run"]
+    # The lint installs exactly the pinned development tools the Makefile installs.
+    assert "-r requirements-dev.txt" in source[2]["run"] and "-m ruff check ." in source[2]["run"]
+    makefile = (REPOSITORY / "Makefile").read_text(encoding="utf-8")
+    assert "-r requirements-dev.txt" in makefile and "-m ruff check ." in makefile
 
 
 def test_ci_cancels_superseded_runs_only_for_pull_requests() -> None:

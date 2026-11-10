@@ -159,7 +159,9 @@ pub(super) fn validate_completion(
         artifacts.push(UiArtifact {
             kind: kind.to_owned(),
             name,
-            path: resolved.to_string_lossy().into_owned(),
+            path: platform::plain_path(&resolved)
+                .to_string_lossy()
+                .into_owned(),
             detail,
             filter: record
                 .get("filter")
@@ -196,7 +198,9 @@ pub(super) fn validate_completion(
             .and_then(|value| value.to_str())
             .unwrap_or("receipt.json")
             .to_owned(),
-        path: receipt_path.to_string_lossy().into_owned(),
+        path: platform::plain_path(&receipt_path)
+            .to_string_lossy()
+            .into_owned(),
         detail: "outer project receipt · content verified".to_owned(),
         filter: None,
         target: None,

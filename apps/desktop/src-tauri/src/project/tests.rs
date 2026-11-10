@@ -1430,3 +1430,367 @@ fn desktop_requires_complete_review_of_the_unchanged_measured_light_set() {
         .starts_with("BLINK_REVIEW_STALE"));
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn staging_names_are_recognised_only_in_the_engines_own_form() {
+    let output = "NGC7331_2026-11-10_2130";
+    for staging in [
+        ".NGC7331_2026-11-10_2130.k3_x9abq.pstage",
+        ".NGC7331_2026-11-10_2130.________.pstage",
+        ".NGC7331_2026-11-10_2130.01234567.pstage",
+    ] {
+        assert!(is_run_staging_name(staging, output), "{staging}");
+    }
+    for other in [
+        // Another run, another kind of staging, a published or evidence directory.
+        ".NGC7331_2026-11-10_2130_2.k3_x9abq.pstage",
+        ".NGC7331_2026-11-10_2130.k3_x9abq.stage",
+        "NGC7331_2026-11-10_2130",
+        "NGC7331_2026-11-10_2130.unsolved",
+        // Nearly the engine's form.
+        "NGC7331_2026-11-10_2130.k3_x9abq.pstage",
+        ".NGC7331_2026-11-10_2130.k3_x9abq.pstage.bak",
+        ".NGC7331_2026-11-10_2130.K3_X9ABQ.pstage",
+        ".NGC7331_2026-11-10_2130.k3_x9ab.pstage",
+        ".NGC7331_2026-11-10_2130.k3_x9abqz.pstage",
+        ".NGC7331_2026-11-10_2130.k3-x9abq.pstage",
+        ".NGC7331_2026-11-10_2130..pstage",
+        ".NGC7331_2026-11-10_2130.pstage",
+        ".pstage",
+        "",
+    ] {
+        assert!(!is_run_staging_name(other, output), "{other}");
+    }
+}
+
+#[test]
+fn only_the_staging_this_run_created_is_removed() {
+    let root = std::env::temp_dir().join(new_public_identifier("staging-removal-test").unwrap());
+    std::fs::create_dir_all(&root).unwrap();
+    let parent = canonical_output_parent(&root.to_string_lossy()).unwrap();
+    let name = "NGC7331_2026-11-10_2130";
+    let output = parent.join(name);
+    let tree = |directory: &str| {
+        let path = parent.join(directory);
+        std::fs::create_dir_all(path.join("details").join("runs")).unwrap();
+        std::fs::write(
+            path.join("details").join("runs").join("frame.fits"),
+            b"pixels",
+        )
+        .unwrap();
+        path
+    };
+    // Left by an earlier run that had the same output name.
+    let earlier = tree(&format!(".{name}.aaaaaaaa.pstage"));
+    let present_at_launch = run_staging_names(&output);
+    assert_eq!(present_at_launch.len(), 1);
+
+    let staging = tree(&format!(".{name}.k3_x9abq.pstage"));
+    let second = tree(&format!(".{name}.zzzz0000.pstage"));
+    let kept = [
+        earlier,
+        tree(&format!("{name}.unsolved")),
+        tree(&format!(".{name}_2.k3_x9abq.pstage")),
+        tree(&format!(".{name}.k3_x9abq.pstage.bak")),
+        tree(&format!(".{name}.k3_x9abq.stage")),
+        tree(&format!(".{name}.ABCDEFGH.pstage")),
+        tree(&format!(".{name}.short.pstage")),
+        tree(&format!("{name}.k3_x9abq.pstage")),
+        tree("unrelated"),
+    ];
+    // A file with a staging name is not a staging tree.
+    let file = parent.join(format!(".{name}.ffffffff.pstage"));
+    std::fs::write(&file, b"not a directory").unwrap();
+    // Neither is a link with a staging name; what it points at stays.
+    #[cfg(unix)]
+    let linked = {
+        let target = tree("linked-elsewhere");
+        std::os::unix::fs::symlink(&target, parent.join(format!(".{name}.llllllll.pstage")))
+            .unwrap();
+        target
+    };
+
+    remove_run_staging(&output, &present_at_launch);
+
+    assert!(!staging.exists() && !second.exists());
+    for path in &kept {
+        assert!(
+            path.join("details")
+                .join("runs")
+                .join("frame.fits")
+                .is_file(),
+            "{} was touched",
+            path.display()
+        );
+    }
+    assert_eq!(std::fs::read(&file).unwrap(), b"not a directory");
+    #[cfg(unix)]
+    {
+        assert!(linked
+            .join("details")
+            .join("runs")
+            .join("frame.fits")
+            .is_file());
+        assert!(std::fs::symlink_metadata(parent.join(format!(".{name}.llllllll.pstage"))).is_ok());
+    }
+
+    // An output parent that is reached through a link is not the directory
+    // the run was launched in: nothing below it is removed.
+    #[cfg(unix)]
+    {
+        let again = tree(&format!(".{name}.k3_x9abq.pstage"));
+        let alias = parent.join("alias");
+        std::os::unix::fs::symlink(&parent, &alias).unwrap();
+        remove_run_staging(&alias.join(name), &present_at_launch);
+        assert!(again.is_dir());
+        std::fs::remove_file(&alias).unwrap();
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn an_engine_error_envelope_supplies_the_code_and_message_of_a_failed_run() {
+    use std::os::unix::process::ExitStatusExt;
+    let diagnostics = concat!(
+        "bundled catalog not installed (CATALOG_BUNDLE_MISSING): no bundled index set\n",
+        r#"{"error":{"code":"NO_FLATS","message":"NO_FLATS: no flat matches filter R"},"ok":false}"#,
+        "\n"
+    );
+    assert_eq!(
+        decode_project_response(b"", Some(ExitStatus::from_raw(2 << 8)), diagnostics).unwrap_err(),
+        ("NO_FLATS".to_owned(), "no flat matches filter R".to_owned())
+    );
+    // A process that exited normally has to answer on stdout.
+    let (code, detail) =
+        decode_project_response(b"", Some(ExitStatus::from_raw(0)), diagnostics).unwrap_err();
+    assert_eq!(code, "PROJECT_RESPONSE_INVALID");
+    assert!(detail.contains("no JSON result"));
+    // A result on stdout is the engine's answer, whatever the diagnostics say.
+    let (code, detail) = decode_project_response(
+        br#"{"success":false,"code":"ASTROMETRY_REQUIRED","message":"the final solve failed"}"#,
+        Some(ExitStatus::from_raw(3 << 8)),
+        diagnostics,
+    )
+    .unwrap_err();
+    assert_eq!(code, "ASTROMETRY_REQUIRED");
+    assert_eq!(detail, "the final solve failed");
+}
+
+/// A run request of one Light, as the interface sends it.
+fn stand_in_request(light: &Path, output_parent: &Path) -> ProjectRunRequest {
+    serde_json::from_value(serde_json::json!({
+        "sources": [{"sourceId": "light-1", "role": "LIGHT", "paths": [light], "recursive": false}],
+        "projectName": "NGC 7331", "runLabel": "NGC 7331",
+        "recipe": {"balanced": true, "automaticScreening": true, "drizzleEnabled": false,
+                   "solverRequired": true, "calibrationWorkflow": "mono-standard-v1"},
+        "masterMetadataOverrides": [], "rawFrameMetadataOverrides": [], "reviewSelections": [],
+        "outputParentDirectory": output_parent,
+    }))
+    .expect("request JSON")
+}
+
+/// Launches `source` (a Python script) as the engine of a run in a fresh
+/// directory; returns the directory, the registry, the run and the channels
+/// of its progress and error events.
+#[cfg(unix)]
+#[allow(clippy::type_complexity)]
+fn launch_stand_in_engine(
+    label: &str,
+    source: &str,
+) -> (
+    PathBuf,
+    Arc<ProjectRegistry>,
+    ProjectRunReceipt,
+    std::sync::mpsc::Receiver<serde_json::Value>,
+    std::sync::mpsc::Receiver<serde_json::Value>,
+) {
+    use std::os::unix::fs::PermissionsExt;
+    use tauri::Listener;
+
+    let root = std::env::temp_dir().join(new_public_identifier(label).unwrap());
+    std::fs::create_dir_all(&root).unwrap();
+    let light = root.join("light.fit");
+    std::fs::write(&light, b"synthetic source fixture").unwrap();
+    let script = root.join("stand-in-engine");
+    std::fs::write(&script, format!("#!/usr/bin/env python3\n{source}")).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let app = tauri::test::mock_app();
+    let handle = app.handle().clone();
+    let (progress_sender, progress) = std::sync::mpsc::channel();
+    let (error_sender, errors) = std::sync::mpsc::channel();
+    handle.listen(PROGRESS_EVENT, move |event| {
+        let _ = progress_sender.send(serde_json::from_str(event.payload()).unwrap());
+    });
+    handle.listen(ERROR_EVENT, move |event| {
+        let _ = error_sender.send(serde_json::from_str(event.payload()).unwrap());
+    });
+    let registry = Arc::new(ProjectRegistry::default());
+    let run = start_with(
+        handle,
+        registry.clone(),
+        stand_in_request(&light, &root),
+        crate::sidecar::EngineExecutable { path: script },
+    )
+    .expect("launch the stand-in engine");
+    (root, registry, run, progress, errors)
+}
+
+#[cfg(unix)]
+const EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+#[cfg(unix)]
+#[test]
+fn an_engine_error_before_staging_reaches_the_interface_with_its_code_and_message() {
+    let (root, registry, run, _progress, errors) = launch_stand_in_engine(
+        "project-envelope-test",
+        r###"import json, sys
+print("moved catalog folder not re-pointed (CATALOG_ROOT_MISSING): nothing to move", file=sys.stderr)
+print(json.dumps({"ok": False, "error": {"code": "OUTPUT_PATH_TOO_LONG",
+    "message": "the run needs 301 characters under the output directory; this system allows 259"}},
+    separators=(",", ":")), file=sys.stderr)
+sys.exit(2)
+"###,
+    );
+    let error = errors.recv_timeout(EVENT_TIMEOUT).unwrap();
+    assert_eq!(error["jobId"], run.job_id);
+    assert_eq!(error["code"], "OUTPUT_PATH_TOO_LONG");
+    assert_eq!(
+        error["message"],
+        "the run needs 301 characters under the output directory; this system allows 259"
+    );
+    // Nothing was published and the engine kept no evidence.
+    assert_eq!(error["details"]["outputPublished"], false);
+    assert!(error["details"].get("evidenceDirectory").is_none());
+    assert!(registry.jobs.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_solve_reports_its_evidence_directory_and_states_the_code_once() {
+    let (root, _registry, run, _progress, errors) = launch_stand_in_engine(
+        "project-evidence-test",
+        r###"import json, pathlib, sys
+request = json.loads(pathlib.Path(sys.argv[3]).read_text())
+output = pathlib.Path(request["outputDirectory"])
+evidence = output.with_name(output.name + ".unsolved")
+evidence.mkdir()
+(evidence / "receipt.json").write_text("{}")
+print(json.dumps({"success": False, "code": "ASTROMETRY_REQUIRED", "state": "UNSOLVED_WORKING",
+    "message": "ASTROMETRY_REQUIRED: one or more filters did not solve",
+    "outputDirectory": None, "evidenceDirectory": str(evidence)}))
+sys.exit(3)
+"###,
+    );
+    let error = errors.recv_timeout(EVENT_TIMEOUT).unwrap();
+    assert_eq!(error["code"], "ASTROMETRY_REQUIRED");
+    assert_eq!(error["message"], "one or more filters did not solve");
+    let evidence = format!("{}.unsolved", run.output_directory);
+    assert_eq!(error["details"]["evidenceDirectory"], evidence);
+    assert_eq!(error["details"]["outputPublished"], false);
+    // The evidence is the product of a failed solve, not staging.
+    assert!(Path::new(&evidence).join("receipt.json").is_file());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A stand-in engine in the middle of a run: it has staged work beside its
+/// output, says where in a progress record, and keeps going.
+#[cfg(unix)]
+const ENGINE_WITH_STAGING: &str = r###"import json, pathlib, sys, time
+request = json.loads(pathlib.Path(sys.argv[3]).read_text())
+output = pathlib.Path(request["outputDirectory"])
+staging = output.parent / f".{output.name}.k3_x9abq.pstage"
+(staging / "details" / "runs").mkdir(parents=True)
+(staging / "details" / "runs" / "calibrated.fits").write_bytes(b"x" * 4096)
+print(json.dumps({"type": "progress", "event": {"stage": "calibration", "status": "RUNNING",
+    "current": 1, "total": 9, "message": str(staging)}}), file=sys.stderr, flush=True)
+time.sleep(60)
+"###;
+
+#[cfg(unix)]
+#[test]
+fn a_cancelled_run_leaves_no_staging_tree_behind() {
+    let (root, registry, run, progress, errors) =
+        launch_stand_in_engine("project-cancel-staging-test", ENGINE_WITH_STAGING);
+    let staged = progress.recv_timeout(EVENT_TIMEOUT).unwrap();
+    let staging = PathBuf::from(staged["message"].as_str().unwrap());
+    assert!(staging
+        .join("details")
+        .join("runs")
+        .join("calibrated.fits")
+        .is_file());
+    // Beside it: the staging of another run and an evidence directory.
+    let output = Path::new(&run.output_directory);
+    let name = output.file_name().unwrap().to_string_lossy();
+    let other_run = output.with_file_name(format!(".{name}_2.k3_x9abq.pstage"));
+    let evidence = output.with_file_name(format!("{name}.unsolved"));
+    for directory in [&other_run, &evidence] {
+        std::fs::create_dir(directory).unwrap();
+        std::fs::write(directory.join("kept.txt"), b"kept").unwrap();
+    }
+
+    cancel(&registry, &run.job_id).expect("cancel the run");
+    let error = errors.recv_timeout(EVENT_TIMEOUT).unwrap();
+    assert_eq!(error["code"], "PROJECT_EXECUTION_FAILED");
+    assert!(error["message"]
+        .as_str()
+        .unwrap()
+        .contains("no JSON result"));
+    assert_eq!(error["details"]["outputPublished"], false);
+    // The tree is gone by the time the interface hears of the cancellation.
+    assert!(!staging.exists());
+    assert!(other_run.join("kept.txt").is_file());
+    assert!(evidence.join("kept.txt").is_file());
+    assert!(!output.exists());
+    assert!(registry.jobs.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn application_shutdown_waits_until_the_killed_runs_staging_is_removed() {
+    let (root, registry, _run, progress, _errors) =
+        launch_stand_in_engine("project-shutdown-staging-test", ENGINE_WITH_STAGING);
+    let staged = progress.recv_timeout(EVENT_TIMEOUT).unwrap();
+    let staging = PathBuf::from(staged["message"].as_str().unwrap());
+    assert!(staging.is_dir());
+
+    terminate_all(&registry).expect("terminate the run");
+    assert!(!staging.exists());
+    assert!(registry.jobs.lock().unwrap().is_empty());
+    terminate_all(&registry).expect("shutdown is idempotent");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// `canonicalize` answers in the verbatim spelling on Windows; the engine and
+/// the interface are given the plain one, which names the same files.
+#[test]
+fn a_run_request_names_its_paths_in_the_plain_spelling() {
+    let root = std::env::temp_dir().join(new_public_identifier("plain-request-test").unwrap());
+    std::fs::create_dir_all(&root).unwrap();
+    let light = root.join("盾牌座 light.fit");
+    std::fs::write(&light, b"synthetic source fixture").unwrap();
+    let parent = canonical_output_parent(&root.to_string_lossy()).unwrap();
+    let output = unique_output_directory(&parent, "NGC 7331", chrono::Local::now()).unwrap();
+    let request = project_request_json(&stand_in_request(&light, &root), &output).unwrap();
+    let output_directory = request["outputDirectory"].as_str().unwrap();
+    let host_path = request["sources"][0]["hostPath"].as_str().unwrap();
+    for path in [output_directory, host_path] {
+        assert!(Path::new(path).is_absolute());
+        assert!(!path.starts_with(r"\\?\"), "{path}");
+    }
+    assert_eq!(
+        Path::new(host_path).canonicalize().unwrap(),
+        light.canonicalize().unwrap()
+    );
+    assert_eq!(
+        Path::new(output_directory)
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap(),
+        root.canonicalize().unwrap()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

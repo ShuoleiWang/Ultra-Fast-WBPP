@@ -27,7 +27,7 @@ from .xisf import XISF
 
 from .cfa import even_block_size, is_cfa_pattern
 from .fits_bands import close_image_data, open_fits_image_data, reader_backend
-from .metadata import _header_lookup, normalize_metadata
+from .metadata import RA_UNIT_EVIDENCE_KEY, _header_lookup, normalize_metadata, ra_comment_names_hours
 from .models import FrameMetadata
 
 
@@ -164,14 +164,42 @@ def _input_sequence(
     return tuple(inputs)
 
 
+# What an operating system or this engine leaves beside the user's frames.
+# macOS writes an AppleDouble companion ``._name`` for every file on exFAT and
+# network volumes; ``._L_0001.fits`` has a frame's ending and no FITS content.
+_HOUSEKEEPING_FILES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
+_HOUSEKEEPING_FOLDERS = frozenset({"$recycle.bin", "system volume information"})
+
+
+def is_housekeeping_file(name: str) -> bool:
+    """A file that is never user data, also when it is named explicitly."""
+
+    return name.startswith("._") or name.casefold() in _HOUSEKEEPING_FILES
+
+
+def _is_scanned_folder(name: str) -> bool:
+    """Whether a folder below an input is read: hidden folders (the engine's
+    own ``.<output>.<8>.pstage`` / ``.stage`` staging trees among them), an
+    aborted ``*.project-staging`` tree and the volume's recycle bin are not."""
+
+    return not (
+        name.startswith(".")
+        or name.casefold() in _HOUSEKEEPING_FOLDERS
+        or name.casefold().endswith(".project-staging")
+    )
+
+
 def discover_paths(
     inputs: str | os.PathLike[str] | Iterable[str | os.PathLike[str]],
 ) -> list[Path]:
     """Discover FITS/XISF files recursively with deterministic ordering.
 
-    Unsupported files encountered *inside* a directory are ignored.  An
-    explicitly supplied unsupported file is an error, since silently omitting
-    it would make a CLI request look successful while losing user intent.
+    Unsupported files encountered *inside* a directory are ignored, and so
+    are hidden files and folders, operating-system housekeeping files and the
+    engine's own staging trees.  An explicitly supplied unsupported file is
+    an error, since silently omitting it would make a CLI request look
+    successful while losing user intent; a housekeeping file (``._name``,
+    ``.DS_Store``, ``Thumbs.db``, ``desktop.ini``) is ignored there too.
     Directory symlinks are not traversed.  Canonical file paths are deduplicated.
     """
 
@@ -185,6 +213,8 @@ def discover_paths(
         if not expanded.exists():
             raise FrameDiscoveryError("INPUT_NOT_FOUND", expanded, "path does not exist")
         if expanded.is_file():
+            if is_housekeeping_file(expanded.name):
+                continue
             if not is_supported_frame_path(expanded):
                 raise UnsupportedFrameFormatError(
                     "UNSUPPORTED_FORMAT",
@@ -204,11 +234,11 @@ def discover_paths(
             directory_names[:] = sorted(
                 name
                 for name in directory_names
-                if not (root_path / name).is_symlink()
+                if _is_scanned_folder(name) and not (root_path / name).is_symlink()
             )
             for name in sorted(file_names):
                 candidate = root_path / name
-                if not is_supported_frame_path(candidate) or not candidate.is_file():
+                if name.startswith(".") or not is_supported_frame_path(candidate) or not candidate.is_file():
                     continue
                 canonical = candidate.resolve(strict=True)
                 discovered[os.path.normcase(str(canonical))] = canonical
@@ -346,6 +376,8 @@ def _fits_header_dict(header: fits.Header) -> dict[str, Any]:
         if not key or key in {"COMMENT", "HISTORY"}:
             continue
         result[key] = _plain_value(card.value)
+        if key.upper() == "RA" and ra_comment_names_hours(card.comment):
+            result[RA_UNIT_EVIDENCE_KEY] = "hour"
     return result
 
 
@@ -524,6 +556,8 @@ def _xisf_header_dict(image_metadata: Mapping[str, Any]) -> dict[str, Any]:
                 entry = entries[0]
                 if isinstance(entry, Mapping) and "value" in entry:
                     header[str(key)] = _plain_value(entry["value"])
+                    if str(key).upper() == "RA" and ra_comment_names_hours(entry.get("comment")):
+                        header[RA_UNIT_EVIDENCE_KEY] = "hour"
 
     properties = image_metadata.get("XISFProperties", {})
     property_values: dict[str, Any] = {}

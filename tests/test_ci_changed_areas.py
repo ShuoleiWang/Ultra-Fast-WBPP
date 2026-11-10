@@ -32,11 +32,24 @@ EVERYTHING = {"python", "rust", "frontend"}
         ("LICENSE", {"python", "rust"}),
         ("NOTICE", {"python", "rust"}),
         ("LICENSES/GPL-3.0.txt", {"python", "rust"}),
-        # Workflows, this script and Git metadata select everything.
+        # The CI workflow, this script and Git metadata select everything.
         (".github/workflows/ci.yml", EVERYTHING),
-        (".github/pull_request_template.md", EVERYTHING),
         ("scripts/ci_changed_areas.py", EVERYTHING),
         (".gitattributes", EVERYTHING),
+        # The other workflows are read by the Python contract tests only.
+        (".github/workflows/release.yml", {"python"}),
+        (".github/workflows/codeql.yml", {"python"}),
+        # Templates and code owners run nothing.
+        (".github/pull_request_template.md", set()),
+        (".github/ISSUE_TEMPLATE/bug.yml", set()),
+        (".github/CODEOWNERS", set()),
+        # An unknown file under .github still selects everything.
+        (".github/dependabot.yml", EVERYTHING),
+        # The root test and lint configuration.
+        ("pytest.ini", {"python"}),
+        ("conftest.py", {"python"}),
+        ("ruff.toml", {"python"}),
+        ("requirements-dev.txt", {"python"}),
         # Code areas.
         ("packages/engine/src/ufwbpp/cli.py", {"python"}),
         ("native/src/FusedIntegration.cpp", {"python"}),
@@ -152,3 +165,36 @@ def test_main_selects_everything_when_the_diff_cannot_be_computed(
     assert code == 0
     assert output.read_text(encoding="utf-8").splitlines() == ["python=true", "rust=true", "frontend=true"]
     assert "::warning::" in capsys.readouterr().out
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_worktree_mode_counts_commits_uncommitted_edits_and_new_files(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository = tmp_path / "repository"
+    (repository / "docs").mkdir(parents=True)
+    (repository / "docs" / "guide.md").write_text("a\n", encoding="utf-8")
+    (repository / "apps" / "desktop" / "src").mkdir(parents=True)
+    (repository / "apps" / "desktop" / "src" / "App.tsx").write_text("x\n", encoding="utf-8")
+    _git(repository, "init", "-q")
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-q", "-m", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+
+    def selected() -> set[str]:
+        capsys.readouterr()
+        assert areas.main(["--worktree", "--base", base, "--repository", str(repository)]) == 0
+        lines = capsys.readouterr().out.splitlines()
+        return {line.split("=")[0] for line in lines if line.endswith("=true")}
+
+    assert selected() == set()  # nothing changed: nothing to run
+    (repository / "docs" / "guide.md").write_text("b\n", encoding="utf-8")
+    assert selected() == set()  # documentation only
+    (repository / "apps" / "desktop" / "src" / "App.tsx").write_text("y\n", encoding="utf-8")  # uncommitted
+    (repository / "packages" / "engine").mkdir(parents=True)
+    (repository / "packages" / "engine" / "new.py").write_text("", encoding="utf-8")  # untracked
+    assert selected() == {"frontend", "python"}
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-q", "-m", "work")
+    (repository / "Cargo.lock").write_text("", encoding="utf-8")
+    assert selected() == {"frontend", "python", "rust"}  # the commit and the new file together

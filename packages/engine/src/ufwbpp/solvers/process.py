@@ -311,6 +311,18 @@ def kill_process_tree(process: subprocess.Popen[Any]) -> None:
     platform_services.current().kill_process_tree(process)
 
 
+# The solver processes running now.  Read from a signal handler, so it is
+# guarded by nothing but the interpreter lock.
+_RUNNING: set[subprocess.Popen[Any]] = set()
+
+
+def kill_running_solvers() -> None:
+    """Kill the process tree of every solver this process is running."""
+
+    for process in tuple(_RUNNING):
+        kill_process_tree(process)
+
+
 def kill_lingering_posix_group(process: subprocess.Popen[Any]) -> None:
     """Close the private process group after the direct child exits.
 
@@ -471,6 +483,7 @@ class SolverProcessRuntime:
         capture_threads: list[threading.Thread] = []
         try:
             process = subprocess.Popen(**popen_options)
+            _RUNNING.add(process)
             assert process.stdout is not None and process.stderr is not None
             capture_threads = [
                 threading.Thread(target=stdout_capture.consume, args=(process.stdout,), daemon=True),
@@ -493,6 +506,7 @@ class SolverProcessRuntime:
         finally:
             if process is not None:
                 kill_lingering_posix_group(process)
+                _RUNNING.discard(process)
                 for thread in capture_threads:
                     thread.join(timeout=2)
                 for stream, thread in zip((process.stdout, process.stderr), capture_threads, strict=False):
@@ -874,7 +888,10 @@ def publish_solved_copy(input_path: Path, output_path: Path, wcs_header: fits.He
         created_output = False
         committed = False
         try:
-            os.link(temporary_path, output_path)
+            # Create-only on every volume: a hard link, or the platform's
+            # fallback where the volume has none (exFAT, FAT32, network shares).
+            # Either way the output is the staged file's own inode.
+            platform_services.current().publish_file_no_replace(temporary_path, output_path)
             created_output = True
         except FileExistsError as error:
             raise SolverExecutionError("OUTPUT_EXISTS", f"output appeared during publication: {output_path}") from error

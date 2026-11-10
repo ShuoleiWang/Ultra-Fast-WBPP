@@ -47,7 +47,11 @@ def _safe_token(value: str) -> str:
 
 
 def _rename_directory_no_replace(source: Path, destination: Path) -> None:
-    """Create-only directory publication through the platform service layer."""
+    """Create-only directory publication through the platform service layer.
+
+    ``OUTPUT_EXISTS`` only when the destination exists; any other failure of
+    the rename is ``PUBLICATION_FAILED``.  Either way ``source`` is untouched.
+    """
 
     try:
         platform_services.current().rename_directory_no_replace(source, destination)
@@ -60,6 +64,20 @@ def _rename_directory_no_replace(source: Path, destination: Path) -> None:
             )
             raise E2EError("OUTPUT_EXISTS", message, path=str(destination)) from error
         raise E2EError(error.code, error.message) from error
+    except OSError as error:
+        if os.path.lexists(destination):
+            raise E2EError("OUTPUT_EXISTS", "output appeared during publication", path=str(destination)) from error
+        reason = os.strerror(error.errno) if error.errno else str(error)
+        raise E2EError(
+            "PUBLICATION_FAILED", f"the directory could not be renamed: {reason}", path=str(destination)
+        ) from error
+
+
+def _unpublished_reason(error: E2EError, output: Path) -> str:
+    """Why a publication failed, naming the directories beside the output by
+    name: this text also goes into the failure receipt, which holds no host path."""
+
+    return str(error).removeprefix(f"{error.code}: ").replace(str(output.parent) + os.sep, "")
 
 
 def _fsync_directory(path: Path) -> None:
@@ -83,7 +101,7 @@ def _artifact_records(staging: Path, roots: Sequence[Path], *, workers: int = 4)
             digests = list(pool.map(sha256_digest, paths))
     return [
         {
-            "path": str(path.relative_to(staging)),
+            "path": path.relative_to(staging).as_posix(),
             "sha256": digest,
             "sizeBytes": path.stat().st_size,
         }
@@ -107,7 +125,7 @@ def _relativize_solver_attempts(
             output_path = result.get("outputPath")
             if isinstance(output_path, str):
                 try:
-                    result["outputPath"] = str(Path(output_path).relative_to(staging))
+                    result["outputPath"] = Path(output_path).relative_to(staging).as_posix()
                 except ValueError:
                     pass
         artifact = attempt.get("artifact")
@@ -115,7 +133,7 @@ def _relativize_solver_attempts(
             artifact_path = artifact.get("path")
             if isinstance(artifact_path, str):
                 try:
-                    artifact["path"] = str(Path(artifact_path).relative_to(staging))
+                    artifact["path"] = Path(artifact_path).relative_to(staging).as_posix()
                 except ValueError:
                     pass
         if attempt.get("executionVerified") is True:

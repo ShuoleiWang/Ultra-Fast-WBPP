@@ -89,7 +89,12 @@ LEGAL_RESOURCE_NAMES = (
     "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "docs/licensing.md",
     "LICENSES/GPL-3.0.txt", "LICENSES/astroalign-MIT.txt", "LICENSES/astrometry-net-BSD-3-Clause.txt",
 )
-MACOS_MAXIMUM_DEPLOYMENT_TARGET = (14, 0, 0)
+# The oldest macOS a release bundle declares (LSMinimumSystemVersion) and the
+# newest Mach-O ``minos`` it may contain. The release job freezes Homebrew's
+# python@3.12 on macos-15, whose interpreter and lib-dynload modules target
+# macOS 15.0. A local build from an interpreter built for a newer macOS passes
+# that macOS with --macos-minimum (build_engine_sidecar.py --print-local-macos-minimum).
+MACOS_MAXIMUM_DEPLOYMENT_TARGET = (15, 0, 0)
 WINDOWS_TARGET_MACHINES = {
     "x86_64-pc-windows-msvc": "x86_64",
     "aarch64-pc-windows-msvc": "aarch64",
@@ -472,54 +477,56 @@ def _resolve_dependency(
     return "unresolved-relative", []
 
 
-def inspect_macos_bundle(
-    app: Path,
-    *,
-    maximum_deployment_target: tuple[int, int, int] = MACOS_MAXIMUM_DEPLOYMENT_TARGET,
-) -> dict[str, Any]:
-    """Inspect every Mach-O slice and its static dylib closure inside a .app.
-
-    This parser reads Mach-O headers directly. It does not trust filename
-    extensions, Info.plist, the host SDK, or the output of a best-effort launch.
-    All paths in the returned record are relative to the application bundle.
-    """
-
-    if app.is_symlink() or not app.is_dir() or app.suffix != ".app":
-        raise BundleAttestationError("macOS deployment audit requires a real .app directory")
+def _check_maximum_deployment_target(maximum_deployment_target: tuple[int, int, int]) -> None:
     if len(maximum_deployment_target) != 3 or any(
         isinstance(item, bool) or not isinstance(item, int) or item < 0
         for item in maximum_deployment_target
     ):
         raise ValueError("maximum_deployment_target must be a three-part version")
-    resolved_root = app.resolve(strict=True)
-    info_path = app / "Contents" / "Info.plist"
-    if info_path.is_symlink() or not info_path.is_file():
-        raise BundleAttestationError("application Info.plist is missing or unsafe")
-    try:
-        with info_path.open("rb") as stream:
-            info = plistlib.load(stream)
-    except (OSError, plistlib.InvalidFileException) as error:
-        raise BundleAttestationError(f"application Info.plist is invalid: {error}") from error
-    if not isinstance(info, dict):
-        raise BundleAttestationError("application Info.plist is not a dictionary")
-    declared_minimum = _parse_version_text(
-        info.get("LSMinimumSystemVersion"), "LSMinimumSystemVersion"
-    )
-    executable_name = info.get("CFBundleExecutable")
-    if (
-        not isinstance(executable_name, str)
-        or not executable_name
-        or "/" in executable_name
-        or "\\" in executable_name
-    ):
-        raise BundleAttestationError("CFBundleExecutable is missing or unsafe")
-    main_executable = app / "Contents" / "MacOS" / executable_name
-    if main_executable.is_symlink() or not main_executable.is_file():
-        raise BundleAttestationError("declared application executable is missing or unsafe")
 
+
+def _macos_name(version: tuple[int, int, int]) -> str:
+    """``(15, 0, 0)`` -> ``"macOS 15"``, ``(15, 4, 0)`` -> ``"macOS 15.4"``."""
+
+    shown = list(version)
+    while len(shown) > 1 and shown[-1] == 0:
+        shown.pop()
+    return "macOS " + ".".join(str(item) for item in shown)
+
+
+def parse_macos_minimum(value: str) -> tuple[int, int, int]:
+    """A ``--macos-minimum`` value; never older than the release minimum."""
+
+    try:
+        version = _parse_version_text(value, "macOS minimum")
+    except BundleAttestationError as error:
+        raise ValueError(str(error)) from error
+    if version < MACOS_MAXIMUM_DEPLOYMENT_TARGET:
+        raise ValueError(
+            f"macOS minimum {value} is older than the release minimum "
+            f"{_version_text(MACOS_MAXIMUM_DEPLOYMENT_TARGET)}"
+        )
+    return version
+
+
+def macho_minimum_version(path: Path) -> tuple[int, int, int]:
+    """The newest ``minos`` of any slice of one Mach-O file."""
+
+    return max(item["minimumVersionTuple"] for item in _parse_macho(path))
+
+
+def _audit_macho_tree(
+    root: Path,
+    maximum_deployment_target: tuple[int, int, int],
+    *,
+    main_executable: Path | None = None,
+) -> dict[str, Any]:
+    """Every Mach-O slice under ``root``: deployment target and dylib closure."""
+
+    resolved_root = root.resolve(strict=True)
     records: list[dict[str, Any]] = []
-    for path in _macho_candidates(app):
-        relative = path.relative_to(app).as_posix()
+    for path in _macho_candidates(root):
+        relative = path.relative_to(root).as_posix()
         try:
             slices = _parse_macho(path)
         except BundleAttestationError as error:
@@ -533,16 +540,16 @@ def inspect_macos_bundle(
             }
         )
     if not records:
-        raise BundleAttestationError("application bundle contains no Mach-O files")
-    main_relative = main_executable.relative_to(app).as_posix()
-    main_record = next(
-        (record for record in records if record["bundlePath"] == main_relative), None
-    )
-    if main_record is None or not any(
-        item["fileType"] == "executable" for item in main_record["slices"]
-    ):
-        raise BundleAttestationError("CFBundleExecutable is not a Mach-O executable")
-
+        raise BundleAttestationError(f"{root.name} contains no Mach-O files")
+    if main_executable is not None:
+        main_relative = main_executable.relative_to(root).as_posix()
+        main_record = next(
+            (record for record in records if record["bundlePath"] == main_relative), None
+        )
+        if main_record is None or not any(
+            item["fileType"] == "executable" for item in main_record["slices"]
+        ):
+            raise BundleAttestationError("CFBundleExecutable is not a Mach-O executable")
     executable_directories = tuple(
         sorted(
             {
@@ -621,22 +628,8 @@ def inspect_macos_bundle(
             slice_record["dependencies"] = resolved_dependencies
             slice_record.pop("minimumVersionTuple")
         record.pop("_path")
-    if declared_minimum != maximum_deployment_target:
-        violations.append(
-            {
-                "code": "DECLARED_MINIMUM_MISMATCH",
-                "declaredMinimumVersion": _version_text(declared_minimum),
-                "requiredMinimumVersion": _version_text(maximum_deployment_target),
-            }
-        )
     slice_count = sum(len(record["slices"]) for record in records)
     return {
-        "policy": {
-            "platform": "macOS",
-            "requiredMinimumSystemVersion": _version_text(maximum_deployment_target),
-            "maximumMachOMinimumVersion": _version_text(maximum_deployment_target),
-        },
-        "declaredMinimumSystemVersion": _version_text(declared_minimum),
         "maximumObservedMachOMinimumVersion": _version_text(maximum_observed),
         "machOFileCount": len(records),
         "sliceCount": slice_count,
@@ -653,19 +646,109 @@ def inspect_macos_bundle(
     }
 
 
-def attest_macos_deployment(app: Path) -> dict[str, Any]:
-    """Fail closed unless the complete signed bundle can launch on macOS 14."""
+def inspect_macos_bundle(
+    app: Path,
+    *,
+    maximum_deployment_target: tuple[int, int, int] = MACOS_MAXIMUM_DEPLOYMENT_TARGET,
+) -> dict[str, Any]:
+    """Inspect every Mach-O slice and its static dylib closure inside a .app.
 
-    audit = inspect_macos_bundle(app)
-    violations = audit.pop("violations")
+    This parser reads Mach-O headers directly. It does not trust filename
+    extensions, Info.plist, the host SDK, or the output of a best-effort launch.
+    All paths in the returned record are relative to the application bundle.
+    """
+
+    if app.is_symlink() or not app.is_dir() or app.suffix != ".app":
+        raise BundleAttestationError("macOS deployment audit requires a real .app directory")
+    _check_maximum_deployment_target(maximum_deployment_target)
+    info_path = app / "Contents" / "Info.plist"
+    if info_path.is_symlink() or not info_path.is_file():
+        raise BundleAttestationError("application Info.plist is missing or unsafe")
+    try:
+        with info_path.open("rb") as stream:
+            info = plistlib.load(stream)
+    except (OSError, plistlib.InvalidFileException) as error:
+        raise BundleAttestationError(f"application Info.plist is invalid: {error}") from error
+    if not isinstance(info, dict):
+        raise BundleAttestationError("application Info.plist is not a dictionary")
+    declared_minimum = _parse_version_text(
+        info.get("LSMinimumSystemVersion"), "LSMinimumSystemVersion"
+    )
+    executable_name = info.get("CFBundleExecutable")
+    if (
+        not isinstance(executable_name, str)
+        or not executable_name
+        or "/" in executable_name
+        or "\\" in executable_name
+    ):
+        raise BundleAttestationError("CFBundleExecutable is missing or unsafe")
+    main_executable = app / "Contents" / "MacOS" / executable_name
+    if main_executable.is_symlink() or not main_executable.is_file():
+        raise BundleAttestationError("declared application executable is missing or unsafe")
+
+    tree = _audit_macho_tree(
+        app, maximum_deployment_target, main_executable=main_executable
+    )
+    violations = tree.pop("violations")
+    if declared_minimum != maximum_deployment_target:
+        violations.append(
+            {
+                "code": "DECLARED_MINIMUM_MISMATCH",
+                "declaredMinimumVersion": _version_text(declared_minimum),
+                "requiredMinimumVersion": _version_text(maximum_deployment_target),
+            }
+        )
+    return {
+        "policy": {
+            "platform": "macOS",
+            "requiredMinimumSystemVersion": _version_text(maximum_deployment_target),
+            "maximumMachOMinimumVersion": _version_text(maximum_deployment_target),
+        },
+        "declaredMinimumSystemVersion": _version_text(declared_minimum),
+        **tree,
+        "violations": violations,
+    }
+
+
+def _raise_deployment_violations(
+    violations: Sequence[Mapping[str, Any]], maximum_deployment_target: tuple[int, int, int]
+) -> None:
     if violations:
         examples = "; ".join(
             f"{item['code']}:{item.get('bundlePath', 'Info.plist')}"
             for item in violations[:8]
         )
         raise BundleAttestationError(
-            f"macOS 14 deployment audit found {len(violations)} violation(s): {examples}"
+            f"{_macos_name(maximum_deployment_target)} deployment audit found "
+            f"{len(violations)} violation(s): {examples}"
         )
+
+
+def attest_macos_deployment(
+    app: Path,
+    *,
+    maximum_deployment_target: tuple[int, int, int] = MACOS_MAXIMUM_DEPLOYMENT_TARGET,
+) -> dict[str, Any]:
+    """Fail closed unless the complete signed bundle can launch on the declared macOS."""
+
+    audit = inspect_macos_bundle(app, maximum_deployment_target=maximum_deployment_target)
+    _raise_deployment_violations(audit.pop("violations"), maximum_deployment_target)
+    audit["verified"] = True
+    return audit
+
+
+def attest_macho_tree_deployment(
+    root: Path,
+    *,
+    maximum_deployment_target: tuple[int, int, int] = MACOS_MAXIMUM_DEPLOYMENT_TARGET,
+) -> dict[str, Any]:
+    """The bundle's deployment audit on a runtime tree before it is bundled."""
+
+    if root.is_symlink() or not root.is_dir():
+        raise BundleAttestationError("macOS deployment audit requires a real directory")
+    _check_maximum_deployment_target(maximum_deployment_target)
+    audit = _audit_macho_tree(root, maximum_deployment_target)
+    _raise_deployment_violations(audit.pop("violations"), maximum_deployment_target)
     audit["verified"] = True
     return audit
 
@@ -1303,6 +1386,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--max-start-seconds", type=float, default=5.0)
     parser.add_argument(
+        "--macos-minimum",
+        default=_version_text(MACOS_MAXIMUM_DEPLOYMENT_TARGET),
+        help=(
+            "macOS version the bundle must declare and no Mach-O slice may exceed "
+            "(default: the release minimum; a local build from a newer interpreter "
+            "passes the version it declared)"
+        ),
+    )
+    parser.add_argument(
         "--main-executable",
         type=Path,
         default=None,
@@ -1317,6 +1409,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
+        macos_minimum = parse_macos_minimum(arguments.macos_minimum)
         legal_resources = None
         macos_deployment = None
         if arguments.app is not None:
@@ -1330,7 +1423,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             legal_resources = attest_legal_resources(application_resources)
             signature = _mac_signature(arguments.app)
-            macos_deployment = attest_macos_deployment(arguments.app)
+            macos_deployment = attest_macos_deployment(
+                arguments.app,
+                maximum_deployment_target=macos_minimum,
+            )
             bundle_name = arguments.app.name
         else:
             resource_root = arguments.resource_root
@@ -1381,12 +1477,15 @@ __all__ = [
     "NATIVE_KERNEL_DLL_NAME",
     "WINDOWS_TARGET_MACHINES",
     "attest_legal_resources",
+    "attest_macho_tree_deployment",
     "attest_macos_deployment",
     "attest_runtime",
     "attest_windows_deployment",
     "inspect_macos_bundle",
+    "macho_minimum_version",
     "inspect_windows_main_executable",
     "inspect_windows_runtime",
     "main",
+    "parse_macos_minimum",
     "write_create_only",
 ]

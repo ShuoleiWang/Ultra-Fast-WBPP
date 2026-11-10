@@ -64,6 +64,11 @@ class ColorProductRequest:
     # ``LRGB``.  PixInsight labels an opened image with its file stem, so the
     # default names the view after the channels it holds.
     product_name: str | None = None
+    # Root of the result the channels are part of.  The receipt then names
+    # each input by its place in that result (``artifact/<relative path>``)
+    # without host path or file-system identity: the form a result is
+    # published in, so ``receiptId`` identifies the published document.
+    artifact_root: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +122,23 @@ def _regular_identity(path: Path) -> dict[str, Any]:
         "mtimeNs": info.st_mtime_ns,
         "device": info.st_dev,
         "inode": info.st_ino,
+    }
+
+
+def _receipt_identity(channel: _Channel, artifact_root: Path | None) -> Mapping[str, Any]:
+    """An input's identity as the receipt states it (see ``artifact_root``)."""
+
+    if artifact_root is None:
+        return channel.identity
+    try:
+        relative = channel.path.relative_to(artifact_root)
+    except ValueError as error:
+        raise ColorProductError(
+            "CHANNEL_OUTSIDE_RESULT", "channel is not below artifact_root", path=str(channel.path)
+        ) from error
+    return {
+        **{key: value for key, value in channel.identity.items() if key not in ("mtimeNs", "device", "inode")},
+        "path": "artifact/" + relative.as_posix(),
     }
 
 
@@ -554,7 +576,7 @@ def _write_linear_fits(path: Path, rgb: NDArray[np.float32], reference: _Channel
 def _artifact(path: Path, root: Path, kind: str) -> dict[str, Any]:
     info = path.stat()
     return {
-        "path": str(path.relative_to(root)),
+        "path": path.relative_to(root).as_posix(),
         "kind": kind,
         "sha256": sha256_digest(path),
         "sizeBytes": info.st_size,
@@ -576,6 +598,16 @@ def build_color_product(
     channels = {name: _read_channel(name, value) for name, value in values.items()}
     if len({str(channel.path) for channel in channels.values()}) != len(channels):
         raise ColorProductError("DUPLICATE_CHANNEL", "each channel must name a distinct input file")
+    try:
+        artifact_root = (
+            None if request.artifact_root is None else Path(request.artifact_root).expanduser().resolve(strict=True)
+        )
+    except OSError as error:
+        raise ColorProductError("ARTIFACT_ROOT_INVALID", str(error), path=request.artifact_root) from error
+    inputs = [
+        _receipt_identity(channels[name], artifact_root)
+        for name in (*_CHANNELS, *(("L",) if "L" in channels else ()))
+    ]
     reference = channels["R"]
     for channel in channels.values():
         if channel.shape != reference.shape:
@@ -623,7 +655,7 @@ def build_color_product(
             "productVersion": COLOR_PRODUCT_VERSION,
             "createdAt": datetime.now(timezone.utc).isoformat(),
             "state": "SOLVED",
-            "inputs": [channels[name].identity for name in (*_CHANNELS, *(("L",) if "L" in channels else ()))],
+            "inputs": inputs,
             "geometry": {
                 "shape": list(reference.shape),
                 "channelOrder": list(_CHANNELS),

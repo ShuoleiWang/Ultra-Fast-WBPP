@@ -331,7 +331,9 @@ pub(crate) fn discover_engine<R: Runtime>(app: &AppHandle<R>) -> Result<EngineEx
         if !seen.insert(path.clone()) || !path.is_file() {
             continue;
         }
-        return Ok(EngineExecutable { path });
+        return Ok(EngineExecutable {
+            path: platform::plain_path(&path),
+        });
     }
     #[cfg(debug_assertions)]
     Err("Ultra-Fast WBPP scientific sidecar was not found. Install a signed app bundle or set UFWBPP_ENGINE_EXECUTABLE to the development engine executable.".to_owned())

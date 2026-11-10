@@ -191,7 +191,6 @@ def test_only_added_rejections_receive_sky_alignment_and_original_mad_stays_fixe
 
 def _reference_fit_residual_background(values, bin_factor, weights):
     """The previous one-frame-at-a-time cell statistics, kept as the reference."""
-    from ufwbpp.stacking import residual_background as module
 
     n, height, width = values.shape
     cell = max(5, int(np.ceil(128 / bin_factor)))

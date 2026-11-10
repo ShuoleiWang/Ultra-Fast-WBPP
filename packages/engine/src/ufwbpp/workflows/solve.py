@@ -1069,8 +1069,18 @@ def _solve_one(
     hints: _SolverHints,
     min_matches: int,
     max_rms_arcsec: float,
+    staging_directory: Path | None = None,
 ) -> tuple[bool, list[dict[str, Any]]]:
+    """Solve with the first backend that verifies.
+
+    ``staging_directory`` is where the solver's own working files go: a
+    directory inside the run's staging tree, so that they sit on the output
+    volume and leave with the run.  Without it the adapter uses its default.
+    """
+
     attempts: list[dict[str, Any]] = []
+    if staging_directory is not None:
+        staging_directory.mkdir(parents=True, exist_ok=True)
     for backend in backends:
         if os.path.lexists(output_path):
             attempts.append(
@@ -1090,6 +1100,7 @@ def _solve_one(
                     dec_hint_degrees=hints.dec_degrees,
                     field_of_view_degrees=hints.field_of_view_degrees,
                     search_radius_degrees=hints.search_radius_degrees,
+                    staging_directory=None if staging_directory is None else str(staging_directory),
                 )
             )
         except Exception as error:

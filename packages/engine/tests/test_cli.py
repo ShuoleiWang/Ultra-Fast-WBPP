@@ -115,3 +115,83 @@ def test_cli_streams_are_utf8_regardless_of_the_console_code_page(
     assert "目录 (12°)" in rendered
     # The bytes on the pipe are UTF-8, not the console code page's encoding.
     assert "目录 (12°)".encode("utf-8") in completed.stdout
+
+
+def test_an_engine_error_is_one_line_of_json_on_the_diagnostic_stream(tmp_path: Path, capsys) -> None:
+    """The desktop reads the engine's diagnostics line by line: the error
+    envelope must be one line for its code and message to be recovered."""
+
+    assert main(["inventory", str(tmp_path / "no such folder")]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    lines = captured.err.splitlines()
+    assert len(lines) == 1
+    envelope = json.loads(lines[0])
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] and "no such folder" in envelope["error"]["message"]
+
+
+def test_inventory_takes_everything_after_a_double_dash_as_a_path(nina_project: Path, capsys) -> None:
+    """The desktop separates its options from the user's paths with ``--``:
+    a path that looks like an option is a path, and nothing is written."""
+
+    assert main(["inventory", "--compact", "--", str(nina_project / "LIGHT")]) == 0
+    assert json.loads(capsys.readouterr().out)["counts"]["LIGHT"] == 1
+
+    target = nina_project / "existing.json"
+    target.write_text("keep", encoding="utf-8")
+    arguments = ["--output", str(target), "--force", str(nina_project / "LIGHT")]
+    assert main(["inventory", "--compact", "--", *arguments]) == 2
+    assert json.loads(capsys.readouterr().err)["ok"] is False
+    assert target.read_text(encoding="utf-8") == "keep"
+
+
+def test_request_sources_bind_every_asset_to_the_deepest_one_in_linear_time(tmp_path: Path) -> None:
+    """An asset takes the role of the deepest request source that is the
+    asset itself or a folder above it; one written twice counts as first
+    written.  With one source per file, as the desktop sends them, the check
+    must not compare every asset with every source."""
+
+    import time
+    from types import SimpleNamespace
+
+    from ufwbpp.cli import _verify_expected_source_roles
+    from ufwbpp.models import AssetRole
+    from ufwbpp.runtime import RuntimeConfigurationError
+
+    def inventory(*assets: tuple[Path, AssetRole]) -> SimpleNamespace:
+        return SimpleNamespace(assets=[SimpleNamespace(path=str(path), role=role) for path, role in assets])
+
+    night = tmp_path / "night"
+    assets = inventory(
+        (night / "LIGHT" / "a.fits", AssetRole.LIGHT),
+        (night / "FLAT" / "f.fits", AssetRole.FLAT),
+        (night / "masters" / "bias.fits", AssetRole.MASTER_BIAS),
+    )
+    # The folder says LIGHT, a deeper folder and a single file say otherwise.
+    expected = {
+        str(night): "LIGHT",
+        str(night / "FLAT"): "FLAT",
+        str(night / "masters" / "bias.fits"): "MASTER_BIAS",
+    }
+    _verify_expected_source_roles(assets, expected)
+    # The same folder written a second way: the first role stands.
+    _verify_expected_source_roles(assets, {**expected, str(night / "FLAT") + "/": "DARK"})
+    with pytest.raises(RuntimeConfigurationError) as mismatch:
+        _verify_expected_source_roles(assets, {**expected, str(night / "FLAT"): "DARK"})
+    assert mismatch.value.code == "PROJECT_SOURCE_ROLE_MISMATCH"
+    assert f"{night / 'FLAT' / 'f.fits'} expected DARK, header/path evidence found FLAT" in str(mismatch.value)
+    with pytest.raises(RuntimeConfigurationError) as unbound:
+        _verify_expected_source_roles(inventory((tmp_path / "elsewhere" / "a.fits", AssetRole.LIGHT)), expected)
+    assert unbound.value.code == "PROJECT_SOURCE_UNBOUND"
+    with pytest.raises(RuntimeConfigurationError) as nothing:
+        _verify_expected_source_roles(assets, {})
+    assert nothing.value.code == "PROJECT_SOURCE_UNBOUND"
+
+    # 4000 files, one source each: milliseconds; the pairwise comparison took minutes.
+    files = [tmp_path / f"PANEL_{index % 6}" / f"NIGHT_{index % 9}" / "LIGHT" / f"L_{index:05d}.fits" for index in range(4000)]
+    started = time.perf_counter()
+    _verify_expected_source_roles(
+        inventory(*((path, AssetRole.LIGHT) for path in files)), {str(path): "LIGHT" for path in files}
+    )
+    assert time.perf_counter() - started < 5.0

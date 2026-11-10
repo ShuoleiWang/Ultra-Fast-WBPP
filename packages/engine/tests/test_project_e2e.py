@@ -6,7 +6,6 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
-from types import SimpleNamespace
 from typing import Any, Generator, Mapping
 
 from astropy.io import fits
@@ -15,6 +14,7 @@ import numpy as np
 import pytest
 
 from mosaic_synthetic import Sky, TruthCatalog, TruthSolver, make_sky, render, true_header, truth_cards
+from receipt_audit import audit_published_digests
 from ufwbpp.mosaic.astrometry import MosaicAstrometryError, PanelStars, SipFit
 from ufwbpp.mosaic.canvas import canvas_window, celestial_wcs, frame_boundary, window_grid
 from ufwbpp.workflows.single_target import (
@@ -879,6 +879,16 @@ def test_published_layout_is_channels_previews_receipt_and_details(tmp_path: Pat
         assert frame["path"].startswith("source/")
         assert (output / frame["reviewPreview"]).is_file()
         assert frame["reviewPreview"].startswith("details/runs/")
+    # Every digest the receipts cite is the digest of the published file: the
+    # panel runs' receipts (the fake runner writes local paths, which the
+    # publication rewrites), the mosaics', the shared calibration's, the colour product's.
+    checked, problems = audit_published_digests(output)
+    assert problems == []
+    cited = {line.split(" -> ")[-1].split(" (")[0] for line in checked}
+    assert {
+        "details/shared-calibration/receipt.json", "details/color/receipt.json", "details/mosaics/l/receipt.json",
+        *(f"details/runs/DUNPAI{panel}/receipt.json" for panel in range(1, 5)),
+    } <= cited
 
 
 def test_publish_file_links_and_gives_a_private_solver_output_normal_permissions(tmp_path: Path) -> None:
@@ -1249,6 +1259,9 @@ def test_mosaic_failures_publish_unsolved_only(tmp_path: Path) -> None:
     assert [key.casefold() for key in failure["filters"]] == ["r"] and [key.casefold() for key in failure["passedFilters"]] == ["g"]
     (failed,) = failure["filters"].values()
     assert failed["gates"]["canvasWcs"] == "FAIL"
+    # An evidence tree cites its receipts by the digests of the files in it.
+    checked, problems = audit_published_digests(Path(unverified.evidence_directory))
+    assert problems == [] and sum("].receipt -> details/runs/" in line for line in checked) == 4
 
     inventory2, base2, _ = _project(tmp_path / "survey", filters=("R",))
     unplaced = run_project_e2e(
@@ -1506,6 +1519,122 @@ def test_unexpected_error_keeps_private_diagnostics_if_evidence_writer_also_fail
     assert diagnostic["message"] == "unexpected panel failure"
 
 
+def test_a_stage_record_that_is_not_a_finite_number_still_leaves_published_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A receipt states no NaN, so a project with one in a stage record does
+    not publish.  Its evidence does: the failure receipt holds the record with
+    the value as text instead of failing to be written in its turn."""
+
+    import ufwbpp.workflows.project as project_module
+
+    inventory, base = _single_target_project(tmp_path, ("R", "G", "B"))
+    crop = project_module._crop_final_channels
+
+    def unmeasured(*arguments: Any, **options: Any) -> dict[str, Any]:
+        evidence = crop(*arguments, **options)
+        evidence["unmeasured"] = [float("nan"), {"limit": float("-inf")}]
+        return evidence
+
+    monkeypatch.setattr(project_module, "_crop_final_channels", unmeasured)
+    result = run_project_e2e(
+        ProjectE2ERequest(inventory, base, base.output_directory),
+        solver_backends=(ManagedCopySolver(),),
+        panel_runner=FakePanelRunner(),
+        reproject_provider=FakeReproject().provider(),
+    )
+    assert result.success is False and result.code == "PROJECT_UNEXPECTED_FAILURE"
+    assert "ValueError" in result.message and "evidence publication failed" not in result.message
+    evidence = Path(result.evidence_directory)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["input", "product.unsolved"] and evidence.name == "product.unsolved"
+    assert {"R.fits", "G.fits", "B.fits", "RGB.fits"} <= {path.name for path in evidence.iterdir()}
+    receipt = json.loads(Path(result.receipt_path).read_text(encoding="utf-8"), parse_constant=pytest.fail)
+    assert receipt["execution"]["finalCrop"]["unmeasured"] == ["nan", {"limit": "-inf"}]
+    assert receipt["execution"]["unexpectedFailure"]["exceptionType"] == "ValueError"
+
+
+@pytest.mark.parametrize("case", ["rename-refused", "output-appears", "no-rename-works", "receipt-held"])
+def test_a_finished_project_whose_final_rename_fails_is_kept_and_reported_unpublished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """The last step of a complete project is one directory rename.  When it
+    fails (another program holds a file of the tree, the output name is taken
+    meanwhile) nothing that was made is deleted or replaced: the failure says
+    that publication failed, or that the output exists when it does, the
+    products are kept as ``<output>.unsolved`` evidence (in the staging
+    directory when that rename fails too), the result names that directory,
+    and no receipt outside a published directory says SOLVED."""
+
+    import ufwbpp.workflows.project as project_module
+    from ufwbpp import platform as platform_services
+
+    inventory, base = _single_target_project(tmp_path, ("R", "G", "B"))
+    output = Path(base.output_directory)
+    evidence = output.with_name(output.name + ".unsolved")
+    services = platform_services.current()
+    rename_directory = services.rename_directory_no_replace
+    refused = {output, evidence} if case in ("no-rename-works", "receipt-held") else {output}
+
+    def rename(source: Path, destination: Path) -> None:
+        if Path(destination) in refused:
+            if case == "output-appears":
+                Path(destination).mkdir()  # another program took the name during the run
+            else:
+                raise PermissionError(errno.EACCES, "The process cannot access the file", str(destination))
+        rename_directory(source, destination)
+
+    monkeypatch.setattr(type(services), "rename_directory_no_replace", lambda self, source, destination: rename(source, destination))
+    if case == "receipt-held":
+        # The success receipt itself cannot be withdrawn.
+        def held(path: Path, **kwargs: Any) -> bool:
+            if Path(path).name == "receipt.json" and Path(path).parent.name.endswith(".pstage"):
+                raise PermissionError(errno.EACCES, "The process cannot access the file", str(path))
+            return platform_services.remove_file(path, **kwargs)
+
+        monkeypatch.setattr(project_module, "remove_file", held)
+
+    result = run_project_e2e(
+        ProjectE2ERequest(inventory, base, base.output_directory),
+        solver_backends=(ManagedCopySolver(),),
+        panel_runner=FakePanelRunner(),
+        reproject_provider=FakeReproject().provider(),
+    )
+
+    assert result.success is False and result.state is E2EState.UNSOLVED_WORKING
+    assert result.code == ("OUTPUT_EXISTS" if case == "output-appears" else "PUBLICATION_FAILED")
+    assert result.output_directory is None and result.product_paths == ()
+    kept = Path(result.evidence_directory)
+    # Create-only: a directory that took the output name is not touched, and nothing else was made.
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
+        {"input", kept.name, *(("product",) if case == "output-appears" else ())}
+    )
+    assert not output.exists() or list(output.iterdir()) == []
+    if case in ("rename-refused", "output-appears"):
+        assert kept == evidence
+    else:
+        assert kept.parent == output.parent and kept.name.startswith(".product.") and kept.name.endswith(".pstage")
+    # The result says what happened and where the finished products are.
+    assert "the finished project was not published" in result.message and str(kept) in result.message
+    assert ("the directory could not be renamed" in result.message) is (case != "output-appears")
+    # Every finished product is there.
+    assert {"R.fits", "G.fits", "B.fits", "RGB.fits", "previews", "details"} <= {path.name for path in kept.iterdir()}
+    assert fits.getheader(kept / "RGB.fits")["OAFSTATE"] == "SOLVED"
+    if case == "receipt-held":
+        # Nothing could replace the receipt: the result says so and names no result.
+        assert "its failure receipt could not be written" in result.message
+        assert "which is not a published result" in result.message
+        return
+    receipt_text = (kept / "receipt.json").read_text(encoding="utf-8")
+    receipt = json.loads(receipt_text)
+    assert Path(result.receipt_path) == kept / "receipt.json"
+    assert (receipt["success"], receipt["state"], receipt["code"]) == (False, "UNSOLVED_WORKING", result.code)
+    assert receipt["publication"]["successDirectoryPublished"] is False
+    assert receipt["publication"]["evidenceDirectoryPublished"] is (kept == evidence)
+    assert "the finished project was not published: product: " in receipt["message"]
+    assert str(tmp_path) not in receipt_text
+    assert audit_published_digests(kept)[1] == []
+
+
 def _brute_valid_rectangle(mask: np.ndarray) -> tuple[int, int, int, int, int]:
     height, width = mask.shape
     return max(
@@ -1634,6 +1763,7 @@ def test_project_publishes_the_super_luminance_of_its_broadband_channels(tmp_pat
     assert artifact["kind"] == "SOLVED_MONO_FITS" and artifact["finalGate"]["status"] == "PASS"
     assert artifact["astrometryProvenance"]["referenceFilter"] == "L"
     assert artifact["sha256"] == record["sha256"] == "sha256:" + hashlib.sha256(super_luminance.read_bytes()).hexdigest()
+    assert audit_published_digests(output)[1] == []
     color = receipt["execution"]["color"]
     assert color["status"] == "SOLVED_LRGB" and color["luminanceRequested"] == luminance
     assert color["luminanceSource"] == ("SuperL" if luminance == "superL" else "L")

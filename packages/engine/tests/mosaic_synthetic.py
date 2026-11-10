@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from astropy.io import fits
-from astropy.wcs import WCS
 import numpy as np
 
 from ufwbpp.mosaic.astrometry import CatalogStars

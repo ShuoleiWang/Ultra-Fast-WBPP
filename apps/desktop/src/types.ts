@@ -406,12 +406,19 @@ export interface PipelineCompleteEvent {
   gate: ResultGateReport;
   screening?: ScreeningSummary;
 }
+/** What a failed run left on disk, as the controller reports it with every failure. */
+export interface PipelineErrorDetails extends Record<string, unknown> {
+  /** The run's `.unsolved` evidence folder; present only when it exists. */
+  evidenceDirectory?: string;
+  /** Whether the output folder exists (a result the final verification refused stays there). */
+  outputPublished?: boolean;
+}
 export interface PipelineErrorEvent {
   jobId: string;
   code: string;
   message: string;
   retryable: boolean;
-  details?: Record<string, unknown>;
+  details?: PipelineErrorDetails;
 }
 export interface PipelineEventHandlers {
   onProgress(event: PipelineProgressEvent): void;

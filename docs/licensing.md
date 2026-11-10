@@ -19,7 +19,7 @@ appreciated, not an additional condition of the MIT license.
 
 ## Provenance review boundary
 
-The local continuation review found one author and committer across the eight visible commits and no additional co-author trailers. The identified Astroalign adaptation retains its upstream MIT notice. This supports the recorded provenance but does not independently prove ownership of initial imports or every uncommitted change. Before publishing the relicensed candidate, the copyright holder must confirm authority to relicense all project-owned portions; third-party code and documents retain their original terms.
+The local continuation review found one author and committer across the commits visible at that time and no additional co-author trailers. The identified Astroalign adaptation retains its upstream MIT notice. This supports the recorded provenance but does not independently prove ownership of initial imports or every uncommitted change. Before publishing the relicensed candidate, the copyright holder must confirm authority to relicense all project-owned portions; third-party code and documents retain their original terms.
 
 ## No GPL library in the bundled engine
 

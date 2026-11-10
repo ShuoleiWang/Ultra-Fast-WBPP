@@ -23,7 +23,10 @@ export function requestedDemoStage(): DemoStage | undefined {
 
 /**
  * Drives the clearly labelled browser demo to a stage without clicks, so the
- * documentation screenshots come from the real components.  It never runs
+ * documentation screenshots come from the real components.  The default walk
+ * is the default flow: import, then Start with automatic screening (`frames`
+ * stops on the import page, `run` and `result` start from it); `blink` opens
+ * the manual review and `review` the legacy evidence table.  It never runs
  * inside the desktop app and never touches files.
  */
 export function useDemoAutopilot(workflow: Workflow, stage: DemoStage | undefined) {
@@ -41,25 +44,19 @@ export function useDemoAutopilot(workflow: Workflow, stage: DemoStage | undefine
         if (source.detected && !source.confirmed) workflow.confirmRole(source.role);
       return;
     }
-    if (phase.current === 2 && stage === "blink" && workflow.allRequiredConfirmed && workflow.step === "import") {
+    if (phase.current !== 2 || !workflow.allRequiredConfirmed || workflow.step !== "import") return;
+    if (stage === "blink") {
       phase.current = 3;
       void workflow.runBlink();
-      return;
-    }
-    if (phase.current === 2 && stage !== "frames" && workflow.allRequiredConfirmed && workflow.step === "import") {
+    } else if (stage === "review") {
       phase.current = 3;
       void workflow.runInspection();
-      return;
-    }
-    if (
-      phase.current === 3 &&
-      (stage === "run" || stage === "result") &&
-      workflow.step === "inspect" &&
-      workflow.canStart
-    ) {
+    } else if ((stage === "run" || stage === "result") && !workflow.automaticScreening) {
+      // A browser that turned it off before still walks the default flow.
+      workflow.setAutomaticScreening(true);
+    } else if ((stage === "run" || stage === "result") && workflow.canStart) {
       phase.current = 4;
       void workflow.startRun();
-      return;
     }
   }, [stage, workflow]);
 }

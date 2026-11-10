@@ -557,8 +557,6 @@ def run_portable_pipeline(
 
 __all__ = [
     "PixelTransform",
-    "AffineTransform",
-    "MasterMetadataOverride",
     "OUTPUT_STATE",
     "PIPELINE_VERSION",
     "PipelineParameters",

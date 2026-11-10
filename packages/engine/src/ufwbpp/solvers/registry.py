@@ -14,11 +14,6 @@ from .base import DeclarativeSolverBackend, SolverBackend
 
 
 def solver_backends() -> tuple[SolverBackend, ...]:
-    # Lazy imports avoid a cycle: execution adapters consume the request/result
-    # models defined above, while this registry is the public composition root.
-    from .astap import AstapSolverBackend
-    from .astrometry_net import AstrometryNetSolverBackend
-
     common = ("seed-hints", "celestial-wcs", "fail-closed-wcs-validation")
     # Registry order is the planner's ``auto`` preference; keep it aligned with
     # the runtime chain (astrometry-net, astap, native) so the plan names the

@@ -133,7 +133,6 @@ def test_confirmed_harmful_frame_triggers_a_second_integration_pass(
     """A frame the counterfactual confirms harmful is removed and the group integrated again."""
 
     import ufwbpp.workflows.integration as integration_module
-    import ufwbpp.workflows.screening as screening_module
     from ufwbpp.selection import policy as policy_module
 
     # Two candidates: at most one of them can be the group's normalization

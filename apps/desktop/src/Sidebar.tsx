@@ -4,6 +4,7 @@ import type { Translator } from "./i18n";
 import { BiasIcon, DarkIcon, FlatIcon, ImportIcon, LightIcon, ProcessIcon, ResultIcon } from "./icons";
 import type { RawFrameRole, WorkflowStep } from "./types";
 import type { useWorkflow } from "./useWorkflow";
+import { filterName } from "./views/common";
 
 type Workflow = ReturnType<typeof useWorkflow>;
 export type InventoryTab = RawFrameRole | "ALL";
@@ -120,7 +121,7 @@ export function Sidebar({
                 onClick={() => pick("LIGHT")}
               >
                 <span className="sb-name">
-                  {cell.target} · {cell.filter}
+                  {cell.target} · {filterName(cell.filter, t)}
                 </span>
                 <span className="sb-count">{cell.lightCount}</span>
               </button>
@@ -177,7 +178,11 @@ export function Sidebar({
       <div className="sb-foot">
         <div className="engine" title={workflow.capabilities?.available ? t("engineReady") : t("engineUnavailable")}>
           <span className={`runtime-dot ${workflow.capabilities?.available ? "online" : ""}`} />
-          <strong>{workflow.capabilities?.chip ?? t("detectingHardware")}</strong>
+          <strong>
+            {workflow.capabilities?.platform === "browser"
+              ? t("browserDemoChip")
+              : (workflow.capabilities?.chip ?? t("detectingHardware"))}
+          </strong>
         </div>
         <details>
           <summary>{t("legal")}</summary>

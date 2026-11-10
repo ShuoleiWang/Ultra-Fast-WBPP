@@ -33,6 +33,7 @@ from ..stacking.integration import (
     normalize_role,
     robust_location,
 )
+from ..stacking.masters import calibration_stack_parameters
 from ..stacking.normalization import StellarScaleHint
 from ..stacking.parameters import PipelineParameters
 from .common import _safe_token
@@ -99,7 +100,7 @@ def _build_registration_masters(
                 for path in (*biases, *darks, *flats, *supplied_biases, *supplied_darks, *supplied_flats, *lights)
             ),
         )
-    parameters = pipeline_parameters.integration
+    parameters = calibration_stack_parameters(pipeline_parameters)
     workflow = pipeline_parameters.calibration_workflow
     directory.mkdir(parents=True, exist_ok=False)
     def frame_info(path: Path) -> FrameInfo:
@@ -190,6 +191,7 @@ def _build_registration_masters(
             supplied_dark_bias_included=supplied_dark_bias_included,
             workflow=workflow,
             dark_temperature_tolerance_celsius=pipeline_parameters.dark_temperature_tolerance_celsius,
+            required=pipeline_parameters.required_calibration,
         )
     except CalibrationError as error:
         raise E2EError(error.code, str(error), path=error.path) from error
@@ -587,6 +589,36 @@ def _capture_single_field_generated_calibration(
     )
 
 
+def _refinement_rejection(evidence: Mapping[str, Any]) -> str:
+    """Why the full-resolution refinement refused a transform, with its numbers."""
+
+    reason = str(evidence.get("reason", "full-resolution refinement was not accepted"))
+    fixed = evidence.get("sensorFixedControlPoints")
+    if reason == "CONTROL_POINTS_SENSOR_FIXED" and isinstance(fixed, Mapping):
+        return (
+            f"{reason}: {fixed.get('inlierCount')} of {evidence.get('finalInlierCount')} control points are single "
+            "pixels on the same sensor pixel of this Light and of the reference (hot pixels, not stars), and "
+            f"{fixed.get('remainingConsensusInlierCount')} other catalog objects register "
+            f"{float(fixed.get('remainingConsensusOffsetPreviewPixels', math.nan)):.1f} preview pixels away "
+            f"(limit {float(fixed.get('remainingConsensusOffsetMaximumPreviewPixels', math.nan)):g}); "
+            "calibrate the Lights with a matching Dark"
+        )
+
+    def shown(value: Any) -> str:
+        if isinstance(value, float):
+            return f"{value:.4g}"
+        if isinstance(value, list):
+            return "[" + ", ".join(shown(item) for item in value) + "]"
+        return str(value)
+
+    numbers = ", ".join(
+        f"{key}={shown(value)}"
+        for key, value in evidence.items()
+        if key not in {"status", "reason"} and isinstance(value, (int, float, list)) and not isinstance(value, bool)
+    )
+    return f"{reason} ({numbers})" if numbers else reason
+
+
 def _register_lights(
     lights: tuple[Path, ...],
     calibration_plan: Any,
@@ -672,13 +704,9 @@ def _register_lights(
             and getattr(item, "transform_model", "similarity")
             != expected_refined_model
         ):
-            refine_evidence = getattr(item, "full_refine_evidence", {})
-            reason = refine_evidence.get(
-                "reason", "full-resolution refinement was not accepted"
-            )
             raise E2EError(
                 "REGISTRATION_FULL_REFINEMENT_REJECTED",
-                str(reason),
+                _refinement_rejection(getattr(item, "full_refine_evidence", {})),
                 path=item.path,
             )
         serialized = tuple(tuple(float(value) for value in row) for row in matrix)

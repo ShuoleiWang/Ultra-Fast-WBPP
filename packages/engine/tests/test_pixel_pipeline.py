@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import hashlib
 import json
+import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -210,7 +211,6 @@ def test_parallel_warps_preserve_fits_and_ordered_provenance(
 @pytest.mark.parametrize(("budget_jobs", "cpu_workers", "expected_workers"), [(3, 8, 3), (10, 12, 10), (10, 2, 2)])
 def test_fused_jobs_share_budget_and_keep_result_order(tmp_path, monkeypatch, budget_jobs, cpu_workers, expected_workers):
     from types import SimpleNamespace
-    import ufwbpp.stacking.pipeline as pipeline
     info = SimpleNamespace(shape=(12, 16))
     jobs = [SimpleNamespace(index=i, info=info, transform=AffineTransform.identity(), cfa_pattern=None) for i in range(20)]
     budget = lights_module._fused_job_bytes(jobs[0], "lanczos-3-clamped") * budget_jobs
@@ -236,7 +236,6 @@ def test_fused_jobs_share_budget_and_keep_result_order(tmp_path, monkeypatch, bu
 
 def test_fused_failure_waits_for_active_writer(monkeypatch):
     from types import SimpleNamespace
-    import ufwbpp.stacking.pipeline as pipeline
     jobs = [SimpleNamespace(index=i, info=SimpleNamespace(shape=(12, 16)), transform=AffineTransform.identity(), cfa_pattern=None) for i in range(2)]
     barrier = threading.Barrier(2)
     failed, release_writer, writer_finished = threading.Event(), threading.Event(), threading.Event()
@@ -1084,6 +1083,48 @@ def test_output_directory_is_never_overwritten(tmp_path: Path) -> None:
         )
     assert captured.value.code == "OUTPUT_EXISTS"
     assert _sha(output / "receipt.json") == receipt_hash
+
+
+@pytest.mark.skipif(os.name != "posix", reason="simulates a POSIX volume; Windows' fallback is tested in test_platform")
+def test_output_volume_without_hard_links_publishes_the_same_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_file_rules
+) -> None:
+    """An output folder on exFAT or a network share: no hard links, no exclusive rename."""
+
+    import ctypes
+    import errno
+
+    from ufwbpp.platform import darwin, linux
+
+    biases, darks, flats, lights, _, _ = _dataset(tmp_path / "raw")
+
+    def run(output: Path) -> dict[str, str]:
+        result = run_portable_pipeline(
+            bias_files=biases,
+            dark_files=darks,
+            flat_files=flats,
+            light_files=lights,
+            output_directory=output,
+            parameters=_parameters(),
+        )
+        assert result.state == "UNSOLVED_WORKING"
+        return {path.relative_to(output).as_posix(): _sha(path) for path in sorted(output.rglob("*.fits"))}
+
+    linked = run(tmp_path / "linked")
+
+    def no_hard_links(src, dst, **kwargs) -> None:
+        raise OSError(errno.ENOTSUP, "Operation not supported")
+
+    def unsupported_rename(src: bytes, dst: bytes) -> int:
+        ctypes.set_errno(errno.ENOTSUP)
+        return -1
+
+    monkeypatch.setattr(os, "link", no_hard_links)
+    for module in (darwin, linux):
+        monkeypatch.setattr(module, "libc_no_replace_rename", lambda platform_id: unsupported_rename)
+    unlinked = run(tmp_path / "unlinked")
+    assert unlinked and unlinked == linked
+    assert not list(tmp_path.glob("unlinked*staging*")) and not list((tmp_path / "unlinked").rglob("*.partial"))
 
 
 @pytest.mark.parametrize("mismatch", ["filter", "dark-exposure"])

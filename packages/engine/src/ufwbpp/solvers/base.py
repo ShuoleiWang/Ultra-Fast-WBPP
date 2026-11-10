@@ -4,7 +4,9 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 import hashlib
 import math
+from pathlib import Path
 import re
+import tempfile
 from typing import Any, Mapping, Protocol, runtime_checkable
 
 from astropy.io import fits
@@ -14,6 +16,7 @@ import numpy as np
 
 from ..backends import Backend, BackendDescriptor
 from ..models import json_value
+from ..path_budget import STAGING_SUFFIX
 
 
 class SolverStatus(StrEnum):
@@ -117,6 +120,28 @@ class SolveRequest:
     dec_hint_degrees: float | None = None
     field_of_view_degrees: float | None = None
     search_radius_degrees: float | None = None
+    # A directory of the run's own staging tree, on the output volume: the
+    # adapter's private copy of the input and everything the solver writes
+    # stay below it.  ``None`` leaves the place to the adapter.
+    staging_directory: str | None = None
+
+
+def solve_staging(
+    request: SolveRequest, *, adapter: str, fallback_root: Path | None
+) -> tempfile.TemporaryDirectory[str]:
+    """The private directory of one solve; leaving the context removes it.
+
+    Below ``request.staging_directory`` it is ``.solve.<8>.stage``, 21
+    characters, so the staged paths stay inside the run's path budget.
+    Without one it is ``ultra-fast-wbpp-<adapter>-<8>`` in ``fallback_root``,
+    or in the system temporary directory.
+    """
+
+    if request.staging_directory is None:
+        return tempfile.TemporaryDirectory(prefix=f"ultra-fast-wbpp-{adapter}-", dir=fallback_root)
+    directory = Path(request.staging_directory).expanduser()
+    directory.mkdir(parents=True, exist_ok=True)
+    return tempfile.TemporaryDirectory(prefix=".solve.", suffix=STAGING_SUFFIX, dir=directory)
 
 
 @dataclass(frozen=True, slots=True)
@@ -627,6 +652,7 @@ __all__ = [
     "WcsValidation",
     "canonical_wcs_sha256",
     "index_artifact_name",
+    "solve_staging",
     "validate_astrometric_quality",
     "validate_solver_result",
     "validate_wcs_header",

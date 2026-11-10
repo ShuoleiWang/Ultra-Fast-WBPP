@@ -20,6 +20,7 @@ from pathlib import Path
 import struct
 import subprocess
 import sys
+import time
 from typing import Any, Callable, Iterator, Mapping
 
 from .base import (
@@ -34,6 +35,7 @@ from .base import (
     PathLimit,
     remove_file,
     resolve_data_root,
+    retry_file_operation,
     VolumeCapabilities,
 )
 
@@ -365,19 +367,41 @@ def volume_information(path: Path) -> VolumeCapabilities:
     return volume_capabilities_from(filesystem.value, int(flags.value))
 
 
+# How long the publication rename waits for another program (an antivirus
+# scan, a sync client, a viewer) to close a file inside the staged result.
+PUBLICATION_RETRY_BUDGET_SECONDS = 10.0
+
+
 def rename_directory_no_replace_with(
-    source: Path, destination: Path, rename: Callable[[Path, Path], None] = os.rename
+    source: Path,
+    destination: Path,
+    rename: Callable[[Path, Path], None] = os.rename,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
 ) -> None:
     """Create-only directory rename: Windows ``MoveFileExW`` without
     ``MOVEFILE_REPLACE_EXISTING`` fails with ``FileExistsError`` for an
-    existing target, which is the no-replace guarantee."""
+    existing target, which is the no-replace guarantee.
+
+    Windows refuses to rename a directory while any file below it is open in
+    another process.  That sharing violation is waited out within a bounded
+    budget; every attempt is the same no-replace call, so a destination that
+    appears meanwhile is refused at once and never replaced.
+    """
 
     if os.path.lexists(destination):
         raise NoReplaceError(
             "OUTPUT_EXISTS", "refusing to replace output directory", str(destination), precheck=True
         )
     try:
-        rename(source, destination)
+        retry_file_operation(
+            lambda: rename(source, destination),
+            platform_id="windows",
+            sleep=sleep,
+            clock=clock,
+            budget_seconds=PUBLICATION_RETRY_BUDGET_SECONDS,
+        )
     except FileExistsError as error:
         raise NoReplaceError(
             "OUTPUT_EXISTS", "output appeared during publication", str(destination)
@@ -591,6 +615,7 @@ __all__ = [
     "LONG_PATHS_REGISTRY_KEY",
     "LONG_PATH_CHARACTERS",
     "MAX_PATH_CHARACTERS",
+    "PUBLICATION_RETRY_BUDGET_SECONDS",
     "WELL_KNOWN_EXECUTABLES",
     "WindowsPlatform",
     "execution_state_keep_awake",

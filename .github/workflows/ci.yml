@@ -43,7 +43,7 @@ jobs:
           --github-output "${GITHUB_OUTPUT}"
 
   source-check:
-    name: Public tree and links
+    name: Source checks
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -52,6 +52,12 @@ jobs:
         run: |
           python3 scripts/check_public_tree.py .
           python3 scripts/check_local_links.py .
+      - name: Lint the Python sources for correctness (undefined names, stale __all__, unused imports)
+        # `make source-check` runs the same three commands; the pin is requirements-dev.txt.
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/lint"
+          "${RUNNER_TEMP}/lint/bin/python" -m pip install --quiet -r requirements-dev.txt
+          "${RUNNER_TEMP}/lint/bin/python" -m ruff check .
 
   python:
     name: Python ${{ matrix.python }} · ${{ matrix.os }}
@@ -141,12 +147,9 @@ jobs:
           facts = describe_native_kernels(); print(json.dumps(facts, indent=2));
           sys.exit(0 if facts['loaded'] else 1)"
       - name: Test Quality Gate and engine (native kernels value-identical to NumPy)
-        run: >-
-          python -m pytest -q
-          packages/light-frame-qc/tests
-          packages/registration/tests
-          packages/engine/tests
-          tests
+        # pytest.ini names the four test directories. On macOS and Linux the
+        # root conftest.py also holds the run to Windows' file-sharing rules.
+        run: python -m pytest -q
       - name: Smoke the command line and its doctor self-report
         shell: bash
         run: |
@@ -243,7 +246,7 @@ jobs:
             fi
           }
           require "Changed areas" "${CHANGES_RESULT}" true
-          require "Public tree and links" "${SOURCE_CHECK_RESULT}" true
+          require "Source checks" "${SOURCE_CHECK_RESULT}" true
           require Python "${PYTHON_RESULT}" "${PYTHON_SELECTED}"
           require Rust "${RUST_RESULT}" "${RUST_SELECTED}"
           require "React desktop shell" "${FRONTEND_RESULT}" "${FRONTEND_SELECTED}"

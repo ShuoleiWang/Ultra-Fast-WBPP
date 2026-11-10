@@ -6,9 +6,10 @@ Start with the [project README](../README.md) (also in [简体中文](README.zh-
 
 | Page | What it is |
 |---|---|
+| [getting-started.md](getting-started.md), [getting-started.zh-CN.md](getting-started.zh-CN.md) | The first run step by step: build or install, Gatekeeper and SmartScreen, the solver, the index set and the Gaia tiles, import, automatic screening or the Blink review, processing, the results folder; an FAQ |
 | [features.md](features.md) | Why Ultra-Fast WBPP: the advantages over PixInsight WBPP, the noteworthy features and the evidence behind each claim, plus what the project does not do |
 | [architecture.md](architecture.md) | How a run executes: desktop → Rust → Python engine → native kernels; data and correctness boundaries; the scientific stages (legacy gate, explicit blink selection, unattended selection); performance; platform layer |
-| [recipes/README.md](recipes/README.md) | Which recipe to start from for your data, and the built-in contracts |
+| [recipes/README.md](recipes/README.md) | Which recipe to start from for your data, and the calibration contracts |
 | [building-from-source.md](building-from-source.md) | Build the engine, the desktop app or a self-contained demo app from a clone; check the result and share it |
 | [validation-matrix.md](validation-matrix.md) | The register of what is validated, on which hardware, and what is explicitly not |
 | [evidence/](evidence/) | The dated, share-safe receipts and benchmark reports the validation matrix and the benchmarks page cite; new results are not committed |
@@ -18,17 +19,17 @@ Start with the [project README](../README.md) (also in [简体中文](README.zh-
 
 | Page | Use it for |
 |---|---|
-| [recipes/nina-mono.md](recipes/nina-mono.md) | N.I.N.A. mono folders through the standard workflow; approving REVIEW frames |
-| [recipes/calibration.md](recipes/calibration.md) | Raw Flat/Dark/Bias versus supplied masters, Dark bias semantics, overrides |
+| [recipes/nina-mono.md](recipes/nina-mono.md) | N.I.N.A. mono folders through the standard workflow; which Lights are stacked (automatic screening or Blink in the desktop, REVIEW approval on the command line) |
+| [recipes/calibration.md](recipes/calibration.md) | Raw Flat/Dark/Bias versus supplied masters, Dark bias semantics, overrides; importing a folder prepared for PixInsight WBPP and the WBPP pairing rules (`NIGHT_…`, `DATE_…`, `SESSION_…`, `PANEL_…`) |
 | [recipes/blink-screening.md](recipes/blink-screening.md) | Blink-style screening: the flags and their thresholds, the reference frame per channel, the normalised previews, the selection file, `blink-measure` and `--selection`, what a run records, the limits |
 | [blink-display-redesign.md](blink-display-redesign.md) | Experimental display-only redesign: complementary star/background views, native-pixel crops, real-image comparison and remaining human validation |
 | [recipes/automatic-screening.md](recipes/automatic-screening.md) | Mixed-night import, the legacy gate (what it measures, how it decides, why it cannot see a uniformly bad night) and the optional review |
 | [recipes/drizzle.md](recipes/drizzle.md) | 1×–4× native drizzle: options, products, measured quality |
 | [recipes/osc-cfa.md](recipes/osc-cfa.md) | One-shot-colour (Bayer) Lights: pipeline and the synthetic validation |
 | [recipes/advanced-algorithms.md](recipes/advanced-algorithms.md) | The two opt-in algorithms, both off by default: ZOGY proper coaddition as an additional product, and the robust IRLS combination |
-| [recipes/astrometry.md](recipes/astrometry.md), [recipes/offline-solver-catalogs.md](recipes/offline-solver-catalogs.md) | `SEED` versus `SOLVED`, installing the solver and index set |
+| [recipes/astrometry.md](recipes/astrometry.md), [recipes/offline-solver-catalogs.md](recipes/offline-solver-catalogs.md) | `SEED` versus `SOLVED`, the catalog-refitted WCS (TAN-SIP on Gaia stars) and same-grid solve inheritance; installing the solver, the index set and the Gaia DR2 tiles |
 | [recipes/normalization-and-xisf.md](recipes/normalization-and-xisf.md) | XISF inputs, supported stellar/background normalization and retired LN compatibility |
-| [recipes/project-mosaic-rgb.md](recipes/project-mosaic-rgb.md) | Multi-panel projects and RGB/LRGB products |
+| [recipes/project-mosaic-rgb.md](recipes/project-mosaic-rgb.md) | Multi-panel projects on one shared canvas (including drizzle onto the canvas), RGB/LRGB products and the `SuperL.fits` super luminance that every project with two or more broadband channels publishes by default |
 | [windows.md](windows.md) | Windows x64: requirements, the ASTAP route, Windows-specific behaviour, what is validated |
 | [hardware.md](hardware.md) | Apple Silicon profiles and tuning, what `performance-validated` means |
 
@@ -51,7 +52,7 @@ Start with the [project README](../README.md) (also in [简体中文](README.zh-
 | [frame-selection-plan.md](frame-selection-plan.md) | Analysis and design of unattended selection (2026-09-19). Implemented; the current behaviour is described in [architecture.md](architecture.md#unattended-light-selection) |
 | [frame-selection-implementation.md](frame-selection-implementation.md) | Implementation specification and the round-by-round real-data results (§8) that fixed the thresholds |
 | [gui-redesign-plan.md](gui-redesign-plan.md) | The desktop redesign: diagnosis, design and the implementation record (§8) |
-| [mosaic-plan.md](mosaic-plan.md) | Multi-panel, multi-night mosaics with automatic stitching (2026-10-07): one canvas, one interpolation per frame, global astrometric and photometric networks, a two-scale blend that keeps bright stars and cores from one panel, gates and validation plan. Phase 1, the two-scale blend, partial filters, photometric components, the joint astrometric fit of all panels and per-Light shift fields are implemented (§14); drizzle onto the canvas is not, and HDR exposure classes were dropped. The current behaviour is in the [mosaic recipe](recipes/project-mosaic-rgb.md) |
+| [mosaic-plan.md](mosaic-plan.md) | Multi-panel, multi-night mosaics with automatic stitching (2026-10-07): one canvas, one interpolation per frame, global astrometric and photometric networks, a two-scale blend that keeps bright stars and cores from one panel, gates and validation plan. Phase 1, the two-scale blend, partial filters, photometric components, the joint astrometric fit of all panels, per-Light shift fields and drizzle onto the canvas are implemented (§14; canvas drizzle has synthetic pipeline tests only); HDR exposure classes were dropped. The current behaviour is in the [mosaic recipe](recipes/project-mosaic-rgb.md) |
 | [release-readiness.md](release-readiness.md) | Release review of 2026-09-09 (English): what was fixed, what blocks a stable binary release |
 | [security-audit.md](security-audit.md) | Dependency and secret audit snapshot of 2026-09-05 (English) |
 
@@ -65,4 +66,4 @@ Start with the [project README](../README.md) (also in [简体中文](README.zh-
 | [../SECURITY.md](../SECURITY.md), [../CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md), [../CITATION.cff](../CITATION.cff) | Reporting, conduct, citation |
 | [../assets/branding/README.md](../assets/branding/README.md) | Icon, mark and screenshots, and the scripts that render them |
 
-Conventions for this directory: English is canonical and `README.zh-CN.md` mirrors the project README; a number in a page names where it was measured; a page that records a decision keeps its date and is not silently rewritten; what is *not* validated is stated next to what is.
+Conventions for this directory: English is canonical, `README.zh-CN.md` mirrors the project README and `getting-started.zh-CN.md` mirrors the getting-started guide; a number in a page names where it was measured; a page that records a decision keeps its date and is not silently rewritten; what is *not* validated is stated next to what is.

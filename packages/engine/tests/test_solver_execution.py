@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import sys
 from dataclasses import replace
 
@@ -27,6 +29,7 @@ from ufwbpp.solvers.astrometry_net import (
     discover_astrometry_net,
     probe_astrometry_net,
 )
+from ufwbpp.solvers import catalogs
 from ufwbpp.solvers.catalogs import verify_catalog
 from ufwbpp.solvers.base import SolveRequest, SolverStatus, validate_solver_result
 
@@ -84,13 +87,16 @@ if backend == "astrometry" and args == ["--help"]:
     if mode == "missing-capability":
         print("solve-field --dir --out")
     else:
-        print("solve-field --dir --out --wcs --new-fits --solved --corr --match --no-verify --no-plots --config --downsample --objs --depth --pixel-error")
+        print("solve-field --dir --out --wcs --new-fits --solved --corr --match --no-verify --no-plots --temp-dir --config --downsample --objs --depth --pixel-error")
     raise SystemExit(0)
 
 log = os.environ.get("FAKE_ARGV_LOG")
 if log:
     Path(log).write_text(json.dumps(args), encoding="utf-8")
 if mode == "timeout":
+    if "--temp-dir" in args:
+        # What a killed solve-field leaves behind.
+        (Path(args[args.index("--temp-dir") + 1]) / "tmp.ppm.fake").write_bytes(b"P6")
     time.sleep(20)
 if mode == "exit":
     print("synthetic failure", file=sys.stderr)
@@ -647,6 +653,118 @@ def test_strict_astrometry_rejects_unmanaged_and_replaced_indexes(tmp_path: Path
     assert not (tmp_path / "replaced-solved.fits").exists()
 
 
+def _without_run_specifics(value: object) -> object:
+    """Evidence without the run's duration and the hashes that cover its random staging name."""
+
+    if isinstance(value, dict):
+        return {
+            key: _without_run_specifics(item)
+            for key, item in value.items()
+            if key not in {"durationMs", "argumentsSha256", "receiptSha256"}
+        }
+    if isinstance(value, list):
+        return [_without_run_specifics(item) for item in value]
+    return value
+
+
+def test_reused_index_digests_leave_evidence_and_drift_detection_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = write_fake_solver(tmp_path / "fake_solver.py")
+    source = write_input(tmp_path / "light.fits")
+    config, manifests, _ = managed_catalog(tmp_path)
+    index = config.parent / "index-4206-17.fits"
+    hashed: list[str] = []
+    hash_file = catalogs._hash_regular_file_snapshot
+
+    def recording(path: Path, **options: object) -> dict[str, object]:
+        if path == index:
+            hashed.append(path.name)
+        return hash_file(path, **options)
+
+    monkeypatch.setattr(catalogs, "_hash_regular_file_snapshot", recording)
+
+    def solve(name: str, mode: str = "success"):
+        del hashed[:]
+        return AstrometryNetSolverBackend(
+            executable=sys.executable,
+            executable_args=(str(script),),
+            config_path=config,
+            catalog_manifest_dir=manifests,
+            environment={"FAKE_BACKEND": "astrometry", "FAKE_MODE": mode, "FAKE_CATALOG_PATH": str(index)},
+            staging_root=tmp_path,
+            timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
+            probe_timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
+        ).solve(SolveRequest(str(source), str(tmp_path / f"{name}.fits")))
+
+    # Nothing settles: the five full reads of a solve before digests were reused.
+    monkeypatch.setattr(catalogs, "_SETTLED_NS", 3600 * 10**9)
+    every_use_hashed = solve("hashed")
+    assert every_use_hashed.status is SolverStatus.SOLVED
+    assert len(hashed) == 5
+
+    monkeypatch.setattr(catalogs, "_SETTLED_NS", 0)
+    assert solve("first-use").status is SolverStatus.SOLVED
+    reused = solve("reused")
+    # Only the index the solution is bound to is read again.
+    assert hashed == [index.name]
+    assert verify_solver_execution_result(reused)
+    assert _without_run_specifics(reused.evidence) == _without_run_specifics(every_use_hashed.evidence)
+
+    # The solver swaps the index for a byte-identical file while it runs.
+    replaced = solve("replaced", mode="catalog-replace")
+    assert replaced.status is SolverStatus.FAILED
+    assert replaced.evidence["failureCode"] == "CATALOG_FILE_CHANGED"
+    assert not (tmp_path / "replaced.fits").exists()
+
+
+def test_strict_astrometry_refuses_a_config_that_names_another_folder(tmp_path: Path, symlink) -> None:
+    """A catalog folder copied from elsewhere verifies byte for byte, but its
+    ``astrometry.cfg`` still sends solve-field to the folder it came from."""
+
+    script = write_fake_solver(tmp_path / "fake_solver.py")
+    source = write_input(tmp_path / "light.fits")
+    config, manifests, _ = managed_catalog(tmp_path)
+    copy = tmp_path / "copied-catalog"
+    shutil.copytree(config.parent, copy)
+
+    def solve(name: str, catalog: Path, strict: bool = True, manifest_dir: Path = manifests):
+        return AstrometryNetSolverBackend(
+            executable=sys.executable,
+            executable_args=(str(script),),
+            config_path=catalog / "astrometry.cfg",
+            catalog_manifest_dir=manifest_dir,
+            require_managed_catalog=strict,
+            environment={"FAKE_BACKEND": "astrometry", "FAKE_MODE": "success"},
+            staging_root=tmp_path,
+            timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
+            probe_timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
+        ).solve(SolveRequest(str(source), str(tmp_path / f"{name}.fits")))
+
+    refused = solve("copied", copy)
+    assert refused.status is SolverStatus.FAILED
+    assert refused.evidence["failureCode"] == "CATALOG_CONFIG_RELOCATED"
+    assert not (tmp_path / "copied.fits").exists()
+    diagnostic = solve("diagnostic", copy, strict=False)
+    assert diagnostic.status is SolverStatus.SOLVED
+    assert diagnostic.astrometric_quality.catalog_managed is False
+    assert diagnostic.evidence["catalogBinding"] is None
+
+    # Re-pointed, as the commands do before they run, the copy solves.
+    assert catalogs.relocate_catalog(catalog_root=copy) == str(config.parent)
+    assert solve("re-pointed", copy).status is SolverStatus.SOLVED
+    assert solve("original", config.parent).status is SolverStatus.SOLVED
+
+    # A config that names its own folder through a symlinked parent is not a
+    # moved catalog.
+    volume = tmp_path / "volume"
+    volume.mkdir()
+    symlink(tmp_path / "link", volume)
+    linked_config, linked_manifests, _ = managed_catalog(tmp_path / "link")
+    assert f"add_path {tmp_path / 'link'}" in linked_config.read_text(encoding="utf-8")
+    assert solve("linked", linked_config.parent, manifest_dir=linked_manifests).status is SolverStatus.SOLVED
+
+
 def test_unmanaged_astrometry_result_is_diagnostic_not_final(tmp_path: Path) -> None:
     script = write_fake_solver(tmp_path / "fake_solver.py")
     source = write_input(tmp_path / "light.fits")
@@ -909,6 +1027,69 @@ def test_exit_and_timeout_fail_closed(tmp_path: Path, kind: str, mode: str, code
     assert verify_execution_receipt(result.evidence) is True
 
 
+@pytest.mark.parametrize(
+    ("kind", "mode", "code"),
+    (
+        ("astap", "success", None),
+        ("astrometry", "success", None),
+        ("astap", "exit", "SOLVER_EXIT_NONZERO"),
+        # The fake leaves a temporary file where --temp-dir points, then hangs.
+        ("astrometry", "timeout", "SOLVER_TIMEOUT"),
+        # Raised out of the staging block rather than returned from it.
+        ("astrometry", "self-drift", "EXECUTABLE_DRIFT"),
+    ),
+)
+def test_staging_stays_below_the_directory_the_request_names_and_is_removed(
+    tmp_path: Path, kind: str, mode: str, code: str | None
+) -> None:
+    """A run names a directory of its own staging tree, whose path may hold
+    spaces and non-ASCII characters.  The private copy, the solver's outputs
+    and solve-field's temporary files stay below it and are gone when
+    ``solve`` returns, however it returns."""
+
+    script = write_fake_solver(tmp_path / "fake_solver.py")
+    source = write_input(tmp_path / "light.fits")
+    named = tmp_path / "M 31 输出" / "work"
+    argv_log = tmp_path / "argv.json"
+    common = dict(
+        executable=sys.executable,
+        executable_args=(str(script),),
+        environment={"FAKE_BACKEND": kind, "FAKE_MODE": mode, "FAKE_ARGV_LOG": str(argv_log)},
+        staging_root=tmp_path / "adapter-default",
+        timeout_seconds=4.0 if mode == "timeout" else FAKE_SOLVER_TIMEOUT_SECONDS,
+        probe_timeout_seconds=FAKE_SOLVER_TIMEOUT_SECONDS,
+        require_managed_catalog=False,
+    )
+    backend = (
+        AstapSolverBackend(**common, star_database_dir=fake_star_database(tmp_path))
+        if kind == "astap"
+        else AstrometryNetSolverBackend(**common)
+    )
+    output = tmp_path / "solved.fits"
+
+    result = backend.solve(SolveRequest(str(source), str(output), staging_directory=str(named)))
+
+    if code is None:
+        assert result.status is SolverStatus.SOLVED, result.error
+        assert verify_solver_execution_result(result) is True
+    else:
+        assert result.status is SolverStatus.FAILED
+        assert result.evidence["failureCode"] == code
+        assert not output.exists()
+    argv = json.loads(argv_log.read_text(encoding="utf-8"))
+    options = ("-f", "-o") if kind == "astap" else ("--dir", "--wcs", "--new-fits", "--solved", "--corr", "--match", "--temp-dir")
+    staged = [Path(argv[argv.index(option) + 1]).relative_to(named) for option in options]
+    if kind == "astrometry":
+        staged.append(Path(argv[-1]).relative_to(named))
+        assert argv[argv.index("--temp-dir") + 1] == argv[argv.index("--dir") + 1]
+    (stage,) = {path.parts[0] for path in staged}
+    # 21 characters, so the names below a run's staging stay inside its path budget.
+    assert re.fullmatch(r"\.solve\.[a-z0-9_]{8}\.stage", stage)
+    assert max(len(path.as_posix()) for path in staged) <= len(stage) + len("/attempt-1/solution.solved")
+    assert list(named.iterdir()) == []
+    assert not (tmp_path / "adapter-default").exists()
+
+
 @pytest.mark.parametrize("kind", ["astap", "astrometry"])
 def test_valid_looking_seed_without_backend_marker_is_rejected(tmp_path: Path, kind: str) -> None:
     script = write_fake_solver(tmp_path / "fake_solver.py")
@@ -1115,7 +1296,9 @@ def test_real_astrometry_fixture_passes_public_adapter_quality_gate(tmp_path: Pa
     ).valid
 
 
-def test_solver_process_path_starts_with_the_solver_directories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_solver_process_path_starts_with_the_solver_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, symlink
+) -> None:
     """A GUI launched from the Finder inherits launchd's minimal ``PATH``;
     ``solve-field`` still has to find its helpers (``pnmfile``, ``image2pnm``,
     ``astrometry-engine``) next to itself, through a symlink or not."""
@@ -1128,7 +1311,7 @@ def test_solver_process_path_starts_with_the_solver_directories(tmp_path: Path, 
     link_dir = tmp_path / "bin"
     link_dir.mkdir()
     link = link_dir / "solve-field"
-    link.symlink_to(real)
+    symlink(link, real)
     monkeypatch.setenv("PATH", f"/usr/bin{os.pathsep}/bin{os.pathsep}{link_dir}")
 
     runtime = astap_backend_module.SolverProcessRuntime(str(link), environment={"FAKE": "1"})
@@ -1140,3 +1323,71 @@ def test_solver_process_path_starts_with_the_solver_directories(tmp_path: Path, 
 
     direct = astap_backend_module.SolverProcessRuntime(str(real), environment=None)
     assert direct.environment["PATH"].split(os.pathsep)[:3] == [str(real_dir.resolve()), "/usr/bin", "/bin"]
+
+
+def test_sigterm_stops_the_running_solver_tree_before_the_engine_dies(tmp_path: Path) -> None:
+    """A solver leads its own session, so the desktop's signal to the engine's
+    process group does not reach it; the engine's SIGTERM handler has to."""
+
+    if os.name != "posix":
+        pytest.skip("POSIX signals and sessions")
+    import signal
+    import subprocess
+    import time
+
+    pid_file = tmp_path / "solver.pid"
+    driver = tmp_path / "engine.py"
+    driver.write_text(
+        "from pathlib import Path\n"
+        "import sys\n"
+        "from ufwbpp import cli\n"
+        "from ufwbpp.solvers.process import SolverProcessRuntime\n"
+        "cli._stop_solvers_on_termination()\n"
+        "solver = SolverProcessRuntime('/bin/sh', executable_args=('-c', 'echo $$ > \"$0\"; sleep 60', sys.argv[1]))\n"
+        "solver.run((), cwd=Path(sys.argv[2]), timeout_seconds=60, log_stem='solver')\n",
+        encoding="utf-8",
+    )
+    environment = {**os.environ, "PYTHONPATH": os.pathsep.join(entry for entry in sys.path if entry)}
+    engine = subprocess.Popen(
+        [sys.executable, str(driver), str(pid_file), str(tmp_path)],
+        env=environment,
+        stdin=subprocess.DEVNULL,
+    )
+    solver_pid = None
+    try:
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and engine.poll() is None:
+            text = pid_file.read_text(encoding="ascii").strip() if pid_file.exists() else ""
+            if text:
+                solver_pid = int(text)
+                break
+            time.sleep(0.05)
+        assert solver_pid is not None, "the solver never started"
+        # Its own session: the engine's process group does not contain it.
+        assert os.getsid(solver_pid) == solver_pid != os.getsid(engine.pid)
+
+        engine.send_signal(signal.SIGTERM)
+        assert engine.wait(timeout=10) == -signal.SIGTERM
+
+        def solver_group_alive() -> bool:
+            try:
+                os.killpg(solver_pid, 0)
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True
+            return True
+
+        deadline = time.monotonic() + 10
+        while solver_group_alive() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not solver_group_alive()
+    finally:
+        if engine.poll() is None:
+            engine.kill()
+            engine.wait(timeout=10)
+        if solver_pid is not None:
+            try:
+                os.killpg(solver_pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass

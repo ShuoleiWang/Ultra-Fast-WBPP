@@ -13,6 +13,7 @@ from numpy.typing import NDArray
 
 from ..calibration.inputs import numeric_domain_metadata
 from ..native_kernels import LATTICE_WARP_KERNEL_ID, WARP_KERNEL_ID, load_native_kernels
+from ..image_io.fits import atomic_publish_file
 from ..platform import remove_file
 from .integration import (
     CalibrationError,
@@ -421,15 +422,7 @@ def _register_frame(
                         stats_sum += float(np.sum(selected, dtype=np.float64))
                     writer.write_rows(y0, values)
             digest = writer.sha256
-            try:
-                os.link(temporary, destination)
-            except FileExistsError as error:
-                raise CalibrationError(
-                    "OUTPUT_EXISTS",
-                    "refusing to overwrite registered frame",
-                    path=str(destination),
-                ) from error
-            remove_file(temporary, missing_ok=False)
+            atomic_publish_file(temporary, destination, what="registered frame")
         finally:
             remove_file(temporary)
     if execution is not None:

@@ -35,8 +35,6 @@ from ufwbpp.mosaic.photometry import (
     _Design,
     _robust_solve,
     _systematic_offset,
-    measure_edge,
-    photometric_components,
     scale_observations,
     solve_planes,
     solve_scales,

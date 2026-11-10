@@ -63,10 +63,13 @@ pub(super) fn create_private_blink_request(
     let mut file = options
         .open(&request_path)
         .map_err(|error| format!("cannot create private blink request: {error}"))?;
+    // The spelling the interface holds: it matches its Lights against the
+    // paths the engine writes into the manifest.
+    let plain = |path: &Path| platform::plain_path(path).to_string_lossy().into_owned();
     let mut payload = serde_json::json!({
         "schemaVersion": 1,
-        "lightPaths": lights.iter().map(|path| path.to_string_lossy()).collect::<Vec<_>>(),
-        "sessionDirectory": session_directory.to_string_lossy(),
+        "lightPaths": lights.iter().map(|path| plain(path)).collect::<Vec<_>>(),
+        "sessionDirectory": plain(session_directory),
         "previews": {
             "filmstripScale": 8, "zoomScale": 4, "filmstripFormat": "jpeg", "jpegQuality": 85,
             "displayAlgorithm": "blink-complementary-display-v2",
@@ -78,9 +81,7 @@ pub(super) fn create_private_blink_request(
     if !master_flats.is_empty() {
         payload["masterFlats"] = master_flats
             .iter()
-            .map(|(filter, path)| {
-                serde_json::json!({"filter": filter, "path": path.to_string_lossy()})
-            })
+            .map(|(filter, path)| serde_json::json!({"filter": filter, "path": plain(path)}))
             .collect();
     }
     if !master_darks.is_empty() {

@@ -84,13 +84,27 @@ def test_release_windows_job_attests_the_installed_msi_before_collecting_install
     assert ".bundled.manifest.json" in steps[gate]["run"]
 
 
-def test_release_prerelease_publishes_both_platforms_with_smartscreen_wording() -> None:
+def test_release_prerelease_publishes_the_platforms_that_passed_with_smartscreen_wording() -> None:
+    yaml = pytest.importorskip("yaml")
     text = RELEASE_WORKFLOW.read_text(encoding="utf-8")
-    steps = _steps(RELEASE_WORKFLOW, "publish-prerelease")
+    job = yaml.safe_load(text)["jobs"]["publish-prerelease"]
+    steps = job["steps"]
 
+    # One failed matrix leg no longer blocks the draft; a skipped bundle job
+    # (the version check failed) or a cancelled run still does.
+    assert job["needs"] == "bundle"
+    assert job["if"] == (
+        "${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') "
+        "&& needs.bundle.result != 'skipped' }}"
+    )
     download = next(step for step in steps if str(step.get("uses", "")).startswith("actions/download-artifact"))
     assert download["with"]["pattern"] == "ultra-fast-wbpp-*"
-    notes = steps[_index(steps, "release-notes.md")]["run"]
+    writer = steps[_index(steps, "scripts/write_prerelease_notes.py")]
+    assert "--assets release-assets" in writer["run"]
+    assert "--notes release-notes.md" in writer["run"] and "--title release-title.txt" in writer["run"]
+    assert "github.run_id" in writer["env"]["RUN_URL"]
+    assert steps.index(download) < steps.index(writer)
+    notes = (REPOSITORY / "scripts" / "write_prerelease_notes.py").read_text(encoding="utf-8")
     for phrase in (
         "SmartScreen",
         '"More info", then "Run anyway"',
@@ -99,11 +113,13 @@ def test_release_prerelease_publishes_both_platforms_with_smartscreen_wording() 
         "Authenticode signing is a release gate",
         "%LOCALAPPDATA%",
         "SHA256SUMS",
+        "macOS 15 or later",
     ):
         assert phrase in notes
     release_command = text.split('gh release create "${GITHUB_REF_NAME}"', 1)[1]
+    assert steps.index(writer) < _index(steps, 'gh release create "${GITHUB_REF_NAME}"')
     assert "--notes-file release-notes.md" in release_command
-    assert "Windows x64" in release_command
+    assert "$(cat release-title.txt)" in release_command
     assert "--draft" in release_command and "--prerelease" in release_command
 
 

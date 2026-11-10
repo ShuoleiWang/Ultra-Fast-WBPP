@@ -109,6 +109,39 @@ def test_generated_artifact_paths_use_portable_separators(staging, master_path) 
     assert _share_safe_string(str(staging), staging=staging, source_tokens={}) == "artifact/."
 
 
+def test_receipts_name_the_files_of_their_tree_with_forward_slashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relative path prints with backslashes on Windows.  Receipts name a
+    file of their tree with forward slashes on every host, so the receipt of
+    a run made on Windows resolves anywhere: the writers run here with
+    relative paths of the Windows flavour."""
+
+    import pathlib
+
+    import ufwbpp.products.color as color_module
+
+    staging = tmp_path / "run"
+    product = staging / "products" / "L" / "master_light_L_wcs.fits"
+    product.parent.mkdir(parents=True)
+    product.write_bytes(b"pixels")
+    relative_to = pathlib.PurePath.relative_to
+    monkeypatch.setattr(
+        pathlib.PurePath,
+        "relative_to",
+        lambda self, *other, **options: PureWindowsPath(*relative_to(self, *other, **options).parts),
+    )
+    assert str(product.relative_to(staging)) == "products\\L\\master_light_L_wcs.fits"
+
+    named = "products/L/master_light_L_wcs.fits"
+    assert [item["path"] for item in common_module._artifact_records(staging, (staging / "products",))] == [named]
+    (attempt,) = common_module._relativize_solver_attempts(
+        [{"result": {"outputPath": str(product)}, "artifact": {"path": str(product)}}], staging
+    )
+    assert attempt["result"]["outputPath"] == attempt["artifact"]["path"] == named
+    assert color_module._artifact(product, staging, "LINEAR_RGB_FITS")["path"] == named
+
+
 def _header(
     role: str,
     *,
@@ -420,7 +453,7 @@ def _content_sha256(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def test_solver_hints_derive_nina_fov_and_ignore_conflicting_user_constraints(
+def test_solver_hints_derive_nina_fov_and_explicit_coordinates_win_over_the_header(
     tmp_path: Path,
 ) -> None:
     request = E2ERequest(
@@ -454,11 +487,13 @@ def test_solver_hints_derive_nina_fov_and_ignore_conflicting_user_constraints(
 
     hints = _inferred_solver_hints(request, [frame.metadata for frame in frames])
 
-    assert hints.ra_degrees == pytest.approx(282.14, abs=1e-6)
-    assert hints.dec_degrees == pytest.approx(-7.40)
+    # The header consensus (282.14, -7.40) is recorded; the user's coordinates seed the solver.
+    assert (hints.ra_degrees, hints.dec_degrees) == (12.0, 55.0)
+    assert hints.evidence["coordinates"]["metadata"]["raDegrees"] == pytest.approx(282.14, abs=1e-6)
     assert hints.field_of_view_degrees == pytest.approx(1.122, abs=0.002)
     assert hints.evidence["coordinates"]["consistency"] == "CONFLICT"
-    assert hints.evidence["coordinates"]["selection"] == "metadata-consensus"
+    assert hints.evidence["coordinates"]["selection"] == "explicit"
+    assert "conflicting-NINA/FITS-header-ignored" in hints.provenance
     assert hints.evidence["fieldOfView"]["consistency"] == "CONFLICT"
     assert hints.evidence["fieldOfView"]["selection"] == "derived"
     assert "conflicting-explicit-FOV-ignored" in hints.provenance
@@ -655,7 +690,6 @@ def test_single_field_generated_master_reuse_matches_raw_rebuild_pixel_oracle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import ufwbpp.workflows.integration as integration_module
-    import ufwbpp.stacking.pipeline as pixel_module
 
     e2e_master_integrations: list[str] = []
     e2e_master_sources: list[str] = []
@@ -848,7 +882,6 @@ def test_e2e_reuses_identity_bound_digests_and_excludes_review_light(
     synthetic_project: dict[str, tuple[Path, ...]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import ufwbpp.stacking.pipeline as pixel_module
 
     all_sources = tuple(
         path for values in synthetic_project.values() for path in values
@@ -1529,6 +1562,389 @@ def test_project_shared_calibration_preserves_xisf_master_identity_into_real_pan
     assert [_content_sha256(path) for path in masters] == [item.source_sha256 for item in overrides]
 
 
+@pytest.mark.parametrize("solved", [True, False])
+def test_every_digest_a_published_project_cites_is_the_digest_of_the_published_file(
+    tmp_path: Path,
+    synthetic_project: dict[str, tuple[Path, ...]],
+    solved: bool,
+) -> None:
+    """The contract of the receipts' digests, on a project through the real
+    pipeline (raw Bias, Dark and Flats build the shared calibration; R, G and
+    B make the colour cube) and on the evidence tree of a failed solve: every
+    SHA-256 a published JSON document cites for a file of the result is the
+    digest of that file, and every receipt's ``receiptId`` is its own."""
+
+    from receipt_audit import audit_published_digests
+    from ufwbpp.inventory import inventory_project
+    from ufwbpp.workflows.project import ProjectE2ERequest, run_project_e2e
+
+    filters = ("R", "G", "B") if solved else ("R",)
+    flats: list[Path] = []
+    lights: list[Path] = []
+    for filter_name in filters:
+        for role, sources, target in (("flat", synthetic_project["flats"], flats), ("light", synthetic_project["lights"][:8], lights)):
+            for index, source in enumerate(sources):
+                header = fits.getheader(source)
+                header["FILTER"] = filter_name
+                target.append(_write(tmp_path / "in" / f"{role}_{filter_name}_{index}.fits", fits.getdata(source), header))
+    base = replace(
+        _request(synthetic_project, tmp_path / "product", lights=tuple(lights)),
+        flat_files=tuple(str(path) for path in flats),
+    )
+    inventory = inventory_project([*lights, *flats, *synthetic_project["darks"], *synthetic_project["biases"]])
+    result = run_project_e2e(
+        ProjectE2ERequest(inventory, base, base.output_directory),
+        solver_backends=(FakeSolver() if solved else FailingSolver(),),
+    )
+    assert result.success is solved, result.message
+    published = Path(result.output_directory or result.evidence_directory or "")
+    checked, problems = audit_published_digests(published)
+    assert problems == []
+
+    # The audit saw the citations it is about, not an empty tree.
+    receipt = json.loads((published / "receipt.json").read_text(encoding="utf-8"))
+    (subrun,) = receipt["execution"]["subruns"]
+    cited = {line.split(" (")[0] for line in checked}
+    expected = {
+        "receipt.json: receiptId",
+        f"{subrun['receipt']}: receiptId",
+        "receipt.json: $.execution.sharedCalibration.receipt -> details/shared-calibration/receipt.json",
+        f"receipt.json: $.execution.subruns[0].receipt -> {subrun['receipt']}",
+    }
+    if solved:
+        expected |= {
+            "details/color/receipt.json: receiptId",
+            "receipt.json: $.execution.color.receipt -> details/color/receipt.json",
+            "details/color/receipt.json: $.inputs[0].path -> R.fits",
+            "details/color/receipt.json: $.artifacts[0].path -> details/color/RGB.fits",
+            *(
+                f"receipt.json: $.finalProducts.guiArtifacts[{index}].relativePath -> {artifact['relativePath']}"
+                for index, artifact in enumerate(receipt["finalProducts"]["guiArtifacts"])
+            ),
+            *(
+                f"receipt.json: $.execution.subruns[0].solvedProducts.{name}.path -> {product['path']}"
+                for name, product in subrun["solvedProducts"].items()
+            ),
+        }
+        assert len(receipt["finalProducts"]["guiArtifacts"]) == 9
+    assert expected <= cited, sorted(expected - cited)
+    # What the run wrote about its own files reads the same on every host.
+    run_receipt = json.loads((published / subrun["receipt"]).read_text(encoding="utf-8"))
+    record = run_receipt["astrometry"]["filters"]["R"]
+    assert record["input"] == "work/pixel-pipeline/masters/master_light_R.fits"
+    assert record["output"] == ("products/R/master_light_R_wcs.fits" if solved else None)
+    coverage = json.loads((published / subrun["receipt"]).with_name("coverage").joinpath("coverage.json").read_text(encoding="utf-8"))
+    assert coverage["filters"]["R"]["maps"]["coverageFraction"] == "coverage/R_coverageFraction.fits"
+    # The generated masters, the run's artifacts and the promoted maps are among them.
+    run_root = Path(subrun["receipt"]).parent.as_posix()
+    assert sum(line.startswith(f"{run_root}/receipt.json: $.artifacts[") for line in cited) >= 10
+    assert any(line.startswith("details/shared-calibration/receipt.json: $.registrationCalibration.artifacts[") for line in cited)
+
+
+def test_the_digest_audit_refuses_a_wrong_citation_and_reads_a_rewritten_attempt_as_history(tmp_path: Path) -> None:
+    """What the audit of a published tree accepts and refuses, on a tree made
+    by hand: a citation must be the digest (and size) of the file it names; a
+    solver attempt whose file a later attempt rewrote states the bytes before
+    the rewrite, and the last attempt that names the file states the file."""
+
+    from receipt_audit import audit_published_digests
+    from ufwbpp.integrity import canonical_json_document
+
+    def sha256(data: bytes) -> str:
+        return "sha256:" + hashlib.sha256(data).hexdigest()
+
+    def publish(root: Path, *, last_attempt: bytes = b"refitted", artifact: bytes = b"refitted", size: int = 8) -> Path:
+        master = root / "products" / "L" / "master_light_L_wcs.fits"
+        master.parent.mkdir(parents=True)
+        master.write_bytes(b"refitted")
+        (root / "receipts").mkdir()
+        (root / "receipts" / "pixel-pipeline.json").write_text(
+            # Paths of the pipeline's own work tree, which is not published, are not citations of this tree.
+            json.dumps({"outputs": [{"path": "products/L/master_light_L_wcs.fits", "sha256": sha256(b"work file")}]})
+        )
+        named = "products/L/master_light_L_wcs.fits"
+        core = {
+            "artifacts": [{"path": named, "sha256": sha256(artifact), "sizeBytes": size}],
+            "astrometry": {"filters": {"L": {"attempts": [
+                {"artifact": {"path": named, "sha256": sha256(b"solved")}},
+                {"artifact": {"path": named, "sha256": sha256(last_attempt)}},
+            ]}}},
+            "staged": {"output": "artifact/" + named, "outputSha256": sha256(b"refitted")},
+        }
+        receipt = {"receiptId": "sha256:" + hashlib.sha256(canonical_json_document(core)).hexdigest(), **core}
+        (root / "receipt.json").write_bytes(canonical_json_document(receipt))
+        return root
+
+    checked, problems = audit_published_digests(publish(tmp_path / "sound"))
+    assert problems == [] and len(checked) == 4  # the receipt's id, its artifact, the last attempt, the staged name
+    assert len(audit_published_digests(publish(tmp_path / "stale-attempt", last_attempt=b"solved"))[1]) == 1
+    assert len(audit_published_digests(publish(tmp_path / "wrong-digest", artifact=b"other"))[1]) == 1
+    assert len(audit_published_digests(publish(tmp_path / "wrong-size", size=9))[1]) == 1
+    edited = publish(tmp_path / "edited")
+    (edited / "receipt.json").write_bytes((edited / "receipt.json").read_bytes().replace(b'"sizeBytes":8', b'"sizeBytes":8,"note":1'))
+    assert audit_published_digests(edited)[1] == ["receipt.json: receiptId is not the SHA-256 of the document's canonical JSON"]
+
+
+@pytest.mark.parametrize("case", ["rename-refused", "no-rename-works", "receipt-held"])
+def test_a_finished_run_whose_final_rename_fails_is_kept_not_deleted(
+    tmp_path: Path,
+    synthetic_project: dict[str, tuple[Path, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """A complete run is never deleted because its last rename failed: its
+    products become the run's ``.unsolved`` evidence under a failure receipt
+    (they stay in the staging directory when that rename fails too), the
+    failure is ``PUBLICATION_FAILED`` and names the directory that holds them,
+    and no receipt outside a published directory says SOLVED."""
+
+    import ufwbpp.workflows.single_target as e2e_module
+    from receipt_audit import audit_published_digests
+    from ufwbpp import platform as platform_services
+
+    output = tmp_path / "out"
+    evidence = tmp_path / "out.unsolved"
+    services = platform_services.current()
+    rename_directory = services.rename_directory_no_replace
+    refused = {output} if case == "rename-refused" else {output, evidence}
+
+    def rename(source: Path, destination: Path) -> None:
+        if Path(destination) in refused:
+            raise PermissionError(13, "The process cannot access the file", str(destination))
+        rename_directory(source, destination)
+
+    monkeypatch.setattr(type(services), "rename_directory_no_replace", lambda self, source, destination: rename(source, destination))
+    if case == "receipt-held":
+        def held(path: Path, **kwargs: Any) -> bool:
+            if Path(path).name == "receipt.json":
+                raise PermissionError(13, "The process cannot access the file", str(path))
+            return platform_services.remove_file(path, **kwargs)
+
+        monkeypatch.setattr(e2e_module, "remove_file", held)
+        with pytest.raises(E2EError) as captured:
+            run_e2e(_request(synthetic_project, output), solver_backends=(FakeSolver(),))
+        # Nothing could replace the receipt: the error names the kept directory and says what it is not.
+        (kept,) = [path for path in tmp_path.iterdir()]
+        assert captured.value.code == "PUBLICATION_FAILED" and captured.value.path == str(kept)
+        assert kept.name.startswith(".out.") and kept.name.endswith(".stage")
+        assert "which is not a published result" in str(captured.value)
+        assert (kept / "products" / "R" / "master_light_R_wcs.fits").is_file()
+        return
+
+    result = run_e2e(_request(synthetic_project, output), solver_backends=(FakeSolver(),))
+
+    assert result.success is False and result.code == "PUBLICATION_FAILED" and result.state is E2EState.UNSOLVED_WORKING
+    assert result.output_directory is None and result.product_paths == ()
+    kept = Path(result.evidence_directory)
+    assert [path for path in tmp_path.iterdir()] == [kept]
+    if case == "rename-refused":
+        assert kept == evidence
+    else:
+        assert kept.name.startswith(".out.") and kept.name.endswith(".stage")
+    assert "the finished run was not published: out: the directory could not be renamed" in result.message
+    assert result.message.endswith(
+        f"its products are kept in {kept}"
+        if case == "rename-refused"
+        else f"the evidence was not published (out.unsolved: the directory could not be renamed: Permission denied) and stays in {kept}"
+    )
+    # The finished master, its preview and the integration maps are there; the private work is not.
+    assert fits.getheader(kept / "products" / "R" / "master_light_R_wcs.fits")["OAFSTATE"] == "SOLVED"
+    assert (kept / "previews" / "master_light_R.png").is_file()
+    assert sorted(path.name for path in (kept / "coverage").glob("*.fits")) == [
+        "R_acceptedSampleCount.fits", "R_coverageFraction.fits", "R_rejectionCount.fits",
+    ]
+    assert not (kept / "work").exists()
+    receipt_text = (kept / "receipt.json").read_text(encoding="utf-8")
+    receipt = json.loads(receipt_text)
+    assert Path(result.receipt_path) == kept / "receipt.json"
+    assert (receipt["success"], receipt["state"], receipt["code"]) == (False, "UNSOLVED_WORKING", "PUBLICATION_FAILED")
+    assert receipt["publication"]["requestedOutputPublished"] is False
+    # What the run found is recorded as found: every filter was solved.
+    assert receipt["astrometry"]["status"] == "SOLVED" and receipt["astrometry"]["filters"]["R"]["status"] == "SOLVED"
+    assert str(tmp_path) not in receipt_text
+    assert audit_published_digests(kept)[1] == []
+
+
+def test_integration_maps_are_published_as_the_files_the_pipeline_wrote(
+    tmp_path: Path,
+    synthetic_project: dict[str, tuple[Path, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The three integration maps of a filter reach the run's ``coverage``
+    folder through the create-only publication (a hard link where the volume
+    has them), not through a copy that is hashed twice: the published file is
+    the one the pipeline wrote, under the digest the pipeline recorded."""
+
+    published: list[tuple[str, str]] = []
+    hashed: list[str] = []
+    publish = products_module.atomic_publish_file
+    digest = products_module.sha256_digest
+
+    def spy_publish(source: Path, destination: Path, **kwargs: Any) -> None:
+        published.append((Path(source).name, _content_sha256(Path(source))))
+        publish(source, destination, **kwargs)
+        assert not Path(source).exists()
+
+    def spy_digest(path: Path) -> str:
+        hashed.append(Path(path).name)
+        return digest(path)
+
+    monkeypatch.setattr(products_module, "atomic_publish_file", spy_publish)
+    monkeypatch.setattr(products_module, "sha256_digest", spy_digest)
+    output = tmp_path / "maps"
+    result = run_e2e(_request(synthetic_project, output), solver_backends=(FakeSolver(),))
+    assert result.success is True
+
+    names = ["R_acceptedSampleCount.fits", "R_coverageFraction.fits", "R_rejectionCount.fits"]
+    assert [name for name, _ in published] == names and not set(hashed) & set(names)
+    pipeline = json.loads((output / "receipts" / "pixel-pipeline.json").read_text(encoding="utf-8"))
+    # The pipeline's own receipt writes its paths with the host's separator.
+    recorded = {
+        item["path"].replace("\\", "/").rsplit("/", 1)[-1]: item["sha256"]
+        for item in pipeline["outputs"]
+        if item["path"].replace("\\", "/").startswith("coverage/")
+    }
+    receipt = json.loads((output / "receipt.json").read_text(encoding="utf-8"))
+    artifacts = {item["path"]: item["sha256"] for item in receipt["artifacts"]}
+    coverage = json.loads((output / "coverage" / "coverage.json").read_text(encoding="utf-8"))
+    assert sorted(coverage["filters"]["R"]["maps"].values()) == [f"coverage/{name}" for name in names]
+    for name, written in published:
+        assert _content_sha256(output / "coverage" / name) == written == recorded[name] == artifacts[f"coverage/{name}"]
+    # A name that is taken is never replaced.
+    (tmp_path / "taken.fits").write_bytes(b"other")
+    with pytest.raises(Exception) as refused:
+        publish(output / "coverage" / names[0], tmp_path / "taken.fits")
+    assert getattr(refused.value, "code", None) == "OUTPUT_EXISTS" and (tmp_path / "taken.fits").read_bytes() == b"other"
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["run-rename-refused", "no-rename-works"])
+def test_a_target_run_that_cannot_be_published_inside_its_project_keeps_its_products_in_the_evidence(
+    tmp_path: Path,
+    synthetic_project: dict[str, tuple[Path, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+    held: bool,
+) -> None:
+    """A finished target run that cannot take its name fails the project,
+    and its master stays in the project's evidence.  While a file of it is
+    held, no directory above it can be renamed either: the project then
+    stays in its staging directory, which the result names."""
+
+    from receipt_audit import audit_published_digests
+    from ufwbpp import platform as platform_services
+    from ufwbpp.inventory import inventory_project
+    from ufwbpp.workflows.project import ProjectE2ERequest, run_project_e2e
+
+    services = platform_services.current()
+    rename_directory = services.rename_directory_no_replace
+
+    def rename(source: Path, destination: Path) -> None:
+        destination = Path(destination)
+        if (destination.parent.name == "runs" and (held or not destination.name.endswith(".unsolved"))) or (
+            held and destination.name == "product.unsolved"
+        ):
+            raise PermissionError(13, "The process cannot access the file", str(destination))
+        rename_directory(source, destination)
+
+    monkeypatch.setattr(type(services), "rename_directory_no_replace", lambda self, source, destination: rename(source, destination))
+    base = _request(synthetic_project, tmp_path / "product")
+    inventory = inventory_project(
+        [*synthetic_project["lights"][:8], *synthetic_project["flats"], *synthetic_project["darks"], *synthetic_project["biases"]]
+    )
+    result = run_project_e2e(ProjectE2ERequest(inventory, base, base.output_directory), solver_backends=(FakeSolver(),))
+
+    assert result.success is False and result.code == "PUBLICATION_FAILED"
+    evidence = Path(result.evidence_directory)
+    assert [path for path in tmp_path.iterdir()] == [evidence]
+    (run,) = (evidence / "details" / "runs").iterdir()
+    if held:
+        assert evidence.name.startswith(".product.") and evidence.name.endswith(".pstage")
+        assert run.name.startswith(".SYNTHETICFIELD.") and run.name.endswith(".stage")
+        assert result.message.endswith(
+            f"the evidence was not published (product.unsolved: the directory could not be renamed: Permission denied) and stays in {evidence}"
+        )
+    else:
+        assert evidence == tmp_path / "product.unsolved" and run.name == "SYNTHETICFIELD.unsolved"
+    assert fits.getheader(run / "products" / "R" / "master_light_R_wcs.fits")["OAFSTATE"] == "SOLVED"
+    receipt_text = (evidence / "receipt.json").read_text(encoding="utf-8")
+    receipt = json.loads(receipt_text)
+    assert Path(result.receipt_path) == evidence / "receipt.json"
+    assert receipt["success"] is False and receipt["code"] == "PUBLICATION_FAILED"
+    assert receipt["publication"]["evidenceDirectoryPublished"] is (not held)
+    assert receipt["message"].startswith("the finished run was not published: ")
+    # A path inside a sentence keeps the host's separators after its staging prefix.
+    assert receipt["message"].replace("\\", "/").endswith(f"artifact/details/runs/{run.name}")
+    assert json.loads((run / "receipt.json").read_text(encoding="utf-8"))["success"] is False
+    assert str(tmp_path) not in receipt_text
+    assert audit_published_digests(evidence)[1] == []
+
+
+def test_evidence_that_cannot_be_renamed_stays_staged_and_keeps_its_failure(
+    tmp_path: Path,
+    synthetic_project: dict[str, tuple[Path, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed run whose ``.unsolved`` name cannot be taken reports the
+    failure it had, not the rename, and names the staging directory that
+    still holds its evidence."""
+
+    from ufwbpp import platform as platform_services
+
+    services = platform_services.current()
+    rename_directory = services.rename_directory_no_replace
+
+    def rename(source: Path, destination: Path) -> None:
+        if Path(destination).name == "out.unsolved":
+            raise PermissionError(13, "The process cannot access the file", str(destination))
+        rename_directory(source, destination)
+
+    monkeypatch.setattr(type(services), "rename_directory_no_replace", lambda self, source, destination: rename(source, destination))
+    result = run_e2e(_request(synthetic_project, tmp_path / "out"), solver_backends=(FailingSolver(),))
+
+    assert result.success is False and result.code == "ASTROMETRY_REQUIRED"
+    (kept,) = tmp_path.iterdir()
+    assert Path(result.evidence_directory) == kept and kept.name.startswith(".out.") and kept.name.endswith(".stage")
+    assert result.message == (
+        "one or more filters did not produce a verified new WCS solution; the evidence was not published "
+        f"(out.unsolved: the directory could not be renamed: Permission denied) and stays in {kept}"
+    )
+    receipt = json.loads((kept / "receipt.json").read_text(encoding="utf-8"))
+    assert (receipt["success"], receipt["code"]) == (False, "ASTROMETRY_REQUIRED")
+    assert (kept / "qc" / "manifest.json").is_file() and not (kept / "work").exists()
+
+
+def test_directory_publication_reports_output_exists_only_when_the_output_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ufwbpp import platform as platform_services
+
+    staged = tmp_path / ".out.stage"
+    staged.mkdir()
+    (staged / "product.fits").write_bytes(b"pixels")
+    services = platform_services.current()
+
+    def refused(self: Any, source: Path, destination: Path) -> None:
+        raise PermissionError(13, "The process cannot access the file", str(destination))
+
+    with monkeypatch.context() as patched:
+        patched.setattr(type(services), "rename_directory_no_replace", refused)
+        with pytest.raises(E2EError) as failed:
+            common_module._rename_directory_no_replace(staged, tmp_path / "out")
+        assert failed.value.code == "PUBLICATION_FAILED" and failed.value.path == str(tmp_path / "out")
+        assert "the directory could not be renamed: Permission denied" in str(failed.value)
+        # The failed rename left the name to another program's directory.
+        (tmp_path / "taken").mkdir()
+        with pytest.raises(E2EError) as raced:
+            common_module._rename_directory_no_replace(staged, tmp_path / "taken")
+        assert raced.value.code == "OUTPUT_EXISTS"
+    with pytest.raises(E2EError) as existing:
+        common_module._rename_directory_no_replace(staged, tmp_path / "taken")
+    assert existing.value.code == "OUTPUT_EXISTS"
+    # Whatever the failure, the staged tree is untouched and nothing was replaced.
+    assert (staged / "product.fits").read_bytes() == b"pixels" and list((tmp_path / "taken").iterdir()) == []
+    common_module._rename_directory_no_replace(staged, tmp_path / "out")
+    assert (tmp_path / "out" / "product.fits").read_bytes() == b"pixels"
+
+
 def test_single_admitted_light_stops_before_calibration_and_preserves_qc(
     tmp_path: Path,
     synthetic_project: dict[str, tuple[Path, ...]],
@@ -2172,6 +2588,89 @@ def test_default_e2e_registration_uses_full_resolution_affine_for_ordinary(
     selected = captured["registration"]
     assert selected.refine_full_centroids is True
     assert selected.full_transform_model == "affine"
+
+
+def test_a_transform_resting_on_hot_pixels_fails_registration_with_its_numbers(
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_project: dict[str, tuple[Path, ...]],
+) -> None:
+    import ufwbpp_registration
+
+    def transform(path: Path, **fields: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            path=str(path),
+            filter_name="R",
+            accepted=True,
+            full_matrix=np.eye(3),
+            reason=None,
+            match_count=540,
+            inlier_count=531,
+            inlier_ratio=0.5,
+            rms_preview_px=0.1,
+            rms_full_px=0.1,
+            warp_pearson=0.05,
+            warp_valid_fraction=0.99,
+            **fields,
+        )
+
+    # The refinement leaves the catalog model in place and says why.
+    refused = transform(
+        synthetic_project["lights"][0],
+        transform_model="similarity",
+        full_refine_evidence={
+            "status": "REJECTED",
+            "reason": "CONTROL_POINTS_SENSOR_FIXED",
+            "finalInlierCount": 531,
+            "sensorFixedControlPoints": {
+                "check": "same-pixel-core-fraction-v1",
+                "coreFractionMinimum": 0.75,
+                "inlierCount": 529,
+                "remainingObjects": "ELSEWHERE",
+                "remainingConsensusInlierCount": 459,
+                "remainingConsensusOffsetPreviewPixels": 7.26,
+                "remainingConsensusOffsetMaximumPreviewPixels": 2.5,
+            },
+        },
+    )
+    gated = transform(
+        synthetic_project["lights"][1],
+        transform_model="similarity",
+        full_refine_evidence={
+            "status": "REJECTED",
+            "reason": "FULL_MODEL_GATE_FAILED",
+            "gateReasons": ["INLIER_RATIO_LOW"],
+            "commonCentroidCount": 80,
+            "finalInlierRatio": 0.2125,
+        },
+    )
+    registration = SimpleNamespace(refine_full_centroids=True, full_transform_model="projective")
+    for first, expected in (
+        (
+            refused,
+            "529 of 531 control points are single pixels on the same sensor pixel of this Light and of the "
+            "reference (hot pixels, not stars), and 459 other catalog objects register 7.3 preview pixels away "
+            "(limit 2.5); calibrate the Lights with a matching Dark",
+        ),
+        (gated, "FULL_MODEL_GATE_FAILED (gateReasons=[INLIER_RATIO_LOW], commonCentroidCount=80, finalInlierRatio=0.2125)"),
+    ):
+        other = gated if first is refused else refused
+        monkeypatch.setattr(
+            ufwbpp_registration,
+            "run_registration",
+            lambda *args, first=first, other=other, **kwargs: SimpleNamespace(transforms=(first, other)),
+        )
+        with pytest.raises(E2EError) as raised:
+            _register_lights(
+                synthetic_project["lights"][:2],
+                calibration_plan=None,
+                detection=None,
+                registration=registration,
+                workers=1,
+                allow_projective=True,
+            )
+        assert raised.value.code == "REGISTRATION_FULL_REFINEMENT_REJECTED"
+        assert raised.value.path == first.path
+        assert expected in str(raised.value)
 
 
 @pytest.mark.parametrize("use_raw_flats", [True, False])

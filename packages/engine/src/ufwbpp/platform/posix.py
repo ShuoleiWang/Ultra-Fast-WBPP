@@ -150,7 +150,42 @@ def rename_directory_no_replace_with(
             raise NoReplaceError(
                 "OUTPUT_EXISTS", "output appeared during publication", str(destination)
             )
+        if error_number in _PRIMITIVE_UNSUPPORTED:
+            _rename_onto_claimed_directory(source, destination)
+            return
         raise OSError(error_number, os.strerror(error_number), str(destination))
+
+
+# What link(2), renamex_np(RENAME_EXCL) and renameat2(RENAME_NOREPLACE) answer
+# on a volume that lacks them: exFAT, FAT32 and most network shares.
+_PRIMITIVE_UNSUPPORTED = frozenset({errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS, errno.EINVAL, errno.EPERM})
+
+
+def _rename_onto_claimed_directory(source: Path, destination: Path) -> None:
+    """Create-only directory rename on a volume without an exclusive rename.
+
+    ``mkdir`` claims the name and fails when anything is there; ``rename``
+    replaces only an empty directory.  Nothing that exists is ever replaced.
+    """
+
+    try:
+        os.mkdir(destination)
+    except FileExistsError as error:
+        raise NoReplaceError(
+            "OUTPUT_EXISTS", "output appeared during publication", str(destination)
+        ) from error
+    try:
+        os.rename(source, destination)
+    except OSError as error:
+        try:
+            os.rmdir(destination)  # the claim, while it is still empty
+        except OSError:
+            pass
+        if error.errno in {errno.EEXIST, errno.ENOTEMPTY}:
+            raise NoReplaceError(
+                "OUTPUT_EXISTS", "output appeared during publication", str(destination)
+            ) from error
+        raise
 
 
 def libc_no_replace_rename(platform_id: str) -> Callable[[bytes, bytes], int] | None:
@@ -164,15 +199,38 @@ def libc_no_replace_rename(platform_id: str) -> Callable[[bytes, bytes], int] | 
     return None
 
 
-def publish_file_no_replace(temporary: Path, destination: Path) -> str:
-    """Hard-link ``temporary`` to ``destination`` (create-only) and drop it.
+def publish_file_no_replace(
+    temporary: Path,
+    destination: Path,
+    *,
+    link: Callable[[Path, Path], None] = os.link,
+) -> str:
+    """Give ``temporary`` the name ``destination`` without replacing anything.
 
-    Returns the mode used (``hardlink``).  ``FileExistsError`` propagates so the
+    A hard link, then the temporary name is dropped.  A volume without hard
+    links (exFAT, FAT32, most network shares) takes an exclusive create of the
+    destination followed by a rename onto that empty file, which is equally
+    create-only.  Returns the mode used; ``FileExistsError`` propagates so the
     caller keeps its ``OUTPUT_EXISTS`` mapping.
     """
 
-    os.link(temporary, destination)
-    temporary.unlink()
+    try:
+        link(temporary, destination)
+    except FileExistsError:
+        raise
+    except OSError as error:
+        if error.errno not in _PRIMITIVE_UNSUPPORTED:
+            raise
+        # The claim is private and empty; the rename below replaces it with
+        # the finished file, which keeps its own mode.
+        os.close(os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        try:
+            os.replace(temporary, destination)
+        except BaseException:
+            os.unlink(destination)
+            raise
+        return "exclusive-create"
+    os.unlink(temporary)
     return "hardlink"
 
 

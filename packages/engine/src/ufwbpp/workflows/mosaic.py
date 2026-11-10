@@ -88,8 +88,12 @@ def _survey_panel(
             hints=hints,
             min_matches=request.min_matches,
             max_rms_arcsec=request.max_rms_arcsec,
+            staging_directory=work,
         )
         attempts.append({"light": Path(path).name, "accepted": bool(accepted), "hints": hints.serializable()})
+        if not accepted:
+            # Why each backend refused this Light, for the receipt of a survey that fails.
+            attempts[-1]["solveAttempts"] = solve_attempts
         if accepted:
             header, shape = _read_image_header(solved)
             celestial = {

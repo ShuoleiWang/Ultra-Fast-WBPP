@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+import errno
 import os
 from pathlib import Path
 import shutil
@@ -365,10 +366,11 @@ def retry_file_operation(
     platform_id: PlatformId | None = None,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
+    budget_seconds: float = RETRY_BUDGET_SECONDS,
 ) -> Any:
     """Run ``operation``, waiting out Windows sharing violations.
 
-    The retry is bounded (about ``RETRY_BUDGET_SECONDS`` with a 20 ms to
+    The retry is bounded (about ``budget_seconds`` with a 20 ms to
     250 ms backoff) and only exists on Windows; POSIX calls run exactly once
     because a POSIX unlink or rename never fails for a reason that waiting
     would fix.  ``platform_id``, ``sleep`` and ``clock`` are injectable so
@@ -377,7 +379,7 @@ def retry_file_operation(
 
     if (platform_id or platform_id_for()) != "windows":
         return operation()
-    deadline = clock() + RETRY_BUDGET_SECONDS
+    deadline = clock() + budget_seconds
     delay = RETRY_INITIAL_SECONDS
     while True:
         try:
@@ -438,13 +440,22 @@ def remove_tree(
 
     target = Path(path)
 
+    def vanished(_function: Any, _entry: Any, error: Any) -> None:
+        # An entry that disappears during the walk is already removed. On
+        # exFAT, FAT32 and network shares macOS deletes a file's AppleDouble
+        # companion ("._name") together with the file, before the walk gets to it.
+        problem = error[1] if isinstance(error, tuple) else error
+        if not isinstance(problem, FileNotFoundError):
+            raise problem
+
+    handler = {"onexc": vanished} if sys.version_info >= (3, 12) else {"onerror": vanished}
+
     def rmtree() -> bool:
-        try:
-            shutil.rmtree(target)
-        except FileNotFoundError:
+        if not os.path.lexists(target):
             if missing_ok:
                 return False
-            raise
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(target))
+        shutil.rmtree(target, **handler)
         return True
 
     try:
@@ -468,13 +479,44 @@ def rename_with_retry(
     retry, for files the engine rewrites in place after another process may
     have opened the previous version.  Create-only publication keeps its own
     primitives (``publish_file_no_replace``, ``rename_directory_no_replace``):
-    a retry there could turn a lost race into a silent overwrite.
+    this helper is not create-only, because ``os.rename`` replaces an existing
+    file on POSIX.
     """
 
     move = os.replace if replace else os.rename
     retry_file_operation(
         lambda: move(source, destination), platform_id=platform_id, sleep=sleep, clock=clock
     )
+
+
+OPEN_FILE_LIMIT = 10240
+
+
+def raise_open_file_limit(target: int = OPEN_FILE_LIMIT) -> int | None:
+    """Raise this process's soft limit on open files towards ``target``.
+
+    An integration keeps every Light of its groups open, two descriptors for
+    each memory-mapped frame.  macOS starts applications with a soft limit of
+    256, which about 125 Lights exhaust (``Too many open files``).  Returns
+    the soft limit now in force, or ``None`` where there is none to raise
+    (Windows).  A limit is never lowered, and a refused request keeps the
+    inherited one.
+    """
+
+    try:
+        import resource
+    except ImportError:
+        return None
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    unlimited = resource.RLIM_INFINITY
+    wanted = target if hard == unlimited else min(target, hard)
+    if soft == unlimited or soft >= wanted:
+        return None if soft == unlimited else soft
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (wanted, hard))
+    except (OSError, ValueError):
+        return soft
+    return wanted
 
 
 def reconfigure_utf8_stdio(
@@ -541,6 +583,7 @@ __all__ = [
     "reconfigure_utf8_stdio",
     "remove_file",
     "remove_tree",
+    "raise_open_file_limit",
     "rename_with_retry",
     "retry_file_operation",
 ]

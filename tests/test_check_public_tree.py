@@ -17,14 +17,14 @@ def test_clean_tree(tmp_path: Path) -> None:
     assert inspect(tmp_path) == []
 
 
-def test_rejects_private_paths_raw_data_and_symlinks(tmp_path: Path) -> None:
+def test_rejects_private_paths_raw_data_and_symlinks(tmp_path: Path, symlink) -> None:
     private_home = "/" + "Users/private/Astro/frame.fits"
     (tmp_path / "source.py").write_text(
         f'SOURCE = "{private_home}"\n', encoding="utf-8"
     )
     (tmp_path / "frame.fits").write_bytes(b"not a fixture")
     (tmp_path / "target.txt").write_text("safe\n", encoding="utf-8")
-    (tmp_path / "link.txt").symlink_to(tmp_path / "target.txt")
+    symlink(tmp_path / "link.txt", tmp_path / "target.txt")
     codes = {finding.code for finding in inspect(tmp_path)}
     assert {"MAC_HOME_PATH", "RAW_DATA", "SYMLINK"} <= codes
 

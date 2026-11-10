@@ -29,6 +29,7 @@ from ..integrity import sha256_digest
 from ..native_kernels import (
     candidate_library_paths,
     load_native_kernels,
+    native_kernels_disabled,
 )
 from ..performance_profile import ExecutionTuning, select_execution_tuning
 from .integration import (
@@ -493,126 +494,6 @@ class NativeMetalExecutor:
         request._array_owners = (values, scale_values, offset_values, weight_values)  # type: ignore[attr-defined]
         return request, output, integrated, accepted, rejected
 
-    def run_tile(
-        self,
-        samples: NDArray[np.float32],
-        *,
-        image_height: int,
-        first_row: int,
-        scales: NDArray[np.float32],
-        offsets: NDArray[np.float32],
-        weights: NDArray[np.float32],
-        sigma_clip: float,
-        compare_cpu: bool,
-    ) -> NativeTileResult:
-        request, output, integrated, accepted, rejected = self._request_and_output(
-            samples,
-            image_height=image_height,
-            first_row=first_row,
-            scales=scales,
-            offsets=offsets,
-            weights=weights,
-            sigma_clip=sigma_clip,
-        )
-        error = ctypes.create_string_buffer(1024)
-        stats = _StatsV1()
-        stats.struct_size = ctypes.sizeof(_StatsV1)
-        status = int(
-            self._library.ufwbpp_native_metal_linear_fit_v1(
-                self._handle,
-                ctypes.byref(request),
-                ctypes.byref(output),
-                ctypes.byref(stats),
-                error,
-                ctypes.sizeof(error),
-            )
-        )
-        if status != 0:
-            raise MetalIntegrationError(self._error_text(error, status))
-        integrated[accepted == 0] = np.nan
-        parity: dict[str, Any] = {"performed": False}
-        if compare_cpu:
-            cpu_integrated = np.empty_like(integrated)
-            cpu_accepted = np.empty_like(accepted)
-            cpu_rejected = np.empty_like(rejected)
-            cpu_output = _OutputV1(
-                ctypes.sizeof(_OutputV1),
-                cpu_integrated.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-                cpu_accepted.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16)),
-                cpu_rejected.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16)),
-                cpu_integrated.size,
-            )
-            error.value = b""
-            status = int(
-                self._library.ufwbpp_native_cpu_linear_fit_v1(
-                    ctypes.byref(request),
-                    ctypes.byref(cpu_output),
-                    error,
-                    ctypes.sizeof(error),
-                )
-            )
-            if status != 0:
-                raise MetalIntegrationError(self._error_text(error, status))
-            cpu_integrated[cpu_accepted == 0] = np.nan
-            finite_equal = bool(
-                np.array_equal(np.isfinite(integrated), np.isfinite(cpu_integrated))
-            )
-            counts_equal = bool(
-                np.array_equal(accepted, cpu_accepted)
-                and np.array_equal(rejected, cpu_rejected)
-            )
-            finite = np.isfinite(cpu_integrated) & np.isfinite(integrated)
-            difference = np.abs(integrated[finite] - cpu_integrated[finite]).astype(
-                np.float64, copy=False
-            )
-            max_abs = float(np.max(difference)) if difference.size else 0.0
-            rmse = (
-                float(np.sqrt(np.mean(np.square(difference), dtype=np.float64)))
-                if difference.size
-                else 0.0
-            )
-            max_abs_limit = 2.0e-6
-            rmse_limit = 2.0e-7
-            parity = {
-                "performed": True,
-                "domain": "native-input-float32",
-                "pixelsCompared": int(np.count_nonzero(finite)),
-                "finiteMaskEqual": finite_equal,
-                "rejectionCountsEqual": counts_equal,
-                "maxAbs": max_abs,
-                "rmse": rmse,
-                "maxAbsLimit": max_abs_limit,
-                "rmseLimit": rmse_limit,
-                "passed": finite_equal
-                and counts_equal
-                and max_abs <= max_abs_limit
-                and rmse <= rmse_limit,
-            }
-            if not parity["passed"]:
-                raise MetalIntegrationError(
-                    "CPU/Metal numerical gate failed: "
-                    f"finite={finite_equal}, counts={counts_equal}, "
-                    f"maxAbs={max_abs:.9g}, rmse={rmse:.9g}"
-                )
-        device_name = bytes(stats.device_name).split(b"\0", 1)[0].decode(
-            "utf-8", errors="replace"
-        )
-        return NativeTileResult(
-            integrated=integrated,
-            accepted=accepted,
-            rejected=rejected,
-            stats={
-                "deviceName": device_name,
-                "executedOnGpu": stats.executed_on_gpu == 1,
-                "wallSeconds": stats.wall_seconds,
-                "gpuSeconds": stats.gpu_seconds,
-                "submittedBufferBytes": stats.submitted_buffer_bytes,
-                "recommendedWorkingSetBytes": stats.recommended_working_set_bytes,
-                "maximumBufferBytes": stats.maximum_buffer_bytes,
-                "parityGate": parity,
-            },
-        )
-
     @staticmethod
     def _masked_request_and_output(
         samples: NDArray[np.float32],
@@ -942,6 +823,10 @@ NATIVE_CPU_AUTO_REASON = (
     "parity reruns; request generic-apple-metal or m3-pro-tuned explicitly to "
     "use the Metal reduction"
 )
+NUMPY_AUTO_REASON = (
+    "auto selected the portable CPU path with the NumPy reference: the native "
+    "kernels are switched off by the environment"
+)
 
 
 def integrate_registered_group(
@@ -984,6 +869,14 @@ def integrate_registered_group(
     )
     if requested_backend == "auto" and load_native_kernels() is not None:
         selected, selection_note = "portable-cpu", NATIVE_CPU_AUTO_REASON
+    elif requested_backend == "auto" and native_kernels_disabled():
+        # The variable asks for the NumPy reference; Metal is not that.
+        selected, selection_note = "portable-cpu", NUMPY_AUTO_REASON
+    if selected != "portable-cpu" and tile_observer is not None:
+        selected, selection_note = (
+            "portable-cpu",
+            "selection evidence and drizzle masks are collected tile by tile on the portable CPU path only",
+        )
     if selected != "portable-cpu" and integration.combination != DEFAULT_COMBINATION:
         selected, selection_note = (
             "portable-cpu",

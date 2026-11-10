@@ -9,7 +9,14 @@ from pathlib import Path
 import re
 from typing import Any, Iterable, Mapping
 
-from lightframeqc.metadata import grouping_keyword_root, grouping_keywords_from_path
+from lightframeqc.cfa import is_cfa_pattern
+from lightframeqc.metadata import (
+    ROLE_DEFAULT_EVIDENCE,
+    grouping_keyword_root,
+    grouping_keywords_from_path,
+    header_target,
+    infer_target_from_folders,
+)
 from lightframeqc.models import FrameRole
 from lightframeqc.readers import (
     FrameReadError,
@@ -39,6 +46,10 @@ _ROLE_MAP = {
     FrameRole.MASTER_LIGHT: AssetRole.MASTER_LIGHT,
     FrameRole.UNKNOWN: AssetRole.UNKNOWN,
 }
+
+
+# The target of Lights that no OBJECT keyword, file name or folder names.
+UNNAMED_TARGET = "UNNAMED"
 
 
 class InventoryBuildError(RuntimeError):
@@ -126,6 +137,82 @@ def _group_id(
     return _digest(payload)
 
 
+def _names_a_target(name: str | None) -> bool:
+    """Whether ``name`` identifies a target: it has a letter or digit (a
+    non-ASCII OBJECT arrives from FITS as question marks) and is not one of
+    the words a header uses for "none"."""
+
+    return (
+        name is not None
+        and any(character.isalnum() for character in name)
+        and name.strip().upper() not in {"UNKNOWN", "NONE", "UNSPECIFIED"}
+    )
+
+
+def _name_lights_without_object(
+    assets: list[FrameAsset], unnamed: list[int], keyword_root: str | None
+) -> list[InventoryIssue]:
+    """Give the Lights whose header names no target one, in place.
+
+    A missing OBJECT takes the target every Light of its folder states in
+    its file name (``M31_300s_001``), else the name of its folder (see
+    ``infer_target_from_folders``), else ``UNNAMED_TARGET`` for the whole
+    import: never a target per frame.
+    """
+
+    folders: dict[str, list[int]] = {}
+    for index in unnamed:
+        folders.setdefault(os.path.dirname(assets[index].path), []).append(index)
+    named: dict[str, list[str]] = {}
+    for indices in folders.values():
+        stated = {assets[index].target for index in indices}
+        if len(stated) == 1 and _names_a_target(next(iter(stated))):
+            continue
+        for index in indices:
+            asset = assets[index]
+            target = infer_target_from_folders(asset.path, root=keyword_root, filter_name=asset.filter_name) or UNNAMED_TARGET
+            renamed = replace(asset, target=target)
+            assets[index] = replace(renamed, group_id=_asset_group_id(renamed))
+            named.setdefault(target, []).append(asset.path)
+    return [
+        InventoryIssue(
+            code="TARGET_UNNAMED" if target == UNNAMED_TARGET else "TARGET_NAMED_BY_FOLDER",
+            severity=IssueSeverity.WARNING,
+            message=(
+                f"{len(paths)} Light(s) name no target (OBJECT is missing or unreadable); they are processed as "
+                + (
+                    f"one target, {UNNAMED_TARGET}"
+                    if target == UNNAMED_TARGET
+                    else f"target {target}, the name of their folder"
+                )
+            ),
+            path=paths[0],
+            details={"count": len(paths), "target": target},
+        )
+        for target, paths in sorted(named.items())
+    ]
+
+
+def _asset_group_id(asset: FrameAsset) -> str:
+    return _group_id(
+        role=asset.role,
+        width=asset.width,
+        height=asset.height,
+        channels=asset.channels,
+        filter_name=asset.filter_name,
+        target=asset.target,
+        camera=asset.camera,
+        exposure_seconds=asset.exposure_seconds,
+        temperature_celsius=asset.temperature_celsius,
+        gain=asset.gain,
+        offset=asset.offset,
+        binning_x=asset.binning_x,
+        binning_y=asset.binning_y,
+        cfa_pattern=asset.cfa_pattern,
+        readout_mode=asset.readout_mode,
+    )
+
+
 def _pointing(metadata: Any) -> tuple[float, float] | None:
     ra, dec = metadata.ra_degrees, metadata.dec_degrees
     if ra is None or dec is None or not (math.isfinite(ra) and math.isfinite(dec)) or abs(dec) > 90.0:
@@ -157,6 +244,18 @@ def _temperature_celsius(header: dict[str, object]) -> float | None:
         if math.isfinite(number):
             return number
     return None
+
+
+def _bayer_offset_is_odd(header: Mapping[str, Any]) -> bool:
+    """Whether XBAYROFF or YBAYROFF moves the Bayer pattern by one pixel."""
+
+    for key in ("XBAYROFF", "YBAYROFF"):
+        try:
+            if int(float(header.get(key) or 0)) & 1:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 def _cfa_is_explicit(header: dict[str, object]) -> bool:
@@ -285,6 +384,8 @@ def inventory_project(
     issues: list[InventoryIssue] = []
     processed_lights: list[tuple[str, tuple[str, ...]]] = []
     master_lights: list[str] = []
+    unnamed_lights: list[int] = []
+    shifted_bayer: list[str] = []
     # WBPP grouping keywords are read below the common folder of every frame,
     # as the run that processes them reads them.
     keyword_root = grouping_keyword_root(str(path) for path in paths)
@@ -328,12 +429,9 @@ def inventory_project(
             continue
 
         role = _ROLE_MAP[metadata.role]
-        declared = any(item.startswith(("FITS:IMAGETYP=", "XISF:imageType=")) for item in metadata.role_evidence)
-        defaulted = role == AssetRole.UNKNOWN and not declared and not metadata.role_conflicts
-        if defaulted:
-            # WBPP takes a frame whose header and path name no image type for
-            # a Light; an explicit unknown type (FOCUS, PREVIEW) stays unknown.
-            role = AssetRole.LIGHT
+        # WBPP takes a frame whose header and path name no image type for a
+        # Light; an explicit unknown type (FOCUS, PREVIEW) stays unknown.
+        defaulted = ROLE_DEFAULT_EVIDENCE in metadata.role_evidence
         # A Light PixInsight already calibrated or registered (WBPP output)
         # keeps IMAGETYP=LIGHT; processing it again would repeat the dark
         # subtraction and flat division, so it is refused, never guessed.
@@ -397,7 +495,11 @@ def inventory_project(
             pointing=_pointing(metadata),
             pixel_scale_arcsec=_pixel_scale_arcsec(metadata.header),
         )
+        if role == AssetRole.LIGHT and not _names_a_target(header_target(metadata.header)):
+            unnamed_lights.append(len(assets))
         assets.append(asset)
+        if _bayer_offset_is_odd(metadata.header) and is_cfa_pattern(metadata.cfa_pattern):
+            shifted_bayer.append(str(path))
         if metadata.role_conflicts:
             issues.append(
                 InventoryIssue(
@@ -432,6 +534,21 @@ def inventory_project(
                 )
             )
 
+    issues.extend(_name_lights_without_object(assets, unnamed_lights, keyword_root))
+    if shifted_bayer:
+        issues.append(
+            InventoryIssue(
+                code="BAYER_OFFSET_NOT_APPLIED",
+                severity=IssueSeverity.WARNING,
+                message=(
+                    f"{len(shifted_bayer)} frame(s) ({_examples(shifted_bayer)}) carry an odd XBAYROFF/YBAYROFF, "
+                    "which shifts the Bayer pattern BAYERPAT names; the offset is not applied yet and their "
+                    "colours may be swapped"
+                ),
+                path=shifted_bayer[0],
+                details={"count": len(shifted_bayer)},
+            )
+        )
     if processed_lights:
         paths = [path for path, _ in processed_lights]
         issues.append(
@@ -515,4 +632,4 @@ def inventory_project(
     )
 
 
-__all__ = ["InventoryBuildError", "inventory_project"]
+__all__ = ["InventoryBuildError", "UNNAMED_TARGET", "inventory_project"]

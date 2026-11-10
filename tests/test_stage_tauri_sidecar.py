@@ -78,7 +78,7 @@ def test_stages_only_the_identity_bound_target_create_only(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize("drift", ["bytes", "target", "symlink"])
-def test_rejects_identity_target_and_file_type_drift(tmp_path: Path, drift: str) -> None:
+def test_rejects_identity_target_and_file_type_drift(tmp_path: Path, drift: str, symlink) -> None:
     source = tmp_path / "input"
     source.mkdir()
     manifest = _pair(source)
@@ -97,6 +97,6 @@ def test_rejects_identity_target_and_file_type_drift(tmp_path: Path, drift: str)
         runtime = source / runtime_directory_name(TEST_TARGET)
         artifact = runtime / sidecar_filename(TEST_TARGET)
         artifact.unlink()
-        artifact.symlink_to("../" + manifest.name)
+        symlink(artifact, "../" + manifest.name)
     with pytest.raises(SidecarStageError):
         stage_sidecar(manifest, tmp_path / "out")

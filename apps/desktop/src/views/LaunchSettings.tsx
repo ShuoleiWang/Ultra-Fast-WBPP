@@ -4,7 +4,7 @@ import { CheckIcon, CpuIcon, FolderIcon, PlayIcon } from "../icons";
 import { DRIZZLE_KERNELS, DRIZZLE_SCALES, type CatalogInfo, type DrizzleKernel, type DrizzleScale } from "../types";
 import type { StartBlocker } from "../useWorkflow";
 import { MasterForm, SolverRow } from "./MasterForm";
-import { Alert, formatBytes, type Workflow } from "./common";
+import { Alert, engineBlockerText, filterName, formatBytes, type Workflow } from "./common";
 
 /** Monochrome defaults, the CFA block and the advanced master settings. */
 export function MetadataConfirmations({ workflow, t }: { workflow: Workflow; t: Translator }) {
@@ -150,7 +150,7 @@ export function LaunchSettings({
         <details className="disclosure" open={!workflow.solverSetupReady && workflow.nativeRuntime}>
           <summary>
             <span>{t("advanced")}</span>
-            <small>SuperL · Drizzle · LN · WCS</small>
+            <small>SuperL · Drizzle · WCS</small>
           </summary>
           <div className="details-content">
             <label className={`toggle ${workflow.superLuminanceEnabled ? "enabled" : ""}`}>
@@ -312,11 +312,18 @@ export function LaunchSettings({
             </section>
             <div className="compute" aria-label={t("computeBackend")}>
               <CpuIcon />
-              <strong>{workflow.capabilities?.chip ?? t("detectingHardware")}</strong>
-              <span>
-                {workflow.capabilities?.cpuBackend ?? "Portable CPU"} ·{" "}
-                {workflow.capabilities?.gpuBackend ?? "GPU probe"} · {computeLabel(workflow.capabilities, t)}
-              </span>
+              <strong>
+                {workflow.capabilities?.platform === "browser"
+                  ? t("browserDemoChip")
+                  : (workflow.capabilities?.chip ?? t("detectingHardware"))}
+              </strong>
+              {/* Backends are named only once the engine reported them. */}
+              {workflow.capabilities && (
+                <span>
+                  {workflow.capabilities.cpuBackend} · {workflow.capabilities.gpuBackend} ·{" "}
+                  {computeLabel(workflow.capabilities, t)}
+                </span>
+              )}
             </div>
           </div>
         </details>
@@ -422,7 +429,7 @@ function StartBlockerList({ workflow, mode, t }: { workflow: Workflow; mode: "im
   const describe = (blocker: StartBlocker): string => {
     switch (blocker.kind) {
       case "engine":
-        return blocker.reason ?? t("blockerEngine");
+        return engineBlockerText(blocker.reason, t);
       case "calibration":
         return t("blockerCalibration");
       case "types":
@@ -434,14 +441,14 @@ function StartBlockerList({ workflow, mode, t }: { workflow: Workflow; mode: "im
         return blinkPanels
           ? t("blockerBlinkChannel", {
               target: cell.target,
-              filter: cell.filter,
+              filter: filterName(cell.filter, t),
               kept: cell.admittedCount,
               total: cell.lightCount,
               required: workflow.minimumAdmittedLights,
             })
           : t("insufficientPanelLights", {
               target: cell.target,
-              filter: cell.filter,
+              filter: filterName(cell.filter, t),
               count: workflow.admissionKnown ? cell.admittedCount : cell.lightCount,
               required: workflow.minimumAdmittedLights,
             });
@@ -524,7 +531,7 @@ function SolverRows({ workflow, t }: { workflow: Workflow; t: Translator }) {
 
 /** Automatic screening (default) or the manual Blink review; the choice is remembered. */
 function ScreeningModeToggle({ workflow, t }: { workflow: Workflow; t: Translator }) {
-  if (workflow.demoMode) return null;
+  // The browser demo shows it too; there the choice lives in the demo's state only.
   return (
     <label className="screening-mode">
       <input
@@ -540,7 +547,7 @@ function ScreeningModeToggle({ workflow, t }: { workflow: Workflow; t: Translato
 
 /** The completed manual review: the user's decisions admit the Lights. */
 function ScreeningNotice({ workflow, t }: { workflow: Workflow; t: Translator }) {
-  if (workflow.demoMode || !workflow.blinkReviewComplete) return null;
+  if (!workflow.blinkReviewComplete) return null;
   const kept = workflow.blinkChannels.reduce((sum, channel) => sum + channel.kept, 0);
   const total = workflow.blinkChannels.reduce((sum, channel) => sum + channel.total, 0);
   return (
@@ -578,7 +585,7 @@ export function LaunchBar({
 }) {
   // Automatic screening needs no review, so Start is primary; on the manual
   // path Blink is primary until every channel has been reviewed and confirmed.
-  const automatic = workflow.automaticScreening && !workflow.demoMode;
+  const automatic = workflow.automaticScreening;
   const blinkPrimary = !automatic && !workflow.blinkReviewComplete;
   const blinkButton = (
     <button
@@ -613,12 +620,14 @@ export function LaunchBar({
           </div>
           {modeToggle}
         </div>
-      ) : !workflow.blinkReviewComplete && !workflow.demoMode ? (
+      ) : !workflow.blinkReviewComplete ? (
         <div className="screening-notice" role="status">
           <span className="symbol">!</span>
           <div>
             <strong>{t("blinkHumanReviewTitle")}</strong>
             <span>{t("blockerBlinkReview")}</span>
+            {/* The demo does not remember the choice. */}
+            {!workflow.demoMode && <span>{t("automaticScreeningOffNote")}</span>}
           </div>
           {modeToggle}
         </div>

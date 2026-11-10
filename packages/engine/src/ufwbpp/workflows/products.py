@@ -13,7 +13,9 @@ from typing import Any, Mapping, Sequence
 from astropy.io import fits
 import numpy as np
 
+from ..image_io.fits import atomic_publish_file
 from ..integrity import sha256_digest
+from ..path_budget import WORK_DIRECTORY
 from ..solvers.base import SolverBackend, validate_wcs_header
 from ..stacking.drizzle_native import DrizzleGroupRequest, drizzle_group, verify_drizzle_receipt
 from ..stacking.integration import CalibrationError, read_frame_info
@@ -145,23 +147,19 @@ def _ordinary_candidates(
                     "PIPELINE_RECEIPT_INVALID", "integration map escapes pipeline root"
                 ) from error
             destination = staging / "coverage" / f"{token}_{map_name}.fits"
+            # The map moves out of the pipeline's work tree, which is deleted
+            # before publication: the same file under its published name, so
+            # the digest the pipeline recorded for it stays its digest.
             try:
-                with source.open("rb") as input_stream, destination.open("xb") as output_stream:
-                    shutil.copyfileobj(input_stream, output_stream, length=4 * 1024 * 1024)
-                    output_stream.flush()
-                    os.fsync(output_stream.fileno())
-            except FileExistsError as error:
+                atomic_publish_file(source, destination)
+            except CalibrationError as error:
                 raise E2EError(
-                    "OUTPUT_EXISTS", "refusing to replace promoted integration map",
+                    error.code, "refusing to replace promoted integration map",
                     path=str(destination),
                 ) from error
-            if sha256_digest(source) != sha256_digest(destination):
-                raise E2EError(
-                    "ARTIFACT_HASH_MISMATCH",
-                    "promoted integration map differs from its source",
-                    path=str(destination),
-                )
-            promoted_maps[map_name] = str(destination.relative_to(staging))
+            with destination.open("r+b") as stream:
+                os.fsync(stream.fileno())
+            promoted_maps[map_name] = destination.relative_to(staging).as_posix()
         coverage_path = staging / promoted_maps["coverageFraction"]
         with fits.open(coverage_path, mode="readonly", memmap=True, checksum=True) as hdul:
             coverage_data = np.asarray(hdul[0].data, dtype=np.float32)
@@ -301,8 +299,8 @@ def _promote_proper_coadds(
             )
         promoted.append(destination)
         records[filter_name] = {
-            "output": str(destination.relative_to(staging)),
-            "wcsSource": str(solved.relative_to(staging)),
+            "output": destination.relative_to(staging).as_posix(),
+            "wcsSource": solved.relative_to(staging).as_posix(),
             "wcsProvenance": "INHERITED_SAME_GRID",
             "wcsGridDisagreementPixels": residual,
             "wcsValidation": validation.serializable(),
@@ -350,6 +348,7 @@ def _solve_candidates(
             hints=hints,
             min_matches=request.min_matches,
             max_rms_arcsec=request.max_rms_arcsec,
+            staging_directory=staging / WORK_DIRECTORY / "solver",
         )
         with progress_lock:
             completed += 1
@@ -377,8 +376,8 @@ def _solve_candidates(
         solved_path = solve_targets[filter_name]
         records[filter_name] = {
             "status": "SOLVED" if solved else "UNSOLVED",
-            "input": str(candidates[filter_name].relative_to(staging)),
-            "output": str(solved_path.relative_to(staging)) if solved else None,
+            "input": candidates[filter_name].relative_to(staging).as_posix(),
+            "output": solved_path.relative_to(staging).as_posix() if solved else None,
             "attempts": _relativize_solver_attempts(attempts, staging),
         }
         all_solved = all_solved and solved

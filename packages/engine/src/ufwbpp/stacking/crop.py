@@ -10,6 +10,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 from numpy.typing import NDArray
 
+from ..image_io.fits import atomic_publish_file
 from ..platform import remove_file
 from .integration import CalibrationError, FitsFloatWriter, FitsFrame, FrameInfo, PixelStatistics
 from .parameters import PixelTransform
@@ -332,13 +333,7 @@ def _crop_fits(
                     writer.write_rows(output_y, values)
                     output_y += values.shape[0]
             digest = writer.sha256
-            try:
-                os.link(temporary, destination)
-            except FileExistsError as error:
-                raise CalibrationError(
-                    "OUTPUT_EXISTS", "refusing to overwrite master", path=str(destination)
-                ) from error
-            remove_file(temporary, missing_ok=False)
+            atomic_publish_file(temporary, destination, what="master")
         finally:
             remove_file(temporary)
     return PixelStatistics(

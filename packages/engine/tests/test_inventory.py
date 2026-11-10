@@ -5,6 +5,9 @@ from pathlib import Path
 from ufwbpp.inventory import inventory_project
 from ufwbpp.models import AssetRole, AssetStatus
 
+from astropy.io import fits
+import pytest
+
 from conftest import write_frame
 
 
@@ -111,3 +114,122 @@ def test_master_lights_are_ignored_with_a_warning(tmp_path: Path) -> None:
     (issue,) = [issue for issue in inventory.issues if issue.code == "MASTER_LIGHT_IGNORED"]
     assert issue.severity.value == "WARNING"
     assert inventory.has_errors is False
+
+
+@pytest.mark.parametrize(
+    ("image_type", "role"),
+    [
+        ("Light Frame", "LIGHT"),
+        ("Flat Field", "FLAT"),
+        ("Flat Frame", "FLAT"),
+        ("Dark Frame", "DARK"),
+        ("Bias Frame", "BIAS"),
+        ("DARKFLAT", "DARK"),
+        ("Master Dark", "MASTER_DARK"),
+        ("Science", "LIGHT"),
+        ("Lights", "LIGHT"),
+        ("zero", "BIAS"),
+        ("SNAPSHOT", "UNKNOWN"),
+    ],
+)
+def test_inventory_and_pixel_reader_read_one_role_table(tmp_path: Path, image_type: str, role: str) -> None:
+    from ufwbpp.stacking.integration import read_frame_info
+
+    frame = write_frame(tmp_path / "frames" / "frame.fits", "Light")
+    fits.setval(frame, "IMAGETYP", value=image_type)
+
+    (asset,) = inventory_project([tmp_path]).assets
+
+    assert asset.role.value == role
+    assert read_frame_info(frame).role == role
+
+
+def test_inventory_and_pixel_reader_name_a_filter_alike(tmp_path: Path) -> None:
+    from ufwbpp.calibration.inputs import with_path_metadata
+    from ufwbpp.stacking.integration import read_frame_info
+
+    for index, (spelling, expected) in enumerate(
+        (("Red", "R"), ("Lum", "L"), ("H-alpha", "HA"), ("O3", "OIII"), ("L-Pro", "L-PRO"), (None, "NOFILTER"), ("None", "NOFILTER"))
+    ):
+        frame = write_frame(tmp_path / str(index) / "frame.fits", "Light")
+        if spelling is None:
+            fits.delval(frame, "FILTER")
+        else:
+            fits.setval(frame, "FILTER", value=spelling)
+        (asset,) = inventory_project([frame]).assets
+        assert asset.filter_name == expected
+        assert with_path_metadata(read_frame_info(frame), frame).filter_name == expected
+
+
+def test_housekeeping_files_beside_the_frames_are_not_inventoried(tmp_path: Path) -> None:
+    light = write_frame(tmp_path / "LIGHT" / "L_0001.fits", "Light")
+    (light.parent / "._L_0001.fits").write_bytes(b"\x00\x05\x16\x07" + b"\x00" * 60)
+    (light.parent / ".DS_Store").write_bytes(b"store")
+    write_frame(tmp_path / ".out.a1b2c3d4.pstage" / "masters" / "master_light_R.fits", "Light")
+
+    inventory = inventory_project([tmp_path])
+
+    assert [asset.path for asset in inventory.assets] == [str(light.resolve())]
+    assert inventory.has_errors is False
+
+
+def test_lights_without_object_share_a_target_and_never_get_one_each(tmp_path: Path) -> None:
+    written: list[Path] = []
+
+    def light(path: Path, target: str | None = None) -> Path:
+        frame = write_frame(path, "Light", target=target or "x")
+        if target is None:
+            fits.delval(frame, "OBJECT")
+        # Distinct bytes: identical copies of a Light are refused.
+        fits.setval(frame, "DATE-OBS", value=f"2026-03-22T12:{len(written):02d}:00Z")
+        written.append(frame)
+        return frame
+
+    # N.I.N.A.'s default file pattern: a date and time before the exposure.
+    for index in range(3):
+        light(tmp_path / "2026-03-22" / "LIGHT" / f"2026-03-22_21-1{index}-11_R_-10.00_120.00s_000{index}.fits")
+    # Two nights of one target named by its folder, one of them with a Chinese name.
+    for night in ("2026-03-22", "2026-03-23"):
+        light(tmp_path / "M31" / night / "LIGHT" / "img_0001.fits")
+        light(tmp_path / f"玫瑰星云_{night}" / "LIGHT" / "img_0001.fits")
+    # A header OBJECT that astropy could not decode is no name either.
+    light(tmp_path / "NGC 7000" / "LIGHT" / "img_0001.fits", target="????")
+    # A file name that states the target of every Light of its folder is kept.
+    for index in range(2):
+        light(tmp_path / "named" / f"M42_120s_000{index}.fits")
+    named = light(tmp_path / "header" / "img_0001.fits", target="M 51")
+
+    inventory = inventory_project([tmp_path])
+
+    targets: dict[str, int] = {}
+    for asset in inventory.assets:
+        targets[asset.target] = targets.get(asset.target, 0) + 1
+    assert targets == {"UNNAMED": 3, "M31": 2, "玫瑰星云": 2, "NGC 7000": 1, "M42": 2, "M 51": 1}
+    assert {issue.severity.value for issue in inventory.issues} == {"WARNING"}
+    codes = sorted((issue.code, issue.details["target"], issue.details["count"]) for issue in inventory.issues)
+    assert codes == [
+        ("TARGET_NAMED_BY_FOLDER", "M31", 2),
+        ("TARGET_NAMED_BY_FOLDER", "NGC 7000", 1),
+        ("TARGET_NAMED_BY_FOLDER", "玫瑰星云", 2),
+        ("TARGET_UNNAMED", "UNNAMED", 3),
+    ]
+    assert inventory.has_errors is False
+    # Lights of one target and set-up are one group whatever named them.
+    by_target: dict[str, set[str]] = {}
+    for asset in inventory.assets:
+        by_target.setdefault(asset.target, set()).add(asset.group_id)
+    assert all(len(groups) == 1 for groups in by_target.values())
+    assert by_target["M 51"] == {next(asset.group_id for asset in inventory.assets if asset.path == str(named.resolve()))}
+
+
+def test_an_odd_bayer_offset_is_reported_because_it_is_not_applied(tmp_path: Path) -> None:
+    frame = write_frame(tmp_path / "LIGHT" / "osc.fits", "Light")
+    fits.setval(frame, "BAYERPAT", value="RGGB")
+    fits.setval(frame, "YBAYROFF", value=1)
+    even = write_frame(tmp_path / "LIGHT" / "osc_even.fits", "Light", exposure=60.0)
+    fits.setval(even, "BAYERPAT", value="RGGB")
+    fits.setval(even, "XBAYROFF", value=0)
+
+    inventory = inventory_project([tmp_path])
+
+    assert [(issue.code, Path(issue.path).name) for issue in inventory.issues] == [("BAYER_OFFSET_NOT_APPLIED", "osc.fits")]

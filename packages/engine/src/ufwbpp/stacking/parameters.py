@@ -367,6 +367,10 @@ class PipelineParameters:
     )
     master_metadata_overrides: tuple[MasterMetadataOverride, ...] = ()
     raw_frame_metadata_overrides: tuple[RawFrameMetadataOverride, ...] = ()
+    # The calibration kinds (BIAS, DARK, FLAT) the recipe requires: a Light
+    # paired with none of a required kind stops the run. The recipe, whose
+    # digest the receipt records, declares them: not serialized.
+    required_calibration: tuple[str, ...] = ()
     # Calibrated Lights are computed in memory and registered directly.  They
     # are written to disk only when a consumer (Drizzle, the public portable
     # pipeline) needs them; the ordinary E2E path keeps them transient.
@@ -414,6 +418,8 @@ class PipelineParameters:
     def validate(self) -> None:
         if self.calibration_workflow not in WORKFLOWS:
             raise ValueError("unsupported calibration_workflow")
+        if not set(self.required_calibration) <= {"BIAS", "DARK", "FLAT"}:
+            raise ValueError("required_calibration names BIAS, DARK and FLAT only")
         if self.output_grid is not None:
             if not isinstance(self.output_grid, OutputGrid):
                 raise ValueError("output_grid must be an OutputGrid")

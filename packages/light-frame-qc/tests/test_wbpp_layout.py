@@ -9,6 +9,9 @@ from lightframeqc.metadata import (
     infer_exposure_from_path,
     infer_filter_from_path,
     infer_frame_role_from_path,
+    infer_target_from_folders,
+    infer_target_from_path,
+    normalize_filter,
     parse_frame_role,
     path_metadata,
     processing_markers,
@@ -92,3 +95,46 @@ def test_processing_markers_from_xisf_properties_and_the_wbpp_layout() -> None:
     assert processing_markers({}, "/w/registered/Light_x/a_c_r.fits") == ["CALIBRATED", "REGISTERED"]
     # A raw file that merely ends in _c, outside WBPP's folders, is untouched.
     assert processing_markers({}, "/data/night/a_c.fits") == []
+
+
+def test_one_filter_identity_names_every_alias_spelling() -> None:
+    for spelling, expected in (
+        ("L", "L"), ("Lum", "L"), ("Luminance", "L"), ("lum", "L"),
+        ("Red", "R"), ("Green", "G"), ("Blue", "B"),
+        ("Ha", "HA"), ("H-alpha", "HA"), ("H_Alpha", "HA"), ("Halpha", "HA"), ("H alpha", "HA"), ("Hα", "HA"),
+        ("O3", "OIII"), ("OIII", "OIII"), ("O-III", "OIII"), ("Oxygen III", "OIII"),
+        ("S2", "SII"), ("SII", "SII"), ("Sulfur II", "SII"),
+        ("NoFilter", "NOFILTER"), ("No Filter", "NOFILTER"),
+        # Other names are themselves, in upper case, and never an alias.
+        ("L-Pro", "L-PRO"), ("Clear", "CLEAR"), ("Ha 3nm", "HA 3NM"), ("UV/IR", "UV/IR"),
+    ):
+        assert normalize_filter(spelling) == expected, spelling
+        assert normalize_filter(normalize_filter(spelling)) == expected, spelling
+    assert normalize_filter(None) == normalize_filter("  ") == "UNKNOWN"
+
+
+def test_the_documented_folder_spellings_name_their_role() -> None:
+    assert infer_frame_role_from_path("/data/FlatField/x_001.fits") is FrameRole.RAW_FLAT
+    assert infer_frame_role_from_path("/data/Science/x_001.fits") is FrameRole.LIGHT
+    assert infer_frame_role_from_path("/data/M31/2026-03-22/x_001.fits") is FrameRole.UNKNOWN
+
+
+def test_a_file_name_states_a_target_only_without_a_date_or_time() -> None:
+    assert infer_target_from_path("/d/M31_300s_0001.fits") == "M31"
+    assert infer_target_from_path("/d/2026-03-22_21-10-11_L_-10.00_300.00s_0001.fits") == "UNKNOWN"
+    assert infer_target_from_path("/d/img_0001.fits") == "UNKNOWN"
+
+
+def test_the_folders_below_the_import_name_a_light_without_object() -> None:
+    def named(path: str, filter_name: str = "L") -> str | None:
+        return infer_target_from_folders(path, root="/data", filter_name=filter_name)
+
+    assert named("/data/M31/2026-03-22/LIGHT/L/x.fits") == "M31"
+    assert named("/data/SDSS J1004+4112_2026-11-02/LIGHT/L/x.fits") == "SDSS J1004+4112"
+    assert named("/data/玫瑰星云_2026-03-22/LIGHT/x.fits") == "玫瑰星云"
+    assert named("/data/NGC7000/Ha 3nm/x.fits", filter_name="HA 3NM") == "NGC7000"
+    # Frame-type, filter, date, exposure and grouping-keyword folders name nothing,
+    # and no folder above the import is read.
+    assert named("/data/2026-03-22/LIGHT/x.fits") is None
+    assert named("/data/NIGHT_1/Lights_300s/R/x.fits", filter_name="R") is None
+    assert infer_target_from_folders("/volume/owner/LIGHT/x.fits", root="/volume/owner") is None

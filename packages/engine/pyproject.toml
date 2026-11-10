@@ -60,7 +60,3 @@ ufwbpp = [
   "solvers/catalog_manifests/*.json",
   "solvers/catalog_manifests/*.md",
 ]
-
-[tool.pytest.ini_options]
-pythonpath = ["src", "../light-frame-qc/src"]
-testpaths = ["tests"]

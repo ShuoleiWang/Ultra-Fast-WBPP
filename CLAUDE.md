@@ -22,11 +22,12 @@ Ultra-Fast WBPP preprocesses astrophotography Lights into verified, plate-solved
 
 ```bash
 make bootstrap BOOTSTRAP_PYTHON=python3.12 && make test   # first time; python + rust + frontend + native tests
-.venv/bin/python -m pytest -q packages/light-frame-qc/tests packages/registration/tests packages/engine/tests tests
+.venv/bin/python -m pytest -q          # all four test directories (pytest.ini); a worktree tests its own sources
 cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked
 npm --prefix apps/desktop run format:check && npm --prefix apps/desktop test && npm --prefix apps/desktop run build
 make native-release-install            # Release kernels into the engine package (the only library to install)
-make source-check                      # public-tree and link checks
+make source-check                      # public-tree and link checks, Python correctness lint (ruff)
+make pr-check                          # before a push: source-check + the suites CI would select for the local changes
 make desktop-dev | make demo | CARGO_PROFILE_RELEASE_STRIP=none make desktop-build-macos-prerelease   # …-macos-demo: solver + indexes bundled
 ```
 
@@ -41,6 +42,7 @@ make desktop-dev | make demo | CARGO_PROFILE_RELEASE_STRIP=none make desktop-bui
 - QC grids live in the QC reference frame, registered pixels in the pipeline reference frame; meridian flips are 180° apart — transform spatial QC products.
 - Windows needs the patched deterministic SEP build; unpatched runs differ (`SEP_NONDETERMINISTIC`).
 - Hosted CI has no Metal device: the CPU↔Metal differential is skipped there, so verify Metal changes with `make native-test` on Apple Silicon. Pull requests run only the CI jobs their paths select (`scripts/ci_changed_areas.py`).
+- Tests run under Windows' file rules on every OS (root `conftest.py`): renaming, replacing or deleting a file that is still open or memory-mapped, or a directory holding one, fails locally as it does on Windows. Read FITS with `memmap=False` first. Path separators and timer resolution are still Windows-only: compare `Path` objects, never `"a/b"` strings.
 - Spawn-pool scripts need `if __name__ == "__main__":`; quote zsh globs; absolute paths in parallel shells; `./node_modules/.bin/tsc` inside `apps/desktop`.
 
 ## Where to look

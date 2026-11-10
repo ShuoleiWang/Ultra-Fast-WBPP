@@ -12,9 +12,10 @@ import stat
 from typing import Any, Iterable, Mapping, Sequence
 
 from lightframeqc.cfa import is_cfa_pattern
+from lightframeqc.metadata import ROLE_DEFAULT_EVIDENCE
 from lightframeqc.readers import probe_frame_metadata
 
-from ..calibration.inputs import InternalSourceIdentity, with_path_metadata
+from ..calibration.inputs import InternalSourceIdentity, numeric_application_scale, with_path_metadata
 from ..calibration.policy import apply_mono_workflow, bias_from_header, MONO_STANDARD
 from ..image_io.xisf import convert_xisf_to_fits, preflight_xisf_header
 from ..integrity import sha256_digest
@@ -96,7 +97,8 @@ def _input_frame_info(
 
         info = FrameInfo(
             path=str(path),
-            role=normalize_role(metadata.role.value),
+            # A frame of no stated type takes the role it is supplied as.
+            role="UNKNOWN" if ROLE_DEFAULT_EVIDENCE in metadata.role_evidence else normalize_role(metadata.role.value),
             shape=(metadata.height, metadata.width),
             filter_name=metadata.filter_name,
             exposure_seconds=metadata.exposure_seconds,
@@ -473,10 +475,13 @@ def _validated_sources(request: E2ERequest, progress: ProgressCallback | None) -
     master_biases = _canonical_inputs(request.master_bias_files, "MASTER_BIAS", required=False)
     master_darks = _canonical_inputs(request.master_dark_files, "MASTER_DARK", required=False)
     master_flats = _canonical_inputs(request.master_flat_files, "MASTER_FLAT", required=False)
-    if len(master_biases) > 1 or (biases and master_biases) or (not biases and not master_biases and request.pipeline_parameters.calibration_workflow != MONO_STANDARD):
+    # Several MasterBias files are the masters of several calibration groups
+    # (a project builds one per night or gain); the matcher pairs each Light
+    # with its own, and the strict workflow refuses an ambiguous choice there.
+    if (biases and master_biases) or (not biases and not master_biases and request.pipeline_parameters.calibration_workflow != MONO_STANDARD):
         raise E2EError(
             "BIAS_SOURCE_AMBIGUOUS",
-            "supply exactly one Bias source mode: raw Bias frames or one MasterBias",
+            "supply one Bias source mode: raw Bias frames or MasterBias files",
         )
     if not flats and not master_flats:
         raise E2EError("MASTER_FLAT_MISSING", "raw Flats or supplied MasterFlats are required")
@@ -521,12 +526,30 @@ def _validated_sources(request: E2ERequest, progress: ProgressCallback | None) -
             actual_role = normalize_role(frame_info.role)
         except CalibrationError as error:
             raise E2EError(error.code, str(error), path=str(path)) from error
+        if actual_role == "UNKNOWN":
+            # No type in the header or the path: the frame takes the role it
+            # is supplied as (the inventory supplies it as a Light, as WBPP
+            # does), like the registration and pixel stages that follow.
+            actual_role = expected_role
         if actual_role != expected_role:
             raise E2EError(
                 "FRAME_ROLE_MISMATCH",
                 f"expected {expected_role}, found {actual_role}",
                 path=str(path),
             )
+        if expected_role == "LIGHT" and path.suffix.casefold() != ".xisf":
+            # The registration stage refuses a Light whose pixels declare no
+            # sensor range (float or signed FITS); refuse it here, before the
+            # Lights are measured, by the same test.
+            try:
+                numeric_application_scale(frame_info, frame_info, target_label="Light", additive_label="Light")
+            except CalibrationError as error:
+                raise E2EError(
+                    error.code,
+                    "this Light stores floating-point or signed pixels without a declared sensor range "
+                    "(a converted or processed frame); the run calibrates raw camera frames (unsigned integer FITS)",
+                    path=str(path),
+                ) from error
         if expected_role in {"LIGHT", "FLAT", "DARK", "BIAS"}:
             cfa = frame_info.cfa_pattern.strip().upper()
             if cfa in {"", "UNKNOWN", "UNSPECIFIED"}:

@@ -13,6 +13,7 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image
 
+from ..image_io.fits import atomic_publish_file
 from ..platform import remove_file
 from ..stacking.integration import CalibrationError, FitsFrame
 
@@ -158,13 +159,7 @@ def render_auto_stretch_preview(
         )
         with temporary.open("r+b") as stream:
             os.fsync(stream.fileno())
-        try:
-            os.link(temporary, destination)
-        except FileExistsError as error:
-            raise CalibrationError(
-                "OUTPUT_EXISTS", "refusing to overwrite preview", path=str(destination)
-            ) from error
-        remove_file(temporary, missing_ok=False)
+        atomic_publish_file(temporary, destination, what="preview")
         black, white, median, mad = stretch
         return PreviewResult(
             output_path=str(destination),

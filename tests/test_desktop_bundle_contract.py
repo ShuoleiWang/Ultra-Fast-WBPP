@@ -135,8 +135,8 @@ def test_release_macos_job_freezes_a_homebrew_python_for_the_runtime_overlay() -
     workflow = (REPOSITORY / ".github" / "workflows" / "release.yml").read_text(
         encoding="utf-8"
     )
-    # The macOS 14 overlay swaps the Homebrew openssl@3/mpdecimal dylibs a
-    # Homebrew interpreter links against; python.org's framework build (what
+    # The runtime overlay swaps the Homebrew openssl@3/mpdecimal dylibs a
+    # Homebrew interpreter links against for pinned Sonoma bottles; python.org's framework build (what
     # setup-python provides) bundles OpenSSL and links libmpdec statically, so
     # the macOS job must freeze from a Homebrew Python or the overlay has
     # nothing to replace.
@@ -147,6 +147,40 @@ def test_release_macos_job_freezes_a_homebrew_python_for_the_runtime_overlay() -
     assert "brew install python@3.12" in homebrew
     assert "-m venv" in homebrew and "GITHUB_PATH" in homebrew
     assert "--macos14-bottle-root build/macos14-runtime-libraries" in workflow
+
+
+def test_release_bundle_declares_the_macos_minimum_its_deployment_audit_enforces() -> None:
+    from scripts.attest_bundled_runtime import MACOS_MAXIMUM_DEPLOYMENT_TARGET
+
+    prerelease = json.loads((TAURI_ROOT / "tauri.prerelease.conf.json").read_text(encoding="utf-8"))
+    declared = prerelease["bundle"]["macOS"]["minimumSystemVersion"]
+    assert declared == "15.0"
+    assert MACOS_MAXIMUM_DEPLOYMENT_TARGET == (15, 0, 0)
+    assert tuple(int(part) for part in declared.split(".")) + (0,) == MACOS_MAXIMUM_DEPLOYMENT_TARGET
+    base = json.loads((TAURI_ROOT / "tauri.conf.json").read_text(encoding="utf-8"))
+    assert "minimumSystemVersion" not in json.dumps(base)
+    # The pinned Sonoma overlay libraries stay within the release minimum.
+    policy = json.loads(
+        (REPOSITORY / "packaging" / "engine" / "macos14-runtime-libraries-v1.json").read_text(encoding="utf-8")
+    )
+    assert tuple(int(part) for part in policy["maximumDeploymentTarget"].split(".")) <= (
+        MACOS_MAXIMUM_DEPLOYMENT_TARGET
+    )
+
+    # The release job freezes and bundles at the release minimum: no override.
+    workflow = (REPOSITORY / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    assert "--macos-minimum" not in workflow and "minimumSystemVersion" not in workflow
+    # A local build passes one value to the freeze and to the bundle.
+    makefile = (REPOSITORY / "Makefile").read_text(encoding="utf-8")
+    assert "scripts/build_engine_sidecar.py --print-local-macos-minimum" in makefile
+    assert "--macos-minimum $(MACOS_MINIMUM)" in makefile
+    assert (
+        """--config '{"bundle":{"macOS":{"minimumSystemVersion":"$(MACOS_MINIMUM)"}}}'"""
+        in makefile
+    )
+    for target in ("desktop-build:", "desktop-build-macos-prerelease:", "desktop-build-macos-demo:"):
+        recipe = makefile.split("\n" + target, 1)[1].split("\n\n", 1)[0]
+        assert "$(DESKTOP_BUNDLE_PLATFORM_ARGS)" in recipe, target
 
 
 def test_windows_installers_embed_webview2_and_install_per_user_without_downgrades() -> None:

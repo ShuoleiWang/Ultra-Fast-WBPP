@@ -279,6 +279,15 @@ def build_e2e_request(
     pipeline = replace(
         PipelineParameters(),
         calibration_workflow=recipe.calibration.workflow,
+        required_calibration=tuple(
+            kind
+            for kind, requirement in (
+                ("BIAS", recipe.calibration.bias),
+                ("DARK", recipe.calibration.dark),
+                ("FLAT", recipe.calibration.flat),
+            )
+            if requirement is Requirement.REQUIRED
+        ),
         integration=integration,
         registration_memory_bytes=tuning.registration_memory_bytes,
         global_normalization=GlobalNormalizationParameters(

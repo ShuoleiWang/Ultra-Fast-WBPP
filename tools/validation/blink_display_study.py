@@ -21,7 +21,7 @@ from PIL import Image
 from lightframeqc.content_hash import file_sha256, stat_identity
 from lightframeqc.readers import read_frame_preview
 from ufwbpp.blink.native_crops import native_atlas, star_positions
-from ufwbpp.blink.diagnostics import DISPLAY_ALGORITHM, DisplayReference, choose_display_reference, detail_transfer, diagnostic_preview, local_noise
+from ufwbpp.blink.diagnostics import DISPLAY_ALGORITHM, DisplayReference, choose_display_reference, diagnostic_preview, local_noise
 from ufwbpp.blink.imaging import (
     PreviewCalibration,
     calibrate_linear,
