@@ -1,14 +1,26 @@
 import type { Translator } from "../i18n";
 import { CheckIcon, SparkIcon, XIcon } from "../icons";
-import { RunElapsed, stageLabel, type Workflow } from "./common";
+import { explainFailure, filterName, RunElapsed, stageLabel, type Workflow } from "./common";
 
-/** The failure card of a run that failed closed: what failed, where the engine's evidence is, what to do. */
+/**
+ * The failure card of a run that failed closed: what failed, what to do (a
+ * localised sentence for the codes a user is likely to meet, the engine's own
+ * text beside it), whether the output folder was written, and where the
+ * engine's evidence is when that folder exists.
+ */
 function RunFailure({ workflow, t }: { workflow: Workflow; t: Translator }) {
-  const code = workflow.runFailureCode;
-  const message = workflow.errorMessage ?? "";
-  const detail = code && message.startsWith(`${code}: `) ? message.slice(code.length + 2) : message;
+  const { code, hint, detail } = explainFailure(workflow.errorMessage ?? "", t, workflow.runFailureCode);
   const failedStage = workflow.stages.find((stage) => stage.status === "FAILED");
-  const evidence = workflow.outputDirectory ? `${workflow.outputDirectory}.unsolved` : undefined;
+  const details = workflow.runFailureDetails;
+  // The controller says what the run left on disk; an event without that
+  // report (an older controller) keeps the conventional evidence folder.
+  const evidence = details
+    ? typeof details.evidenceDirectory === "string"
+      ? details.evidenceDirectory
+      : undefined
+    : workflow.outputDirectory
+      ? `${workflow.outputDirectory}.unsolved`
+      : undefined;
   return (
     <section className="run-failure" role="alert" aria-live="assertive">
       <div className="run-failure-head">
@@ -16,13 +28,17 @@ function RunFailure({ workflow, t }: { workflow: Workflow; t: Translator }) {
           !
         </span>
         <div>
-          <strong>{t("runFailureTitle")}</strong>
+          <strong>{t(details?.outputPublished === true ? "runFailurePublishedTitle" : "runFailureTitle")}</strong>
           <span>
             {failedStage ? t("runFailureStage", { stage: stageLabel(failedStage.stageId, t) }) : t("runFailureNoStage")}
           </span>
         </div>
       </div>
-      <p className="run-failure-detail">
+      {hint && <p className="run-failure-hint run-failure-action">{hint}</p>}
+      <p
+        className={`run-failure-detail${hint ? " secondary" : ""}`}
+        title={hint ? t("runFailureEngineMessage") : undefined}
+      >
         {code && (
           <>
             <code className="run-failure-code">{code}</code>:{" "}
@@ -30,8 +46,6 @@ function RunFailure({ workflow, t }: { workflow: Workflow; t: Translator }) {
         )}
         {detail}
       </p>
-      {code === "ASTROMETRY_REQUIRED" && <p className="run-failure-hint">{t("astrometryFailedHint")}</p>}
-      {code === "MOSAIC_CATALOG_TOO_SPARSE" && <p className="run-failure-hint">{t("mosaicCatalogHint")}</p>}
       {evidence && (
         <p className="run-failure-hint">
           {t("unsolvedEvidenceHint")}{" "}
@@ -92,7 +106,7 @@ export function RunView({ workflow, t }: { workflow: Workflow; t: Translator }) 
                 index: workflow.runProgress.panelIndex ?? 0,
                 count: workflow.runProgress.panelCount ?? 0,
                 target: workflow.runProgress.panelTarget ?? "",
-                filter: workflow.runProgress.panelFilter ?? "",
+                filter: filterName(workflow.runProgress.panelFilter ?? "", t),
               })
             : workflow.runProgress?.scope === "project"
               ? t("projectFinalStages")

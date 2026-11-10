@@ -1113,19 +1113,6 @@ def source_identity(
     return original, digest, after
 
 
-def find_dark(
-    exposure: float | None,
-    masters: Mapping[float, Path],
-) -> tuple[float, Path] | None:
-    if exposure is None:
-        return None
-    for dark_exposure, path in masters.items():
-        if math.isclose(exposure, dark_exposure, rel_tol=0.0, abs_tol=1e-6):
-            return dark_exposure, path
-    return None
-
-
-
 # The engine's role names for what a path says (WBPP's image-type words).
 _PATH_ROLES = {
     "LIGHT": "LIGHT",
@@ -1150,10 +1137,11 @@ def with_path_metadata(
     Bayer pattern the header lacks (WBPP's smart naming), and supplies the
     grouping keywords (NIGHT_1, SESSION-2, PANEL_3) calibration is paired by,
     read below ``keyword_root`` (see ``grouping_keyword_root``). A generated
-    master keeps the keywords its metadata override declares.
+    master keeps the keywords its metadata override declares. A Light or
+    Flat without any filter gets the filterless channel's name.
     """
 
-    from lightframeqc.metadata import path_metadata
+    from lightframeqc.metadata import filter_or_filterless, path_metadata
 
     found = path_metadata(str(original_path), keyword_root=keyword_root)
     changes: dict[str, Any] = {}
@@ -1163,8 +1151,15 @@ def with_path_metadata(
         role = _PATH_ROLES.get(str(getattr(found.role, "value", found.role)))
         if role is not None:
             changes["role"] = role
-    if unknown(info.filter_name) and found.filter_name != "UNKNOWN":
-        changes["filter_name"] = found.filter_name
+    filter_name = info.filter_name
+    if unknown(filter_name) and found.filter_name != "UNKNOWN":
+        filter_name = found.filter_name
+    # A Light or Flat that names no filter is in the filterless channel, as
+    # the inventory reads it (a frame of no stated type is a Light).
+    if changes.get("role", info.role) not in {"DARK", "BIAS", "MASTER_DARK", "MASTER_BIAS"}:
+        filter_name = filter_or_filterless(filter_name)
+    if filter_name != info.filter_name:
+        changes["filter_name"] = filter_name
     if info.exposure_seconds is None and found.exposure_seconds is not None:
         changes["exposure_seconds"] = found.exposure_seconds
     if info.binning_x is None and info.binning_y is None and found.binning is not None:

@@ -428,6 +428,33 @@ def test_auto_prefers_native_cpu_kernels_and_explicit_metal_still_runs(
         fits.getdata(tmp_path / "auto-master.fits"), fits.getdata(tmp_path / "explicit-master.fits")
     )
 
+    # The variable that selects the NumPy reference must not land on Metal,
+    # and a run that collects evidence tile by tile is never sent there.
+    monkeypatch.setenv(native_kernels.DISABLE_ENVIRONMENT_VARIABLE, "1")
+    reference = metal.integrate_registered_group(
+        [FrameExpression(str(path)) for path in paths],
+        tmp_path / "numpy-master.fits",
+        parameters=IntegrationParameters(max_memory_bytes=1024 * 1024),
+        requested_backend="auto",
+        hardware=profile,
+        tuning=tuning,
+    )
+    assert reference.execution["selectedBackend"] == "portable-cpu"
+    assert reference.execution["fallbackReason"] == metal.NUMPY_AUTO_REASON
+    assert reference.execution["acceleratorUsed"] is False
+    monkeypatch.delenv(native_kernels.DISABLE_ENVIRONMENT_VARIABLE)
+    tiles: list[object] = []
+    observed = metal.integrate_registered_group(
+        [FrameExpression(str(path)) for path in paths],
+        tmp_path / "observed-master.fits",
+        parameters=IntegrationParameters(max_memory_bytes=1024 * 1024),
+        requested_backend="m3-pro-tuned",
+        hardware=profile,
+        tuning=tuning,
+        tile_observer=tiles.append,
+    )
+    assert observed.execution["selectedBackend"] == "portable-cpu" and tiles
+
 
 def test_portable_mask_counts_separate_nan_coverage_from_rejection() -> None:
     samples = np.asarray(

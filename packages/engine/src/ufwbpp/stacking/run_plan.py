@@ -37,7 +37,8 @@ from ..calibration.matching import (
     physically_compatible,
 )
 from ..calibration.pairing import dark_group_warnings, light_group_warnings, pair_calibration
-from ..calibration.policy import MONO_STANDARD, apply_mono_workflow, cfa_for_workflow
+from ..calibration.policy import MONO_STANDARD, apply_mono_workflow, cfa_for_workflow, unknown
+from ..path_budget import target_key
 from .integration import CalibrationError, FrameInfo, PixelStatistics
 from .normalization import StellarScaleHint
 from .parameters import PipelineParameters, PixelTransform, ShiftField
@@ -614,6 +615,7 @@ def _plan_run(
         supplied_dark_bias_included=supplied_dark_bias_included,
         workflow=workflow,
         dark_temperature_tolerance_celsius=parameters.dark_temperature_tolerance_celsius,
+        required=parameters.required_calibration,
     )
     tokens: dict[str, str] = {}
     for name in {*light_groups, *output_groups, *calibration.groups[FLAT]}:
@@ -730,7 +732,7 @@ def _group_lights(
             mismatches = physically_compatible(
                 reference_traits, frame_traits(candidate, LIGHT, supplied_master=False, workflow=workflow)
             )
-            if required_mismatch(reference.target, candidate.target):
+            if _targets_differ(reference.target, candidate.target):
                 mismatches.append("target")
             if mismatches:
                 raise CalibrationError(
@@ -741,6 +743,15 @@ def _group_lights(
                     path=str(path),
                 )
     return light_groups
+
+
+def _targets_differ(left: str, right: str) -> bool:
+    """Whether two Lights name different targets, by the project's target
+    key (``M31`` and ``M 31`` are one target). Lights whose headers name no
+    target were put together by the inventory (their folder's name) and are
+    one target here too; a named and an unnamed Light are not."""
+
+    return ("" if unknown(left) else target_key(left)) != ("" if unknown(right) else target_key(right))
 
 
 def _output_groups(

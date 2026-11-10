@@ -19,9 +19,12 @@ from numpy.typing import NDArray
 
 from lightframeqc.cfa import CFA_PATTERNS, normalize_pattern as normalize_cfa_pattern
 from lightframeqc.fits_bands import FitsBandReader, close_image_data, open_fits_image_data
+from lightframeqc.metadata import normalize_filter, parse_frame_role
+from lightframeqc.models import FrameRole
 
 from ..calibration.policy import bias_from_header
 from ..lanczos_table import TAP_OFFSETS, tap_weights
+from .. import platform as platform_services
 from ..platform import remove_file
 
 FITS_BLOCK_BYTES = 2880
@@ -66,34 +69,23 @@ def header_text(header: Mapping[str, Any], *keys: str, default: str = "UNKNOWN")
     return default
 
 
+# The pixel reader's role names of the one frame-role table.
+_ROLE_NAMES = {
+    FrameRole.LIGHT: "LIGHT",
+    FrameRole.RAW_FLAT: "FLAT",
+    FrameRole.DARK: "DARK",
+    FrameRole.BIAS: "BIAS",
+    FrameRole.MASTER_FLAT: "MASTER_FLAT",
+    FrameRole.MASTER_DARK: "MASTER_DARK",
+    FrameRole.MASTER_BIAS: "MASTER_BIAS",
+}
+
+
 def normalize_role(value: Any) -> str:
-    compact = re.sub(r"[^A-Z0-9]+", "", str(value or "").upper())
-    # The image-type words WBPP recognises; a Flat-Dark is a Dark.
-    return {
-        "BIAS": "BIAS",
-        "BIASFRAME": "BIAS",
-        "ZERO": "BIAS",
-        "DARK": "DARK",
-        "DARKFRAME": "DARK",
-        "DARKFLAT": "DARK",
-        "FLATDARK": "DARK",
-        "FLAT": "FLAT",
-        "FLATFRAME": "FLAT",
-        "FLATFIELD": "FLAT",
-        "LIGHT": "LIGHT",
-        "LIGHTFRAME": "LIGHT",
-        "SCIENCE": "LIGHT",
-        "SCIENCEFRAME": "LIGHT",
-        "MASTERBIAS": "MASTER_BIAS",
-        "MASTERBIASFRAME": "MASTER_BIAS",
-        "MASTERDARK": "MASTER_DARK",
-        "MASTERDARKFRAME": "MASTER_DARK",
-        "MASTERDARKFLAT": "MASTER_DARK",
-        "MASTERFLATDARK": "MASTER_DARK",
-        "MASTERFLAT": "MASTER_FLAT",
-        "MASTERFLATFRAME": "MASTER_FLAT",
-        "MASTERFLATFIELD": "MASTER_FLAT",
-    }.get(compact, "UNKNOWN")
+    """The role an image-type word names, read from the table inventory and
+    QC use (``lightframeqc.metadata.parse_frame_role``); a Flat-Dark is a Dark."""
+
+    return _ROLE_NAMES.get(parse_frame_role(value), "UNKNOWN")
 
 
 def numeric_domain_from_header(
@@ -361,7 +353,13 @@ class FitsFrame:
             path=str(self.path),
             role=normalize_role(header.get("IMAGETYP", header.get("IMAGETYPE"))),
             shape=self.shape,
-            filter_name=header_text(header, "FILTER", "INSFLNAM", "FILTERID"),
+            # The inventory's filter identity, so plan and run pair alike.
+            filter_name=normalize_filter(
+                next(
+                    (value for key in ("FILTER", "INSFLNAM", "FILTERID") if (value := header.get(key)) is not None and str(value).strip()),
+                    None,
+                )
+            ),
             exposure_seconds=header_number(header, "EXPTIME", "EXPOSURE", "EXPOSURETIME"),
             temperature_celsius=header_number(
                 header, "CCD-TEMP", "CCD_TEMP", "SENSORT", "SENSOR-T", "CAMTEMP"
@@ -859,16 +857,19 @@ class FitsFloatWriter:
         self.close()
 
 
-def atomic_publish_file(temporary: Path, destination: Path) -> None:
+def atomic_publish_file(temporary: Path, destination: Path, *, what: str = "output") -> None:
+    """Give a finished ``temporary`` file its name; never replaces anything.
+
+    The platform's create-only publication: a hard link where the volume has
+    them, its create-only fallback on exFAT, FAT32 and network shares.
+    """
+
     try:
-        os.link(temporary, destination)
+        platform_services.current().publish_file_no_replace(temporary, destination)
     except FileExistsError as error:
         raise CalibrationError(
-            "OUTPUT_EXISTS", "refusing to overwrite output", path=str(destination)
+            "OUTPUT_EXISTS", f"refusing to overwrite {what}", path=str(destination)
         ) from error
-    # The destination link exists; dropping the temporary name waits out a
-    # scanner that may still hold the freshly written file (Windows).
-    remove_file(temporary, missing_ok=False)
 
 
 def temporary_output(destination: Path) -> Path:

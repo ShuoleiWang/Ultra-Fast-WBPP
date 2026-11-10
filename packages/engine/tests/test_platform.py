@@ -322,6 +322,105 @@ def test_host_publish_file_no_replace(tmp_path) -> None:
     assert final.read_text(encoding="utf-8") == "a"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="the POSIX fallbacks; the Windows ones are tested with injected calls")
+def test_posix_volume_without_hard_links_or_exclusive_rename_publishes_create_only(tmp_path, host_file_rules) -> None:
+    """exFAT, FAT32 and network shares answer ENOTSUP to link(2) and to the exclusive rename."""
+
+    import ctypes
+    import errno
+
+    from ufwbpp.platform import posix
+
+    def no_hard_links(src, dst) -> None:
+        raise OSError(errno.ENOTSUP, "Operation not supported")
+
+    temporary = tmp_path / ".a.partial"
+    temporary.write_text("a", encoding="utf-8")
+    final = tmp_path / "a.fits"
+    assert posix.publish_file_no_replace(temporary, final, link=no_hard_links) == "exclusive-create"
+    assert final.read_text(encoding="utf-8") == "a" and not temporary.exists()
+    temporary.write_text("b", encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        posix.publish_file_no_replace(temporary, final, link=no_hard_links)
+    assert final.read_text(encoding="utf-8") == "a" and temporary.read_text(encoding="utf-8") == "b"
+
+    def unsupported_rename(src: bytes, dst: bytes) -> int:
+        ctypes.set_errno(errno.ENOTSUP)
+        return -1
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "L.fits").write_text("pixels", encoding="utf-8")
+    result = tmp_path / "result"
+    rename_directory_no_replace_with(staging, result, unsupported_rename)
+    assert (result / "L.fits").read_text(encoding="utf-8") == "pixels" and not staging.exists()
+
+    # Another writer takes the name between the check and the claim: nothing of its directory is replaced.
+    def racing_rename(src: bytes, dst: bytes) -> int:
+        other = Path(os.fsdecode(dst))
+        other.mkdir()
+        (other / "theirs.fits").write_text("theirs", encoding="utf-8")
+        ctypes.set_errno(errno.ENOTSUP)
+        return -1
+
+    late = tmp_path / "late"
+    late.mkdir()
+    (late / "L.fits").write_text("ours", encoding="utf-8")
+    taken = tmp_path / "taken"
+    with pytest.raises(NoReplaceError) as lost:
+        rename_directory_no_replace_with(late, taken, racing_rename)
+    assert lost.value.code == "OUTPUT_EXISTS"
+    assert sorted(path.name for path in taken.iterdir()) == ["theirs.fits"] and (late / "L.fits").is_file()
+
+
+def test_remove_tree_finishes_when_entries_vanish_during_the_walk(tmp_path, monkeypatch) -> None:
+    """On exFAT, FAT32 and network shares macOS deletes ``._name`` together with ``name``."""
+
+    from ufwbpp.platform import remove_tree
+
+    tree = tmp_path / ".work"
+    tree.mkdir()
+    for name in ("accepted_R.fits", "coverage_R.fits", "integrated_R.fits"):
+        (tree / name).write_bytes(b"pixels")
+        (tree / f"._{name}").write_bytes(b"resource fork")
+    unlink = os.unlink
+
+    def unlink_with_companion(path, *args, **kwargs) -> None:
+        unlink(path, *args, **kwargs)
+        name = os.fspath(path)
+        if not os.path.basename(name).startswith("._"):
+            companion = os.path.join(os.path.dirname(name), "._" + os.path.basename(name))
+            try:
+                unlink(companion, *args, **kwargs)
+            except FileNotFoundError:
+                pass
+
+    monkeypatch.setattr(os, "unlink", unlink_with_companion)
+    assert remove_tree(tree) is True
+    assert not tree.exists()
+    assert remove_tree(tree) is False
+    with pytest.raises(FileNotFoundError):
+        remove_tree(tree, missing_ok=False)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows has no descriptor limit to raise")
+def test_open_file_limit_is_raised_from_the_application_default_and_never_lowered() -> None:
+    import resource
+
+    from ufwbpp.platform import raise_open_file_limit
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    try:
+        # What launchd hands a Finder-launched application and its engine.
+        resource.setrlimit(resource.RLIMIT_NOFILE, (256, hard))
+        raised = raise_open_file_limit()
+        assert raised is not None and raised > 256
+        assert resource.getrlimit(resource.RLIMIT_NOFILE)[0] == raised
+        assert raise_open_file_limit(target=128) == raised
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
 def test_host_fsync_directory_and_volume_facts(tmp_path) -> None:
     services = current()
     result = services.fsync_directory(tmp_path)
@@ -717,12 +816,13 @@ def test_remove_helpers_are_idempotent_and_report_what_they_removed(tmp_path, mo
     assert (tmp_path / "fresh.json").read_text(encoding="utf-8") == "moved"
 
 
-def test_remove_file_outlives_a_handle_another_thread_holds(tmp_path) -> None:
+def test_remove_file_outlives_a_handle_another_thread_holds(tmp_path, host_file_rules) -> None:
     """A file that is open elsewhere is removed as soon as the handle closes.
 
     POSIX unlinks the name immediately; Windows refuses while the handle is
     open (sharing violation), so the helper must wait.  Both hosts end with
-    the file gone; only Windows is expected to have slept.
+    the file gone; only Windows is expected to have slept.  The test is about
+    the host's own rule, so the repository's Windows rules are lifted.
     """
 
     target = tmp_path / "held.partial"
@@ -757,3 +857,71 @@ def test_remove_file_outlives_a_handle_another_thread_holds(tmp_path) -> None:
         assert sleeps, "Windows must have waited for the holder to close the file"
     else:
         assert sleeps == []
+
+
+def test_windows_publication_rename_waits_out_a_sharing_violation_and_never_replaces(tmp_path) -> None:
+    source = tmp_path / "staging"
+    source.mkdir()
+    (source / "receipt.json").write_text("verified", encoding="utf-8")
+    destination = tmp_path / "result"
+    clock = _FakeClock()
+    attempts: list[str] = []
+
+    def held_twice(src, dst) -> None:
+        attempts.append("rename")
+        if len(attempts) <= 2:
+            raise _SharingViolation(13, "a scanner still holds a file of the staging tree")
+        os.rename(src, dst)
+
+    windows_platform.rename_directory_no_replace_with(
+        source, destination, held_twice, sleep=clock.sleep, clock=clock
+    )
+    assert len(attempts) == 3 and len(clock.sleeps) == 2
+    assert (destination / "receipt.json").read_text(encoding="utf-8") == "verified" and not source.exists()
+
+    # A destination that appears while the rename waits is refused at once:
+    # the next attempt is the same no-replace call.
+    late = tmp_path / "late-staging"
+    late.mkdir()
+    taken = tmp_path / "taken"
+    clock = _FakeClock()
+    attempts.clear()
+
+    def raced(src, dst) -> None:
+        attempts.append("rename")
+        if len(attempts) == 1:
+            Path(dst).mkdir()
+            (Path(dst) / "theirs.txt").write_text("another run", encoding="utf-8")
+            raise PermissionError(13, "access denied")
+        raise FileExistsError(183, "exists")
+
+    with pytest.raises(NoReplaceError) as lost:
+        windows_platform.rename_directory_no_replace_with(late, taken, raced, sleep=clock.sleep, clock=clock)
+    assert lost.value.code == "OUTPUT_EXISTS" and lost.value.precheck is False
+    assert len(attempts) == 2 and len(clock.sleeps) == 1
+    assert (taken / "theirs.txt").read_text(encoding="utf-8") == "another run" and late.is_dir()
+
+    # The wait is bounded; the staged result stays where it was.
+    stuck_destination = tmp_path / "never"
+    clock = _FakeClock()
+
+    def stuck(src, dst) -> None:
+        raise _SharingViolation(13, "a viewer keeps a file open")
+
+    with pytest.raises(_SharingViolation):
+        windows_platform.rename_directory_no_replace_with(late, stuck_destination, stuck, sleep=clock.sleep, clock=clock)
+    budget = windows_platform.PUBLICATION_RETRY_BUDGET_SECONDS
+    assert budget <= sum(clock.sleeps) <= budget + RETRY_MAXIMUM_SECONDS
+    assert late.is_dir() and not stuck_destination.exists()
+
+    # An error waiting cannot fix is raised without a second attempt.
+    clock = _FakeClock()
+    attempts.clear()
+
+    def missing(src, dst) -> None:
+        attempts.append("rename")
+        raise FileNotFoundError(2, "missing")
+
+    with pytest.raises(FileNotFoundError):
+        windows_platform.rename_directory_no_replace_with(late, stuck_destination, missing, sleep=clock.sleep, clock=clock)
+    assert attempts == ["rename"] and clock.sleeps == []

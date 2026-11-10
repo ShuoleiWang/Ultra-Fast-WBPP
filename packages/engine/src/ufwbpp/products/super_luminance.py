@@ -182,6 +182,16 @@ def _sky_level_and_noise(data: NDArray[np.float32], tiles: list[tuple[slice, sli
     return float(np.median(levels)), math.sqrt(float(np.median(variances)))
 
 
+def _recorded(measurements: Mapping[str, Any]) -> dict[str, Any]:
+    """Measurements as a receipt holds them: one that could not be made (a
+    value that is not finite) is ``None``, which canonical JSON can state."""
+
+    return {
+        name: None if isinstance(value, float) and not math.isfinite(value) else value
+        for name, value in measurements.items()
+    }
+
+
 def build_super_luminance(
     channels: Mapping[str, Path],
     reference_key: str,
@@ -321,6 +331,8 @@ def build_super_luminance(
                 reason = f"fewer than {MINIMUM_SCALE_STARS} stars to scale it"
             elif not shapes[key]:
                 reason = "too few isolated stars to measure its star shapes"
+            elif not (math.isfinite(entry["fwhmRatio"]) and math.isfinite(entry["ellipticityExcess"])):
+                reason = "its star shapes could not be measured"
             elif not entry["fwhmRatio"] <= MAXIMUM_FWHM_RATIO:
                 reason = f"stars {entry['fwhmRatio']:.2f}x wider than the reference's"
             elif not entry["ellipticityExcess"] <= MAXIMUM_ELLIPTICITY_EXCESS:
@@ -336,7 +348,7 @@ def build_super_luminance(
             entry["included"] = reason is None
             if reason is not None:
                 entry["reason"] = reason
-            channel_records[key] = entry
+            channel_records[key] = _recorded(entry)
         record["channels"] = channel_records
         if reference not in weights:
             return {**record, "reason": f"the reference is unusable: {channel_records[reference]['reason']}"}
@@ -355,7 +367,9 @@ def build_super_luminance(
             kernel = sum(kernels[key] * (weights[key] / total) for key in included)
             combined.append((_half_maximum_fwhm(kernel) / reference_fwhm, _moments(kernel, centre, window)[2] - reference_ellipticity))
         medians = np.median(np.asarray(combined), axis=0)
-        record["stars"] = {"fwhmRatio": float(medians[0]), "ellipticityExcess": float(medians[1]), "boxes": len(combined)}
+        record["stars"] = _recorded(
+            {"fwhmRatio": float(medians[0]), "ellipticityExcess": float(medians[1]), "boxes": len(combined)}
+        )
 
         metadata: dict[str, Any] = {
             card.keyword: card.value
@@ -389,6 +403,10 @@ def build_super_luminance(
         record.update(status="CREATED", sha256=writer.sha256)
         return record
     finally:
+        # An error keeps this frame alive in its traceback: the mapped pixels
+        # are released here, or the channels stay mapped (and on Windows
+        # cannot be renamed) while the caller handles the failure.
+        images = data = None
         for hdul in opened.values():
             hdul.close()
 

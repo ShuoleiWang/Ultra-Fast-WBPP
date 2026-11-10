@@ -4,6 +4,7 @@ import { BlinkFrameDetails } from "./BlinkView";
 import { InputChecks } from "./FrameInventory";
 import type { InspectedLightQuality } from "./types";
 import type { useWorkflow } from "./useWorkflow";
+import { filterName } from "./views/common";
 
 type Workflow = ReturnType<typeof useWorkflow>;
 const basename = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
@@ -46,7 +47,7 @@ export function Inspector({
                   {blinkFrame.name}
                 </div>
                 <div className="ins-sub">
-                  {blinkFrame.night} · {blinkFrame.filter}
+                  {blinkFrame.night} · {filterName(blinkFrame.filter, t)}
                   {blinkFrame.reference ? ` · ★ ${t("blinkReference")}` : ""}
                 </div>
               </header>

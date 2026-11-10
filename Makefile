@@ -15,18 +15,24 @@ HOST_SYSTEM := $(shell uname -s 2>/dev/null)
 ifeq ($(HOST_SYSTEM),Darwin)
 DESKTOP_BUILD_SCRIPT := tauri:build:macos-prerelease
 DESKTOP_SIDECAR_PLATFORM_DEPS := macos14-runtime-libraries
-DESKTOP_SIDECAR_PLATFORM_ARGS := --macos14-bottle-root $(MACOS14_BOTTLE_ROOT)
+# A release declares macOS 15 (the release workflow); a local build declares
+# the release minimum or, when the .venv interpreter was built for a newer
+# macOS, that macOS, and says so. Evaluated only by the recipes that use it.
+MACOS_MINIMUM ?= $(shell $(PYTHON) scripts/build_engine_sidecar.py --print-local-macos-minimum)
+DESKTOP_SIDECAR_PLATFORM_ARGS = --macos14-bottle-root $(MACOS14_BOTTLE_ROOT) --macos-minimum $(MACOS_MINIMUM)
+DESKTOP_BUNDLE_PLATFORM_ARGS = --config '{"bundle":{"macOS":{"minimumSystemVersion":"$(MACOS_MINIMUM)"}}}'
 else
 DESKTOP_BUILD_SCRIPT := tauri:build
 DESKTOP_SIDECAR_PLATFORM_DEPS :=
 DESKTOP_SIDECAR_PLATFORM_ARGS :=
+DESKTOP_BUNDLE_PLATFORM_ARGS :=
 endif
 
-.PHONY: bootstrap demo desktop-dev test python-test rust-test frontend-test native-configure native-build native-test native-release-configure native-release-build native-release-test native-release-install macos14-runtime-libraries desktop-sidecar desktop-build desktop-build-macos-prerelease desktop-build-macos-demo source-check check doctor clean
+.PHONY: bootstrap demo desktop-dev test python-test rust-test frontend-test native-configure native-build native-test native-release-configure native-release-build native-release-test native-release-install macos14-runtime-libraries desktop-sidecar desktop-build desktop-build-macos-prerelease desktop-build-macos-demo source-check pr-check check doctor clean
 
 bootstrap:
 	$(BOOTSTRAP_PYTHON) -m venv .venv
-	.venv/bin/python -m pip install -e './packages/light-frame-qc[test]' -e './packages/registration[test]' -e './packages/engine[test,all]' -r packaging/engine/requirements-build.txt
+	.venv/bin/python -m pip install -e './packages/light-frame-qc[test]' -e './packages/registration[test]' -e './packages/engine[test,all]' -r packaging/engine/requirements-build.txt -r requirements-dev.txt
 	.venv/bin/python -m pip check
 	npm --prefix apps/desktop ci
 	$(MAKE) native-release-install
@@ -39,12 +45,10 @@ desktop-dev: native-release-install
 
 test: python-test rust-test frontend-test native-test
 
+# pytest.ini names the four test directories and puts this checkout's sources
+# first, so the same command tests a git worktree's own code.
 python-test:
-	$(PYTHON) -m pytest -q \
-		packages/light-frame-qc/tests \
-		packages/registration/tests \
-		packages/engine/tests \
-		tests
+	$(PYTHON) -m pytest -q
 
 rust-test:
 	cargo test --workspace --locked
@@ -100,21 +104,34 @@ desktop-sidecar: native-release-install $(DESKTOP_SIDECAR_PLATFORM_DEPS)
 		build/sidecars/ufwbpp-engine-$$($(PYTHON) -c 'from scripts.build_engine_sidecar import detect_host_target_triple; print(detect_host_target_triple())').manifest.json
 
 desktop-build: desktop-sidecar
-	npm --prefix apps/desktop run $(DESKTOP_BUILD_SCRIPT)
+	npm --prefix apps/desktop run $(DESKTOP_BUILD_SCRIPT) -- $(DESKTOP_BUNDLE_PLATFORM_ARGS)
 
 desktop-build-macos-prerelease: desktop-sidecar
-	npm --prefix apps/desktop run tauri:build:macos-prerelease
+	npm --prefix apps/desktop run tauri:build:macos-prerelease -- $(DESKTOP_BUNDLE_PLATFORM_ARGS)
 
 # Self-contained demo app: solve-field and the index set ship inside it, so a
 # new Mac solves without Homebrew or a download. Astrometry.net is GPL as
 # distributed and the index terms are unresolved: never a public release.
 desktop-build-macos-demo: desktop-sidecar
 	$(PYTHON) scripts/stage_astrometry_runtime.py --output $(ASTROMETRY_RUNTIME)
-	npm --prefix apps/desktop run tauri:build:macos-prerelease -- --config src-tauri/tauri.demo.conf.json
+	npm --prefix apps/desktop run tauri:build:macos-prerelease -- --config src-tauri/tauri.demo.conf.json $(DESKTOP_BUNDLE_PLATFORM_ARGS)
 
+# What the CI job "Source checks" runs. The lint is ruff's correctness rules
+# (ruff.toml); install it with `$(PYTHON) -m pip install -r requirements-dev.txt`.
 source-check:
 	$(PYTHON) scripts/check_public_tree.py .
 	$(PYTHON) scripts/check_local_links.py .
+	$(PYTHON) -m ruff check .
+
+# Before a push: the source checks, then the suites CI would select for this
+# checkout's changes against origin/main (commits, uncommitted edits, new files).
+pr-check: source-check
+	@selected="$$($(PYTHON) scripts/ci_changed_areas.py --worktree --base origin/main)"; \
+	echo "$$selected"; \
+	set -e; \
+	case "$$selected" in *python=true*) $(MAKE) python-test;; esac; \
+	case "$$selected" in *rust=true*) cargo fmt --all -- --check; cargo clippy --workspace --all-targets --locked -- -D warnings; $(MAKE) rust-test;; esac; \
+	case "$$selected" in *frontend=true*) $(MAKE) frontend-test;; esac
 
 check: source-check
 	cargo fmt --all -- --check

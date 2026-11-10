@@ -841,19 +841,86 @@ def _one_to_one_matches(
     return source[source_indices], reference[reference_indices], distances
 
 
-def _refine_transform(
+def _coarse_acceptance(
+    residuals: Float64Array,
+    inlier_count: int,
+    source_count: int,
+    reference_count: int,
+    config: RegistrationConfig,
+) -> tuple[bool, float, float]:
+    """``(accepted, inlier ratio, inlier rms)`` of a refined catalog model."""
+
+    mask = residuals <= config.residual_threshold_px
+    rms = float(np.sqrt(np.mean(np.square(residuals[mask])))) if np.any(mask) else float("inf")
+    denominator = min(source_count, reference_count)
+    ratio = inlier_count / denominator if denominator else 0.0
+    accepted = (
+        inlier_count >= config.min_inliers
+        and ratio >= config.min_inlier_ratio
+        and rms <= config.max_rms_px
+    )
+    return accepted, ratio, rms
+
+
+def _refine_from_triangles(
     source: StarCatalog,
     reference: StarCatalog,
     config: RegistrationConfig,
 ) -> tuple[SimilarityTransform, Float64Array, int]:
+    initial, _ = astroalign.find_transform(
+        source.points,
+        reference.points,
+        max_control_points=config.max_control_points,
+    )
+    return _refine_from_initial(source, reference, initial, config)
+
+
+def _refine_transform(
+    source: StarCatalog,
+    reference: StarCatalog,
+    config: RegistrationConfig,
+    *,
+    second_bootstrap: bool = True,
+) -> tuple[SimilarityTransform, Float64Array, int]:
+    """Bootstrap and refine the source->reference catalog model.
+
+    The offset bootstrap only knows 0 and 180 degrees, and in a star-rich
+    field chance pairs alone reach its match count, so it also "succeeds" on
+    a frame rotated by a few degrees and the refinement then settles on a
+    random consensus.  With ``second_bootstrap``, a model refined from the
+    offset bootstrap that misses the acceptance thresholds is refined again
+    from the triangle bootstrap and the better of the two is returned.  A
+    model that meets the thresholds is returned as it is, so a frame the
+    offset bootstrap registers keeps its matrix value for value.
+    """
+
     initial = _translation_rotation_bootstrap(source, reference, config)
     if initial is None:
-        initial, _ = astroalign.find_transform(
-            source.points,
-            reference.points,
-            max_control_points=config.max_control_points,
-        )
-    return _refine_from_initial(source, reference, initial, config)
+        return _refine_from_triangles(source, reference, config)
+    if not second_bootstrap:
+        return _refine_from_initial(source, reference, initial, config)
+    first: tuple[SimilarityTransform, Float64Array, int] | None
+    first_error: Exception | None = None
+    try:
+        first = _refine_from_initial(source, reference, initial, config)
+    except Exception as error:
+        first, first_error = None, error
+
+    def rank(candidate: tuple[SimilarityTransform, Float64Array, int]) -> tuple[bool, int, float]:
+        _, residuals, inlier_count = candidate
+        accepted, _, rms = _coarse_acceptance(residuals, inlier_count, source.count, reference.count, config)
+        return accepted, inlier_count, -rms
+
+    if first is not None and rank(first)[0]:
+        return first
+    try:
+        second = _refine_from_triangles(source, reference, config)
+    except Exception:
+        if first is None:
+            assert first_error is not None
+            raise first_error
+        return first
+    return second if first is None or rank(second) > rank(first) else first
 
 
 def _translation_rotation_bootstrap(
@@ -959,14 +1026,8 @@ def _result_from_model(
     started: float,
     bridge_path: str | None = None,
 ) -> FrameTransform:
-    mask = residuals <= config.residual_threshold_px
-    rms = float(np.sqrt(np.mean(np.square(residuals[mask])))) if np.any(mask) else float("inf")
-    denominator = min(source.catalog.count, reference.catalog.count)
-    ratio = inlier_count / denominator if denominator else 0.0
-    accepted = (
-        inlier_count >= config.min_inliers
-        and ratio >= config.min_inlier_ratio
-        and rms <= config.max_rms_px
+    accepted, ratio, rms = _coarse_acceptance(
+        residuals, inlier_count, source.catalog.count, reference.catalog.count, config
     )
     preview_matrix = np.asarray(model.params, dtype=np.float64)
     full_matrix = full_resolution_matrix(preview_matrix, source, reference)
@@ -984,7 +1045,14 @@ def _result_from_model(
         rms_preview_px=rms,
         rms_full_px=rms * full_scale,
         accepted=accepted,
-        reason=None if accepted else "registration thresholds not met",
+        reason=None
+        if accepted
+        else (
+            "registration thresholds not met: "
+            f"{inlier_count} inliers (minimum {config.min_inliers}), "
+            f"inlier ratio {ratio:.3f} (minimum {config.min_inlier_ratio:g}), "
+            f"rms {rms:.2f} px (maximum {config.max_rms_px:g})"
+        ),
         registration_seconds=time.perf_counter() - started,
         bridge_path=bridge_path,
     )
@@ -1139,6 +1207,141 @@ def _core_window_sigma(config: RegistrationConfig) -> float:
     if config.full_centroid_window_sigma_px is not None:
         return float(config.full_centroid_window_sigma_px)
     return DEFAULT_CENTROID_WINDOW_SIGMA_PX
+
+
+SENSOR_FIXED_CHECK = "same-pixel-core-fraction-v1"
+# A control point is sensor-fixed when it sits on the same pixel of both
+# frames and that pixel holds at least this share of the light of its 3x3
+# neighbourhood.  Measured on synthetic frames: an isolated hot pixel holds
+# 0.90-1.00, a star of FWHM 1.0 px centred on a pixel 0.62, of FWHM >= 2 px
+# at most 0.25.  The share only selects what is examined; it refuses nothing.
+SENSOR_FIXED_CORE_FRACTION = 0.75
+# The refinement's own minimum of control points: fewer sensor-fixed ones
+# cannot carry a transform, so they are not examined.
+SENSOR_FIXED_MINIMUM_CONTROL_POINTS = 12
+
+
+def _core_fractions(image: FloatImage, positions: Float64Array, radius: int) -> Float64Array:
+    """Share of the light in each position's 3x3 neighbourhood that its
+    central pixel holds, above the patch-border median (NaN without a patch)."""
+
+    height, width = image.shape
+    center = np.rint(positions).astype(np.int64)
+    fractions = np.full(center.shape[0], np.nan, dtype=np.float64)
+    size = 2 * radius + 1
+    x0 = center[:, 0] - radius
+    y0 = center[:, 1] - radius
+    rows = np.flatnonzero((x0 >= 0) & (y0 >= 0) & (x0 + size <= width) & (y0 + size <= height))
+    if rows.size == 0:
+        return fractions
+    offsets = np.arange(size, dtype=np.int64)
+    patches = np.asarray(
+        image[y0[rows, None, None] + offsets[None, :, None], x0[rows, None, None] + offsets[None, None, :]],
+        dtype=np.float64,
+    )
+    border = np.concatenate(
+        (patches[:, 0, :], patches[:, -1, :], patches[:, 1:-1, 0], patches[:, 1:-1, -1]),
+        axis=1,
+    )
+    signal = np.maximum(patches - np.median(border, axis=1)[:, None, None], 0.0)
+    box = signal[:, radius - 1 : radius + 2, radius - 1 : radius + 2]
+    total = np.sum(box.reshape(rows.size, -1), axis=1)
+    lit = np.isfinite(total) & (total > 0.0)
+    fractions[rows[lit]] = box[lit, 1, 1] / total[lit]
+    return fractions
+
+
+def _without_points(catalog: StarCatalog, points: Float64Array) -> StarCatalog:
+    dropped = {(float(x), float(y)) for x, y in points}
+    keep = np.fromiter(
+        ((float(x), float(y)) not in dropped for x, y in catalog.points),
+        dtype=np.bool_,
+        count=catalog.count,
+    )
+    return replace(
+        catalog,
+        points=catalog.points[keep],
+        flux=catalog.flux[keep],
+        peak=catalog.peak[keep],
+        fwhm=catalog.fwhm[keep],
+    )
+
+
+def _sensor_fixed_evidence(
+    source: FrameAnalysis,
+    reference: FrameAnalysis,
+    source_image: FloatImage,
+    reference_image: FloatImage,
+    inlier_source: Float64Array,
+    inlier_reference: Float64Array,
+    inlier_source_preview: Float64Array,
+    inlier_reference_preview: Float64Array,
+    preview_matrix: Float64Array,
+    config: RegistrationConfig,
+) -> dict[str, object]:
+    """Whether the refined transform rests on sensor defects instead of stars.
+
+    Hot pixels sit on the same pixels of every frame, so frames without a
+    matching dark can register on them: every gate passes and the transform
+    is wrong by the whole dither.  When at least the minimum of control
+    points are single pixels on the same pixel of both frames, the catalog
+    objects the transform does not use are registered on their own
+    (``remainingObjects``): ``ELSEWHERE`` when they meet the acceptance
+    thresholds under a model whose inlier pairs the refined transform leaves
+    beyond the catalog residual threshold.  Only that contradiction refuses a
+    transform: an undithered sequence has its stars among the control points,
+    nothing registers elsewhere, and it passes as before.
+    """
+
+    radius = config.full_centroid_radius_px
+    fixed = np.all(np.rint(inlier_source) == np.rint(inlier_reference), axis=1)
+    if np.any(fixed):
+        sharpness = np.minimum(
+            _core_fractions(source_image, inlier_source[fixed], radius),
+            _core_fractions(reference_image, inlier_reference[fixed], radius),
+        )
+        # NaN (no patch) compares false: such a point is not called a defect.
+        fixed[fixed] = sharpness >= SENSOR_FIXED_CORE_FRACTION
+    count = int(np.count_nonzero(fixed))
+    evidence: dict[str, object] = {
+        "check": SENSOR_FIXED_CHECK,
+        "coreFractionMinimum": SENSOR_FIXED_CORE_FRACTION,
+        "inlierCount": count,
+        "minimumControlPoints": SENSOR_FIXED_MINIMUM_CONTROL_POINTS,
+        "remainingObjects": "NOT_CHECKED",
+    }
+    if count < SENSOR_FIXED_MINIMUM_CONTROL_POINTS:
+        return evidence
+    rest_source = _without_points(source.catalog, inlier_source_preview)
+    rest_reference = _without_points(reference.catalog, inlier_reference_preview)
+    evidence["remainingObjects"] = "NO_CONSENSUS"
+    initial = _translation_rotation_bootstrap(rest_source, rest_reference, config)
+    if initial is None:
+        return evidence
+    try:
+        model, residuals, inlier_count = _refine_from_initial(rest_source, rest_reference, initial, config)
+    except Exception:
+        return evidence
+    accepted, _, _ = _coarse_acceptance(residuals, inlier_count, rest_source.count, rest_reference.count, config)
+    if not accepted:
+        return evidence
+    other_source, other_reference, _ = _one_to_one_matches(
+        rest_source.points, rest_reference.points, model, config.match_radius_px
+    )
+    consensus = np.linalg.norm(model(other_source) - other_reference, axis=1) <= config.residual_threshold_px
+    offset = float(
+        np.median(
+            np.linalg.norm(
+                _apply_homography(preview_matrix, other_source[consensus]) - other_reference[consensus],
+                axis=1,
+            )
+        )
+    )
+    evidence["remainingObjects"] = "ELSEWHERE" if offset > config.residual_threshold_px else "AGREE"
+    evidence["remainingConsensusInlierCount"] = int(np.count_nonzero(consensus))
+    evidence["remainingConsensusOffsetPreviewPixels"] = offset
+    evidence["remainingConsensusOffsetMaximumPreviewPixels"] = config.residual_threshold_px
+    return evidence
 
 
 def _refine_full_resolution(
@@ -1327,6 +1530,25 @@ def _refine_full_resolution(
             **{**gate_evidence, "status": "REJECTED", "gateReasons": gate_reasons},
         )
     preview_matrix = np.linalg.inv(reference_scale) @ full_matrix @ source_scale
+    inlier_pairs = common[final_inliers]
+    sensor_fixed = _sensor_fixed_evidence(
+        source,
+        reference,
+        source_image,
+        reference_image,
+        selected_source,
+        selected_reference,
+        source_preview[inlier_pairs],
+        reference_preview[inlier_pairs],
+        preview_matrix,
+        config,
+    )
+    gate_evidence["sensorFixedControlPoints"] = sensor_fixed
+    if sensor_fixed["remainingObjects"] == "ELSEWHERE":
+        return rejected(
+            "CONTROL_POINTS_SENSOR_FIXED",
+            **{**gate_evidence, "status": "REJECTED"},
+        )
     return replace(
         result,
         preview_matrix=preview_matrix,
@@ -1366,6 +1588,8 @@ def _estimate_one(
     source: FrameAnalysis,
     reference: FrameAnalysis,
     config: RegistrationConfig,
+    *,
+    second_bootstrap: bool = True,
 ) -> FrameTransform:
     started = time.perf_counter()
     if source.path == reference.path:
@@ -1388,7 +1612,7 @@ def _estimate_one(
         )
     try:
         model, residuals, inlier_count = _refine_transform(
-            source.catalog, reference.catalog, config
+            source.catalog, reference.catalog, config, second_bootstrap=second_bootstrap
         )
     except Exception as error:
         return FrameTransform(
@@ -1424,13 +1648,15 @@ def _estimate_via_bridge(
     bridge_to_reference: FrameTransform,
     reference: FrameAnalysis,
     config: RegistrationConfig,
+    *,
+    second_bootstrap: bool,
 ) -> FrameTransform | None:
     """Recover a hard direct match through a same-filter registered frame."""
 
     if bridge_to_reference.preview_matrix is None or not bridge_to_reference.accepted:
         return None
     started = time.perf_counter()
-    source_to_bridge = _estimate_one(source, bridge, config)
+    source_to_bridge = _estimate_one(source, bridge, config, second_bootstrap=second_bootstrap)
     if source_to_bridge.preview_matrix is None or not source_to_bridge.accepted:
         return None
     composed = bridge_to_reference.preview_matrix @ source_to_bridge.preview_matrix
@@ -1546,10 +1772,33 @@ def _estimate_member_task(
     source, anchor, anchor_result, reference, config = task
     if anchor is None or anchor_result is None:
         return _estimate_one(source, reference, config)
-    recovered = _estimate_via_bridge(source, anchor, anchor_result, reference, config)
-    # Direct fallback retains generality for unusual same-filter failures
-    # without penalizing the normal fast path.
-    return recovered or _estimate_one(source, reference, config)
+    # First the two routes with the offset bootstrap alone: a member either
+    # of them registers keeps that route and its matrix.
+    recovered = _estimate_via_bridge(
+        source, anchor, anchor_result, reference, config, second_bootstrap=False
+    )
+    if recovered is not None and recovered.accepted:
+        return recovered
+    direct: FrameTransform | None = None
+    if recovered is None:
+        # Direct fallback retains generality for unusual same-filter failures
+        # without penalizing the normal fast path.
+        direct = _estimate_one(source, reference, config, second_bootstrap=False)
+        if direct.accepted:
+            return direct
+    # Neither registered the member: both once more with the triangle
+    # bootstrap allowed, the easier same-filter bridge first.
+    bridged = _estimate_via_bridge(
+        source, anchor, anchor_result, reference, config, second_bootstrap=True
+    )
+    if bridged is not None and bridged.accepted:
+        return bridged
+    candidates = [
+        item
+        for item in (recovered, direct, bridged, _estimate_one(source, reference, config))
+        if item is not None
+    ]
+    return max(candidates, key=lambda item: (item.accepted, item.inlier_count, -item.rms_preview_px))
 
 
 # Full-resolution frames decoded by a worker process, keyed by path: the
@@ -1802,8 +2051,13 @@ def run_registration(
         registration_wall_seconds = time.perf_counter() - registration_started
     accepted = [item for item in transforms if item.accepted and item.full_matrix is not None]
     if len(accepted) != len(transforms):
-        failures = [Path(item.path).name for item in transforms if not item.accepted]
-        raise RuntimeError(f"registration failed for {len(failures)} frame(s): {failures}")
+        rejected = [item for item in transforms if not item.accepted]
+        failures = [Path(item.path).name for item in rejected]
+        reasons = "; ".join(f"{Path(item.path).name}: {item.reason}" for item in rejected[:3])
+        raise RuntimeError(
+            f"registration failed for {len(failures)} frame(s): {failures} ({reasons}"
+            f"{'; ...' if len(rejected) > 3 else ''})"
+        )
     return RegistrationRun(
         reference_index=reference_index,
         analyses=analyses,

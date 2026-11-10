@@ -1,0 +1,14 @@
+# Correctness lint only (`make source-check`, the CI job "Source checks"):
+# undefined names, names in __all__ that do not exist, unused imports and
+# variables, syntax errors.  Formatting and style are not enforced.
+target-version = "py311"
+line-length = 200
+extend-exclude = ["build", "target", "apps/desktop/node_modules"]
+
+[lint]
+select = ["F", "E9"]
+
+[lint.per-file-ignores]
+# A fixture imported from another test module and then named as a parameter.
+"**/tests/**" = ["F811"]
+"tests/**" = ["F811"]

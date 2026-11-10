@@ -23,6 +23,9 @@ pub(crate) struct PlatformProfile {
     pub optimization_tier: &'static str,
 }
 
+mod paths;
+pub(crate) use paths::plain_path;
+
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]

@@ -11,7 +11,6 @@ import time
 
 import numpy as np
 
-from ufwbpp.stacking import pipeline
 from ufwbpp.stacking import crop, parameters
 
 

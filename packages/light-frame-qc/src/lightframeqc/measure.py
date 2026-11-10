@@ -478,7 +478,7 @@ def measure_frame(
         if linear_path is not None:
             save_linear_preview(preview, linear_path)
         measurement.native_psf = _native_psf_summary(path, measurement)
-    except Exception as error:
+    except Exception:
         try:
             verify_file_identity_stat(path, identity)
         except FileIdentityError as changed:

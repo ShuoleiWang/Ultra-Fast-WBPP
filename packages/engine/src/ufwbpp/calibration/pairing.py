@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import replace
 import math
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from ..stacking.integration import CalibrationError, FrameInfo
 from .inputs import assert_compatible, frame_traits
@@ -40,9 +40,14 @@ def pair_calibration(
     supplied_dark_bias_included: Mapping[Path, bool],
     workflow: str,
     dark_temperature_tolerance_celsius: float,
+    required: Sequence[str] = (),
 ) -> CalibrationMatch:
     """Group the calibration frames and pair every Light and raw Flat group
     by WBPP's rules; a pairing no frame can serve is refused.
+
+    ``required`` names the kinds (``BIAS``, ``DARK``, ``FLAT``) the recipe
+    requires: a Light that gets none of a required kind is refused here, at
+    the pairing the pixels use, so no master is published without it.
 
     The strict workflow additionally refuses every pairing WBPP would make
     despite unknown or differing metadata, as it always has.
@@ -87,6 +92,17 @@ def pair_calibration(
             first.code,
             "; ".join(issue.message for issue in match.errors),
         )
+    for kind in required:
+        unpaired = [path for path, pairing in match.lights.items() if getattr(pairing, kind.lower()) is None]
+        if unpaired:
+            filters = sorted({light_info[Path(path)].filter_name for path in unpaired})
+            raise CalibrationError(
+                f"{kind}_MATCH_MISSING",
+                f"no {kind.lower()} fits {len(unpaired)} Light(s)"
+                + (f" of filter {', '.join(filters)}" if kind == FLAT else "")
+                + " and the recipe requires one",
+                path=unpaired[0],
+            )
     if strict:
         infos = {
             str(path): info

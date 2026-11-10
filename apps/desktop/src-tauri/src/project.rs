@@ -37,7 +37,7 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Runtime};
 
 use crate::platform::{self, ManagedChild};
-use crate::sidecar::{discover_engine, new_public_identifier, LossyLines};
+use crate::sidecar::{discover_engine, engine_error, new_public_identifier, LossyLines};
 
 const PROGRESS_EVENT: &str = "ufwbpp://pipeline-progress";
 const COMPLETE_EVENT: &str = "ufwbpp://pipeline-complete";
@@ -95,6 +95,13 @@ fn decode_project_response(
 ) -> Result<serde_json::Value, (String, String)> {
     let failed = status.is_none_or(|value| !value.success());
     let result: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| {
+        // A failure the engine meets before it has a result to print is
+        // reported on its diagnostic stream, with its own code and message.
+        if failed {
+            if let Some(reported) = engine_error(diagnostics) {
+                return reported;
+            }
+        }
         let exit = status
             .map(|value| value.to_string())
             .unwrap_or_else(|| "exit status unavailable".to_owned());
@@ -135,6 +142,9 @@ fn decode_project_response(
 pub(crate) struct ProjectRegistry {
     jobs: Mutex<HashMap<String, ProjectJob>>,
     shutting_down: AtomicBool,
+    /// The result threads of the launched runs.  Shutdown waits for them: the
+    /// thread of a killed run removes that run's staging tree.
+    workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 #[derive(Clone)]

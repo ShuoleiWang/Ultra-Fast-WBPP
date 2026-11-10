@@ -226,13 +226,116 @@ def test_build_runs_source_doctor_and_public_audit_before_pyinstaller(
         events.append("versions")
         raise engine_packaging.SidecarBuildError("STOP", "test stop")
 
+    def interpreter(target: str, macos_minimum: object) -> None:
+        events.append("interpreter")
+
+    monkeypatch.setattr(engine_packaging, "require_interpreter_deployment_target", interpreter)
     monkeypatch.setattr(engine_packaging, "run_source_doctor", doctor)
     monkeypatch.setattr(engine_packaging, "run_public_tree_check", public_tree)
     monkeypatch.setattr(engine_packaging, "collect_versions", versions)
     with pytest.raises(engine_packaging.SidecarBuildError, match="test stop"):
         engine_packaging.build_sidecar(HOST_TARGET, tmp_path)
-    assert events == ["doctor", "public-tree", "versions"]
+    expected = ["doctor", "public-tree", "versions"]
+    if HOST_TARGET.endswith("-apple-darwin"):
+        expected.insert(0, "interpreter")
+    assert events == expected
     assert list(tmp_path.iterdir()) == []
+
+
+def test_an_interpreter_built_for_a_newer_macos_is_refused_before_freezing(
+    tmp_path: Path,
+) -> None:
+    from test_bundled_runtime_attestation import _thin_macho_bytes
+
+    release = engine_packaging.release_macos_minimum()
+    assert release == (15, 0, 0)
+    sonoma = tmp_path / "Python-14"
+    sonoma.write_bytes(_thin_macho_bytes(minimum=(14, 0, 0)))
+    tahoe = tmp_path / "Python-26"
+    tahoe.write_bytes(_thin_macho_bytes(minimum=(26, 0, 0)))
+
+    engine_packaging.require_interpreter_deployment_target(
+        "aarch64-apple-darwin", release, image=sonoma
+    )
+    with pytest.raises(engine_packaging.SidecarBuildError) as error:
+        engine_packaging.require_interpreter_deployment_target(
+            "aarch64-apple-darwin", release, image=tahoe
+        )
+    assert error.value.code == "INTERPRETER_DEPLOYMENT_TARGET_TOO_NEW"
+    message = str(error.value)
+    assert sys.executable in message and str(tahoe) in message
+    assert "targets macOS 26.0" in message and "limit macOS 15.0" in message
+    # A local build may declare the interpreter's own macOS instead.
+    engine_packaging.require_interpreter_deployment_target(
+        "aarch64-apple-darwin", (26, 0, 0), image=tahoe
+    )
+    assert engine_packaging.local_macos_minimum(tahoe) == (26, 0, 0)
+    assert engine_packaging.local_macos_minimum(sonoma) == release
+    # Other targets have no Mach-O interpreter to read.
+    engine_packaging.require_interpreter_deployment_target(
+        "x86_64-pc-windows-msvc", release, image=tmp_path / "missing"
+    )
+    with pytest.raises(engine_packaging.SidecarBuildError) as error:
+        engine_packaging.require_interpreter_deployment_target(
+            "aarch64-apple-darwin", release, image=tmp_path / "missing"
+        )
+    assert error.value.code == "INTERPRETER_DEPLOYMENT_TARGET_UNKNOWN"
+
+
+def test_frozen_tree_is_deployment_audited_right_after_pyinstaller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from test_bundled_runtime_attestation import _thin_macho_bytes
+
+    target = "aarch64-apple-darwin"
+    events: list[str] = []
+    monkeypatch.setattr(engine_packaging, "detect_host_target_triple", lambda: target)
+    monkeypatch.setattr(
+        engine_packaging,
+        "require_interpreter_deployment_target",
+        lambda target, minimum: events.append(f"interpreter<={minimum}"),
+    )
+    monkeypatch.setattr(engine_packaging, "run_source_doctor", lambda: dict(DOCTOR))
+    monkeypatch.setattr(engine_packaging, "run_public_tree_check", lambda: None)
+    monkeypatch.setattr(engine_packaging, "collect_versions", lambda: deepcopy(VERSIONS))
+
+    def pyinstaller(stage: Path, target_triple: str) -> Path:
+        events.append("pyinstaller")
+        runtime = stage / engine_packaging.runtime_directory_name(target_triple)
+        (runtime / "_internal" / "lib-dynload").mkdir(parents=True)
+        (runtime / engine_packaging.sidecar_filename(target_triple)).write_bytes(
+            _thin_macho_bytes(minimum=(15, 0, 0), file_type=2)
+        )
+        (runtime / "_internal" / "lib-dynload" / "_ssl.cpython-312-darwin.so").write_bytes(
+            _thin_macho_bytes(minimum=(26, 0, 0), file_type=8)
+        )
+        return runtime
+
+    def smoke(command: object, **_: object) -> dict[str, str]:
+        events.append("smoke")
+        raise engine_packaging.SidecarBuildError("STOP", "the frozen engine ran")
+
+    monkeypatch.setattr(engine_packaging, "_run_pyinstaller", pyinstaller)
+    monkeypatch.setattr(engine_packaging, "run_runtime_library_smoke", smoke)
+    output = tmp_path / "sidecars"
+    with pytest.raises(engine_packaging.SidecarBuildError) as error:
+        engine_packaging.build_sidecar(target, output)
+    assert error.value.code == "DEPLOYMENT_TARGET_TOO_NEW"
+    assert "macOS 15 deployment audit found 1 violation" in str(error.value)
+    assert "_ssl.cpython-312-darwin.so" in str(error.value)
+    assert events == ["interpreter<=(15, 0, 0)", "pyinstaller"]
+    assert list(output.iterdir()) == []
+
+    # A local build declaring the interpreter's macOS passes the audit.
+    events.clear()
+    with pytest.raises(engine_packaging.SidecarBuildError, match="the frozen engine ran"):
+        engine_packaging.build_sidecar(target, output, macos_minimum=(26, 0, 0))
+    assert events == ["interpreter<=(26, 0, 0)", "pyinstaller", "smoke"]
+
+    windows = "x86_64-pc-windows-msvc"
+    monkeypatch.setattr(engine_packaging, "detect_host_target_triple", lambda: windows)
+    with pytest.raises(engine_packaging.SidecarBuildError, match="macOS targets only"):
+        engine_packaging.build_sidecar(windows, output, macos_minimum=(15, 0, 0))
 
 
 def test_engine_doctor_is_validated_and_native_kernels_are_required(tmp_path: Path) -> None:

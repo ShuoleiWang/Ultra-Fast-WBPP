@@ -42,6 +42,14 @@ state still need the hash-bound confirmation of the strict workflow, and a
 run integrates one Bayer filter per target — mono `R`/`G`/`B` filters of the
 same target would collide with the channel groups (`CFA_CHANNEL_FILTER_COLLISION`).
 
+A one-shot-colour camera without a filter wheel writes no `FILTER`. Its Lights
+and Flats form the filterless channel `NOFILTER` (WBPP's "NoFilter"), which then
+becomes the channel groups `R`, `G` and `B` as above; before, such a set passed
+the plan and was refused by the run with `SCIENCE_FILTER_MISSING`. An odd
+`XBAYROFF` or `YBAYROFF`, which shifts the pattern `BAYERPAT` names by one
+pixel, is not applied yet: the inventory warns with `BAYER_OFFSET_NOT_APPLIED`,
+because the colours of such frames may be swapped.
+
 ## Validation (synthetic RGGB set from real mono Lights)
 
 The 26 NGC 7331 L Lights (26 MP, four dithered nights with a meridian flip) were

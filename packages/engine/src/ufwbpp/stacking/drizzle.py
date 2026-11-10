@@ -114,4 +114,3 @@ __all__ = [
 
 # Historical capability imports; execution is integrate_drizzle_group.
 DrizzleBackend = DrizzleCapabilityProvider
-DeclarativeDrizzleBackend = NativeDrizzleCapabilities

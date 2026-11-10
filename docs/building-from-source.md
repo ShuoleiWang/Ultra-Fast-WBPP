@@ -4,15 +4,15 @@ This guide takes a fresh clone to a Mac app you can run or hand to someone else.
 
 | Build | Command | What the person who runs it needs |
 |---|---|---|
-| Engine only (command line) | `make bootstrap` | the clone and its `.venv` |
-| Desktop app | `make desktop-build-macos-prerelease` | Apple Silicon, macOS 14+, and a plate solver they install themselves ([solver setup](recipes/offline-solver-catalogs.md)) |
-| Self-contained demo app | `make desktop-build-macos-demo` | Apple Silicon and macOS 14+. Nothing else: `solve-field` and its index set are inside the app |
+| Engine only (command line) | `make bootstrap BOOTSTRAP_PYTHON=python3.12` | the clone and its `.venv` |
+| Desktop app | `make desktop-build-macos-prerelease` | Apple Silicon, macOS 15+ ([or newer](#what-the-build-machine-needs)), and a plate solver they install themselves ([solver setup](recipes/offline-solver-catalogs.md)) |
+| Self-contained demo app | `make desktop-build-macos-demo` | Apple Silicon and macOS 15+ ([or newer](#what-the-build-machine-needs)). Nothing else: `solve-field` and its index set are inside the app |
 
 The demo app is for private demonstrations only. It bundles Astrometry.net, which is GPL-3.0-or-later as distributed, and index files whose redistribution terms are unresolved. Do not publish it ([licensing](licensing.md)). Windows builds are covered in [windows.md](windows.md#developing-on-windows). The demo build is macOS-only.
 
 ## What the build machine needs
 
-- A Mac with Apple Silicon on macOS 14 or later, with about 8 GB of free disk and network access to PyPI, npm, crates.io and `ghcr.io`.
+- A Mac with Apple Silicon on macOS 15 or later, with about 8 GB of free disk and network access to PyPI, npm, crates.io and `ghcr.io`.
 - Xcode, or at least its Command Line Tools (`xcode-select --install`). The steps below were followed in a fresh clone on an M3 Pro with Xcode 27 on macOS 27. With the download caches already warm, bootstrap took 61 s and the first demo build 5 min 12 s. A first build on a new machine also downloads the Python wheels, npm packages and Rust crates.
 - [Homebrew](https://brew.sh), then:
 
@@ -20,7 +20,7 @@ The demo app is for private demonstrations only. It bundles Astrometry.net, whic
   brew install python@3.12 cmake node rust
   ```
 
-  The app bundles a Python runtime, which the release build freezes from Homebrew's `python@3.12`. A pinned macOS 14 compatibility layer replaces that interpreter's OpenSSL and mpdecimal libraries so the app also runs on macOS 14. The python.org installer's Python cannot take that layer, because it bundles its own OpenSSL. Other versions are untested; Homebrew's default `python3` is 3.14 at the time of writing. Rust 1.88 or newer and Node.js 22 or newer are required; `rustup` works as well as Homebrew's `rust`.
+  The app bundles a Python runtime, which the build freezes from Homebrew's `python@3.12`. A current Homebrew pours the bottle built for the machine's macOS, or, on a macOS newer than its bottles, the newest one (on macOS 27 today: the macOS 26 bottle). The interpreter and its extension modules carry that deployment target into the app, and an app may not declare an older macOS than its newest library targets. A release declares macOS 15, and the sidecar build refuses, before freezing, an interpreter built for a newer macOS (`INTERPRETER_DEPLOYMENT_TARGET_TOO_NEW`). A local build through `make` does not stop there: it declares the macOS the interpreter was built for when that is newer than 15, and says so (`LOCAL BUILD: the bundle declares macOS 26.0 …`). Such an app runs on the build Mac and on that macOS or later only. It runs on macOS 15 only when the interpreter is a macOS 15 or older bottle, for example a `python@3.12` installed before the Mac's last upgrade and not upgraded since; `.venv/bin/python scripts/build_engine_sidecar.py --print-local-macos-minimum` prints what a build will declare. A pinned compatibility layer replaces the interpreter's OpenSSL and mpdecimal libraries with macOS 14 builds. The python.org installer's Python cannot take that layer, because it bundles its own OpenSSL. Other versions are untested; Homebrew's default `python3` is 3.14 at the time of writing. Rust 1.88 or newer and Node.js 22 or newer are required; `rustup` works as well as Homebrew's `rust`.
 
 ## 1. Clone and bootstrap
 
@@ -38,7 +38,7 @@ make bootstrap BOOTSTRAP_PYTHON=python3.12
 CARGO_PROFILE_RELEASE_STRIP=none make desktop-build-macos-prerelease
 ```
 
-This chain builds, tests and installs the Release native kernels. It then fetches the pinned macOS 14 runtime libraries and freezes the engine with PyInstaller. After that it stages the engine for Tauri and builds an ad-hoc signed app at `target/release/bundle/macos/Ultra-Fast WBPP.app`. `CARGO_PROFILE_RELEASE_STRIP=none` is required on macOS 27 with Xcode 27, where a stripped build fails with `error[E0463]`, and is harmless elsewhere.
+This chain builds, tests and installs the Release native kernels. It then fetches the pinned runtime libraries, checks the interpreter against the macOS the app will declare and freezes the engine with PyInstaller, and audits every Mach-O file of the frozen engine against that macOS. After that it stages the engine for Tauri and builds an ad-hoc signed app at `target/release/bundle/macos/Ultra-Fast WBPP.app`. `CARGO_PROFILE_RELEASE_STRIP=none` is required on macOS 27 with Xcode 27, where a stripped build fails with `error[E0463]`, and is harmless elsewhere.
 
 People who run this app set up a plate solver themselves: Astrometry.net `solve-field`, plus the index set from the app's solver panel.
 
@@ -71,11 +71,12 @@ The app is about 500 MB. On first launch the engine installs the bundled index s
 ```bash
 .venv/bin/python scripts/attest_bundled_runtime.py \
   --app "target/release/bundle/macos/Ultra-Fast WBPP.app" \
-  --target aarch64-apple-darwin --output "$(mktemp -d)/attestation.json"
+  --target aarch64-apple-darwin --output "$(mktemp -d)/attestation.json" \
+  --macos-minimum "$(.venv/bin/python scripts/build_engine_sidecar.py --print-local-macos-minimum)"
 codesign --verify --deep --strict "target/release/bundle/macos/Ultra-Fast WBPP.app"
 ```
 
-The attestation checks the frozen engine's identity, signature, legal files and launch time. For the demo app, you can also check that the bundled engine solves with nothing from Homebrew and no installed catalog. The sandbox below hides Homebrew, and the empty `HOME` has no catalog:
+The attestation checks the frozen engine's identity, signature, legal files and launch time, and that the app declares the given macOS and contains nothing built for a newer one. Without `--macos-minimum` it applies the release minimum, macOS 15. For the demo app, you can also check that the bundled engine solves with nothing from Homebrew and no installed catalog. The sandbox below hides Homebrew, and the empty `HOME` has no catalog:
 
 ```bash
 engine="target/release/bundle/macos/Ultra-Fast WBPP.app/Contents/Resources/resources/ufwbpp-engine/ufwbpp-engine-aarch64-apple-darwin/ufwbpp-engine-aarch64-apple-darwin"
@@ -91,7 +92,7 @@ It prints `"solverReady": true`. The same sandbox and `run-project` give a full 
 ditto -c -k --sequesterRsrc --keepParent "target/release/bundle/macos/Ultra-Fast WBPP.app" Ultra-Fast-WBPP-macOS-arm64.zip
 ```
 
-The demo app compresses to about 300 MB. The recipient needs Apple Silicon and macOS 14 or later, and moves the app to Applications. The app is ad-hoc signed and not notarized, so macOS refuses the first launch. They open System Settings → Privacy & Security and choose **Open Anyway**, once. Or they run `xattr -dr com.apple.quarantine "/Applications/Ultra-Fast WBPP.app"`. Only Developer ID signing plus notarization removes that step ([release process](release-process.md#signing-and-publication)).
+The demo app compresses to about 300 MB. The recipient needs Apple Silicon and macOS 15 or later (or the newer macOS the build declared), and moves the app to Applications. The app is ad-hoc signed and not notarized, so macOS refuses the first launch. They open System Settings → Privacy & Security and choose **Open Anyway**, once. Or they run `xattr -dr com.apple.quarantine "/Applications/Ultra-Fast WBPP.app"`. Only Developer ID signing plus notarization removes that step ([release process](release-process.md#signing-and-publication)).
 
 ## Rebuilding
 
@@ -110,6 +111,7 @@ The downloaded bottles in `build/astrometry-bottles` and `build/macos14-runtime-
 |---|---|
 | `error[E0463]: can't find crate` while Tauri builds | macOS 27 / Xcode 27: prefix the build with `CARGO_PROFILE_RELEASE_STRIP=none` |
 | The engine freeze fails its runtime smoke (OpenSSL or libmpdec version) | `.venv` was not created from Homebrew's `python@3.12`: `rm -rf .venv` and bootstrap again with `BOOTSTRAP_PYTHON=python3.12` |
+| `INTERPRETER_DEPLOYMENT_TARGET_TOO_NEW` from `scripts/build_engine_sidecar.py` | The interpreter was built for a newer macOS than the limit. A release build needs a macOS 15 bottle; for a local build use `make`, or pass `--macos-minimum` with the version the message names |
 | `OUTPUT_EXISTS` or `refusing to replace …` | Delete the intermediates listed under [Rebuilding](#rebuilding) |
 | `stage_astrometry_runtime: … does not match the checked manifest` | The index set is missing or incomplete: `ultra-fast-wbpp catalog verify astrometry-net-4107-4112` shows which file |
 | Runs are several times slower than expected | The unoptimized kernels are installed: `make native-release-install` |

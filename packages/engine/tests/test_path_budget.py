@@ -12,7 +12,6 @@ import re
 
 import pytest
 
-from ufwbpp.stacking import pipeline as pixel_pipeline
 from ufwbpp.stacking import records as records_module
 from ufwbpp.workflows import project as project_e2e, single_target as e2e
 from ufwbpp import platform as platform_services
@@ -195,3 +194,31 @@ def test_prepare_execution_refuses_windows_outside_x86_64(nina_project: Path, tm
     refuse_unsupported_platform(detect_hardware(system="Windows", machine="AMD64", cpu_brand="x"))
     refuse_unsupported_platform(detect_hardware(system="Darwin", machine="arm64", cpu_brand="Apple M3 Pro"))
     refuse_unsupported_platform(detect_hardware(system="Linux", machine="aarch64", cpu_brand="x"))
+
+
+def test_target_keys_are_unique_stable_and_safe_path_components_for_any_name() -> None:
+    # ASCII names keep the keys (and so the run directories) they always had.
+    assert {name: target_key(name) for name in ("M 31", "m31", "M-31", "NGC 7331 PANEL 2", "SDSS J1004+4112", "RCS2 J0327?1326")} == {
+        "M 31": "m31",
+        "m31": "m31",
+        "M-31": "m31",
+        "NGC 7331 PANEL 2": "ngc7331panel2",
+        "SDSS J1004+4112": "sdssj10044112",
+        "RCS2 J0327?1326": "rcs2j03271326",
+    }
+    # A name beyond ASCII has a key of its own, fixed by its letters and digits.
+    assert target_key("仙女座星系") == "x43ce33e5" == target_key("仙女座 星系")
+    assert target_key("NGC 7000 北") == "ngc7000x73df0944"
+    names = ("仙女座星系", "玫瑰星云", "测试1", "目标1", "NGC 7000 北", "NGC 7000 南", "NGC 7000")
+    assert len({target_key(name) for name in names}) == len(names)
+    # Full-width spellings and punctuation beyond ASCII do not change a key.
+    assert target_key("Ｍ３１") == target_key("M 31 –") == "m31"
+    # No key spells a Windows device name, and each is one short [a-z0-9] component.
+    assert target_key("CON") == "conx1143da2b" and target_key("com1") == "com1x957a49c3"
+    for name in (*names, "CON", "PRN", "AUX", "NUL", "COM1", "LPT9", "con"):
+        key = target_key(name)
+        assert re.fullmatch(r"[a-z0-9]+", key) and len(key) <= len(name) + 9
+        assert name_token(key) == key.upper()
+        assert name_token(key).lower() not in {"con", "prn", "aux", "nul", "com1", "lpt9"}
+    # Without a letter or a digit there is no key: the name is missing.
+    assert target_key("???") == target_key(" - ") == ""

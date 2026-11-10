@@ -51,9 +51,20 @@ Rust validates returned files and sky-coordinate evidence → GUI completion
 ## Data and correctness boundaries
 
 Original inputs are read-only. The engine binds processing evidence to input
-identities and writes intermediate data into owned staging directories. It
+identities and writes intermediate data into owned staging directories on
+the output volume, the solver's working files included (each solve stages
+below `<staging>/work/solver`, and `solve-field` gets `--temp-dir` there). It
 uses no-replace publication for new result directories; supplied images and
-previous results are not overwritten.
+previous results are not overwritten. Every file is given its name by one
+create-only primitive, `image_io.fits.atomic_publish_file` → the platform's
+`publish_file_no_replace`: a hard link where the volume has them; on exFAT,
+FAT32 and network shares an exclusive create of the destination and a rename
+onto that empty file (macOS, Linux) or `MoveFileExW` without replace
+(Windows). A directory is published by `renamex_np(RENAME_EXCL)`,
+`renameat2(RENAME_NOREPLACE)` or `MoveFileExW`, and on a volume without an
+exclusive rename by claiming the name with `mkdir` and renaming onto the empty
+directory; on Windows that rename waits out a sharing violation for up to 10 s.
+None of these paths replaces an existing name.
 
 The **Python project runner** materializes the completed result directory and
 returns its receipt. Rust then reopens and verifies the returned products before
@@ -71,7 +82,13 @@ backend truth flags are described in
 
 ## Scientific work
 
-1. Inventory frames and interpret calibration metadata.
+1. Inventory frames and interpret calibration metadata. One filter identity
+   (`lightframeqc.metadata.normalize_filter`: `Red` is `R`, `H-alpha` is `HA`,
+   a Light or Flat without a filter is `NOFILTER`), one frame-role table
+   (`parse_frame_role`, which the pixel reader's `normalize_role` also reads)
+   and one target per folder for Lights without `OBJECT` hold from the
+   inventory through planning, preflight, quality control, the run and the
+   project layout, so the plan and the pixels pair alike.
 2. Measure Light quality (1/4-scale previews, SEP detection, native-resolution
    PSF stamps, the QC reference and registration, spatial features) and run the
    quality gate; then admit frames by one of three routes. The *legacy gate*
@@ -100,12 +117,21 @@ backend truth flags are described in
    to core-weighted star centroids, so frames of other nights or hour angles
    (tilt, differential refraction) and asymmetric PSFs do not leave
    filter-dependent offsets. Exact identity/integer half-turns copy pixels;
-   general rotations and dithers use one Lanczos warp.
+   general rotations and dithers use one Lanczos warp. The catalog model is
+   bootstrapped by 0°/180° offsets; when the model refined from it misses the
+   acceptance thresholds (a rotated star-rich field, where chance pairs reach
+   the bootstrap's count), the triangle bootstrap runs too and the better
+   model is kept, so a frame the offset bootstrap registers keeps its matrix.
+   A full-resolution transform whose control points are single pixels on the
+   same sensor pixel in both frames, while the remaining catalog objects
+   register elsewhere, rests on hot pixels and is refused
+   (`CONTROL_POINTS_SENSOR_FIXED`, `same-pixel-core-fraction-v1`).
 5. Normalize, reject inconsistent samples and detected transient trails
    (each frame's residual against the temporal median is integrated along
    every line of every dyadic length with a fast Radon transform, so faint
    satellites are found from their whole length and only that frame's
-   samples inside the corridor are dropped), and integrate. Frames are matched to the frame with the flattest large-scale
+   samples inside the corridor are dropped; Bias, Dark and Flat stacks are
+   integrated without this trail search), and integrate. Frames are matched to the frame with the flattest large-scale
    background of acceptable quality; when the sky level varies enough across
    the group, the sky-proportional part of each frame's background (residual
    flat-field structure) is separated from the object by regression in the
@@ -346,8 +372,8 @@ redistribution permissions are separate; see [licensing](licensing.md).
   (`crop.py`), `_integrate_group` per output group (`groups.py`), then the
   receipt and one no-replace publication.
 - `calibration/matching.py` groups calibration frames and pairs every Light
-  and raw Flat group by WBPP's rules (grouping keywords, compatibility,
-  closest exposure); `calibration/pairing.py` applies it to a run (the
+  and raw Flat group by WBPP's rules (compatibility, a Dark's exposure first,
+  then grouping keywords and settings); `calibration/pairing.py` applies it to a run (the
   workflow's refusals and `strict-v1`'s fail-closed checks), and
   `planning.py` and `calibration/preflight.py` report the same pairing before
   a run. The masters are built per group and each Light is calibrated with

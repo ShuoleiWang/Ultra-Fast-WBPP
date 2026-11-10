@@ -61,16 +61,18 @@ jobs:
 
       - name: Select the Homebrew Python 3.12 (macOS)
         if: runner.os == 'macOS'
-        # The macOS 14 runtime overlay (packaging/engine/macos14-runtime-libraries-v1.json)
+        # The runtime overlay (packaging/engine/macos14-runtime-libraries-v1.json)
         # replaces the Homebrew openssl@3 and mpdecimal dylibs that a
         # Homebrew-built interpreter links against with digest-pinned Sonoma
         # bottles. setup-python installs python.org's framework build, which
         # bundles its own OpenSSL and links libmpdec statically, so the overlay
         # would find nothing to replace and the pinned ABI smoke could not hold.
         # The venv keeps pip out of Homebrew's externally managed site-packages
-        # and is what the local macOS build uses as well. The runner's macOS may
-        # be newer than the bundle's: the overlay and the deployment audit keep
-        # every Mach-O slice at 14.0, so the app still declares macOS 14.
+        # and is what the local macOS build uses as well. Homebrew pours the
+        # bottle built for the runner's macOS: on macos-15 the interpreter and
+        # its lib-dynload modules target macOS 15.0, which is why the app
+        # declares macOS 15. The sidecar build refuses a newer interpreter
+        # before freezing and audits the frozen tree right after PyInstaller.
         shell: bash
         run: |
           brew install python@3.12
@@ -273,7 +275,11 @@ jobs:
 
   publish-prerelease:
     name: Prepare draft unsigned prerelease
-    if: startsWith(github.ref, 'refs/tags/v')
+    # One platform's failure must not hold back the other: the draft carries
+    # every platform whose bundle job uploaded attested artifacts (the upload
+    # is that job's last step) and names the missing one. With no platform,
+    # or when the version check failed (bundle skipped), nothing is drafted.
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.bundle.result != 'skipped' }}
     needs: bundle
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -283,37 +289,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          # Both platforms: the Windows MSI/NSIS pass the installed-runtime
-          # attestation (PE import closure, static-CRT kernels, launch budget)
-          # in the bundle job before they can reach this step.
+          # Every platform that passed: the Windows MSI/NSIS pass the
+          # installed-runtime attestation (PE import closure, static-CRT
+          # kernels, launch budget) and the macOS DMG the deployment and
+          # launch attestation in the bundle job before they are uploaded.
           pattern: ultra-fast-wbpp-*
           path: release-assets
           merge-multiple: true
-      - name: Write the prerelease notes
-        run: |
-          cat > release-notes.md <<'EOF'
-          Unsigned validation build for maintainer review; not a stable release. Verify the
-          included `SHA256SUMS-<target>` files before installing anything.
-
-          **macOS (Apple Silicon, DMG):** ad-hoc signed, not notarized. Gatekeeper will
-          refuse the first launch; open it once via right-click, "Open" or System Settings,
-          Privacy & Security, "Open Anyway".
-
-          **Windows 10/11 x64 (MSI and NSIS installers):** not Authenticode-signed.
-          - The NSIS installer (`*-setup.exe`, per-user, installs under `%LOCALAPPDATA%`)
-            triggers Microsoft Defender SmartScreen: choose "More info", then "Run anyway".
-          - The MSI installs per machine (Program Files) and shows a User Account Control
-            prompt from an unknown publisher; accept it only for a build whose SHA-256 you
-            have verified. The MSI embeds the WebView2 bootstrapper and installs the
-            runtime silently when it is missing.
-          - Authenticode signing is a release gate: stable releases will carry a signature
-            and these warnings will not appear.
-
-          Every installer was produced and attested in this workflow run: the frozen engine's
-          DLL/PYD import closure resolves against Windows system DLLs or shipped files, the
-          native kernel DLL links the C runtime statically, and the installed runtime passed
-          the launch budget before the artifacts were collected.
-          EOF
+      - name: Write the prerelease notes for the platforms that built and attested
+        # Fails when no platform did; checks each platform's SHA256SUMS
+        # against the downloaded files.
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: >-
+          python3 scripts/write_prerelease_notes.py
+          --assets release-assets
+          --notes release-notes.md
+          --title release-title.txt
+          --run-url "${RUN_URL}"
       - name: Create draft GitHub prerelease for maintainer review
         env:
           GH_TOKEN: ${{ github.token }}
@@ -324,5 +317,5 @@ jobs:
           --verify-tag
           --draft
           --prerelease
-          --title "Ultra-Fast WBPP ${GITHUB_REF_NAME} (macOS arm64 + Windows x64 unsigned prerelease)"
+          --title "Ultra-Fast WBPP ${GITHUB_REF_NAME} ($(cat release-title.txt))"
           --notes-file release-notes.md

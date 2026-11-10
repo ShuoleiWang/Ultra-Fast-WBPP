@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import type { Translator } from "./i18n";
 import type { FrameRole, InspectedAsset, RawFrameRole } from "./types";
-import { FrameTile } from "./views/common";
+import { filterName, FrameTile } from "./views/common";
 import type { useWorkflow } from "./useWorkflow";
 
 type Workflow = ReturnType<typeof useWorkflow>;
@@ -247,7 +247,7 @@ export function FrameInventory({
                   </td>
                   <td>
                     <strong>{value(asset.target)}</strong>
-                    <small>{value(asset.filter)}</small>
+                    <small>{value(filterName(asset.filter, t))}</small>
                   </td>
                   <td className="r tnum">{exposures.length ? summarize(exposures) : "—"} s</td>
                   <td>
@@ -275,7 +275,7 @@ export function FrameInventory({
                         count: paths.length,
                         type: label(roleFamily(asset.role)),
                         target: value(asset.target),
-                        filter: value(asset.filter),
+                        filter: value(filterName(asset.filter, t)),
                       })}
                       onClick={() => setExpanded(expanded === key ? undefined : key)}
                     >
@@ -480,6 +480,9 @@ function calibrationIssueLabel(code: string, t: Translator, importedRoles: Set<R
   if (["DARK_BIAS_SEMANTICS_UNDECLARED", "MASTER_DARK_BIAS_SEMANTICS_REQUIRED"].includes(code))
     return t("calibrationBiasReason");
   if (code === "CAPTURE_SESSION_NOT_VERIFIED") return t("calibrationSessionReason");
+  if (code === "TARGET_NAMED_BY_FOLDER") return t("calibrationTargetNamedByFolderReason");
+  if (code === "TARGET_UNNAMED") return t("calibrationTargetUnnamedReason");
+  if (code === "BAYER_OFFSET_NOT_APPLIED") return t("calibrationBayerOffsetReason");
   return t("calibrationReasonGeneric", { code });
 }
 
@@ -509,7 +512,7 @@ export function CalibrationGroups({ workflow, t }: { workflow: Workflow; t: Tran
             {workflow.calibrationInspection.groups.map((group) => (
               <tr key={group.groupId}>
                 <th scope="row">
-                  {group.target} · {group.filter}
+                  {group.target} · {filterName(group.filter, t)}
                   <small>{group.lightCount} Light</small>
                 </th>
                 <td>{group.observedDates.join(", ") || "—"}</td>

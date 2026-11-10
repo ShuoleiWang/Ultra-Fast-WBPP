@@ -3,7 +3,7 @@ import { dispositionLabel } from "../Inspector";
 import type { Translator } from "../i18n";
 import type { GateDisposition } from "../types";
 import { LaunchBar, LaunchSettings, MetadataConfirmations } from "./LaunchSettings";
-import { Alert, basename, dispositionClass, FrameTile, PASS_FRAME_BATCH, type Workflow } from "./common";
+import { Alert, basename, dispositionClass, filterName, FrameTile, PASS_FRAME_BATCH, type Workflow } from "./common";
 
 export function ScreeningView({
   workflow,
@@ -184,7 +184,7 @@ export function ScreeningView({
                       <th scope="col">{t("targetLabel")}</th>
                       {filters.map((filter) => (
                         <th scope="col" key={filter}>
-                          {filter}
+                          {filterName(filter, t)}
                         </th>
                       ))}
                     </tr>

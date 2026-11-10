@@ -25,6 +25,7 @@ from .base import (
     SolverResult,
     SolverStatus,
     SolverIndexArtifact,
+    solve_staging,
     validate_wcs_header,
     wcs_parity,
 )
@@ -33,6 +34,7 @@ from .catalogs import (
     bundled_astrometry_root,
     installed_set_identity_for_solver_indexes,
     installed_set_snapshot_for_solver_config,
+    require_config_serves_snapshot,
     verify_installed_set_snapshot,
 )
 from .process import (
@@ -53,7 +55,7 @@ from .process import (
 )
 
 
-ADAPTER_VERSION = "astrometry-net-process-v4"
+ADAPTER_VERSION = "astrometry-net-process-v5"
 _CAPABILITIES = (
     "blind-solve",
     "seed-hints",
@@ -307,6 +309,7 @@ def _probe_astrometry_runtime(runtime: SolverProcessRuntime, timeout_seconds: fl
             "--match",
             "--no-verify",
             "--no-plots",
+            "--temp-dir",
             "--config",
             "--downsample",
             "--objs",
@@ -952,11 +955,14 @@ class AstrometryNetSolverBackend:
                 catalog_preflight = {"managed": False, "reason": "NO_MANAGED_CONFIG"}
             else:
                 try:
-                    catalog_snapshot = installed_set_snapshot_for_solver_config(
+                    verified_snapshot = installed_set_snapshot_for_solver_config(
                         self.config_path,
                         manifest_dir=self.catalog_manifest_dir,
                         environment=platform_services.merged_environment(os.environ, self.environment, platform_id=platform_services.current().platform_id),
                     )
+                    # solve-field searches the folder the config names.
+                    require_config_serves_snapshot(verified_snapshot)
+                    catalog_snapshot = verified_snapshot
                     catalog_preflight = {
                         "managed": True,
                         "config": {
@@ -973,9 +979,7 @@ class AstrometryNetSolverBackend:
                     if self.require_managed_catalog:
                         raise SolverExecutionError(error.code, str(error)) from error
                     catalog_preflight = {"managed": False, "reason": error.code}
-            with tempfile.TemporaryDirectory(
-                prefix="ultra-fast-wbpp-astrometry-", dir=self.staging_root
-            ) as raw_stage:
+            with solve_staging(request, adapter="astrometry", fallback_root=self.staging_root) as raw_stage:
                 stage = Path(raw_stage)
                 try:
                     stage.chmod(0o700)
@@ -1036,6 +1040,10 @@ class AstrometryNetSolverBackend:
                             str(match_path),
                             "--no-verify",
                             "--no-plots",
+                            # solve-field's own temporaries (default /tmp) go
+                            # with the attempt, also when it is killed.
+                            "--temp-dir",
+                            str(attempt_stage),
                             "--downsample",
                             str(attempt.downsample),
                             "--objs",

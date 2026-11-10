@@ -24,9 +24,11 @@ import type {
   FrameRole,
   GateSummary,
   InspectedAsset,
+  InspectRequest,
   MasterMetadataOverride,
   OutputArtifact,
   PipelineCompleteEvent,
+  PipelineErrorDetails,
   PipelineErrorEvent,
   PipelineProgressEvent,
   QualityInspection,
@@ -156,12 +158,15 @@ export function useWorkflow(t: Translator) {
   const [automaticScreening, setAutomaticScreeningState] = useState(storedAutomaticScreening);
   const setAutomaticScreening = (value: boolean) => {
     setAutomaticScreeningState(value);
-    rememberAutomaticScreening(value);
+    // The browser demo keeps the choice in its own state only.
+    if (nativeRuntime) rememberAutomaticScreening(value);
   };
   const [outputDirectory, setOutputDirectory] = useState<string>();
   const [errorMessage, setErrorMessage] = useState<string>();
   // The engine/desktop failure code of the current run (e.g. ASTROMETRY_REQUIRED), for the run view's failure card.
   const [runFailureCode, setRunFailureCode] = useState<string>();
+  // What the failed run left on disk (evidence folder, published output), as the controller reports it.
+  const [runFailureDetails, setRunFailureDetails] = useState<PipelineErrorDetails>();
   const [demoMode, setDemoMode] = useState(false);
   const [inventoryBusy, setInventoryBusy] = useState(false);
   const [drizzleEnabled, setDrizzleEnabled] = useState(false);
@@ -175,8 +180,6 @@ export function useWorkflow(t: Translator) {
   // extra product never replaces the master.
   const [properCoadditionEnabled, setProperCoadditionEnabled] = useState(false);
   const [superLuminanceEnabled, setSuperLuminanceEnabled] = useState(true);
-  // Opt-in per session. The native recipe selects local or global normalization
-  // from this flag; it must not infer the choice from a visible progress stage.
   const [catalogList, setCatalogList] = useState<CatalogListResponse>();
   const [catalogDoctor, setCatalogDoctor] = useState<CatalogDoctorResponse>();
   const [solverDoctor, setSolverDoctor] = useState<SolverDoctorResponse>();
@@ -189,6 +192,8 @@ export function useWorkflow(t: Translator) {
   const [catalogError, setCatalogError] = useState<string>();
   const [solverSetupBusy, setSolverSetupBusy] = useState(false);
   const inventoryInFlightRef = useRef(false);
+  const queuedImportsRef = useRef<InspectRequest[]>([]);
+  const namedByLightsRef = useRef(false);
   const qualityInFlightRef = useRef(false);
   const stepRef = useRef(step);
   stepRef.current = step;
@@ -289,26 +294,36 @@ export function useWorkflow(t: Translator) {
     }
   }, [nativeRuntime]);
 
-  const importPaths = useCallback(
-    async (paths: string[], roleHint?: FrameRole) => {
-      if (
-        !paths.length ||
-        !nativeRuntime ||
-        stepRef.current !== "import" ||
-        inventoryInFlightRef.current ||
-        qualityInFlightRef.current ||
-        blinkInFlightRef.current ||
-        runLaunchInFlightRef.current
-      )
-        return;
-      inventoryInFlightRef.current = true;
-      setInventoryBusy(true);
-      setErrorMessage(undefined);
+  // The engine reports itself unavailable while no solver passes its
+  // self-check, so its capabilities are read again whenever the solver setup
+  // is rechecked, not only at launch.
+  const refreshCapabilities = useCallback(async () => {
+    try {
+      setCapabilities(await desktopBridge.getCapabilities());
+    } catch (error) {
+      setCapabilities(null);
+      throw error;
+    }
+  }, []);
+  const refreshSetup = useCallback(async () => {
+    const [solver, engine] = await Promise.allSettled([refreshSolverSetup(), refreshCapabilities()]);
+    if (solver.status === "rejected") throw solver.reason;
+    if (engine.status === "rejected") throw engine.reason;
+  }, [refreshCapabilities, refreshSolverSetup]);
+
+  // Reads one batch and merges it into the project; a failure is returned, not thrown.
+  const importBatch = useCallback(
+    async (request: InspectRequest): Promise<string | undefined> => {
       try {
-        const inspected = await desktopBridge.inspectPaths({ paths, roleHint });
+        const inspected = await desktopBridge.inspectPaths(request);
         setCalibrationResult(undefined);
         setCalibrationRevision((value) => value + 1);
-        setProjectName(inspected.projectName || "Ultra-Fast WBPP project");
+        // The first import that brings Lights names the project; a calibration
+        // library added later does not rename it.
+        if (!namedByLightsRef.current) {
+          setProjectName(inspected.projectName || "Ultra-Fast WBPP project");
+          namedByLightsRef.current = inspected.sources.some((source) => source.role === "LIGHT");
+        }
         const priorLights = new Set(
           assetsRef.current.filter((asset) => asset.role === "LIGHT").map((asset) => asset.path),
         );
@@ -342,14 +357,53 @@ export function useWorkflow(t: Translator) {
           return [...byPath.values()];
         });
         setSelectedRole(undefined);
+        return undefined;
       } catch (error) {
-        setErrorMessage(String(error));
+        return String(error);
+      }
+    },
+    [clearBlinkSession],
+  );
+
+  const importPaths = useCallback(
+    async (paths: string[], roleHint?: FrameRole) => {
+      if (
+        !paths.length ||
+        !nativeRuntime ||
+        stepRef.current !== "import" ||
+        qualityInFlightRef.current ||
+        blinkInFlightRef.current ||
+        runLaunchInFlightRef.current
+      )
+        return;
+      if (inventoryInFlightRef.current) {
+        // A drop made while the previous import is still being read is imported
+        // right after it. A type hint covers one import, so this one is detected.
+        queuedImportsRef.current.push({ paths });
+        return;
+      }
+      inventoryInFlightRef.current = true;
+      setInventoryBusy(true);
+      setErrorMessage(undefined);
+      const failures: string[] = [];
+      try {
+        for (
+          let request: InspectRequest | undefined = { paths, roleHint };
+          request;
+          request = queuedImportsRef.current.shift()
+        ) {
+          const failure = await importBatch(request);
+          if (failure) {
+            failures.push(failure);
+            setErrorMessage(failures.join("\n"));
+          }
+        }
       } finally {
         inventoryInFlightRef.current = false;
         setInventoryBusy(false);
       }
     },
-    [clearBlinkSession, nativeRuntime],
+    [importBatch, nativeRuntime],
   );
 
   useEffect(() => {
@@ -402,15 +456,9 @@ export function useWorkflow(t: Translator) {
   const recheckCalibration = () => setCalibrationRevision((value) => value + 1);
 
   useEffect(() => {
-    desktopBridge
-      .getCapabilities()
-      .then(setCapabilities)
-      .catch((error) => {
-        setErrorMessage(String(error));
-        setCapabilities(null);
-      });
+    refreshCapabilities().catch((error) => setErrorMessage(String(error)));
     if (nativeRuntime) refreshSolverSetup().catch((error) => setCatalogError(String(error)));
-  }, [nativeRuntime, refreshSolverSetup]);
+  }, [nativeRuntime, refreshCapabilities, refreshSolverSetup]);
 
   useEffect(() => {
     let disposeDrop: () => void = () => undefined;
@@ -522,6 +570,7 @@ export function useWorkflow(t: Translator) {
       setStages(failStages);
       setRunStatus("FAILED");
       setRunFailureCode(event.code);
+      setRunFailureDetails(event.details);
       setErrorMessage(`${event.code}: ${event.message}`);
     },
     [stopRunClock],
@@ -558,7 +607,7 @@ export function useWorkflow(t: Translator) {
       setCatalogStatus("VERIFYING");
       try {
         await desktopBridge.verifyCatalog(event.catalogId, true);
-        await refreshSolverSetup();
+        await refreshSetup();
         setCatalogStatus("READY");
         setCatalogError(undefined);
       } catch (error) {
@@ -569,7 +618,7 @@ export function useWorkflow(t: Translator) {
         setCatalogJobId(undefined);
       }
     },
-    [refreshSolverSetup],
+    [refreshSetup],
   );
 
   useEffect(() => {
@@ -686,7 +735,7 @@ export function useWorkflow(t: Translator) {
     if (nativeRuntime) return;
     setDemoMode(true);
     setExecutionMode("demo");
-    setProjectName("Clearly labelled browser demo");
+    setProjectName(t("demoProjectName"));
     setSources(
       emptySources().map((source) => ({
         ...source,
@@ -739,6 +788,7 @@ export function useWorkflow(t: Translator) {
     jobIdRef.current = undefined;
     pendingProgressRef.current = [];
     pendingTerminalRef.current = undefined;
+    namedByLightsRef.current = false;
     setSources(emptySources());
     setAssets([]);
     setMasterOverrides([]);
@@ -813,6 +863,8 @@ export function useWorkflow(t: Translator) {
   // the view; a session that still matches the Lights is reopened instead.
   const runBlink = async (force = false) => {
     if (demoMode && !nativeRuntime) {
+      // As in the app, reviewing in Blink is the manual path (demo state only).
+      if (automaticScreening) setAutomaticScreening(false);
       if (!blinkSession) installBlinkSession(demoBlinkManifest(), [], true);
       setStep("blink");
       return;
@@ -1055,6 +1107,7 @@ export function useWorkflow(t: Translator) {
     setOutputDirectory(undefined);
     setRunStatus("RUNNING");
     setRunFailureCode(undefined);
+    setRunFailureDetails(undefined);
     setOverallProgress(0);
     setStages(initialStages());
     setStep("run");
@@ -1217,7 +1270,7 @@ export function useWorkflow(t: Translator) {
   const recheckSolverSetup = async () => {
     if (solverSetupBusy || catalogStatus === "DOWNLOADING" || catalogStatus === "VERIFYING") return;
     try {
-      await refreshSolverSetup();
+      await refreshSetup();
     } catch (error) {
       setCatalogError(String(error));
     }
@@ -1254,7 +1307,7 @@ export function useWorkflow(t: Translator) {
   // browser demo's bundled session stands in for its labelled demo files).
   const blinkReady = Boolean(
     blinkSession &&
-    (blinkSession.demo ? demoMode && !nativeRuntime : blinkSessionCovers(blinkSession, lightSourcePaths)),
+    (blinkSession.demo ? demoMode && !nativeRuntime : blinkSessionCovers(blinkSession, lightSourcePaths, assets)),
   );
   const blinkChannels = useMemo<BlinkChannelSummary[]>(
     () =>
@@ -1405,6 +1458,7 @@ export function useWorkflow(t: Translator) {
     inputBusy,
     errorMessage,
     runFailureCode,
+    runFailureDetails,
     calibrationReady,
     firstSolved,
     demoMode,

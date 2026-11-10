@@ -1,5 +1,5 @@
-import type { Translator } from "../i18n";
-import type { GateDisposition, OutputArtifactKind } from "../types";
+import type { MessageKey, Translator } from "../i18n";
+import type { GateDisposition, OutputArtifact, OutputArtifactKind } from "../types";
 import type { useWorkflow } from "../useWorkflow";
 
 export type Workflow = ReturnType<typeof useWorkflow>;
@@ -70,6 +70,9 @@ export function FrameTile({
     </span>
   );
 }
+/** A filter name as the interface shows it: the engine's `NOFILTER` reads "no filter". */
+export const filterName = (filter: string, t: Translator) =>
+  filter.trim().toUpperCase() === "NOFILTER" ? t("noFilter") : filter;
 export const basename = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 export const formatBytes = (bytes: number, t: Translator) =>
   bytes ? `${(bytes / 1_000_000).toFixed(0)} MB` : t("externallyManaged");
@@ -97,13 +100,38 @@ export function artifactLabel(kind: OutputArtifactKind, t: Translator): string {
   );
 }
 
+/**
+ * A product's one-line description, written from its kind and solve evidence so
+ * it follows the interface language; the controller's own text is the fallback
+ * (other kinds, and the browser demo's labelled placeholder).
+ */
+export function artifactDetail(artifact: OutputArtifact, t: Translator): string {
+  const solved = artifact.receipt?.astrometry;
+  if (solved) return t("artifactDetailSolved", { rms: solved.rmsArcsec.toFixed(3), stars: solved.matchedStars });
+  if (!artifact.receipt) return artifact.detail;
+  switch (artifact.kind) {
+    case "RGB_PREVIEW_TIFF_16":
+    case "RGB_PREVIEW_PNG_16":
+      return t("artifactDetailDisplayPreview");
+    case "MONO_PREVIEW_PNG":
+      return t("artifactDetailMonoPreview");
+    case "RECEIPT":
+      return t("artifactDetailReceipt");
+    default:
+      return artifact.detail;
+  }
+}
+
+/** The engine blocker: a localised label in front of the controller's own reason. */
+export const engineBlockerText = (reason: string | undefined, t: Translator) =>
+  reason ? t("blockerEngineReason", { reason }) : t("blockerEngine");
+
 export function stageLabel(stageId: string, t: Translator): string {
   return (
     {
       "quality-control": t("stageQuality"),
       calibrate: t("stageCalibration"),
       register: t("stageRegistration"),
-      "local-normalization": t("stageLocalNormalization"),
       integrate: t("stageIntegration"),
       drizzle: t("stageDrizzle"),
       solve: t("stageSolve"),
@@ -146,5 +174,83 @@ export function Alert({
         <p>{children}</p>
       </div>
     </aside>
+  );
+}
+
+/** The engine and controller failure codes with a localised, actionable sentence. */
+const FAILURE_HINTS: Record<string, MessageKey> = {
+  ASTROMETRY_REQUIRED: "astrometryFailedHint",
+  MOSAIC_CATALOG_TOO_SPARSE: "mosaicCatalogHint",
+  OUTPUT_EXISTS: "failureHint_OUTPUT_EXISTS",
+  OUTPUT_PATH_TOO_LONG: "failureHint_OUTPUT_PATH_TOO_LONG",
+  SOLVER_UNAVAILABLE: "failureHint_SOLVER_UNAVAILABLE",
+  NO_FLATS: "failureHint_NO_FLATS",
+  FLAT_MATCH_MISSING: "failureHint_FLAT_MATCH_MISSING",
+  DARK_MATCH_MISSING: "failureHint_DARK_MATCH_MISSING",
+  BIAS_MATCH_MISSING: "failureHint_BIAS_MATCH_MISSING",
+  PUBLICATION_FAILED: "failureHint_PUBLICATION_FAILED",
+  ATOMIC_PUBLICATION_FAILED: "failureHint_PUBLICATION_FAILED",
+  REGISTRATION_FAILED: "failureHint_REGISTRATION_FAILED",
+  IO_ERROR: "failureHint_IO_ERROR",
+  PLAN_NOT_EXECUTION_READY: "failureHint_PLAN_NOT_EXECUTION_READY",
+  PROJECT_RESULT_GATE_BLOCKED: "failureHint_PROJECT_RESULT_GATE_BLOCKED",
+  UNSUPPORTED_FORMAT: "importRefusedNoFrames",
+  NO_SUPPORTED_FRAMES: "importRefusedNoFrames",
+};
+/** The controller's import refusals, which carry no code of their own. */
+const IMPORT_REFUSALS: Array<[RegExp, MessageKey]> = [
+  [/^inventory contains blocking frame errors:/, "importRefusedFrameErrors"],
+  [/^frame is not ready:/, "importRefusedNotReady"],
+  [/^desktop import does not accept role /, "importRefusedRole"],
+  [/^no supported astronomy frames were found/, "importRefusedNoFrames"],
+  [/^import takes absolute file or folder paths/, "importRefusedRelativePath"],
+  [/separately selected files are too many for one import on Windows/, "importRefusedTooMany"],
+];
+const DISK_FULL = /\[Errno 28\]|No space left on device|ENOSPC|not enough space on the disk/i;
+const CODED = /^([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+): ([\s\S]*)$/;
+
+export interface FailureExplanation {
+  /** The failure code, from the event or from a leading `CODE: ` of the text. */
+  code?: string;
+  /** The localised sentence of what to do, when the failure has one. */
+  hint?: string;
+  /** The engine's or controller's own text, without the code. */
+  detail: string;
+}
+
+/**
+ * What a failure means for the user: the localised sentence of a known code
+ * or controller refusal (a full disk whatever the code), and the original
+ * text, which stays visible beside it.  Unknown failures keep their own text.
+ */
+export function explainFailure(text: string, t: Translator, eventCode?: string): FailureExplanation {
+  let detail = text.replace(/^Error: /, "");
+  let code = eventCode;
+  if (code && detail.startsWith(`${code}: `)) detail = detail.slice(code.length + 2);
+  else if (!code) {
+    const coded = CODED.exec(detail);
+    if (coded) [, code, detail] = coded;
+  }
+  const hintKey = DISK_FULL.test(detail)
+    ? "failureHint_DISK_FULL"
+    : ((code && FAILURE_HINTS[code]) ?? IMPORT_REFUSALS.find(([pattern]) => pattern.test(detail))?.[1]);
+  return { code, hint: hintKey ? t(hintKey) : undefined, detail };
+}
+
+/** An error message of one or more lines, each with its localised sentence where there is one. */
+export function FailureLines({ message, t }: { message: string; t: Translator }) {
+  const lines = message.split("\n").filter((line) => line.trim());
+  return (
+    <>
+      {lines.map((line, index) => {
+        const { hint } = explainFailure(line, t);
+        return (
+          <span key={index} className="failure-line">
+            {hint && <span className="failure-hint">{hint}</span>}
+            {hint ? <small className="failure-detail">{line.replace(/^Error: /, "")}</small> : line}
+          </span>
+        );
+      })}
+    </>
   );
 }

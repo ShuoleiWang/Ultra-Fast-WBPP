@@ -4,9 +4,11 @@ import { blinkFlagLabel, screeningCodeLabel, type Translator } from "../i18n";
 import { CheckIcon, FileIcon, RevealIcon, SparkIcon } from "../icons";
 import type { OutputArtifact, OutputArtifactKind, ScreeningSummary } from "../types";
 import {
+  artifactDetail,
   artifactLabel,
   basename,
   dispositionClass,
+  filterName,
   filterTileClass,
   FrameTile,
   RunElapsed,
@@ -127,14 +129,14 @@ export function ResultView({ workflow, t }: { workflow: Workflow; t: Translator 
                     ) : (
                       <StarField seed={artifact.path.length} count={70} className="shot-sky" />
                     )}
-                    {artifact.filter && <span className="tag">{artifact.filter}</span>}
+                    {artifact.filter && <span className="tag">{filterName(artifact.filter, t)}</span>}
                   </div>
                   <div className="card-body">
                     <div className="card-title">
                       <b title={artifact.path}>{artifact.name}</b>
                       {artifact.target && <span>{artifact.target}</span>}
                     </div>
-                    <div className="metrics">{artifact.detail}</div>
+                    <div className="metrics">{artifactDetail(artifact, t)}</div>
                   </div>
                 </article>
               );
@@ -184,15 +186,21 @@ export function ResultView({ workflow, t }: { workflow: Workflow; t: Translator 
   );
 }
 
-/** The decision badge of a screened frame: the user's blink decision when there was one, else the gate's disposition. */
-function screeningBadge(frame: ScreeningSummary["frames"][number], t: Translator) {
+/**
+ * The decision badge of a screened frame: the user's blink decision when there
+ * was one, else the gate's disposition. A frame the gate marked (REVIEW or
+ * HARD_FAIL) that automatic screening kept says so: nobody approved it.
+ */
+function screeningBadge(frame: ScreeningSummary["frames"][number], automatic: boolean, t: Translator) {
   if (frame.reason === "USER_DROP") return <span className="badge stop">{t("screeningUserDrop")}</span>;
   if (frame.reason === "AUTO_DROP") return <span className="badge stop">{t("screeningAutoDrop")}</span>;
   if (frame.reason === "USER_KEEP_OVERRIDE")
     return <span className="badge check">{t("screeningUserKeepOverride")}</span>;
   return (
     <span className={`badge ${frame.admitted ? "ok" : frame.disposition === "REVIEW" ? "check" : "stop"}`}>
-      {frame.admitted ? t("screeningAdmittedReview") : dispositionLabel(frame.disposition, t)}
+      {frame.admitted
+        ? t(automatic ? "screeningAutoKept" : "screeningAdmittedReview")
+        : dispositionLabel(frame.disposition, t)}
     </span>
   );
 }
@@ -232,7 +240,7 @@ export function ScreeningSection({ screening, t }: { screening: ScreeningSummary
           <ul>
             {suspect.map((channel) => (
               <li key={`${channel.target}/${channel.filter}`}>
-                {channel.target} · {channel.filter}
+                {channel.target} · {filterName(channel.filter, t)}
                 {codeLabels(channel.codes, t).length ? ` — ${codeLabels(channel.codes, t).join("; ")}` : ""}
                 {channel.summary ? <small>{channel.summary}</small> : null}
               </li>
@@ -268,7 +276,7 @@ export function ScreeningSection({ screening, t }: { screening: ScreeningSummary
                   </td>
                   <td className="dec-cell">
                     <div className="dec">
-                      {screeningBadge(frame, t)}
+                      {screeningBadge(frame, Boolean(screening.policy), t)}
                       <span className="why">{screeningWhy(frame, t)}</span>
                     </div>
                   </td>
@@ -314,7 +322,8 @@ function ArtifactList({
               <strong>{artifact.name}</strong>
               <small>
                 <span>{artifactLabel(artifact.kind, t)}</span>
-                {artifact.filter ? ` · ${artifact.target ?? ""} · ${artifact.filter}` : ""} · {artifact.detail}
+                {artifact.filter ? ` · ${artifact.target ?? ""} · ${filterName(artifact.filter, t)}` : ""} ·{" "}
+                {artifactDetail(artifact, t)}
               </small>
             </div>
             <button
@@ -322,7 +331,9 @@ function ArtifactList({
               className="btn icon"
               disabled={!workflow.nativeRuntime}
               title={artifact.path}
-              aria-label={t("showInFinder", { name: artifact.name })}
+              aria-label={t(workflow.capabilities?.platform === "macos" ? "showInFinder" : "showInFolder", {
+                name: artifact.name,
+              })}
               onClick={() => void workflow.revealOutput(artifact.path)}
             >
               <RevealIcon />

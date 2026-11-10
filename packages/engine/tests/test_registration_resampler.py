@@ -10,7 +10,6 @@ import pytest
 from ufwbpp.stacking.integration import (
     CalibrationError, FitsFrame, FrameInfo, read_frame_info,
 )
-from ufwbpp.stacking import pipeline
 from ufwbpp.stacking import crop as crop_module
 from ufwbpp.stacking import groups as groups_module
 from ufwbpp.stacking import warp as warp_module

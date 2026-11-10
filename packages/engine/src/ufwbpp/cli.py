@@ -5,6 +5,7 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
+import signal
 import sys
 import tempfile
 from typing import Any, Mapping, Sequence
@@ -24,8 +25,10 @@ from .solvers.catalogs import (
     CatalogError,
     catalog_doctor,
     catalog_list,
+    default_catalog_root,
     install_bundled_catalog,
     install_catalog,
+    relocate_catalog,
     remove_catalog_plan,
     verify_catalog,
 )
@@ -71,10 +74,9 @@ def _emit(payload: object, output: str | None, *, compact: bool, force: bool) ->
         if force:
             os.replace(temporary, destination)
         else:
-            # A hard-link publication is atomic and refuses a destination that
-            # appeared after the initial existence check.
-            os.link(temporary, destination)
-            temporary.unlink()
+            # Create-only: refuses a destination that appeared after the
+            # initial existence check.
+            platform_services.current().publish_file_no_replace(temporary, destination)
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -326,17 +328,17 @@ def _load_blink_request(path: str) -> Any:
 def _verify_expected_source_roles(inventory: Any, expected: Mapping[str, str]) -> None:
     from .runtime import RuntimeConfigurationError
 
+    # An asset takes the role of the deepest request source that is the asset
+    # or one of its folders.  The desktop sends one source per file, so the
+    # sources are looked up by path instead of compared with every asset.
+    roles: dict[Path, str] = {}
+    for root, role in expected.items():
+        roles.setdefault(Path(root), role)
     for asset in inventory.assets:
         asset_path = Path(asset.path)
-        matches = [
-            (Path(root), role)
-            for root, role in expected.items()
-            if asset_path == Path(root) or Path(root) in asset_path.parents
-        ]
-        if not matches:
+        role = next((roles[path] for path in (asset_path, *asset_path.parents) if path in roles), None)
+        if role is None:
             raise RuntimeConfigurationError("PROJECT_SOURCE_UNBOUND", "inventoried asset is not bound to a request source")
-        root, role = max(matches, key=lambda item: len(item[0].parts))
-        del root
         if asset.role.value != role:
             raise RuntimeConfigurationError(
                 "PROJECT_SOURCE_ROLE_MISMATCH",
@@ -586,13 +588,37 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _install_bundled_catalog() -> None:
-    """A self-contained build installs its bundled index set on first use.
+def _prepare_catalog(args: argparse.Namespace) -> None:
+    """Make the managed catalog usable before a command reads it.
 
-    A failure leaves the solver unconfigured, which ``doctor`` and the run's
-    readiness gate report; it never stops the command itself.
+    A catalog folder moved or copied from another computer is pointed at the
+    place it now sits, and a self-contained build installs its bundled index
+    set on first use.  A failure leaves the solver unconfigured, which
+    ``doctor`` and the run's readiness gate report; it never stops the command.
     """
 
+    if args.command == "catalog":
+        if args.catalog_command not in {"list", "doctor", "verify", "install"}:
+            return
+        roots = [Path(args.catalog_dir) if args.catalog_dir else default_catalog_root()]
+    elif args.command in {"doctor", "run", "run-project"}:
+        from .solvers.astrometry_net import discover_astrometry_config
+
+        config = discover_astrometry_config()
+        roots = [default_catalog_root(), *([Path(config).parent] if config else [])]
+    else:
+        return
+    for root in dict.fromkeys(roots):
+        try:
+            previous = relocate_catalog(catalog_root=root)
+        except (CatalogError, OSError, ValueError) as error:
+            code = getattr(error, "code", type(error).__name__)
+            sys.stderr.write(f"moved catalog folder not re-pointed ({code}): {error}\n")
+        else:
+            if previous is not None:
+                sys.stderr.write(f"catalog folder moved from {previous}; re-pointed to {root.expanduser().absolute()}\n")
+    if args.command == "catalog" and args.catalog_command not in {"list", "doctor"}:
+        return
     try:
         install_bundled_catalog()
     except (CatalogError, OSError, ValueError, KeyError) as error:
@@ -600,16 +626,48 @@ def _install_bundled_catalog() -> None:
         sys.stderr.write(f"bundled catalog not installed ({code}): {error}\n")
 
 
+def _stop_solvers_on_termination() -> None:
+    """Make SIGTERM stop the running solver processes before it ends the engine.
+
+    A solver leads its own session, so a signal sent to the engine's process
+    group never reaches it.  Once the solver trees are killed the signal is
+    raised again with its default action: the engine still dies of SIGTERM.
+    Windows has no such signal; there the caller's Job Object holds the tree.
+    """
+
+    if platform_services.current().platform_id == "windows":
+        return
+    owner = os.getpid()
+
+    def stop(signum: int, _frame: object) -> None:
+        try:
+            # A forked worker inherits this handler with a stale copy of the
+            # registry; only the process that started the solvers kills them.
+            solvers = sys.modules.get(f"{__package__}.solvers.process")
+            if solvers is not None and os.getpid() == owner:
+                solvers.kill_running_solvers()
+        finally:
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+
+    try:
+        signal.signal(signal.SIGTERM, stop)
+    except ValueError:
+        # Only the main thread may install a handler.
+        pass
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     # Receipts, progress and results are UTF-8 on every platform;
     # a Windows console code page must not decide how they are encoded.
     platform_services.reconfigure_utf8_stdio()
+    # A Finder-launched application hands its engine a limit of 256 open files.
+    platform_services.raise_open_file_limit()
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if args.command in {"doctor", "run", "run-project"} or (
-        args.command == "catalog" and args.catalog_command in {"list", "doctor"}
-    ):
-        _install_bundled_catalog()
+    if args.command in {"run", "run-project"}:
+        _stop_solvers_on_termination()
+    _prepare_catalog(args)
     try:
         if args.command == "doctor":
             payload = doctor_payload()
@@ -892,8 +950,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             code = "IO_ERROR"
         else:
             raise
+        # One line: a caller that reads the diagnostic stream line by line
+        # recovers the code and the message from it.
         sys.stderr.write(
-            _json({"ok": False, "error": {"code": code, "message": str(error)}})
+            _json({"ok": False, "error": {"code": code, "message": str(error)}}, compact=True)
             + "\n"
         )
         return 2

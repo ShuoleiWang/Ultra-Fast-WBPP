@@ -29,7 +29,7 @@ from ufwbpp.recipe import Recipe
 from ufwbpp.runtime import RuntimeConfigurationError, build_e2e_request
 from ufwbpp.selection import SelectionParameters
 from test_e2e import FakeSolver, _header, _request, _write, synthetic_project  # noqa: F401  (fixture re-export)
-from test_project_e2e import FakePanelRunner, FakeReproject, ManagedCopySolver, _mosaic_solver, _project
+from test_project_e2e import FakePanelRunner, FakeReproject, _mosaic_solver, _project
 
 
 def _digest(path: Path) -> str:

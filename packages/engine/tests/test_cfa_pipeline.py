@@ -265,7 +265,6 @@ def test_bayer_lights_integrate_into_three_colour_channel_masters(cfa_project, t
     for name, header in headers.items():
         assert header["OAFCFA"] == "RGGB" and header["OAFCFACH"] == name and header["OAFCFAF"] == "LP"
         assert header["OAFSTATE"] == "SOLVED" and header["OAFNFRM"] == 8
-    receipt = json.loads((output / "receipt.json").read_text(encoding="utf-8"))
     pixel_receipt = json.loads((output / "receipts" / "pixel-pipeline.json").read_text(encoding="utf-8"))
     groups = pixel_receipt["statistics"]["integrationGroups"]
     assert {name: (group["sourceFilter"], group["cfaChannel"], group["cfaPattern"]) for name, group in groups.items()} == {

@@ -35,8 +35,14 @@ def apply_mono_workflow(info: Any, workflow: str) -> Any:
 
 
 def metadata_changes(override: Any) -> dict[str, Any]:
+    from lightframeqc.metadata import normalize_filter
+
     fields = ("camera", "gain", "offset", "binning_x", "binning_y", "filter_name", "cfa_pattern", "readout_mode", "temperature_celsius", "exposure_seconds")
-    return {name: canonical(value) for name in fields if not unknown(value := getattr(override, name))}
+    changes = {name: canonical(value) for name in fields if not unknown(value := getattr(override, name))}
+    if "filter_name" in changes:
+        # An override names its filter in the one filter identity.
+        changes["filter_name"] = normalize_filter(changes["filter_name"])
+    return changes
 
 
 def bias_from_header(header: Mapping[str, Any]) -> bool | None:

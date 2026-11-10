@@ -29,11 +29,13 @@ const EN = {
   flatSessionWarning:
     "Headers cannot verify that a Flat shares the same optical path, dust and camera rotation. To calibrate each night with its own Flats, keep each night in its own NIGHT_1, NIGHT_2… (or DATE_…) folder, as for WBPP.",
   automaticQuality: "Light quality evidence",
-  qualityNotMeasured: "Complete Blink review before processing. The measurement table is optional.",
+  qualityNotMeasured:
+    "This measurement table is optional: screening happens during processing, or in Blink when you review the Lights yourself.",
   qualityChecksHint: "Measures stars, focus, trailing, clouds, field agreement and spatial obstruction evidence.",
-  qualityExclusionHint: "These measurements provide advice. Your confirmed Blink choices decide what is stacked.",
+  qualityExclusionHint:
+    "These measurements provide advice. Automatic screening decides what is stacked, or your confirmed Blink choices when you review the Lights yourself.",
   qcPassed: "Pass",
-  qcReview: "Review · excluded by default",
+  qcReview: "Review",
   qcRejected: "Rejected · HARD_FAIL",
   calibrationChecking: "Checking calibration matches…",
   calibrationMatched: "Calibration files matched",
@@ -70,6 +72,13 @@ const EN = {
   calibrationBiasReason: "Declare whether Master Dark includes Bias before reuse.",
   calibrationSessionReason: "Cross-date Flat / Light optical-path consistency needs review.",
   calibrationReasonGeneric: "The engine reported {code}; inspect the affected files.",
+  calibrationTargetNamedByFolderReason:
+    "These Lights name no target (OBJECT is missing), so the target is taken from their folder name.",
+  calibrationTargetUnnamedReason:
+    "These Lights name no target and their folders do not name one either; they are processed together as one target, UNNAMED.",
+  calibrationBayerOffsetReason:
+    "These frames carry an odd Bayer offset (XBAYROFF/YBAYROFF) that is not applied yet; their colours may be swapped. Check the colours of the result.",
+  noFilter: "no filter",
   affectedFiles: "Affected files",
   calibrationPendingBlocker: "Complete the calibration check and resolve its blockers.",
   language: "Language",
@@ -78,6 +87,8 @@ const EN = {
   english: "English",
   chinese: "简体中文",
   browserDemo: "BROWSER DEMO",
+  browserDemoChip: "Browser demo",
+  demoProjectName: "Clearly labelled browser demo",
   engineReady: "Local engine ready",
   engineUnavailable: "Scientific engine unavailable",
   detectingHardware: "Detecting hardware…",
@@ -122,6 +133,7 @@ const EN = {
   screeningSummary: "{admitted} stacked · {excluded} excluded",
   screeningAllPassed: "Every Light passed the quality gate and was stacked.",
   screeningAdmittedReview: "REVIEW · approved",
+  screeningAutoKept: "Kept by automatic screening",
   screeningReviewHint: "To change the selection, return to Blink, review the affected channel and process again.",
   framesUsed: "{admitted} of {total} frames stacked",
   framesExcluded: "{excluded} left out",
@@ -129,7 +141,7 @@ const EN = {
   newProject: "NEW PROJECT",
   importTitle: "Drop in your N.I.N.A. folders",
   importDescription:
-    "Drop every night together with raw Flat, Dark, Bias and existing masters. Types are read from the headers; review the Lights in Blink before processing.",
+    "Drop every night together with raw Flat, Dark, Bias and existing masters. Types are read from the headers. Screening is automatic unless you choose to review the Lights in Blink yourself.",
   dropNative: "Drop files or folders anywhere in this window",
   dropBrowser: "Browser demo cannot read local paths",
   nextBatch: "Next selection will be checked as {role}; conflicting headers still block.",
@@ -225,7 +237,7 @@ const EN = {
   cfaDetectedBody:
     "{count} raw frames carry a {pattern} Bayer pattern. They are calibrated as mosaics with per-channel flat scaling, debayered into R, G and B channel masters and combined into the RGB product; a drizzle drops the mosaic's own colour samples.",
   monoStandardDefaults:
-    "Monochrome workflow · missing Bayer metadata is treated as mono. Imported MasterDark includes Bias by default; advanced settings can override this.",
+    "Monochrome workflow · missing Bayer metadata is treated as mono. An imported Master Dark includes Bias by default; advanced settings can override this.",
   optionalOverrides: "Optional",
   notRecorded: "Not recorded",
   useFileMetadata: "Use file information",
@@ -240,7 +252,7 @@ const EN = {
   processEyebrow: "PROCESS",
   processTitle: "Use the recommended recipe",
   processDescription:
-    "Balanced is the safe default. Choose a new output location, then start. Optional methods and solver setup stay under Advanced.",
+    "Balanced is the safe default. Choose a new output location, then start. Optional methods and solver setup stay under “Advanced options and solver setup”.",
   recommended: "RECOMMENDED",
   balanced: "Balanced",
   balancedDescription: "Conservative calibration, quality weighting, robust rejection, and a verified final WCS.",
@@ -308,6 +320,7 @@ const EN = {
   appleGeneric: "GENERIC APPLE SILICON",
   blockers: "Before you can start",
   blockerEngine: "The local processing engine is unavailable. Check the installation.",
+  blockerEngineReason: "The processing engine is not ready: {reason}",
   blockerCalibration: "Complete the calibration check and resolve missing, incompatible or ambiguous matches.",
   blockerTypes: "Return to Import and confirm the detected frame types.",
   blockerQc: "Run the real Quality Gate for the current Light set.",
@@ -319,8 +332,48 @@ const EN = {
   pipeline: "PIPELINE",
   runningTitle: "Creating verified products",
   cancelledTitle: "Run safely cancelled",
-  failedTitle: "Run failed closed",
+  failedTitle: "Run failed",
   runFailureTitle: "The run failed — no products were published",
+  runFailurePublishedTitle: "The run failed after writing its output folder; the app did not accept the result",
+  runFailureEngineMessage: "Engine message",
+  failureHint_OUTPUT_EXISTS:
+    "The output folder already exists, and a run never overwrites one. Choose another output folder, or move the existing one away, then start again.",
+  failureHint_OUTPUT_PATH_TOO_LONG:
+    "The result's paths would be longer than Windows allows. Choose an output folder with a shorter path (for example directly on a drive), or enable long paths in Windows, then start again.",
+  failureHint_SOLVER_UNAVAILABLE:
+    "No working plate solver was found. Open Advanced options and solver setup, install or repair the solver and its catalog, choose Recheck setup, then start again.",
+  failureHint_NO_FLATS:
+    "This project has no Flats. Add the raw Flats or a Master Flat for these Lights, then start again.",
+  failureHint_FLAT_MATCH_MISSING:
+    "Some Lights have no matching Flat (same filter, size and binning). Add the missing Flats; the calibration check on the import page names the groups.",
+  failureHint_DARK_MATCH_MISSING:
+    "Some Lights have no matching Dark (same size, binning and camera settings). Add the missing Darks or a Master Dark; the calibration check on the import page names the groups.",
+  failureHint_BIAS_MATCH_MISSING:
+    "Some frames need a Bias that matches their size, binning and camera settings. Add the missing Bias frames or a Master Bias, then start again.",
+  failureHint_PUBLICATION_FAILED:
+    "The finished result could not be moved into the output folder. Check that the output drive is writable, has free space and is not a synced or locked folder, then start again.",
+  failureHint_REGISTRATION_FAILED:
+    "The Lights of a channel could not be aligned to its reference. Check that the channel's Lights show the same field with enough stars (no thick cloud, no wrong target), then start again.",
+  failureHint_IO_ERROR:
+    "A file could not be read or written. Check that the source drive is connected, the output folder is writable and no other program holds the files, then start again.",
+  failureHint_DISK_FULL:
+    "The output drive is full. Free space on it, or choose an output folder on a drive with more space, then start again.",
+  failureHint_PLAN_NOT_EXECUTION_READY:
+    "The project is not ready to process: a required input or setting is missing. The engine message below names it; fix it on the import page, then start again.",
+  failureHint_PROJECT_RESULT_GATE_BLOCKED:
+    "The engine wrote its output folder, but the app's own verification of the masters and their receipt did not pass, so the result is not shown as complete. The files stay in the output folder; run again into a new folder.",
+  importRefusedFrameErrors:
+    "The import was refused because a file could not be read as an astronomy frame. Remove or replace the file named below (for example a damaged FITS or a macOS ._ file), then import again.",
+  importRefusedNotReady:
+    "The import was refused because a frame is not ready to use. Check the file named below, then import again.",
+  importRefusedRole:
+    "The import was refused because a file is neither a Light nor a calibration frame (for example an earlier result or a snapshot). Move it out of the folder, or import the subfolders that hold your frames.",
+  importRefusedNoFrames:
+    "No supported astronomy frames were found. Import FITS or XISF files, or the folder that holds them.",
+  importRefusedRelativePath:
+    "Import takes complete file or folder paths. Choose the files or folders again, or paste their full paths.",
+  importRefusedTooMany:
+    "Too many separately selected files for one import on Windows. Choose or drop the folder that holds them instead.",
   runFailureStage: "Stopped during: {stage}",
   runFailureNoStage: "Stopped before the first stage reported",
   stageFailed: "failed",
@@ -334,7 +387,8 @@ const EN = {
   automaticScreening: "Automatic screening",
   automaticScreeningTitle: "Automatic screening",
   automaticScreeningHint:
-    "The engine judges every Light (cloud, moonlit nights, trails, focus, field) and weights the rest; the result lists every frame it left out and why. Uncheck to review every frame in Blink yourself.",
+    "The engine judges every Light (cloud, moonlit nights, trails, focus, field) and weights the rest; the result lists every frame it left out and why. Uncheck it, or choose Review in Blink instead, to decide every frame yourself; that choice is remembered for later projects.",
+  automaticScreeningOffNote: "Automatic screening is off and stays off for later projects until you check it again.",
   blinkInstead: "Review in Blink instead",
   screeningAutoDrop: "Left out automatically",
   screeningSuspectTitle: "Worth a look in Blink",
@@ -389,6 +443,7 @@ const EN = {
   startNew: "Start a new project",
   revealOutput: "Show output: {name}",
   showInFinder: "Show {name} in Finder",
+  showInFolder: "Show {name} in its folder",
   sourcesReadonly: "Read-only sources · create-only results · auditable decisions",
   legal: "Legal",
   legalBody:
@@ -436,6 +491,10 @@ const EN = {
   artifactDrizzle: "Drizzle data",
   artifactMaster: "Master",
   artifactPreview: "Preview",
+  artifactDetailSolved: "WCS embedded · {rms}″ RMS · {stars} matched stars",
+  artifactDetailDisplayPreview: "16-bit display preview",
+  artifactDetailMonoPreview: "Auto-stretched mono preview",
+  artifactDetailReceipt: "Outer project receipt · content verified",
   browserOnlyError: "Real processing requires the Ultra-Fast WBPP desktop app; this browser is a labelled visual demo.",
   browserSidecarMissing: "Browser demo has no scientific sidecar",
   dialogFrames: "Choose N.I.N.A. astronomy frames",
@@ -461,7 +520,6 @@ const EN = {
   stageQuality: "Quality Gate",
   stageCalibration: "Calibration",
   stageRegistration: "Registration",
-  stageLocalNormalization: "LocalNormalization",
   stageIntegration: "Integration and rejection",
   stageDrizzle: "Drizzle",
   stageSolve: "Astrometric solve",
@@ -754,7 +812,7 @@ export function blinkFlagHint(code: string, t: Translator): string {
 const ZH: Record<MessageKey, string> = {
   blinkDiagReference: "{filter} · 参考帧 {name} · 固定显示尺度",
   blinkDiagTitle: "视觉诊断",
-  blinkDiagDisplayMode: "Blink 显示方式",
+  blinkDiagDisplayMode: "闪视显示方式",
   blinkDiagDetailMode: "星场细节",
   blinkDiagFieldMode: "完整星场",
   blinkDiagDetailHint: "星场细节分离了缓慢变化的背景，请结合背景差异检查；暗星减少和噪声增大仍会保留。",
@@ -806,12 +864,12 @@ const ZH: Record<MessageKey, string> = {
   calibrationUnverified: "校准匹配尚未验证；存在校准文件不代表参数匹配。",
   flatSessionWarning:
     "头信息无法证明 Flat 的光路、灰尘和相机旋转角一致。要让每晚用自己的 Flat，请像 WBPP 一样把每晚放进 NIGHT_1、NIGHT_2…（或 DATE_…）文件夹。",
-  automaticQuality: "自动筛选 Light",
-  qualityNotMeasured: "处理前需完成 Blink 人工审片，测量结果表可选。",
+  automaticQuality: "Light 质量测量",
+  qualityNotMeasured: "这张测量结果表是可选的：筛片在处理过程中自动完成，或由你在闪视筛片里逐张决定。",
   qualityChecksHint: "测量星点、焦点、拖线、云层、画面一致性和空间遮挡证据。",
-  qualityExclusionHint: "这些测量仅提供建议，实际入栈由你确认的 Blink 选择决定。",
+  qualityExclusionHint: "这些测量仅提供建议；哪些帧进入叠加由自动筛片决定，改用闪视筛片时由你确认的选择决定。",
   qcPassed: "通过",
-  qcReview: "待复核 · 默认排除",
+  qcReview: "待复核",
   qcRejected: "拒绝 · HARD_FAIL",
   calibrationChecking: "正在检查校准匹配…",
   calibrationMatched: "校准文件已匹配",
@@ -826,7 +884,7 @@ const ZH: Record<MessageKey, string> = {
   runElapsed: "已用时间",
   runTotalTime: "总用时",
   runNotAccepted: "引擎未接受本次运行。",
-  qualityElapsed: "正在筛选 {count} 张 Light · 已用 {seconds} 秒；完成后恢复操作。",
+  qualityElapsed: "正在对 {count} 张 Light 筛片 · 已用 {seconds} 秒；完成后恢复操作。",
   temperatureUnrecorded: "温度未记录",
   darkTemperatureUnrecorded: "此 Dark 文件未记录温度；这是提示，不会阻止匹配。",
   calibrationImportedUnmatchedReason:
@@ -851,6 +909,12 @@ const ZH: Record<MessageKey, string> = {
   calibrationBiasReason: "复用 Master Dark 前，需要声明是否包含 Bias。",
   calibrationSessionReason: "跨日期 Flat / Light 的光路一致性需要核对。",
   calibrationReasonGeneric: "引擎报告 {code}；请检查涉及的文件。",
+  calibrationTargetNamedByFolderReason: "这些 Light 没有写目标名（缺少 OBJECT），目标名取自它们所在的文件夹名。",
+  calibrationTargetUnnamedReason:
+    "这些 Light 没有写目标名，所在文件夹名也无法给出目标；它们会作为同一个目标 UNNAMED 一起处理。",
+  calibrationBayerOffsetReason:
+    "这些帧带有奇数的 Bayer 偏移（XBAYROFF/YBAYROFF），目前不会应用；颜色可能互换。请检查结果的颜色。",
+  noFilter: "无滤镜",
   affectedFiles: "涉及文件",
   calibrationPendingBlocker: "等待校准检查完成，并处理阻塞项。",
   language: "语言",
@@ -859,6 +923,8 @@ const ZH: Record<MessageKey, string> = {
   english: "English",
   chinese: "简体中文",
   browserDemo: "浏览器演示",
+  browserDemoChip: "浏览器演示",
+  demoProjectName: "带标注的浏览器演示",
   engineReady: "本机引擎就绪",
   engineUnavailable: "科学引擎未连接",
   detectingHardware: "正在检测硬件…",
@@ -867,9 +933,9 @@ const ZH: Record<MessageKey, string> = {
   stepReview: "复核",
   stepReviewCaption: "分组与筛片",
   stepProcess: "处理",
-  stepProcessCaption: "筛片、叠加、解算",
+  stepProcessCaption: "筛片、叠加、天文定位",
   stepResult: "结果",
-  stepResultCaption: "主图与收据",
+  stepResultCaption: "主图与回执",
   sidebarProject: "项目",
   sidebarSources: "来源",
   sidebarResults: "结果",
@@ -904,11 +970,12 @@ const ZH: Record<MessageKey, string> = {
   framesExcluded: "{excluded} 帧未叠加",
   screeningAllPassed: "所有 Light 都通过了质量门禁并进入叠加。",
   screeningAdmittedReview: "REVIEW · 已批准",
-  screeningReviewHint: "如需调整入栈选择：返回 Blink，重新确认受影响通道，再次处理。",
+  screeningAutoKept: "自动筛片保留",
+  screeningReviewHint: "如需调整叠加哪些帧：返回闪视筛片，重新确认受影响的通道，再次处理。",
   newProject: "新项目",
   importTitle: "拖入 N.I.N.A. 拍摄文件夹",
   importDescription:
-    "不同夜的 Light、原始 Flat / Dark / Bias 和已有 Master 一起拖入即可；类型从头信息读取，处理前逐通道完成 Blink 人工审片。",
+    "不同夜的 Light、原始 Flat / Dark / Bias 和已有 Master 一起拖入即可；类型从头信息读取。默认自动筛片，也可以改为在闪视筛片里逐张自己决定。",
   autoDetect: "自动识别帧类型",
   readingMetadata: "正在读取文件元数据…",
   pasteInputPaths: "粘贴文件或文件夹路径",
@@ -922,6 +989,7 @@ const ZH: Record<MessageKey, string> = {
   recheckSetup: "重新检测配置",
   checkingSetup: "正在检测…",
   blockerEngine: "本地处理引擎不可用，请检查程序安装。",
+  blockerEngineReason: "处理引擎未就绪：{reason}",
   blockerCalibration: "请完成校准检查，处理缺失、不匹配或存在歧义的校准输入。",
   blockerTypes: "请返回导入页，确认已识别的帧类型。",
   dropNative: "把文件或文件夹拖到窗口任意位置",
@@ -930,7 +998,7 @@ const ZH: Record<MessageKey, string> = {
   autoRead: "自动从元数据读取帧类型、目标、滤镜、曝光与相机。",
   chooseFiles: "选择文件",
   chooseFolder: "选择文件夹",
-  lights: "亮场",
+  lights: "Light",
   calibration: "校准与 Master 复用",
   calibrationHint: "加入 raw Flat / Dark / Bias，或已验证的 Master Flat / Dark / Bias。",
   detected: "已识别",
@@ -967,7 +1035,7 @@ const ZH: Record<MessageKey, string> = {
   unattendedExcluded: "默认排除",
   panelMatrix: "目标 × 滤镜矩阵",
   noGroups: "没有可用 Light 分组。",
-  frameEvidence: "逐帧 Quality Gate",
+  frameEvidence: "逐帧质量门禁",
   qualityIssueCount: "{count} 张需关注 · {pass} 张通过",
   passBatchStatus: "已显示 {shown}/{total} 张通过帧",
   showMorePass: "再显示 {count} 张通过帧",
@@ -989,11 +1057,11 @@ const ZH: Record<MessageKey, string> = {
   unmatchedCalibration: "仍有 {count} 张校准帧未匹配已确认的单色 Light，保持禁跑。",
   calibrationHashReady: "全部校准帧已绑定内容",
   calibrationHashPending: "不会仅按相机名自动提交单色声明",
-  cfaDetectedTitle: "彩色相机（Bayer）亮场",
+  cfaDetectedTitle: "彩色相机（Bayer）Light",
   cfaDetectedBody:
-    "{count} 张原始帧带有 {pattern} Bayer 图案：按马赛克校准（平场按颜色通道分别缩放），去马赛克为 R、G、B 三个通道的 master 并合成 RGB；Drizzle 直接投射马赛克自身的颜色采样。",
+    "{count} 张原始帧带有 {pattern} Bayer 图案：在原始 Bayer 阵列上校准（平场按颜色通道分别缩放），再去马赛克成 R、G、B 三个通道的主图并合成 RGB；Drizzle 直接投射 Bayer 阵列自身的颜色采样。",
   monoStandardDefaults:
-    "单色处理流程：缺少 Bayer 信息时按单色处理；已导入 MasterDark 默认包含 Bias，可在高级设置中调整。",
+    "单色处理流程：缺少 Bayer 信息时按单色处理；已导入的 Master Dark 默认包含 Bias，可在高级设置中调整。",
   optionalOverrides: "可选",
   notRecorded: "未记录",
   useFileMetadata: "使用文件信息",
@@ -1001,28 +1069,29 @@ const ZH: Record<MessageKey, string> = {
   masterTitle: "校准高级设置",
   masterBody: "默认使用已导入 Master 及其文件信息。缺失参数保持空白；只有明确知道实际校准参数时才需要修改。",
   demoWarningTitle: "明确标记的界面演示",
-  demoWarningBody: "演示数字不是测量，不生成收据或 WCS。",
+  demoWarningBody: "演示数字不是测量，不生成回执或 WCS。",
   back: "返回",
   continueProcess: "继续处理",
   processEyebrow: "处理",
   processTitle: "使用推荐配方",
-  processDescription: "Balanced 是安全默认值。选择一个新的输出位置即可开始；可选算法与 solver 设置收在“高级选项”中。",
+  processDescription:
+    "Balanced 是安全默认值。选择一个新的输出位置即可开始；可选算法与解算器设置收在“高级选项与解算器设置”中。",
   recommended: "推荐",
   balanced: "Balanced",
   balancedDescription: "保守校准、质量加权、稳健像素拒绝，并验证最终 WCS。",
   balancedDetail1: "保守质量门禁",
   balancedDetail2: "自适应配准与像素拒绝",
-  balancedDetail3: "逐通道最终解算",
+  balancedDetail3: "逐通道天文定位",
   selected: "已选择",
   outputLocation: "输出位置",
   outputNotSelected: "尚未选择",
   chooseOutput: "选择输出文件夹",
-  advanced: "高级选项与 solver 设置",
+  advanced: "高级选项与解算器设置",
   superLuminance: "超级亮度（SuperL）",
   superLuminanceHint:
-    "另外写出 SuperL.fits：L、R、G、B 按各自噪声加权合成一张更深的亮度图，星点明显更差的通道不参与。各通道 master 不变，约多用一秒。",
+    "另外写出 SuperL.fits：L、R、G、B 按各自噪声加权合成一张更深的亮度图，星点明显更差的通道不参与。各通道主图不变，约多用一秒。",
   drizzle: "Drizzle",
-  drizzleHint: "把校准后的亮场按积分自身的拒绝、归一化与权重投到更细的网格上。",
+  drizzleHint: "把校准后的 Light 按积分自身的拒绝、归一化与权重投到更细的网格上。",
   drizzleOptions: "Drizzle 选项",
   drizzleScale: "放大倍数",
   drizzleKernel: "核函数",
@@ -1034,12 +1103,13 @@ const ZH: Record<MessageKey, string> = {
   advancedAlgorithms: "进阶算法",
   advancedAlgorithmsBadge: "需手动开启",
   advancedAlgorithmsHint:
-    "需手动开启，仅在参考项目上测量过：在那里它相对 master 没有测出点源增益；各帧 FWHM 差异大时可能有帮助。它为每个通道额外写一个带自身 PSF 的文件，从不替换 master。",
+    "需手动开启，仅在参考项目上测量过：在那里它相对主图没有测出点源增益；各帧 FWHM 差异大时可能有帮助。它为每个通道额外写一个带自身 PSF 的文件，从不替换主图。",
   properCoaddition: "Proper coaddition（额外产品）",
   properCoadditionHint:
-    "在 details/runs/<目标>/products/<FILTER>/ 下、该目标已解算 master 的旁边额外写出 <FILTER>.proper.fits，沿用积分自身的像素拒绝；输出文件夹里的 master 不变。",
-  properCoadditionDrizzle: "开启 Drizzle 时不可用：drizzle 后的 master 网格不同，无法继承同网格已解算 master 的 WCS。",
-  solverSetup: "天文定位 solver",
+    "在 details/runs/<目标>/products/<FILTER>/ 下、该目标已完成天文定位的主图旁边额外写出 <FILTER>.proper.fits，沿用积分自身的像素拒绝；输出文件夹里的主图不变。",
+  properCoadditionDrizzle:
+    "开启 Drizzle 时不可用：Drizzle 后的主图网格不同，无法继承同网格已完成天文定位的主图的 WCS。",
+  solverSetup: "天文定位解算器",
   ready: "就绪",
   actionRequired: "需要操作",
   executable: "可执行",
@@ -1050,7 +1120,7 @@ const ZH: Record<MessageKey, string> = {
     "请从 hnsky.org 安装 ASTAP（astap_cli.exe）和星表数据库（D20 或更大）。程序会用受管的 Astrometry.net 索引核验每一个 ASTAP 解算结果。",
   astapAlternative:
     "可选替代：ASTAP（astap_cli）配合 hnsky.org 的 D20 或更大星表数据库；其解算结果会用受管的 Astrometry.net 索引核验。",
-  browserNoSolver: "浏览器演示没有 solver 或星表。",
+  browserNoSolver: "浏览器演示没有解算器或星表。",
   catalogReady: "离线星表已校验并配置",
   catalogInstallTitle: "安装受检的 Astrometry.net 4107–4112 索引",
   catalogInstallBody: "约 350 MB；程序不会静默下载。",
@@ -1058,7 +1128,7 @@ const ZH: Record<MessageKey, string> = {
   acceptTerms: "我已阅读提供方说明，并接受本次下载标识 {id}。",
   downloadCatalog: "下载并校验 {size}",
   waitProgress: "等待第一条下载进度…",
-  verifyingCatalog: "下载完成，正在校验 SHA-256 并写入受管 solver 配置…",
+  verifyingCatalog: "下载完成，正在校验 SHA-256 并写入受管解算器配置…",
   cancelDownload: "取消下载",
   noCatalogManifest: "没有找到受检星表清单；不会下载未知文件。",
   computeBackend: "计算后端",
@@ -1068,36 +1138,71 @@ const ZH: Record<MessageKey, string> = {
   m3Optimized: "M3 PRO 深度优化",
   appleGeneric: "Apple Silicon 通用路径",
   blockers: "开始前还需要",
-  blockerQc: "先对当前 Light 完成真实 Quality Gate。",
+  blockerQc: "先对当前 Light 运行真实的质量门禁。",
   blockerSolver: "安装解算器（solve-field 或 ASTAP）和已校验离线星表。",
   blockerOutput: "选择输出文件夹。",
   blockerMaster: "保存高级校准修改，或恢复文件设置。",
   blockerCfa: "确认所有缺少 CFA 元数据的原始帧。",
-  blockerCfaUnknownPattern: "无法识别的 CFA 图案。",
+  blockerCfaUnknownPattern: "无法识别的 CFA 图案（可处理 RGGB、BGGR、GRBG、GBRG）。",
   start: "开始处理",
   pipeline: "流水线",
   runningTitle: "正在生成验证后的产品",
   cancelledTitle: "运行已安全取消",
-  failedTitle: "运行已失败关闭",
+  failedTitle: "运行失败",
   runFailureTitle: "运行失败 —— 未发布任何产品",
+  runFailurePublishedTitle: "运行失败：输出文件夹已写入，但结果未通过桌面校验",
+  runFailureEngineMessage: "引擎原文",
+  failureHint_OUTPUT_EXISTS:
+    "输出文件夹已存在，运行从不覆盖已有文件夹。请换一个输出文件夹，或把已有的移走，然后重新开始。",
+  failureHint_OUTPUT_PATH_TOO_LONG:
+    "结果文件的路径会超过 Windows 允许的长度。请选择路径更短的输出文件夹（例如直接放在磁盘根目录下），或在 Windows 中启用长路径，然后重新开始。",
+  failureHint_SOLVER_UNAVAILABLE:
+    "没有找到可用的解算器。请打开“高级选项与解算器设置”，安装或修复解算器及其星表，点“重新检查设置”，然后重新开始。",
+  failureHint_NO_FLATS: "这个项目没有平场。请为这些 Light 加入原始 Flat 或 Master Flat，然后重新开始。",
+  failureHint_FLAT_MATCH_MISSING:
+    "部分 Light 没有匹配的 Flat（滤镜、尺寸和像素合并须一致）。请补充缺少的 Flat；导入页的校准检查会列出涉及的分组。",
+  failureHint_DARK_MATCH_MISSING:
+    "部分 Light 没有匹配的 Dark（尺寸、像素合并和相机设置须一致）。请补充缺少的 Dark 或 Master Dark；导入页的校准检查会列出涉及的分组。",
+  failureHint_BIAS_MATCH_MISSING:
+    "部分帧需要尺寸、像素合并和相机设置一致的 Bias。请补充缺少的 Bias 或 Master Bias，然后重新开始。",
+  failureHint_PUBLICATION_FAILED:
+    "处理完成的结果无法移入输出文件夹。请确认输出磁盘可写、空间充足，且不是同步中或被锁定的文件夹，然后重新开始。",
+  failureHint_REGISTRATION_FAILED:
+    "某个通道的 Light 无法对齐到参考帧。请确认该通道的 Light 拍的是同一视场且星点足够（没有厚云、没有拍错目标），然后重新开始。",
+  failureHint_IO_ERROR:
+    "有文件无法读取或写入。请确认源盘已连接、输出文件夹可写，且没有其他程序占用这些文件，然后重新开始。",
+  failureHint_DISK_FULL: "输出磁盘已满。请清理空间，或把输出文件夹选在空间更大的磁盘上，然后重新开始。",
+  failureHint_PLAN_NOT_EXECUTION_READY:
+    "项目还不能处理：缺少必需的输入或设置。下方的引擎原文写明了缺什么；请在导入页补齐，然后重新开始。",
+  failureHint_PROJECT_RESULT_GATE_BLOCKED:
+    "引擎已写出输出文件夹，但桌面应用对主图及其回执的校验没有通过，因此结果不显示为完成。文件仍保留在输出文件夹中；请重新运行到新的文件夹。",
+  importRefusedFrameErrors:
+    "导入被拒绝：有文件无法作为天文帧读取。请移除或替换下面写明的文件（例如损坏的 FITS 或 macOS 的 ._ 文件），然后重新导入。",
+  importRefusedNotReady: "导入被拒绝：有一帧还不能使用。请检查下面写明的文件，然后重新导入。",
+  importRefusedRole:
+    "导入被拒绝：有文件既不是 Light 也不是校准帧（例如之前的处理结果或快照）。请把它移出文件夹，或只导入存放拍摄帧的子文件夹。",
+  importRefusedNoFrames: "没有找到支持的天文帧。请导入 FITS 或 XISF 文件，或存放它们的文件夹。",
+  importRefusedRelativePath: "导入需要完整的文件或文件夹路径。请重新选择文件或文件夹，或粘贴完整路径。",
+  importRefusedTooMany: "在 Windows 上单次导入分别选中的文件太多。请改为选择或拖入存放它们的文件夹。",
   runFailureStage: "停止于：{stage}",
   runFailureNoStage: "在第一个阶段汇报前停止",
   stageFailed: "失败",
   astrometryFailedHint:
-    "板解算未能为每个通道验证 WCS。解算失败时不会保留积分后的 master：请检查解算器配置（solve-field 及其辅助工具，或 ASTAP 及其星表数据库，以及离线星表），然后重新运行。",
+    "天文定位未能为每个通道验证 WCS。天文定位失败时不会保留叠加后的主图：请检查解算器配置（solve-field 及其辅助工具，或 ASTAP 及其星表数据库，以及离线星表），然后重新运行。",
   mosaicCatalogHint:
-    "已安装的星表在某块马赛克面板里星数太少，无法定位这块面板。Gaia DR2 分块星表（astrometry-net-5205-lite）足够密：请在“高级选项与 solver 设置”里安装，然后重新运行。",
+    "已安装的星表在某块马赛克面板里星数太少，无法为这块面板做天文定位。Gaia DR2 分块星表（astrometry-net-5205-lite）足够密：请在“高级选项与解算器设置”里安装，然后重新运行。",
   gaiaInstallTitle: "Gaia DR2 分块星表（可选，马赛克推荐）",
   gaiaInstallBody:
     "装上后，每张主图的天文坐标都会在 Gaia 恒星上重新拟合（真实主图上约 0.15″）；Tycho-2 星数不够的马赛克面板也能定位。",
   automaticScreening: "自动筛片",
   automaticScreeningTitle: "自动筛片",
   automaticScreeningHint:
-    "程序逐张判断每张 Light（云、月光夜、拖线、跑焦、偏离视场），其余按质量加权；结果页会列出每一张被剔除的帧和原因。取消勾选则在闪视里逐张手动筛片。",
+    "程序逐张判断每张 Light（云、月光夜、拖线、跑焦、偏离视场），其余按质量加权；结果页会列出每一张被剔除的帧和原因。取消勾选或点“改为手动闪视”后，由你在闪视筛片里逐张决定；这个选择会被记住，之后的项目也沿用。",
+  automaticScreeningOffNote: "自动筛片已关闭，之后的项目也保持关闭；重新勾选即可恢复。",
   blinkInstead: "改为手动闪视",
   screeningAutoDrop: "自动剔除",
   screeningSuspectTitle: "建议在闪视中看一下",
-  screeningSuspectHint: "自动筛片对这些通道拿不准。如需自己决定：取消勾选“自动筛片”，在闪视里看一遍，再重新处理。",
+  screeningSuspectHint: "自动筛片对这些通道拿不准。如需自己决定：取消勾选“自动筛片”，在闪视筛片里看一遍，再重新处理。",
   selectionCode_SEL_NIGHT_SKY_BRIGHT: "亮天夜，星点减少",
   selectionCode_SEL_PATCHY_CLOUD: "成片云",
   selectionCode_SEL_BACKGROUND_SHAPE: "背景形状随天空亮度改变",
@@ -1125,27 +1230,28 @@ const ZH: Record<MessageKey, string> = {
   selectionCode_SUSPECT_BLOCK_UNMEASURED: "可疑的一晚无法测量",
   selectionCode_NO_SKY_BASELINE: "没有干净的夜晚可对比天空亮度",
   selectionCode_SOFT_GUARD_KEPT: "部分帧只为凑足最少张数而保留",
-  unsolvedEvidenceHint: "本次尝试的收据、QC 预览与覆盖图保留在：",
-  runDescription: "只有解算并通过收据校验的结果才会完成；取消或失败不会发布半套成功。",
+  unsolvedEvidenceHint: "本次尝试的回执、QC 预览与覆盖图保留在：",
+  runDescription: "只有完成天文定位并通过回执校验的结果才会完成；取消或失败不会发布半套成功。",
   cancel: "安全取消",
   returnConfig: "返回导入",
   native: "原生",
   demo: "演示",
   resultDemo: "演示结果",
-  resultSolved: "最终门禁 · WCS 已解算",
+  resultSolved: "最终校验 · 天文定位完成",
   resultTitle: "每个最终通道都已写入天文坐标",
   resultDemoTitle: "这是结果页演示",
   resultBody: "每个最终单色/马赛克 FITS 都通过天文定位和内容校验；主要产品列在下方。",
-  resultDemoBody: "没有生成 Master，也没有天文解算。",
+  resultDemoBody: "没有生成主图，也没有做天文定位。",
   center: "中心坐标",
   pixelScale: "像元比例",
-  solveQuality: "解算质量",
-  demoNoWcs: "演示没有 WCS 收据。",
+  solveQuality: "天文定位质量",
+  demoNoWcs: "演示没有 WCS 回执。",
   products: "产品",
-  technicalDetails: "收据与技术细节",
+  technicalDetails: "回执与技术细节",
   startNew: "开始新项目",
   revealOutput: "显示输出：{name}",
-  showInFinder: "在 Finder 中显示 {name}",
+  showInFinder: "在访达中显示 {name}",
+  showInFolder: "在文件夹中显示 {name}",
   sourcesReadonly: "原始素材只读 · 结果只写新目录 · 决策可审计",
   legal: "法律信息",
   legalBody:
@@ -1166,30 +1272,34 @@ const ZH: Record<MessageKey, string> = {
   pixelUnitsHelp: "常规 FITS/XISF Master 保持自动；仅在明确知道文件采用其他像素比例时覆盖。",
   confirmAndBind: "保存修改",
   confirmedReview: "已保存",
-  qcPreflightFailed: "真实 Quality Gate 预检失败：{error}",
+  qcPreflightFailed: "真实质量门禁预检失败：{error}",
   sourceHashFailed: "无法生成内容绑定的单色声明：{error}",
-  finalGateFailed: "最终结果门禁未验证每个通道的 WCS。",
+  finalGateFailed: "最终校验未能为每个通道验证 WCS。",
   downloadVerifyFailed: "下载完成，但校验或配置失败：{error}",
   rawFramesTitle: "原始拍摄帧",
   masterReuseTitle: "复用已有 Master",
   masterReuseHint: "缺失字段只会建议，不会静默采纳。",
-  roleHintLight: "N.I.N.A. 拍摄的目标亮场",
+  roleHintLight: "N.I.N.A. 拍摄的目标 Light",
   roleHintFlat: "匹配滤镜、增益与光路",
   roleHintDark: "匹配曝光、温度与增益",
   roleHintBias: "匹配相机、增益与读出模式",
-  roleHintMasterFlat: "复用已验证的主平场",
+  roleHintMasterFlat: "复用已验证的 Master Flat",
   roleHintMasterDark: "必须声明是否包含 Bias",
   roleHintMasterBias: "用内容绑定元数据复用",
-  artifactSolvedMono: "已解算单色 FITS",
+  artifactSolvedMono: "已天文定位的单色 FITS",
   artifactLinearRgb: "线性 RGB FITS",
   artifactTiff: "16-bit TIFF",
   artifactPng: "16-bit PNG",
   artifactMonoPreview: "单色预览",
-  artifactReceipt: "处理收据",
+  artifactReceipt: "回执",
   artifactReport: "报告",
   artifactDrizzle: "Drizzle 数据",
-  artifactMaster: "母片",
+  artifactMaster: "主图",
   artifactPreview: "预览",
+  artifactDetailSolved: "已写入 WCS · RMS {rms}″ · 匹配 {stars} 颗星",
+  artifactDetailDisplayPreview: "16 位显示预览",
+  artifactDetailMonoPreview: "自动拉伸的单色预览",
+  artifactDetailReceipt: "项目总回执 · 内容已校验",
   browserOnlyError: "真实素材处理需要 Ultra-Fast WBPP 桌面应用；浏览器只提供显式界面演示。",
   browserSidecarMissing: "浏览器模式没有科学 sidecar",
   dialogFrames: "选择 N.I.N.A. 天文图像",
@@ -1218,15 +1328,14 @@ const ZH: Record<MessageKey, string> = {
   stageVerify: "最终校验",
   stagePublish: "发布与桌面校验",
   overallProjectProgress: "整项目总进度",
-  currentPanelProgress: "当前分组 {index}/{count} · {target} / {filter}",
+  currentPanelProgress: "面板 {index}/{count} · {target} / {filter}",
   projectFinalStages: "项目级处理阶段",
-  stageQuality: "Quality Gate",
+  stageQuality: "质量门禁",
   stageCalibration: "校准",
   stageRegistration: "星点配准",
-  stageLocalNormalization: "LocalNormalization",
   stageIntegration: "积分与像素拒绝",
   stageDrizzle: "Drizzle",
-  stageSolve: "逐通道天文解算",
+  stageSolve: "逐通道天文定位",
   stageMosaic: "马赛克验证",
   stageColor: "颜色与预览",
   stepBlink: "闪视筛片",
@@ -1295,7 +1404,7 @@ const ZH: Record<MessageKey, string> = {
   blinkMetricGradient: "梯度",
   blinkMetricScore: "评分",
   blinkMetricRank: "第 {rank} 名 · z {z}",
-  blinkMetricGate: "门禁",
+  blinkMetricGate: "质量门禁",
   blinkMetricNotes: "备注",
   blinkMetricFlags: "标记",
   blinkMetricNormalization: "归一化",
@@ -1313,7 +1422,8 @@ const ZH: Record<MessageKey, string> = {
   screeningUserDrop: "你已丢弃",
   screeningUserKeepOverride: "尽管有标记，你仍保留",
   blinkFlag_BLINK_SKY_BRIGHT: "天光偏亮",
-  blinkFlagHint_BLINK_SKY_BRIGHT: "天光相对本通道干净夜晚的水平偏高：月光或薄雾夜。只有同时星点偏少才默认丢弃。",
+  blinkFlagHint_BLINK_SKY_BRIGHT:
+    "天光相对本通道干净夜晚的水平偏高：月光或薄雾夜。请结合星点数量一起判断；最终由你决定。",
   blinkFlag_BLINK_SOURCES_LOW: "星点偏少",
   blinkFlagHint_BLINK_SOURCES_LOW: "检测到的星点相对本通道星点最多的帧偏少：薄雾、云或天光偏亮。",
   blinkFlag_BLINK_EXTINCTION: "消光",
@@ -1331,7 +1441,7 @@ const ZH: Record<MessageKey, string> = {
   blinkFlag_BLINK_FEW_STARS: "几乎没有星点",
   blinkFlagHint_BLINK_FEW_STARS: "检测到的星点少于 20 个。",
   blinkFlag_BLINK_TRAILING: "拖线",
-  blinkFlagHint_BLINK_TRAILING: "门禁发现连贯或碎片化的星点拖线。",
+  blinkFlagHint_BLINK_TRAILING: "质量门禁发现连贯或碎片化的星点拖线。",
   blinkFlag_BLINK_FOCUS: "对焦",
   blinkFlagHint_BLINK_FOCUS: "对焦或视宁度与当晚其他帧不同。",
   blinkFlag_BLINK_OBSTRUCTION: "遮挡",
@@ -1339,7 +1449,7 @@ const ZH: Record<MessageKey, string> = {
   blinkFlag_BLINK_CLOUD_PATCHY: "局部云",
   blinkFlagHint_BLINK_CLOUD_PATCHY: "视场内空间上不均匀的减光。",
   blinkFlag_BLINK_CLOUD_THICK: "厚云",
-  blinkFlagHint_BLINK_CLOUD_THICK: "同时出现多种独立的云迹象（门禁 HARD_FAIL）。",
+  blinkFlagHint_BLINK_CLOUD_THICK: "同时出现多种独立的云迹象（质量门禁 HARD_FAIL）。",
   blinkFlag_BLINK_FIELD_MISMATCH: "视场不符",
   blinkFlagHint_BLINK_FIELD_MISMATCH: "与公共视场重叠很小：拍错视场或偏移很大。",
   blinkFlag_BLINK_REGISTRATION_WEAK: "配准较弱",
@@ -1348,7 +1458,7 @@ const ZH: Record<MessageKey, string> = {
   blinkFlagHint_BLINK_NIGHT_OUTLIER: "背景或噪声与当晚其他帧明显不同。",
   blinkFlag_BLINK_UNMEASURABLE: "无法测量",
   blinkFlagHint_BLINK_UNMEASURABLE: "无法测量这一帧（身份、有限像素比例、近似常数图像或不是 Light）。",
-  blinkHumanReviewTitle: "处理前逐通道人工审片",
+  blinkHumanReviewTitle: "处理前在闪视筛片里确认每个通道",
   blinkHumanReviewHint: "算法标记仅供参考。看完每一帧，决定保留或丢弃，再确认这个通道。",
   blockerBlinkReview: "请先看完并确认每个通道，才能开始处理。",
   blinkViewedCount: "已看 {viewed}/{total}",
@@ -1397,13 +1507,30 @@ export function translateCurrent(key: MessageKey): string {
   return MESSAGES[language][key];
 }
 
+/** `?lang=zh-CN` or `?lang=en` picks the browser demo's language (documentation screenshots); never in the desktop app. */
+function requestedLanguage(): UiLanguage | undefined {
+  if ("__TAURI_INTERNALS__" in window) return undefined;
+  const value = new URLSearchParams(window.location.search).get("lang");
+  return value === "zh-CN" || value === "en" ? value : undefined;
+}
+
+/** The system's language, for a launch without a stored choice: any Chinese locale gives Simplified Chinese. */
+function systemLanguage(): UiLanguage {
+  const preferred = typeof navigator === "undefined" ? "" : (navigator.language ?? "");
+  return /^zh(?:$|[-_])/i.test(preferred) ? "zh-CN" : "en";
+}
+
 function storedLanguage(): UiLanguage {
   if (typeof window === "undefined") return "en";
+  const requested = requestedLanguage();
+  if (requested) return requested;
+  let stored: string | null = null;
   try {
-    return window.localStorage.getItem(STORAGE_KEY) === "zh-CN" ? "zh-CN" : "en";
+    stored = window.localStorage.getItem(STORAGE_KEY);
   } catch {
-    return "en";
+    // Without readable storage there is no stored choice.
   }
+  return stored === "zh-CN" || stored === "en" ? stored : systemLanguage();
 }
 
 export function useI18n() {

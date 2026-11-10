@@ -30,6 +30,7 @@ from lightframeqc.xisf import XISF
 
 from ..integrity import sha256_digest
 from ..platform import remove_file
+from .fits import atomic_publish_file
 from ..stacking.integration import CalibrationError, FitsFloatWriter
 
 
@@ -671,11 +672,7 @@ def convert_xisf_to_fits(
                     height=height,
                     tile_rows=policy.tile_rows,
                 )
-        try:
-            os.link(temporary, destination)
-        except FileExistsError as error:
-            raise CalibrationError("OUTPUT_EXISTS", "refusing to overwrite staging FITS", path=str(destination)) from error
-        remove_file(temporary, missing_ok=False)
+        atomic_publish_file(temporary, destination, what="staging FITS")
     finally:
         remove_file(temporary)
     after = _stat_identity(source)

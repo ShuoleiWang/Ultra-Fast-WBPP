@@ -16,7 +16,8 @@ use tauri::{AppHandle, Emitter, Runtime};
 
 use crate::platform::{self, ManagedChild};
 use crate::sidecar::{
-    command_output, discover_engine, sidecar_output, spawn_sidecar, EngineExecutable, LossyLines,
+    command_failure, command_output, discover_engine, engine_error, sidecar_output, spawn_sidecar,
+    EngineExecutable, LossyLines,
 };
 
 const PROGRESS_EVENT: &str = "ufwbpp://catalog-progress";
@@ -131,15 +132,7 @@ fn parse_catalog_doctor_output(output: std::process::Output) -> Result<serde_jso
     // ready. Its JSON is still the authoritative result for the setup UI.
     let not_ready = output.status.code() == Some(3);
     if !output.status.success() && !not_ready {
-        return Err(format!(
-            "sidecar catalog doctor failed ({}): {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-                .trim()
-                .chars()
-                .take(MAX_DIAGNOSTIC_BYTES)
-                .collect::<String>()
-        ));
+        return Err(command_failure("catalog doctor", &output));
     }
     let diagnosis = parse_json(&output.stdout, "catalog doctor")?;
     if not_ready && diagnosis.get("ok").and_then(serde_json::Value::as_bool) != Some(false) {
@@ -283,7 +276,9 @@ fn stream_progress<R: Runtime>(
                     }
                 }
             }
-            if diagnostics.len() < MAX_DIAGNOSTIC_BYTES {
+            // The engine's own error is its last line; it is kept whatever
+            // came before it.
+            if diagnostics.len() < MAX_DIAGNOSTIC_BYTES || engine_error(&line).is_some() {
                 diagnostics.push_str(&line);
                 diagnostics.push('\n');
             }
@@ -392,17 +387,22 @@ fn start_install_with<R: Runtime>(
             return;
         }
         if status.is_none_or(|status| !status.success()) {
+            let (code, message) = engine_error(&diagnostics).unwrap_or_else(|| {
+                (
+                    "CATALOG_INSTALL_FAILED".to_owned(),
+                    diagnostics
+                        .trim()
+                        .chars()
+                        .take(MAX_DIAGNOSTIC_BYTES)
+                        .collect(),
+                )
+            });
             emit_error(
                 &app_for_thread,
                 &job_for_thread,
                 &catalog_for_thread,
-                "CATALOG_INSTALL_FAILED",
-                diagnostics
-                    .trim()
-                    .chars()
-                    .take(MAX_DIAGNOSTIC_BYTES)
-                    .collect::<String>()
-                    .as_str(),
+                &code,
+                &message,
             );
             return;
         }
@@ -525,6 +525,20 @@ mod tests {
         ] {
             assert!(parse_catalog_doctor_output(doctor_output(3, invalid, b"")).is_err());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_doctor_failure_carries_the_engines_own_error() {
+        let failed = doctor_output(
+            2,
+            b"",
+            br#"{"error":{"code":"CATALOG_MANIFEST_INVALID","message":"manifest 4107 is not JSON"},"ok":false}"#,
+        );
+        assert_eq!(
+            parse_catalog_doctor_output(failed).unwrap_err(),
+            "CATALOG_MANIFEST_INVALID: manifest 4107 is not JSON"
+        );
     }
 
     #[test]
@@ -652,6 +666,68 @@ else:
         )
         .expect("completion JSON");
         assert_eq!(completion["catalogId"], "checked-set");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_install_reports_the_engines_own_code_and_message() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::mpsc;
+        use tauri::Listener;
+
+        let root = std::env::temp_dir().join(
+            crate::sidecar::new_public_identifier("catalog-failure-test").expect("temporary id"),
+        );
+        std::fs::create_dir(&root).expect("create test directory");
+        let script = root.join("failing-catalog-sidecar");
+        std::fs::write(
+            &script,
+            r###"#!/usr/bin/env python3
+import json, sys
+if sys.argv[1:3] == ["catalog", "list"]:
+    print(json.dumps({"schemaVersion":1,"catalogRoot":"/checked/catalog","catalogs":[{"catalogId":"checked-set","allowedDownloadOrigins":["https://provider.example"],"providerTerms":{"acceptanceId":"provider-terms-v1","requiresExplicitAcceptance":True}}]}), flush=True)
+elif sys.argv[1:3] == ["catalog", "install"]:
+    print(json.dumps({"event":"catalog-download","artifactId":"index-4108.fits","downloadedBytes":25,"sizeBytes":100}), file=sys.stderr, flush=True)
+    for line in range(400):
+        print(f"provider note {line}: " + "x" * 40, file=sys.stderr)
+    print(json.dumps({"ok":False,"error":{"code":"CATALOG_DOWNLOAD_FAILED","message":"index-4108.fits: the connection was reset"}}, separators=(",", ":")), file=sys.stderr, flush=True)
+    raise SystemExit(2)
+else:
+    raise SystemExit(2)
+"###,
+        )
+        .expect("write the failing sidecar");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let (error_sender, error_receiver) = mpsc::channel();
+        handle.listen(ERROR_EVENT, move |event| {
+            let _ = error_sender.send(event.payload().to_owned());
+        });
+        start_install_with(
+            handle,
+            Arc::new(CatalogRegistry::default()),
+            CatalogInstallRequest {
+                catalog_id: "checked-set".to_owned(),
+                accepted_terms_id: "provider-terms-v1".to_owned(),
+                field_of_view_degrees: None,
+            },
+            EngineExecutable { path: script },
+        )
+        .expect("start the failing install");
+        let error: serde_json::Value = serde_json::from_str(
+            &error_receiver
+                .recv_timeout(std::time::Duration::from_secs(20))
+                .expect("error event"),
+        )
+        .expect("error JSON");
+        assert_eq!(error["code"], "CATALOG_DOWNLOAD_FAILED");
+        assert_eq!(
+            error["message"],
+            "index-4108.fits: the connection was reset"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

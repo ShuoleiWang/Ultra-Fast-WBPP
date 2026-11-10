@@ -252,6 +252,49 @@ def test_post_commit_parent_fsync_failure_is_not_reported_as_uncommitted(
     assert result.receipt["publication"]["parentDirectoryFsync"] == "BEST_EFFORT_AFTER_COMMIT"
 
 
+def test_color_product_of_a_result_states_its_inputs_in_the_published_form(tmp_path: Path) -> None:
+    """With ``artifact_root`` the receipt is written as it is published: the
+    inputs by their place in the result, no host path and no file-system
+    identity, so the ``receiptId`` over it stays true in the published tree."""
+
+    from ufwbpp.integrity import canonical_json_document
+
+    root = tmp_path / "result"
+    root.mkdir()
+    channels = _channels(root)
+    request = ColorProductRequest(
+        red_path=str(channels["R"]),
+        green_path=str(channels["G"]),
+        blue_path=str(channels["B"]),
+        luminance_path=str(channels["L"]),
+        output_directory=str(root / "details" / "color"),
+        artifact_root=str(root),
+    )
+    result = build_color_product(request)
+    text = Path(result.receipt_path).read_text(encoding="utf-8")
+    receipt = json.loads(text)
+    assert [item["path"] for item in receipt["inputs"]] == [f"artifact/{name}.fits" for name in "RGBL"]
+    for item in receipt["inputs"]:
+        assert set(item) == {"channel", "observedFilter", "normalizedFilter", "path", "sha256", "sizeBytes"}
+        assert item["sha256"] == "sha256:" + _digest(root / Path(item["path"]).name)
+    assert str(tmp_path) not in text
+    core = {key: value for key, value in receipt.items() if key != "receiptId"}
+    assert receipt["receiptId"] == "sha256:" + hashlib.sha256(canonical_json_document(core)).hexdigest()
+
+    # Without it the receipt keeps the host identity the product was read with.
+    plain = build_color_product(replace(request, output_directory=str(tmp_path / "plain"), artifact_root=None))
+    assert {"mtimeNs", "device", "inode"} <= set(plain.receipt["inputs"][0])
+    assert Path(plain.receipt["inputs"][0]["path"]) == channels["R"].resolve()
+
+    # A channel that is not part of the result has no place to be named by.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    with pytest.raises(ColorProductError) as captured:
+        build_color_product(replace(request, output_directory=str(tmp_path / "refused"), artifact_root=str(elsewhere)))
+    assert captured.value.code == "CHANNEL_OUTSIDE_RESULT"
+    assert not (tmp_path / "refused").exists()
+
+
 def test_super_luminance_weights_channels_by_their_pixel_noise_and_keeps_the_reference(tmp_path: Path) -> None:
     """One field in L, R, G, B and Ha: the super luminance takes the
     broadband channels at weights scale^2 / noise^2, leaves out G (stars 30 %
@@ -323,3 +366,60 @@ def test_super_luminance_weights_channels_by_their_pixel_noise_and_keeps_the_ref
     assert float(np.median(residual[300:310, 40:])) == pytest.approx(0.0, abs=0.3)
     noise = 1.4826 * float(np.nanmedian(np.abs(residual - np.nanmedian(residual))))
     assert noise == pytest.approx(channels["l"][1] / record["effectiveGain"], rel=0.05)
+
+    # A star shape that cannot be measured is recorded as unmeasured (null,
+    # which a receipt can state; NaN it cannot) and its channel is left out.
+    import ufwbpp.products.super_luminance as super_luminance_module
+    from ufwbpp.integrity import canonical_json
+
+    stacked, moments = super_luminance_module._stacked_kernel, super_luminance_module._moments
+    unmeasurable: list[np.ndarray] = []
+
+    def stack(data: np.ndarray, *arguments: object) -> np.ndarray:
+        kernel = stacked(data, *arguments)
+        if abs(float(np.nanmedian(data)) - channels["b"][3]) < 10.0:
+            unmeasurable.append(kernel)
+        return kernel
+
+    def no_shape(kernel: np.ndarray, centre: tuple[float, float], radius: float) -> tuple[float, float, float]:
+        if any(kernel is item for item in unmeasurable):
+            return math.nan, math.nan, math.nan
+        return moments(kernel, centre, radius)
+
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(super_luminance_module, "_stacked_kernel", stack)
+        patched.setattr(super_luminance_module, "_moments", no_shape)
+        unmeasured = build_super_luminance(paths, "l", tmp_path / "SuperL-2.fits", filter_names={key: key.upper() for key in paths})
+    assert unmeasurable and unmeasured["status"] == "CREATED"
+    blue = unmeasured["channels"]["b"]
+    assert blue["included"] is False and blue["reason"] == "its star shapes could not be measured"
+    assert (blue["ellipticity"], blue["ellipticityExcess"], blue["starOffsetPixels"]) == (None, None, None)
+    assert blue["fwhmRatio"] == pytest.approx(1.0, abs=0.05)
+    assert fits.getheader(tmp_path / "SuperL-2.fits")["OAFSLCH"] == "L,R"
+    canonical_json(unmeasured)
+
+
+def test_super_luminance_that_raises_leaves_no_channel_memory_mapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An error keeps the failing call's frame alive in its traceback.  The
+    channels the super luminance read must not stay memory-mapped through
+    it: Windows refuses to rename a mapped file, and the project then moves
+    the tree that holds the channels to its evidence."""
+
+    import ufwbpp.products.super_luminance as super_luminance_module
+
+    paths = {}
+    for key in ("l", "r"):
+        paths[key] = tmp_path / f"{key.upper()}.fits"
+        fits.writeto(paths[key], np.ones((96, 96), dtype=np.float32), fits.Header({"FILTER": key.upper()}))
+
+    def failing(shape: tuple[int, int]) -> list[tuple[slice, slice]]:
+        raise RuntimeError("injected measurement failure")
+
+    monkeypatch.setattr(super_luminance_module, "_boxes", failing)
+    with pytest.raises(RuntimeError) as failure:
+        super_luminance_module.build_super_luminance(paths, "l", tmp_path / "SuperL.fits", filter_names={"l": "L", "r": "R"})
+    assert failure.traceback[-1].name == "failing"
+    for path in paths.values():
+        path.rename(path.with_suffix(".moved"))

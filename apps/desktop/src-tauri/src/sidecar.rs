@@ -523,6 +523,9 @@ struct InventoryIssue {
     code: String,
     severity: String,
     message: String,
+    /// The file the issue is about; absent for an issue about the whole set.
+    #[serde(default)]
+    path: Option<String>,
 }
 
 /// The part of the engine's `doctor --json` self-report the desktop needs.
@@ -691,21 +694,58 @@ pub(crate) fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
+/// The engine's own report of a failed command: the code and the message of
+/// the last diagnostics line that is `{"ok": false, "error": {"code",
+/// "message"}}`, or `None` when the engine wrote no such line (a crash, a
+/// traceback).  The message does not repeat the code and is bounded.
+pub(crate) fn engine_error(diagnostics: &str) -> Option<(String, String)> {
+    diagnostics.lines().rev().find_map(|line| {
+        let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+        if value.get("ok").and_then(serde_json::Value::as_bool) != Some(false) {
+            return None;
+        }
+        let error = value.get("error")?;
+        let code = error.get("code")?.as_str()?;
+        let message = error.get("message")?.as_str()?;
+        // The engine's codes have the form of its flag codes.
+        if !crate::project::checked_flag_code(code) {
+            return None;
+        }
+        let message = message
+            .strip_prefix(code)
+            .and_then(|rest| rest.strip_prefix(": "))
+            .unwrap_or(message);
+        Some((
+            code.to_owned(),
+            message.chars().take(MAX_DIAGNOSTIC_BYTES).collect(),
+        ))
+    })
+}
+
+/// A failed engine command as one line of text: the engine's own code and
+/// message when it reported them, else the exit status and its diagnostics.
+pub(crate) fn command_failure(operation: &str, output: &std::process::Output) -> String {
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    if let Some((code, message)) = engine_error(&diagnostic) {
+        return format!("{code}: {message}");
+    }
+    format!(
+        "sidecar {operation} failed ({}): {}",
+        output.status,
+        diagnostic
+            .trim()
+            .chars()
+            .take(MAX_DIAGNOSTIC_BYTES)
+            .collect::<String>()
+    )
+}
+
 pub(crate) fn command_output(mut command: Command, operation: &str) -> Result<Vec<u8>, String> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let output = sidecar_output(&mut command)
         .map_err(|error| format!("cannot launch sidecar for {operation}: {error}"))?;
     if !output.status.success() {
-        let diagnostic = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "sidecar {operation} failed ({}): {}",
-            output.status,
-            diagnostic
-                .trim()
-                .chars()
-                .take(MAX_DIAGNOSTIC_BYTES)
-                .collect::<String>()
-        ));
+        return Err(command_failure(operation, &output));
     }
     Ok(output.stdout)
 }

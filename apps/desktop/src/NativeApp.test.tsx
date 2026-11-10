@@ -127,11 +127,21 @@ const catalogListing = {
   ],
 };
 
+const NO_SOLVER_REASON = "the engine started, but no offline plate solver passed its self-check";
+
 vi.mock("./bridge", () => ({
   hasTauriRuntime: () => true,
   desktopBridge: {
     getCapabilities: vi.fn(async () => {
       native.capabilityCalls += 1;
+      // As the controller reports it: the engine is available only while a
+      // solver passes the science self-check, and says why when it is not.
+      const solverAvailable = native.solverReady || (native.astapReady && native.astapScienceReady);
+      const availability = {
+        available: solverAvailable,
+        solverAvailable,
+        ...(solverAvailable ? {} : { unavailableReason: NO_SOLVER_REASON }),
+      };
       if (native.platform === "windows")
         return {
           platform: "windows",
@@ -139,10 +149,9 @@ vi.mock("./bridge", () => ({
           cpuBackend: "Native CPU execution",
           gpuBackend: "GPU acceleration not used",
           optimizationTier: "WINDOWS_X64",
-          available: true,
           drizzleAvailable: true,
-          solverAvailable: true,
           runtimeVersion: "0.1.0",
+          ...availability,
         };
       return {
         platform: "macos",
@@ -150,10 +159,9 @@ vi.mock("./bridge", () => ({
         cpuBackend: "Native CPU execution",
         gpuBackend: "Metal execution",
         optimizationTier: "M3_PRO_TUNED",
-        available: true,
         drizzleAvailable: true,
-        solverAvailable: true,
         runtimeVersion: "0.1.0",
+        ...availability,
       };
     }),
     blinkMeasure: (...args: unknown[]) => native.blinkMeasure(...args),
@@ -505,7 +513,7 @@ describe("native product workflow", () => {
   it("keeps the retired LocalNormalization option out of the run", async () => {
     render(<App />);
     await reachRecipe();
-    await userEvent.click(screen.getByText("高级选项与 solver 设置"));
+    await userEvent.click(screen.getByText("高级选项与解算器设置"));
     expect(screen.queryByRole("checkbox", { name: /LocalNormalization/ })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
     await userEvent.click(screen.getByRole("button", { name: /开始处理/ }));
@@ -516,7 +524,7 @@ describe("native product workflow", () => {
   it("sends today's recipe unchanged while the advanced algorithms stay untouched", async () => {
     render(<App />);
     await reachRecipe();
-    await userEvent.click(screen.getByText("高级选项与 solver 设置"));
+    await userEvent.click(screen.getByText("高级选项与解算器设置"));
     expect(screen.getByRole("checkbox", { name: /Proper coaddition/ })).not.toBeChecked();
     // The super luminance is made by default, without a key in the recipe.
     expect(screen.getByRole("checkbox", { name: /SuperL/ })).toBeChecked();
@@ -540,7 +548,7 @@ describe("native product workflow", () => {
   it("adds only the proper-coaddition block when that extra product is opted into", async () => {
     render(<App />);
     await reachRecipe();
-    await userEvent.click(screen.getByText("高级选项与 solver 设置"));
+    await userEvent.click(screen.getByText("高级选项与解算器设置"));
     const properCoaddition = screen.getByRole("checkbox", { name: /Proper coaddition/ });
     // The extra product is not listed with the project's masters, so the hint
     // says where it is written.
@@ -560,7 +568,7 @@ describe("native product workflow", () => {
   it("turns the super luminance off only when its checkbox is cleared", async () => {
     render(<App />);
     await reachRecipe();
-    await userEvent.click(screen.getByText("高级选项与 solver 设置"));
+    await userEvent.click(screen.getByText("高级选项与解算器设置"));
     await userEvent.click(screen.getByRole("checkbox", { name: /SuperL/ }));
     await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
     await userEvent.click(screen.getByRole("button", { name: /开始处理/ }));
@@ -570,7 +578,7 @@ describe("native product workflow", () => {
   it("never sends proper coaddition together with drizzle, which the engine refuses", async () => {
     render(<App />);
     await reachRecipe();
-    await userEvent.click(screen.getByText("高级选项与 solver 设置"));
+    await userEvent.click(screen.getByText("高级选项与解算器设置"));
     await userEvent.click(screen.getByRole("checkbox", { name: /Proper coaddition/ }));
     await userEvent.click(screen.getByRole("checkbox", { name: /^Drizzle/ }));
     const properCoaddition = screen.getByRole("checkbox", { name: /Proper coaddition/ });
@@ -639,6 +647,30 @@ describe("native product workflow", () => {
     expect(screen.getByText("Flat filter does not match R")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
     expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
+  });
+
+  it("explains the engine's inventory warnings in the calibration check", async () => {
+    native.inspectCalibration.mockResolvedValue({
+      schemaVersion: 1,
+      status: "READY",
+      calibrationReady: true,
+      groups: [],
+      issues: [
+        [
+          "TARGET_NAMED_BY_FOLDER",
+          "2 Light(s) name no target; they are processed as target M31, the name of their folder",
+        ],
+        ["TARGET_UNNAMED", "1 Light(s) name no target; they are processed as one target, UNNAMED"],
+        ["BAYER_OFFSET_NOT_APPLIED", "1 frame(s) carry an odd XBAYROFF/YBAYROFF"],
+        ["DARK_EXPOSURE_DIFFERS", "no Dark of 180 s"],
+      ].map(([code, message]) => ({ code, severity: "WARNING", message, paths: [], lightGroups: [] })),
+    });
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
+    expect(await screen.findByText(/目标名取自它们所在的文件夹名/)).toBeInTheDocument();
+    expect(screen.getByText(/作为同一个目标 UNNAMED 一起处理/)).toBeInTheDocument();
+    expect(screen.getByText(/奇数的 Bayer 偏移/)).toBeInTheDocument();
+    expect(screen.getByText(/没有相同曝光的 Dark/)).toBeInTheDocument();
   });
 
   it("invalidates calibration readiness while a new check is pending or fails", async () => {
@@ -859,14 +891,14 @@ describe("native product workflow", () => {
         },
       }),
     );
-    expect(await screen.findByText(/最终门禁 · WCS 已解算/)).toBeInTheDocument();
+    expect(await screen.findByText(/最终校验 · 天文定位完成/)).toBeInTheDocument();
     const section = screen.getByRole("region", { name: "筛片结果" });
     expect(within(section).getByText("61 张进入叠加 · 2 张排除")).toBeInTheDocument();
     expect(within(section).getByText("亮场 07.fit")).toBeInTheDocument();
     expect(within(section).getByText("星点数量骤降; 背景升高")).toBeInTheDocument();
     expect(within(section).getByRole("img", { name: "亮场 07.fit 的复核预览" })).toHaveAttribute("src", preview);
     expect(within(section).getByText("trail")).toBeInTheDocument();
-    expect(within(section).getByText(/如需调整入栈选择/)).toBeInTheDocument();
+    expect(within(section).getByText(/如需调整叠加哪些帧/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "显示输出：盾牌座-Panel-1_2026-09-19_0010" })).toBeEnabled();
   });
 
@@ -897,7 +929,7 @@ describe("native product workflow", () => {
         ]),
       }),
     );
-    expect(screen.queryByText(/最终门禁 · WCS 已解算/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/最终校验 · 天文定位完成/)).not.toBeInTheDocument();
     await act(async () =>
       native.handlers?.onComplete({
         jobId: "run-native-1",
@@ -932,11 +964,11 @@ describe("native product workflow", () => {
         gate: { decision: "ready", checks: readyChecks },
       }),
     );
-    expect(await screen.findByText(/最终门禁 · WCS 已解算/)).toBeInTheDocument();
+    expect(await screen.findByText(/最终校验 · 天文定位完成/)).toBeInTheDocument();
     expect(screen.getByText("线性 RGB FITS")).toBeInTheDocument();
     expect(screen.getByText("16-bit TIFF")).toBeInTheDocument();
-    expect(screen.getByText("处理收据")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "在 Finder 中显示 盾牌座_R_mosaic.fits" }));
+    expect(screen.getByText("回执")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "在访达中显示 盾牌座_R_mosaic.fits" }));
     expect(native.revealOutput).toHaveBeenCalledWith(solvedArtifact.path);
   });
 
@@ -959,7 +991,7 @@ describe("native product workflow", () => {
     };
     await act(async () => native.handlers?.onProgress(event));
     expect(screen.getByLabelText("22%")).toBeInTheDocument();
-    expect(screen.getByText(/当前分组 1\/4 · Cartwheel \/ B/)).toBeInTheDocument();
+    expect(screen.getByText(/面板 1\/4 · Cartwheel \/ B/)).toBeInTheDocument();
     await act(async () =>
       native.handlers?.onProgress({
         ...event,
@@ -973,8 +1005,8 @@ describe("native product workflow", () => {
       }),
     );
     expect(screen.getByLabelText("22%")).toBeInTheDocument();
-    expect(screen.getByText(/当前分组 2\/4 · Cartwheel \/ G/)).toBeInTheDocument();
-    expect(screen.getByText("逐通道天文解算").closest("li")).toHaveClass("waiting");
+    expect(screen.getByText(/面板 2\/4 · Cartwheel \/ G/)).toBeInTheDocument();
+    expect(screen.getByText("逐通道天文定位").closest("li")).toHaveClass("waiting");
     await act(async () =>
       native.handlers?.onProgress({
         ...event,
@@ -992,7 +1024,7 @@ describe("native product workflow", () => {
       native.handlers?.onProgress({ ...event, scope: "project", stageId: "publish", overallFraction: 1 }),
     );
     expect(screen.getByLabelText("99%")).toBeInTheDocument();
-    expect(screen.queryByText(/最终门禁 · WCS 已解算/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/最终校验 · 天文定位完成/)).not.toBeInTheDocument();
     await act(async () => native.handlers?.onProgress({ ...event, overallFraction: 0.1 }));
     expect(screen.getByLabelText("99%")).toBeInTheDocument();
     await act(async () =>
@@ -1003,7 +1035,7 @@ describe("native product workflow", () => {
         gate: { decision: "ready", checks: readyChecks },
       }),
     );
-    expect(await screen.findByText(/最终门禁 · WCS 已解算/)).toBeInTheDocument();
+    expect(await screen.findByText(/最终校验 · 天文定位完成/)).toBeInTheDocument();
   });
 
   it("cancels the native process and never fabricates a result", async () => {
@@ -1012,7 +1044,7 @@ describe("native product workflow", () => {
     await userEvent.click(screen.getByRole("button", { name: "安全取消" }));
     expect(native.cancelRun).toHaveBeenCalledWith("run-native-1");
     expect(await screen.findByRole("heading", { name: "运行已安全取消" })).toBeInTheDocument();
-    expect(screen.queryByText(/最终门禁 · WCS 已解算/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/最终校验 · 天文定位完成/)).not.toBeInTheDocument();
   });
 
   it("admits Bayer/OSC Lights and explains the colour channel processing", async () => {
@@ -1020,7 +1052,7 @@ describe("native product workflow", () => {
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
     await userEvent.click(await screen.findByRole("button", { name: /先看筛片结果（1 张 Light/ }));
-    expect(screen.getByText("彩色相机（Bayer）亮场")).toBeInTheDocument();
+    expect(screen.getByText("彩色相机（Bayer）Light")).toBeInTheDocument();
     expect(screen.getByText(/RGGB Bayer 图案/)).toBeInTheDocument();
     expect(screen.queryByText(/无法识别的 CFA 图案/)).not.toBeInTheDocument();
   });
@@ -1170,7 +1202,7 @@ describe("native product workflow", () => {
     await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
     await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
     expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
-    expect(screen.getByText("处理前逐通道人工审片")).toBeInTheDocument();
+    expect(screen.getByText("处理前在闪视筛片里确认每个通道")).toBeInTheDocument();
     expect(native.inspectQuality).not.toHaveBeenCalled();
     expect(native.startRun).not.toHaveBeenCalled();
   });
@@ -1313,7 +1345,7 @@ describe("automatic screening", () => {
     });
     try {
       await importLights();
-      await userEvent.click(screen.getByText("高级选项与 solver 设置"));
+      await userEvent.click(screen.getByText("高级选项与解算器设置"));
       const title = await screen.findByText("Gaia DR2 分块星表（可选，马赛克推荐）");
       const card = title.closest(".catalog-install") as HTMLElement;
       const download = within(card).getByRole("button", { name: /下载/ });
@@ -1455,7 +1487,7 @@ describe("result previews", () => {
         gate: { decision: "ready", checks: readyChecks },
       }),
     );
-    expect(await screen.findByText(/最终门禁 · WCS 已解算/)).toBeInTheDocument();
+    expect(await screen.findByText(/最终校验 · 天文定位完成/)).toBeInTheDocument();
     expect(document.querySelector(".result-hero-image")).toHaveAttribute("src", monoPreview);
     const cards = [...document.querySelectorAll(".card")];
     expect(cards).toHaveLength(2);
@@ -1485,7 +1517,7 @@ describe("result previews", () => {
         gate: { decision: "ready", checks: readyChecks },
       }),
     );
-    expect(await screen.findByText(/最终门禁 · WCS 已解算/)).toBeInTheDocument();
+    expect(await screen.findByText(/最终校验 · 天文定位完成/)).toBeInTheDocument();
     expect(document.querySelector(".result-hero-image")).toBeNull();
     expect(document.querySelector(".card .shot img")).toBeNull();
   });
@@ -1550,7 +1582,7 @@ describe("native run elapsed time", () => {
       native.handlers?.onError({ jobId: "run-native-1", code: "LATE_ERROR", message: "late", retryable: false }),
     );
     expect(elapsed()).toHaveTextContent("01:01:03");
-    expect(screen.getByText(/最终门禁 · WCS 已解算/)).toBeInTheDocument();
+    expect(screen.getByText(/最终校验 · 天文定位完成/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "开始新项目" }));
     expect(screen.queryByRole("timer")).not.toBeInTheDocument();
     await reachRecipe();
@@ -1633,7 +1665,7 @@ describe("native run elapsed time", () => {
         native.handlers?.onComplete({ ...completion(), gate: { decision: "blocked", checks: [] } });
       else finishLaunch();
     });
-    expect(screen.getByRole("heading", { name: "运行已失败关闭" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "运行失败" })).toBeInTheDocument();
     expect(screen.getByRole("timer", { name: "总用时" })).toHaveTextContent("00:00:02");
     await advance(10_000);
     expect(elapsed()).toHaveTextContent("00:00:02");
@@ -1668,8 +1700,8 @@ describe("native run elapsed time", () => {
       await advance(10_000);
       await act(async () => native.handlers?.onComplete(completion()));
       expect(elapsed()).toHaveTextContent(total);
-      if (cancelFails) expect(screen.getByText(/最终门禁 · WCS 已解算/)).toBeInTheDocument();
-      else expect(screen.queryByText(/最终门禁 · WCS 已解算/)).not.toBeInTheDocument();
+      if (cancelFails) expect(screen.getByText(/最终校验 · 天文定位完成/)).toBeInTheDocument();
+      else expect(screen.queryByText(/最终校验 · 天文定位完成/)).not.toBeInTheDocument();
     },
   );
 
@@ -1715,7 +1747,7 @@ describe("native run elapsed time", () => {
     await act(async () => native.handlers?.onComplete(completion()));
     await advance(2_000);
     await act(async () => rejectCancel());
-    expect(screen.getByRole("heading", { name: "运行已失败关闭" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "运行失败" })).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("PROCESS_FAILED: worker failed");
     await advance(10_000);
     expect(screen.getByRole("timer", { name: "总用时" })).toHaveTextContent("00:00:04");
@@ -1748,7 +1780,7 @@ describe("native run failure", () => {
         retryable: false,
       }),
     );
-    expect(screen.getByRole("heading", { name: "运行已失败关闭" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "运行失败" })).toBeInTheDocument();
     // No stage keeps spinning; the stage that was running is marked failed and the earlier ones keep their state.
     expect(document.querySelector(".stage-list .spin")).toBeNull();
     expect(screen.getByText("发布与桌面校验").closest("li")).toHaveClass("failed");
@@ -1760,7 +1792,7 @@ describe("native run failure", () => {
     expect(card).toHaveTextContent(
       "ASTROMETRY_REQUIRED: one or more filters did not produce a verified new WCS solution",
     );
-    expect(card).toHaveTextContent("解算失败时不会保留积分后的 master");
+    expect(card).toHaveTextContent("天文定位失败时不会保留叠加后的主图");
     expect(card).toHaveTextContent("/结果/深空 输出/ultra-fast-wbpp-run.unsolved");
     expect(screen.getByRole("button", { name: "返回导入" })).toHaveClass("primary");
   });
@@ -1777,8 +1809,85 @@ describe("native run failure", () => {
       }),
     );
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "Gaia DR2 分块星表（astrometry-net-5205-lite）足够密：请在“高级选项与 solver 设置”里安装",
+      "Gaia DR2 分块星表（astrometry-net-5205-lite）足够密：请在“高级选项与解算器设置”里安装",
     );
+  });
+});
+
+describe("native failure explanations", () => {
+  const fail = (code: string, message: string, details?: Record<string, unknown>) =>
+    act(async () =>
+      native.handlers?.onError({
+        jobId: "run-native-1",
+        code,
+        message,
+        retryable: false,
+        ...(details ? { details } : {}),
+      }),
+    );
+
+  it("never says nothing was published when the output folder was written", async () => {
+    render(<App />);
+    await reachRun();
+    await fail("PROJECT_RESULT_GATE_BLOCKED", "receipt hash mismatch", { outputPublished: true });
+    const card = screen.getByRole("alert");
+    expect(card).toHaveTextContent("运行失败：输出文件夹已写入，但结果未通过桌面校验");
+    expect(card).not.toHaveTextContent("未发布任何产品");
+    expect(card).toHaveTextContent("PROJECT_RESULT_GATE_BLOCKED: receipt hash mismatch");
+    expect(card).toHaveTextContent("文件仍保留在输出文件夹中");
+    expect(card).not.toHaveTextContent(".unsolved");
+  });
+
+  it("points at the evidence folder only when the controller reports one", async () => {
+    render(<App />);
+    await reachRun();
+    await fail("ASTROMETRY_REQUIRED", "no verified WCS", {
+      outputPublished: false,
+      evidenceDirectory: "/结果/深空 输出/ultra-fast-wbpp-run.unsolved",
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("保留在： /结果/深空 输出/ultra-fast-wbpp-run.unsolved");
+    expect(screen.getByRole("alert")).toHaveTextContent("运行失败 —— 未发布任何产品");
+  });
+
+  it.each([
+    ["OUTPUT_PATH_TOO_LONG", "the run would create paths of up to 290 characters", "请选择路径更短的输出文件夹"],
+    ["SOLVER_UNAVAILABLE", "no execution-ready offline solver is available", "没有找到可用的解算器"],
+    ["NO_FLATS", "raw Flats or supplied MasterFlats are required", "这个项目没有平场"],
+    ["OUTPUT_EXISTS", "refusing to replace output directory", "输出文件夹已存在"],
+    ["IO_ERROR", "[Errno 28] No space left on device", "输出磁盘已满"],
+    ["PLAN_NOT_EXECUTION_READY", "Flat filter does not match R", "项目还不能处理"],
+  ])("explains %s before any stage ran, with the code and the engine's text beside it", async (code, message, hint) => {
+    render(<App />);
+    await reachRun();
+    await fail(code, message, { outputPublished: false });
+    const card = screen.getByRole("alert");
+    expect(card).toHaveTextContent(hint);
+    expect(card).toHaveTextContent(`${code}: ${message}`);
+    expect(card).toHaveTextContent("在第一个阶段汇报前停止");
+    expect(card).not.toHaveTextContent("保留在");
+    expect(card.querySelectorAll(".run-failure-code")).toHaveLength(1);
+  });
+
+  it("falls back to the engine's message for an unknown code", async () => {
+    render(<App />);
+    await reachRun();
+    await fail("SOMETHING_NEW", "a sentence only the engine knows", { outputPublished: false });
+    const card = screen.getByRole("alert");
+    expect(card).toHaveTextContent("SOMETHING_NEW: a sentence only the engine knows");
+    expect(card.querySelector(".run-failure-action")).toBeNull();
+  });
+
+  it("explains an import the controller refused and keeps its own text", async () => {
+    native.inspectPaths.mockRejectedValueOnce(
+      new Error(
+        "inventory contains blocking frame errors: FITS_HEADER_ERROR: No SIMPLE card found (/数据/盾牌座/._L_0001.fits)",
+      ),
+    );
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("导入被拒绝：有文件无法作为天文帧读取");
+    expect(alert).toHaveTextContent("FITS_HEADER_ERROR: No SIMPLE card found (/数据/盾牌座/._L_0001.fits)");
   });
 });
 
@@ -1836,5 +1945,226 @@ describe("explicit catalog setup", () => {
     );
     await waitFor(() => expect(native.verifyCatalog).toHaveBeenCalledWith("astrometry-net-4107-4112", true));
     expect(await screen.findByText("离线星表已校验并配置")).toBeInTheDocument();
+  });
+});
+
+describe("solver setup recheck", () => {
+  it("Start enables after recheck when the engine was unavailable only for lack of a solver", async () => {
+    native.solverReady = false;
+    render(<App />);
+    await reachRecipe();
+    await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
+    expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
+    // The controller's reason is listed behind a localised label, beside the solver blocker.
+    expect(screen.getByText(`处理引擎未就绪：${NO_SOLVER_REASON}`)).toBeInTheDocument();
+    expect(screen.getByText("安装解算器（solve-field 或 ASTAP）和已校验离线星表。")).toBeInTheDocument();
+    expect(document.querySelector(".runtime-dot")).not.toHaveClass("online");
+    expect(native.capabilityCalls).toBe(1);
+    // The user installs the solver and rechecks: no relaunch is needed.
+    native.solverReady = true;
+    await userEvent.click(screen.getByRole("button", { name: "重新检测配置" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled());
+    expect(native.capabilityCalls).toBe(2);
+    expect(screen.queryByText(/处理引擎未就绪/)).not.toBeInTheDocument();
+    expect(document.querySelector(".runtime-dot")).toHaveClass("online");
+    await userEvent.click(screen.getByRole("button", { name: /开始处理/ }));
+    expect(native.startRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the engine's capabilities again once a catalog install is verified", async () => {
+    native.platform = "windows";
+    native.solverReady = false;
+    native.astapReady = true;
+    native.catalogReady = false;
+    // The engine reports its solver science-ready only once the verified catalog exists.
+    native.verifyCatalog.mockImplementationOnce(async () => {
+      native.catalogReady = true;
+      native.astapScienceReady = true;
+      return { schemaVersion: 1, ok: true };
+    });
+    render(<App />);
+    await reachRecipe();
+    await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
+    expect(screen.getByRole("button", { name: /开始处理/ })).toBeDisabled();
+    expect(native.capabilityCalls).toBe(1);
+    await userEvent.click(screen.getByLabelText(/我已阅读提供方说明/));
+    await userEvent.click(screen.getByRole("button", { name: /下载并校验/ }));
+    await act(async () =>
+      native.catalogHandlers?.onComplete({
+        jobId: "catalog-1",
+        catalogId: "astrometry-net-4107-4112",
+        install: { schemaVersion: 1 },
+      }),
+    );
+    expect(await screen.findByText("离线星表已校验并配置")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled());
+    expect(native.capabilityCalls).toBe(2);
+  });
+});
+
+describe("imports that overlap or follow each other", () => {
+  const split = () => {
+    native.lightCount = 2;
+    const lights = inventory();
+    lights.assets = lights.assets.filter((asset) => asset.role === "LIGHT");
+    lights.sources = lights.sources.filter((source) => source.role === "LIGHT");
+    const calibration = inventory();
+    calibration.projectName = "校准库";
+    calibration.assets = calibration.assets.filter((asset) => asset.role !== "LIGHT");
+    calibration.sources = calibration.sources.filter((source) => source.role !== "LIGHT");
+    return { lights, calibration };
+  };
+  const title = () => document.querySelector(".doc-title");
+
+  it("imports a drop made while the previous import is still being read", async () => {
+    const { lights, calibration } = split();
+    let finishLights!: (value: typeof lights) => void;
+    native.inspectPaths
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishLights = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(calibration);
+    render(<App />);
+    await waitFor(() => expect(native.dropHandler).toBeTypeOf("function"));
+    await act(async () => native.dropHandler?.(["/数据/盾牌座"]));
+    await act(async () => native.dropHandler?.(["/数据/校准库"]));
+    expect(native.inspectPaths).toHaveBeenCalledTimes(1);
+    await act(async () => finishLights(lights));
+    await waitFor(() => expect(native.inspectPaths).toHaveBeenCalledTimes(2));
+    expect(native.inspectPaths).toHaveBeenNthCalledWith(2, { paths: ["/数据/校准库"] });
+    // Both drops are in the project, which keeps the name of the import that brought the Lights.
+    expect(await screen.findByRole("tab", { name: "Flat 1" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Light 2" })).toBeInTheDocument();
+    expect(title()).toHaveTextContent("盾牌座 马赛克");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("reports a queued drop that fails and keeps the import before it", async () => {
+    const { lights } = split();
+    let finishLights!: (value: typeof lights) => void;
+    native.inspectPaths
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishLights = resolve;
+          }),
+      )
+      .mockRejectedValueOnce(new Error("HEADER_CONFLICT: role mismatch"));
+    render(<App />);
+    await waitFor(() => expect(native.dropHandler).toBeTypeOf("function"));
+    await act(async () => native.dropHandler?.(["/数据/盾牌座"]));
+    await act(async () => native.dropHandler?.(["/数据/损坏"]));
+    await act(async () => finishLights(lights));
+    expect(await screen.findByText(/HEADER_CONFLICT/)).toBeInTheDocument();
+    expect(native.inspectPaths).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("tab", { name: "Light 2" })).toBeInTheDocument();
+  });
+
+  it("keeps the project name of the Lights when a calibration library is imported afterwards", async () => {
+    const { lights, calibration } = split();
+    native.inspectPaths.mockResolvedValueOnce(lights).mockResolvedValueOnce(calibration);
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
+    await waitFor(() => expect(title()).toHaveTextContent("盾牌座 马赛克"));
+    await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
+    await screen.findByRole("tab", { name: "Flat 1" });
+    expect(title()).toHaveTextContent("盾牌座 马赛克");
+  });
+
+  it("names the project after the Lights when the calibration library came first, and anew after a clear", async () => {
+    const { lights, calibration } = split();
+    native.inspectPaths.mockResolvedValueOnce(calibration).mockResolvedValueOnce(lights);
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
+    await waitFor(() => expect(title()).toHaveTextContent("校准库"));
+    await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
+    await waitFor(() => expect(title()).toHaveTextContent("盾牌座 马赛克"));
+    await userEvent.click(screen.getByRole("button", { name: "清空" }));
+    native.inspectPaths.mockResolvedValueOnce({ ...calibration, projectName: "另一个校准库" });
+    await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
+    await waitFor(() => expect(title()).toHaveTextContent("另一个校准库"));
+  });
+});
+
+describe("screening wording follows the screening mode", () => {
+  const importAutomatic = async () => {
+    window.localStorage.removeItem("ultra-fast-wbpp.automaticScreening");
+    native.lightCount = 2;
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
+    await waitFor(() => expect(native.inspectCalibration).toHaveBeenCalled());
+    await userEvent.click(screen.getByRole("button", { name: "选择输出文件夹" }));
+  };
+  const complete = (screening: object) =>
+    act(async () =>
+      native.handlers?.onComplete({
+        jobId: "run-native-1",
+        outputDirectory: "/结果/深空 输出/盾牌座-Panel-1_2026-11-10_0010",
+        artifacts: [solvedArtifact],
+        gate: { decision: "ready", checks: readyChecks },
+        screening: screening as never,
+      }),
+    );
+
+  it("asks for no Blink review while automatic screening is on and lists no retired option", async () => {
+    window.localStorage.removeItem("ultra-fast-wbpp.automaticScreening");
+    render(<App />);
+    expect(screen.getByText(/默认自动筛片，也可以改为在闪视筛片里逐张自己决定/)).toBeInTheDocument();
+    native.lightCount = 2;
+    await userEvent.click(screen.getByRole("button", { name: /选择文件夹$/ }));
+    await waitFor(() => expect(native.inspectCalibration).toHaveBeenCalled());
+    expect(screen.getByRole("checkbox", { name: "自动筛片" })).toBeChecked();
+    expect(screen.queryByText(/处理前在闪视筛片里确认每个通道/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/处理前需完成/)).not.toBeInTheDocument();
+    expect(screen.getByText(/这张测量结果表是可选的/)).toBeInTheDocument();
+    expect(screen.getByText(/哪些帧进入叠加由自动筛片决定/)).toBeInTheDocument();
+    const advanced = screen.getByText("高级选项与解算器设置").closest("summary")!;
+    expect(advanced).toHaveTextContent("SuperL · Drizzle · WCS");
+    expect(advanced).not.toHaveTextContent("LN");
+  });
+
+  it("says that leaving automatic screening is remembered for later projects", async () => {
+    await importAutomatic();
+    expect(screen.getByText(/这个选择会被记住，之后的项目也沿用/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("checkbox", { name: "自动筛片" }));
+    expect(screen.getByText("自动筛片已关闭，之后的项目也保持关闭；重新勾选即可恢复。")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("checkbox", { name: "自动筛片" }));
+    expect(screen.queryByText(/自动筛片已关闭/)).not.toBeInTheDocument();
+  });
+
+  it("labels a marked frame that automatic screening kept as kept, not approved, and describes products in the interface language", async () => {
+    await importAutomatic();
+    await waitFor(() => expect(screen.getByRole("button", { name: /开始处理/ })).toBeEnabled());
+    await userEvent.click(screen.getByRole("button", { name: /开始处理/ }));
+    await screen.findByRole("heading", { name: "正在生成验证后的产品" });
+    await complete({
+      admitted: 2,
+      excluded: 0,
+      counts: { PASS: 1, REVIEW: 1 },
+      policy: "unattended-v2",
+      frames: [{ name: "亮场 02.fit", disposition: "REVIEW", admitted: true, summary: "thin cloud", evidence: [] }],
+    });
+    const section = await screen.findByRole("region", { name: "筛片结果" });
+    expect(within(section).getByText("自动筛片保留")).toBeInTheDocument();
+    expect(within(section).queryByText(/已批准/)).not.toBeInTheDocument();
+    // The card and the product row are written from the solve evidence, not from the controller's English text.
+    expect(screen.getAllByText(/已写入 WCS · RMS 0\.420″ · 匹配 73 颗星/)).toHaveLength(2);
+    expect(screen.queryByText(/final WCS/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the approved label for a marked frame admitted without the automatic policy", async () => {
+    render(<App />);
+    await reachRunAfterBlink();
+    await complete({
+      admitted: 2,
+      excluded: 0,
+      counts: { PASS: 1, REVIEW: 1 },
+      frames: [{ name: "亮场 02.fit", disposition: "REVIEW", admitted: true, summary: "thin cloud", evidence: [] }],
+    });
+    const section = await screen.findByRole("region", { name: "筛片结果" });
+    expect(within(section).getByText("REVIEW · 已批准")).toBeInTheDocument();
   });
 });

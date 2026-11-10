@@ -37,7 +37,7 @@ from astropy.io import fits
 import numpy as np
 from numpy.typing import NDArray
 
-from ..image_io.fits import plain_header_value
+from ..image_io.fits import atomic_publish_file, plain_header_value
 from ..integrity import canonical_json
 from ..native_kernels import (
     DRIZZLE_KERNEL_ID,
@@ -511,9 +511,9 @@ def drizzle_group(request: DrizzleGroupRequest) -> DrizzleGroupResult:
             stream.flush()
             if request.durable:
                 os.fsync(stream.fileno())
-        os.link(staged_output, output_path)
+        atomic_publish_file(staged_output, output_path, what="drizzle product")
         try:
-            os.link(staged_receipt, receipt_path)
+            atomic_publish_file(staged_receipt, receipt_path, what="drizzle receipt")
         except Exception:
             remove_file(output_path)
             raise

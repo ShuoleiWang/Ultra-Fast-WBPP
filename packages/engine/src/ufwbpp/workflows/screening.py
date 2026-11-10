@@ -309,13 +309,14 @@ def _inferred_solver_hints(
             coordinate_evidence["consistency"] = "CONSISTENT"
             coordinate_evidence["selection"] = "explicit"
         else:
-            # Conflicting pointing hints are never allowed to lock the solver.
-            # A consensus from the actual acquired frames is a better seed; the
-            # astrometry.net adapter still has an unconstrained fallback.
-            ra, dec = metadata_center
-            provenance = "NINA/FITS-header;conflicting-explicit-coordinate-ignored"
+            # The coordinates the user states win over the header: a header
+            # may carry a parked mount's or another unit's pointing, and the
+            # user has no other way to correct it. The conflict is recorded.
+            ra = request.ra_hint_degrees
+            dec = request.dec_hint_degrees
+            provenance = "explicit;conflicting-NINA/FITS-header-ignored"
             coordinate_evidence["consistency"] = "CONFLICT"
-            coordinate_evidence["selection"] = "metadata-consensus"
+            coordinate_evidence["selection"] = "explicit"
     elif explicit_coordinates:
         ra = request.ra_hint_degrees
         dec = request.dec_hint_degrees

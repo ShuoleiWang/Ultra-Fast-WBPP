@@ -63,12 +63,29 @@ def _set_xisf_image_type(path: Path, image_type: str) -> None:
         ("Bias", FrameRole.BIAS),
         ("Master Bias", FrameRole.MASTER_BIAS),
         ("Master Light", FrameRole.MASTER_LIGHT),
+        # MaxIm DL and INDI/Ekos; SBIG's FITS extensions; N.I.N.A.; ASIAIR; IRAF; PixInsight.
+        ("Light Frame", FrameRole.LIGHT),
+        ("Dark Frame", FrameRole.DARK),
+        ("Bias Frame", FrameRole.BIAS),
+        ("Flat Frame", FrameRole.RAW_FLAT),
+        ("Flat Field", FrameRole.RAW_FLAT),
+        ("Flat-Field", FrameRole.RAW_FLAT),
+        ("DARKFLAT", FrameRole.DARK),
+        ("light", FrameRole.LIGHT),
+        ("object", FrameRole.LIGHT),
+        ("zero", FrameRole.BIAS),
+        ("Science", FrameRole.LIGHT),
+        ("Sky Flat", FrameRole.RAW_FLAT),
+        ("Master Dark Flat", FrameRole.MASTER_DARK),
+        # Not a calibration role: never taken for a Light.
+        ("SNAPSHOT", FrameRole.UNKNOWN),
+        ("Tricolor Image", FrameRole.UNKNOWN),
     ],
 )
 def test_fits_header_only_probe_resolves_roles_and_acquisition_identity(
     tmp_path: Path, image_type: str, expected: FrameRole
 ) -> None:
-    source = tmp_path / f"{expected.value}.fits"
+    source = tmp_path / "frame.fits"
     _write_fits(source, image_type)
 
     metadata = probe_frame_metadata(source)
@@ -227,3 +244,74 @@ def test_measurement_binds_identity_and_rejects_mid_measurement_stat_change(
     with pytest.raises(FrameMeasurementError) as raised:
         measure_frame(source, config=DEFAULT_CONFIG)
     assert raised.value.code == "FILE_CHANGED_DURING_MEASUREMENT"
+
+
+def test_a_frame_of_no_stated_type_is_a_light_for_every_reader(tmp_path: Path) -> None:
+    source = tmp_path / "M31" / "2026-03-22" / "img_000.fits"
+    source.parent.mkdir(parents=True)
+    _write_fits(source, "LIGHT")
+    with fits.open(source, mode="update") as hdul:
+        del hdul[0].header["IMAGETYP"]
+
+    metadata = probe_frame_metadata(source)
+
+    assert metadata.role is FrameRole.LIGHT
+    assert metadata.role_evidence == ["DEFAULT=LIGHT"]
+
+
+def _probe_header(tmp_path: Path, cards: list[tuple[str, object, str]]) -> object:
+    source = tmp_path / "pointing.fits"
+    hdu = fits.PrimaryHDU(np.zeros((8, 8), dtype=np.uint16))
+    hdu.header["IMAGETYP"] = "LIGHT"
+    for key, value, comment in cards:
+        hdu.header[key] = (value, comment)
+    hdu.writeto(source)
+    return probe_frame_metadata(source)
+
+
+@pytest.mark.parametrize(
+    ("cards", "expected"),
+    [
+        # N.I.N.A.: sexagesimal hours in OBJCTRA, the telescope's RA in degrees.
+        ([("OBJCTRA", "00 42 44", "[H M S] RA of imaged object"), ("RA", 10.6847, "[deg] RA of telescope")], 10.68333),
+        # Decimal degrees below 24 are degrees, not hours (M31 is at 10.68 deg).
+        ([("RA", 10.6847, "")], 10.6847),
+        ([("CRVAL1", 10.6847, ""), ("CTYPE1", "RA---TAN", "")], 10.6847),
+        ([("RA", 23.46, "")], 23.46),
+        # Sexagesimal text is hours; a comment or the WCS can say a number is hours.
+        ([("RA", "00 42 44.3", "")], 10.68458),
+        ([("OBJCTRA", "00h42m44s", "")], 10.68333),
+        ([("RA", 0.7123, "[h] telescope right ascension")], 10.6845),
+        ([("RA", 0.7123, ""), ("CRVAL1", 10.6845, ""), ("CTYPE1", "RA---TAN", "")], 10.6845),
+        ([("OBJCTRA", 0.7123, ""), ("RA", 10.6845, "")], 10.6845),
+        # Nothing says what a plain number in OBJCTRA is, or what CRVAL1 measures: no seed.
+        ([("OBJCTRA", 10.68, "")], None),
+        ([("CRVAL1", 10.68, "")], None),
+    ],
+)
+def test_right_ascension_units_follow_the_keyword_format_comment_and_agreement(
+    tmp_path: Path, cards: list[tuple[str, object, str]], expected: float | None
+) -> None:
+    metadata = _probe_header(tmp_path, cards)
+
+    assert metadata.ra_degrees == (pytest.approx(expected, abs=1e-4) if expected is not None else None)
+
+
+def test_lights_and_flats_without_a_filter_share_the_filterless_channel(tmp_path: Path) -> None:
+    for name, image_type, expected in (
+        ("light.fits", "LIGHT", "NOFILTER"),
+        ("flat.fits", "FLAT", "NOFILTER"),
+        ("masterflat.fits", "Master Flat", "NOFILTER"),
+        ("dark.fits", "DARK", "UNKNOWN"),
+        ("bias.fits", "BIAS", "UNKNOWN"),
+    ):
+        source = tmp_path / "frames" / name
+        source.parent.mkdir(exist_ok=True)
+        _write_fits(source, image_type)
+        with fits.open(source, mode="update") as hdul:
+            del hdul[0].header["FILTER"]
+        assert probe_frame_metadata(source).filter_name == expected, name
+    none = tmp_path / "frames" / "none.fits"
+    _write_fits(none, "LIGHT")
+    fits.setval(none, "FILTER", value="None")
+    assert probe_frame_metadata(none).filter_name == "NOFILTER"

@@ -8,15 +8,19 @@ raw-frame science path.  This module composes it without weakening any gate:
 * every target runs once with all of its filters, so the filters of one
   target are registered onto one reference frame, cropped to one common
   rectangle, and each master still completes QC through a fresh solve;
-* multi-panel filters are reprojected only from SOLVED panels, pass exact
-  coverage/overlap/seam gates, and then receive a new final plate solution;
-* filters that already share their pixel grid are copied unchanged onto the
-  reference grid (no resampling), while independently solved mosaics are
-  reprojected onto it, before optional RGB/LRGB construction; and
+* several targets are the panels of one mosaic: the canvas is planned before
+  they run, each panel integrates onto its window of it, and every filter's
+  mosaic is assembled there, its canvas WCS verified on catalog stars and
+  never solved blind;
+* filters that share their pixel grid are published unchanged (no
+  resampling); a channel on another grid is resampled onto the reference
+  grid by the optional reprojection backend, before the super luminance and
+  the optional RGB/LRGB cube; and
 * one outer create-only directory rename is the only success commit.
 
-The reprojection WCS of a working mosaic is explicitly never treated as a
-solution.  A failed final solve publishes only ``<output>.unsolved`` evidence.
+A failure publishes only ``<output>.unsolved`` evidence.  A finished project
+whose final rename fails is kept there too (or in its staging directory when
+that rename fails as well) under a failure receipt, never deleted.
 """
 
 from __future__ import annotations
@@ -44,7 +48,7 @@ from astropy.wcs import WCS
 import numpy as np
 
 from lightframeqc.cfa import CHANNEL_NAMES, is_cfa_pattern, normalize_pattern as normalize_cfa_pattern
-from lightframeqc.metadata import grouping_keyword_root
+from lightframeqc.metadata import filter_or_filterless, grouping_keyword_root, normalize_filter
 from lightframeqc.source_extraction import cached_extraction_self_test
 
 from ..calibration.inputs import MasterMetadataOverride
@@ -68,7 +72,7 @@ from ..solvers.base import SolverBackend, canonical_wcs_sha256, validate_wcs_hea
 from ..stacking.crop import histogram_rectangle
 from ..stacking.integration import CalibrationError
 from .canvas import _catalog_verifier, _solve_placements
-from .common import _fsync_directory, _rename_directory_no_replace, _safe_token
+from .common import _fsync_directory, _rename_directory_no_replace, _safe_token, _unpublished_reason
 from .contracts import IntegrationMode, ProgressEvent
 from .mosaic import (
     MosaicGateError,
@@ -90,9 +94,7 @@ from .single_target import (
     run_e2e_stages,
 )
 from .solve import (
-    _SolverHints,
     _read_image_header,
-    _solve_one,
     _solution_geometry,
 )
 from .sources import (
@@ -176,12 +178,6 @@ class ProjectLayout:
         return len(self.target_keys) > 1
 
     @property
-    def requires_project_orchestration(self) -> bool:
-        # Preserve the established single-target ``run`` contract.  Explicit
-        # ``run-project`` still creates RGB for a one-target multi-filter set.
-        return len(self.target_keys) > 1
-
-    @property
     def target_runs(self) -> tuple[tuple[SciencePanel, tuple[SciencePanel, ...]], ...]:
         """Panels grouped per target: one multi-filter E2E run each.
 
@@ -192,11 +188,11 @@ class ProjectLayout:
         """
 
         groups: list[tuple[SciencePanel, tuple[SciencePanel, ...]]] = []
-        for target_key in self.target_keys:
-            panels = tuple(panel for panel in self.panels if panel.target_key == target_key)
+        for key in self.target_keys:
+            panels = tuple(panel for panel in self.panels if panel.target_key == key)
             descriptor = SciencePanel(
                 target=panels[0].target,
-                target_key=target_key,
+                target_key=key,
                 filter_name="+".join(panel.filter_name for panel in panels),
                 filter_key="+".join(panel.filter_key for panel in panels),
                 # The colour channel panels of a Bayer Light set share their
@@ -373,27 +369,6 @@ _CALIBRATION_TARGETS = {
     "masterdark",
     "masterflat",
 }
-_FILTER_ALIASES = {
-    "r": "R",
-    "red": "R",
-    "g": "G",
-    "green": "G",
-    "b": "B",
-    "blue": "B",
-    "l": "L",
-    "lum": "L",
-    "luminance": "L",
-    "ha": "HA",
-    "halpha": "HA",
-    "hydrogenalpha": "HA",
-    "oiii": "OIII",
-    "oxygeniii": "OIII",
-    "sii": "SII",
-    "sulfurii": "SII",
-    "sulphurii": "SII",
-}
-
-
 def _normalized_token(value: str) -> str:
     return target_key(value)
 
@@ -402,9 +377,11 @@ def _science_target(asset: FrameAsset) -> tuple[str, str]:
     display = str(asset.target).strip()
     key = _normalized_token(display)
     if not key or key in {"unknown", "none", "unspecified"}:
+        # The inventory names every Light (OBJECT, else its folder, else one
+        # target for the import); only a hand-built inventory reaches this.
         raise ProjectE2EError(
             "SCIENCE_TARGET_MISSING",
-            "every Light requires an explicit NINA OBJECT/target so panels cannot be mixed",
+            "a Light names no target: its OBJECT is missing or has no letter or digit",
             path=asset.path,
         )
     if key in _CALIBRATION_TARGETS:
@@ -417,15 +394,10 @@ def _science_target(asset: FrameAsset) -> tuple[str, str]:
 
 
 def _science_filter(asset: FrameAsset) -> tuple[str, str]:
-    display = str(asset.filter_name).strip()
-    key = _normalized_token(display)
-    if not key or key in {"unknown", "none", "unspecified"}:
-        raise ProjectE2EError(
-            "SCIENCE_FILTER_MISSING",
-            "every Light requires explicit FILTER metadata",
-            path=asset.path,
-        )
-    canonical = _FILTER_ALIASES.get(key, display.upper())
+    """A Light's filter in the one filter identity, and its key; a Light
+    that names no filter is in the filterless channel."""
+
+    canonical = filter_or_filterless(normalize_filter(asset.filter_name))
     return canonical, _normalized_token(canonical)
 
 
@@ -565,7 +537,11 @@ def classify_project_layout(inventory: ProjectInventory) -> ProjectLayout:
 
 
 def project_requires_orchestration(inventory: ProjectInventory) -> bool:
-    return classify_project_layout(inventory).requires_project_orchestration
+    """Whether ``run`` hands the inventory to the project workflow: only a
+    mosaic.  One target keeps the single-target ``run`` contract; an explicit
+    ``run-project`` still makes RGB of a one-target multi-filter set."""
+
+    return classify_project_layout(inventory).is_mosaic
 
 
 
@@ -918,7 +894,10 @@ def _build_shared_calibration(
         supplied_flats=staged["MASTER_FLAT"],
         lights=_canonical_inputs(base.light_files, "LIGHT", required=True),
         directory=root / "masters",
-        pipeline_parameters=base.pipeline_parameters,
+        # The library serves every Light of the project, before screening.
+        # Whether an admitted Light has the calibration the recipe requires
+        # is decided in its target run, on the Lights that run integrates.
+        pipeline_parameters=replace(base.pipeline_parameters, required_calibration=()),
         source_aliases=aliases,
         xisf_conversions=conversions,
     )
@@ -1057,10 +1036,7 @@ def _find_filter_products(result: E2EResult, expected_filters: Sequence[str]) ->
                 f"{validation.code}: {validation.message}",
                 path=str(path),
             )
-        observed = _FILTER_ALIASES.get(
-            _normalized_token(str(header.get("FILTER", ""))),
-            str(header.get("FILTER", "")).upper(),
-        )
+        observed = filter_or_filterless(normalize_filter(header.get("FILTER")))
         if observed not in expected_filters or observed in products:
             raise ProjectE2EError(
                 "PANEL_PRODUCT_FILTER_MISMATCH",
@@ -1069,28 +1045,6 @@ def _find_filter_products(result: E2EResult, expected_filters: Sequence[str]) ->
             )
         products[observed] = path
     return products
-
-
-def _final_mosaic_hints(path: Path, base: E2ERequest) -> _SolverHints:
-    header, shape = _read_image_header(path)
-    geometry = _solution_geometry(header, shape)
-    return _SolverHints(
-        ra_degrees=float(geometry["centerRaDegrees"]),
-        dec_degrees=float(geometry["centerDecDegrees"]),
-        field_of_view_degrees=float(geometry["fieldWidthDegrees"]),
-        search_radius_degrees=(
-            base.search_radius_degrees
-            if base.search_radius_degrees is not None
-            else max(2.0, float(geometry["fieldWidthDegrees"]) * 0.75)
-        ),
-        provenance="VERIFIED_REPROJECTION_GRID_HINT_ONLY",
-        evidence={
-            "workingMosaicSha256": sha256_digest(path),
-            "workingMosaicState": str(header.get("OAFSTATE")),
-            "propagatedWcsIsFinalSolution": False,
-            "geometry": geometry,
-        },
-    )
 
 
 def _supports_keyword(function: Callable[..., Any], name: str) -> bool:
@@ -1492,6 +1446,40 @@ def _crop_final_channels(
     return evidence
 
 
+def _non_finite_as_text(value: Any) -> Any:
+    """``value`` with every number that is not finite as text (``"nan"``).
+
+    Canonical JSON rejects such numbers.  A failure receipt holds whatever the
+    stages recorded, and a record that cannot be serialised must not keep the
+    evidence of a run from being published."""
+
+    if isinstance(value, float) and not math.isfinite(value):
+        return repr(value)
+    if isinstance(value, dict):
+        return {key: _non_finite_as_text(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_non_finite_as_text(item) for item in value]
+    return value
+
+
+def _cite_staged_receipts(records: Mapping[str, Any], staging: Path) -> None:
+    """Give every record that names a receipt of the tree that file's SHA-256.
+
+    Only after ``_sanitize_shareable_tree``: the rewrite changes the bytes of
+    a document that held local paths, and a cited digest is the digest of the
+    file as it is published."""
+
+    cited = (
+        records.get("sharedCalibration"),
+        records.get("color"),
+        *records.get("subruns", ()),
+        *records.get("mosaics", {}).values(),
+    )
+    for record in cited:
+        if isinstance(record, dict) and isinstance(record.get("receipt"), str):
+            record["receiptSha256"] = sha256_digest(staging / record["receipt"])
+
+
 def _failure_result(
     *,
     staging: Path,
@@ -1503,53 +1491,70 @@ def _failure_result(
     records: Mapping[str, Any],
     passed: Sequence[str],
     excluded: Sequence[str],
+    finished: bool = False,
 ) -> ProjectE2EResult:
+    """Publish the staging tree as the project's ``.unsolved`` evidence under a failure receipt.
+
+    A receipt staged earlier is withdrawn first: the success receipt of a
+    project whose final rename failed (``finished``) says SOLVED, which is
+    true only of a published directory.  When the evidence cannot be renamed
+    either, the tree stays where it is staged, under a receipt that says so.
+    Nothing is deleted, and the result names the directory that holds the
+    evidence or, of a finished project, the products."""
+
+    remove_file(staging / "receipt.json")
     _sanitize_shareable_tree(staging, sources)
-    public_records = _share_safe_value(
-        dict(records),
-        staging=staging,
-        source_tokens={
-            item.path: f"source/{item.source_id}/{Path(item.path).name}"
-            for item in sources
-        },
+    _cite_staged_receipts(records, staging)
+    source_tokens = {item.path: f"source/{item.source_id}/{Path(item.path).name}" for item in sources}
+    public_records = _non_finite_as_text(
+        _share_safe_value(dict(records), staging=staging, source_tokens=source_tokens)
     )
-    public_layout = _share_safe_value(
-        layout.serializable(),
-        staging=staging,
-        source_tokens={
-            item.path: f"source/{item.source_id}/{Path(item.path).name}"
-            for item in sources
-        },
-    )
-    receipt_core = {
-        "schemaVersion": 1,
-        "pipelineVersion": PROJECT_E2E_VERSION,
-        "createdAt": datetime.now(timezone.utc).isoformat(),
-        "success": False,
-        "state": E2EState.UNSOLVED_WORKING.value,
-        "code": code,
-        "message": message,
-        "layout": public_layout,
-        "sources": [item.serializable() for item in sources],
-        "execution": public_records,
-        "publication": {
-            "successDirectoryPublished": False,
-            "evidenceDirectoryPublished": True,
-            "atomic": True,
-            "noReplace": True,
-        },
-    }
-    receipt_id = "sha256:" + hashlib.sha256(canonical_json_document(receipt_core)).hexdigest()
-    _write_json(staging / "receipt.json", {"receiptId": receipt_id, **receipt_core})
-    _rename_directory_no_replace(staging, evidence)
-    _fsync_directory(evidence.parent)
+    public_layout = _share_safe_value(layout.serializable(), staging=staging, source_tokens=source_tokens)
+    # A message may name a file of the tree or a source; the receipt names neither by host path.
+    public_message = _share_safe_value(message, staging=staging, source_tokens=source_tokens)
+
+    def write_receipt(evidence_published: bool) -> None:
+        receipt_core = {
+            "schemaVersion": 1,
+            "pipelineVersion": PROJECT_E2E_VERSION,
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+            "success": False,
+            "state": E2EState.UNSOLVED_WORKING.value,
+            "code": code,
+            "message": public_message,
+            "layout": public_layout,
+            "sources": [item.serializable() for item in sources],
+            "execution": public_records,
+            "publication": {
+                "successDirectoryPublished": False,
+                "evidenceDirectoryPublished": evidence_published,
+                "atomic": True,
+                "noReplace": True,
+            },
+        }
+        receipt_id = "sha256:" + hashlib.sha256(canonical_json_document(receipt_core)).hexdigest()
+        _write_json(staging / "receipt.json", {"receiptId": receipt_id, **receipt_core})
+
+    write_receipt(True)
+    kept = evidence
+    try:
+        _rename_directory_no_replace(staging, evidence)
+        _fsync_directory(evidence.parent)
+    except E2EError as error:
+        kept = staging
+        remove_file(staging / "receipt.json")
+        write_receipt(False)
+        message = f"{message}; the evidence was not published ({_unpublished_reason(error, evidence)}) and stays in {staging}"
+    else:
+        if finished:
+            message = f"{message}; its products are kept in {evidence}"
     return ProjectE2EResult(
         success=False,
         code=code,
         state=E2EState.UNSOLVED_WORKING,
         output_directory=None,
-        evidence_directory=str(evidence),
-        receipt_path=str(evidence / "receipt.json"),
+        evidence_directory=str(kept),
+        receipt_path=str(kept / "receipt.json"),
         product_paths=(),
         preview_paths=(),
         passed_light_paths=tuple(passed),
@@ -1684,7 +1689,6 @@ def _prepare_shared_calibration(run: _ProjectRun) -> _SharedMasters:
         ) = _build_shared_calibration(request.e2e_request, shared_root)
     records["sharedCalibration"] = {
         "receipt": (shared_root / "receipt.json").relative_to(staging).as_posix(),
-        "receiptSha256": sha256_digest(shared_root / "receipt.json"),
         "mode": shared_receipt["mode"],
         "rawIntegrationCount": shared_receipt["rawIntegrationCount"],
     }
@@ -1726,6 +1730,11 @@ def _run_target_panels(run: _ProjectRun, shared: _SharedMasters, explicit_select
     def finish(index: int, group: SciencePanel, panels: tuple[SciencePanel, ...], sub_result: E2EResult) -> ProjectE2EResult | None:
         passed.extend(sub_result.passed_light_paths)
         excluded.extend(sub_result.excluded_light_paths)
+        if not Path(sub_result.receipt_path).is_file():
+            # The project receipt cites this file by its digest at publication.
+            raise ProjectE2EError(
+                "PANEL_RECEIPT_MISSING", "target run reported a receipt that does not exist", path=sub_result.receipt_path
+            )
         record = {
             "target": group.target,
             "targetKey": group.target_key,
@@ -1733,7 +1742,6 @@ def _run_target_panels(run: _ProjectRun, shared: _SharedMasters, explicit_select
             "success": sub_result.success,
             "code": sub_result.code,
             "receipt": Path(sub_result.receipt_path).relative_to(staging).as_posix(),
-            "receiptSha256": sha256_digest(Path(sub_result.receipt_path)),
         }
         records["subruns"].append(record)
         try:
@@ -2007,7 +2015,6 @@ def _canvas_mosaic_stage(
             "verdict": receipt["verdict"],
             "gates": receipt["gates"],
             "receipt": receipt_path.relative_to(run.staging).as_posix(),
-            "receiptSha256": sha256_digest(receipt_path),
         }
         quality = qualities[filter_key]
         if quality is None or quality.get("catalogManaged") is not True:
@@ -2250,6 +2257,7 @@ def _render_previews_and_color(run: _ProjectRun, final_sources: dict[str, tuple[
                 output_directory=str(details / "color"),
                 wcs_tolerance_pixels=request.channel_wcs_tolerance_pixels,
                 preview_max_long_edge=request.e2e_request.pipeline_parameters.preview_max_long_edge,
+                artifact_root=str(staging),
             )
         )
         # The color stage publishes into ``details/color``; its FITS and
@@ -2266,7 +2274,6 @@ def _render_previews_and_color(run: _ProjectRun, final_sources: dict[str, tuple[
         records["color"] = {
             "status": "SOLVED_LRGB" if luminance is not None else "SOLVED_RGB",
             "receipt": Path(color_result.receipt_path).relative_to(staging).as_posix(),
-            "receiptSha256": sha256_digest(Path(color_result.receipt_path)),
             "publication": color_publication,
             "luminanceParticipated": luminance is not None,
             "luminanceRequested": request.e2e_request.color_luminance,
@@ -2311,6 +2318,7 @@ def _verify_and_publish(run: _ProjectRun, panels_by_filter: dict[str, list[tuple
     project_progress.phase("verify", 0, 1, "verifying source identities, final products, and receipts")
     _verify_sources(sources)
     _sanitize_shareable_tree(staging, sources)
+    _cite_staged_receipts(records, staging)
     public_records = _share_safe_value(
         records,
         staging=staging,
@@ -2469,7 +2477,28 @@ def _verify_and_publish(run: _ProjectRun, panels_by_filter: dict[str, list[tuple
     project_progress.phase("verify", 1, 1, "final products and receipt verified")
     project_progress.phase("publish", 0, 1, "atomically publishing the complete project")
     _fsync_directory(staging)
-    _rename_directory_no_replace(staging, output)
+    try:
+        _rename_directory_no_replace(staging, output)
+    except E2EError as error:
+        # The project is complete and verified; only its last rename failed.
+        unpublished = f"the finished project was not published: {_unpublished_reason(error, output)}"
+        try:
+            return _failure_result(
+                staging=staging, evidence=run.evidence, code=error.code, message=unpublished,
+                sources=sources, layout=layout, records=records, passed=passed, excluded=excluded, finished=True,
+            )
+        except Exception as evidence_error:
+            return ProjectE2EResult(
+                success=False, code=error.code, state=E2EState.UNSOLVED_WORKING,
+                output_directory=None, evidence_directory=str(staging),
+                receipt_path=str(staging / "receipt.json"), product_paths=(), preview_paths=(),
+                passed_light_paths=tuple(passed), excluded_light_paths=tuple(excluded),
+                message=(
+                    f"{unpublished}; its failure receipt could not be written "
+                    f"({type(evidence_error).__name__}: {evidence_error}); its products stay in the staging "
+                    f"directory {staging}, which is not a published result"
+                ),
+            )
     _fsync_directory(output.parent)
     # Progress cannot turn an already committed success into a failure.
     # The desktop's independent artifact verification releases the final 1%.

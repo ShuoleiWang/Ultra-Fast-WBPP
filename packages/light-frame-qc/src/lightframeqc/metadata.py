@@ -15,6 +15,12 @@ from .models import FrameMetadata, FrameRole
 from .cfa import normalize_pattern as normalize_cfa_pattern
 
 
+# The channel of Lights and Flats that name no filter (WBPP's "NoFilter"):
+# one-shot colour without a wheel, a mono camera without one.
+NO_FILTER = "NOFILTER"
+# The one filter identity. Inventory, plan, preflight, QC, the pixel reader and
+# the project layout all name a filter through ``normalize_filter``, so Lights
+# written "Red" and Flats written "R" are one filter at every stage.
 _FILTER_ALIASES = {
     "L": "L",
     "LUM": "L",
@@ -27,39 +33,66 @@ _FILTER_ALIASES = {
     "BLUE": "B",
     "HA": "HA",
     "HALPHA": "HA",
-    "H-ALPHA": "HA",
     "HΑ": "HA",
+    "HYDROGENALPHA": "HA",
     "O3": "OIII",
     "OIII": "OIII",
     "OXYGENIII": "OIII",
     "S2": "SII",
     "SII": "SII",
+    "SULFURII": "SII",
+    "SULPHURII": "SII",
+    "NOFILTER": NO_FILTER,
 }
+# What a header writes when no filter is in the light path.
+_FILTERLESS_NAMES = frozenset({"UNKNOWN", "NONE", "UNSPECIFIED"})
 
 
+# The one frame-role table: IMAGETYP / XISF imageType values and the folder
+# or file-name words that name a role, compared without case, spaces or
+# punctuation. Inventory, QC and the pixel reader all read it, so a spelling
+# is the same role at every stage. It holds what acquisition software writes
+# (N.I.N.A. LIGHT/FLAT/DARK/BIAS/DARKFLAT; MaxIm DL and INDI/Ekos "Light
+# Frame", "Dark Frame", "Bias Frame", "Flat Frame"; SBIG's FITS extensions
+# "Flat Field"; ASIAIR "Light", "Dark", "Flat", "Bias"; IRAF "object",
+# "zero") and PixInsight's words ("Science", "Master Dark"). A type that is
+# not a calibration role (SNAPSHOT, FOCUS, PREVIEW, "Tricolor Image") is
+# deliberately absent: it stays unknown and is never taken for a Light.
 _ROLE_ALIASES = {
     "LIGHT": FrameRole.LIGHT,
     "LIGHTS": FrameRole.LIGHT,
     "LIGHTFRAME": FrameRole.LIGHT,
     "LIGHTFRAMES": FrameRole.LIGHT,
+    "SCIENCE": FrameRole.LIGHT,
+    "SCIENCEFRAME": FrameRole.LIGHT,
+    "SCIENCEFRAMES": FrameRole.LIGHT,
+    "OBJECT": FrameRole.LIGHT,
     "FLAT": FrameRole.RAW_FLAT,
     "FLATS": FrameRole.RAW_FLAT,
     "FLATFRAME": FrameRole.RAW_FLAT,
     "FLATFRAMES": FrameRole.RAW_FLAT,
+    "FLATFIELD": FrameRole.RAW_FLAT,
+    "FLATFIELDS": FrameRole.RAW_FLAT,
     "RAWFLAT": FrameRole.RAW_FLAT,
+    "SKYFLAT": FrameRole.RAW_FLAT,
+    "DOMEFLAT": FrameRole.RAW_FLAT,
+    "TWILIGHTFLAT": FrameRole.RAW_FLAT,
     "MASTERFLAT": FrameRole.MASTER_FLAT,
+    "MASTERFLATFRAME": FrameRole.MASTER_FLAT,
+    "MASTERFLATFIELD": FrameRole.MASTER_FLAT,
     "DARK": FrameRole.DARK,
     "DARKS": FrameRole.DARK,
     "DARKFRAME": FrameRole.DARK,
     "DARKFRAMES": FrameRole.DARK,
     # A Flat-Dark (N.I.N.A. IMAGETYP DARKFLAT, WBPP "Dark Flat") is a Dark at
-    # the Flats' exposure; darks are matched by exact exposure, so it
-    # calibrates the Flats and can never reach a Light.
+    # the Flats' exposure: a Light takes the Dark of its own exposure, so it
+    # calibrates the Flats.
     "DARKFLAT": FrameRole.DARK,
     "DARKFLATS": FrameRole.DARK,
     "FLATDARK": FrameRole.DARK,
     "FLATDARKS": FrameRole.DARK,
     "MASTERDARK": FrameRole.MASTER_DARK,
+    "MASTERDARKFRAME": FrameRole.MASTER_DARK,
     "MASTERDARKFLAT": FrameRole.MASTER_DARK,
     "MASTERFLATDARK": FrameRole.MASTER_DARK,
     "BIAS": FrameRole.BIAS,
@@ -70,9 +103,12 @@ _ROLE_ALIASES = {
     "ZEROS": FrameRole.BIAS,
     "ZEROFRAME": FrameRole.BIAS,
     "MASTERBIAS": FrameRole.MASTER_BIAS,
+    "MASTERBIASFRAME": FrameRole.MASTER_BIAS,
     "MASTERZERO": FrameRole.MASTER_BIAS,
     "MASTERLIGHT": FrameRole.MASTER_LIGHT,
 }
+# Role evidence of a frame whose header and path name no type.
+ROLE_DEFAULT_EVIDENCE = "DEFAULT=LIGHT"
 
 # Folders WBPP writes its intermediate frames to, and the suffixes it appends
 # (_c calibrated, _cc cosmetized, _d debayered, _r registered).
@@ -83,7 +119,6 @@ _WBPP_PROCESSED_SUFFIX = re.compile(r"(?:_c(?:_cc)?(?:_d)?(?:_r)?|_cc(?:_d)?(?:_
 # carry different values of one keyword (a frame without the keyword matches
 # every value). PANEL also separates the mosaic panels of one target.
 DEFAULT_GROUPING_KEYWORDS = ("DATE", "NIGHT", "PANEL", "SESSION")
-POST_PROCESSING_KEYWORDS = frozenset({"PANEL"})
 SESSION_KEYWORDS = ("DATE", "NIGHT", "SESSION")
 # WBPP's syntax for a keyword in a folder or file name: the name after a
 # non-alphanumeric character, then "_", "-" or a space, then the value in the
@@ -126,11 +161,22 @@ def _number(value: Any | None) -> float | None:
 
 
 def normalize_filter(value: Any | None) -> str:
+    """The canonical name of a filter: an alias spelling (Lum, Red, H-alpha,
+    O3 ...) names its filter, any other text is the filter in upper case, and
+    no text is ``UNKNOWN``."""
+
     text = _clean_text(value)
     if text is None:
         return "UNKNOWN"
-    compact = re.sub(r"[ _]+", "", text.upper())
+    compact = re.sub(r"[\W_]+", "", text.upper())
     return _FILTER_ALIASES.get(compact, text.upper())
+
+
+def filter_or_filterless(name: str) -> str:
+    """The filter of a Light or Flat: one that names none belongs to the
+    filterless channel ``NO_FILTER``, as in WBPP."""
+
+    return NO_FILTER if name in _FILTERLESS_NAMES else name
 
 
 def parse_frame_role(value: Any | None) -> FrameRole:
@@ -220,6 +266,11 @@ def _normalize_role(metadata: FrameMetadata) -> None:
         role = infer_frame_role_from_path(metadata.path)
         if role != FrameRole.UNKNOWN:
             evidence.append(f"PATH={role.value}")
+        else:
+            # WBPP takes a frame whose header and path name no image type
+            # for a Light; inventory, QC and the run all read this role.
+            role = FrameRole.LIGHT
+            evidence.append(ROLE_DEFAULT_EVIDENCE)
 
     metadata.role = role
     metadata.role_evidence = evidence
@@ -266,19 +317,108 @@ def parse_datetime(
         return None
 
 
-def _angle_degrees(value: Any | None, hour_angle: bool) -> float | None:
-    text = _clean_text(value)
-    if text is None:
-        return None
+_SEXAGESIMAL = re.compile(r"[:\s°'\"hmsd]", re.IGNORECASE)
+# How far two readings of one pointing may differ and still be the same field.
+_POINTING_AGREEMENT_DEGREES = 2.0
+# Header key the FITS/XISF readers add when the comment of a numeric RA names
+# hours (``RA = 0.7123 / [h] ...``); degrees need no evidence.
+RA_UNIT_EVIDENCE_KEY = "RA:UNIT"
+_HOUR_COMMENT = re.compile(r"\bh(?:ou)?rs?\b|\[h\]|\bhour\s*angle\b", re.IGNORECASE)
+
+
+def ra_comment_names_hours(comment: Any | None) -> bool:
+    text = _clean_text(comment)
+    return bool(text) and _HOUR_COMMENT.search(text) is not None and "deg" not in text.lower()
+
+
+def _sexagesimal_degrees(text: str, *, hours: bool) -> float | None:
     try:
-        if ":" in text or " " in text:
-            return float(Angle(text, unit=u.hourangle if hour_angle else u.deg).degree)
-        numeric = float(text)
-        if hour_angle and abs(numeric) <= 24:
-            return numeric * 15.0
-        return numeric
+        return float(Angle(text, unit=u.hourangle if hours else u.deg).degree)
     except (TypeError, ValueError, u.UnitsError):
         return None
+
+
+def _circular_difference(left: float, right: float) -> float:
+    return abs((left - right + 180.0) % 360.0 - 180.0)
+
+
+def _right_ascension_degrees(header: dict[str, Any]) -> float | None:
+    """Right ascension in degrees, by the unit each keyword establishes.
+
+    ``OBJCTRA`` is sexagesimal hours. ``RA`` written as sexagesimal text is
+    hours; a number is decimal degrees (N.I.N.A., SGP, INDI, ASIAIR) unless
+    its comment names hours or it is fifteen times smaller than the WCS
+    value. ``CRVAL1`` is degrees when ``CTYPE1`` is a right-ascension axis.
+    A plain number in ``OBJCTRA`` may be hours or degrees: it is read as the
+    one that agrees with ``RA``/``CRVAL1``, and without them it is used only
+    above 24, where it can only be degrees. No evidence gives no value: a
+    solver without a seed searches the sky, one with a wrong seed rejects
+    the right solution.
+    """
+
+    reference: float | None = None
+    crval = _number(_header_lookup(header, ("CRVAL1",)))
+    ctype = _clean_text(_header_lookup(header, ("CTYPE1",)))
+    if crval is not None and ctype is not None and ctype.upper().startswith("RA"):
+        reference = crval
+
+    def resolved(number: float) -> float | None:
+        """A number that is hours or degrees, decided by ``reference``."""
+
+        if reference is None:
+            return None
+        readings = [value for value in (number, number * 15.0) if _circular_difference(value, reference) <= _POINTING_AGREEMENT_DEGREES]
+        return readings[0] if len(readings) == 1 else None
+
+    telescope: float | None = None
+    text = _clean_text(_header_lookup(header, ("RA",)))
+    if text is not None:
+        if _SEXAGESIMAL.search(text):
+            telescope = _sexagesimal_degrees(text, hours=True)
+        else:
+            number = _number(text)
+            if number is not None:
+                if _clean_text(header.get(RA_UNIT_EVIDENCE_KEY)) is not None:
+                    telescope = number * 15.0
+                else:
+                    agreed = resolved(number)
+                    telescope = agreed if agreed is not None else number
+
+    text = _clean_text(_header_lookup(header, ("OBJCTRA",)))
+    if text is not None:
+        if _SEXAGESIMAL.search(text):
+            value = _sexagesimal_degrees(text, hours=True)
+            if value is not None:
+                return value
+        else:
+            number = _number(text)
+            if number is not None:
+                if reference is None:
+                    reference = telescope
+                agreed = resolved(number)
+                if agreed is not None:
+                    return agreed
+                if telescope is None and reference is None and 24.0 < number < 360.0:
+                    return number
+    return telescope if telescope is not None else reference
+
+
+def _declination_degrees(header: dict[str, Any]) -> float | None:
+    """Declination in degrees: ``OBJCTDEC``, then ``DEC`` (sexagesimal or
+    decimal degrees), then ``CRVAL2`` when ``CTYPE2`` is a declination axis."""
+
+    for name in ("OBJCTDEC", "DEC"):
+        text = _clean_text(_header_lookup(header, (name,)))
+        if text is None:
+            continue
+        value = _sexagesimal_degrees(text, hours=False) if _SEXAGESIMAL.search(text) else _number(text)
+        if value is not None:
+            return value
+    crval = _number(_header_lookup(header, ("CRVAL2",)))
+    ctype = _clean_text(_header_lookup(header, ("CTYPE2",)))
+    if crval is not None and ctype is not None and ctype.upper().startswith("DEC"):
+        return crval
+    return None
 
 
 def airmass_from_altitude(altitude_degrees: float | None) -> float | None:
@@ -493,13 +633,64 @@ def grouping_keyword_root(paths: Iterable[str]) -> str | None:
         return None
 
 
+_DATE_IN_NAME = re.compile(r"(?<!\d)(?:19|20)\d\d[-_.]?[01]\d[-_.]?[0-3]\d(?!\d)")
+_TIME_IN_NAME = re.compile(r"(?<!\d)[0-2]\d[-_.:][0-5]\d[-_.:][0-5]\d(?!\d)")
+_EXPOSURE_WORD = re.compile(r"[0-9]+(?:\.[0-9]+)?S|BIN[0-9]", re.IGNORECASE)
+
+
+def header_target(header: dict[str, Any]) -> str | None:
+    """The target a header names (``OBJECT``, ``OBJNAME``, ``TARGET``), else ``None``."""
+
+    return _clean_text(_header_lookup(header, ("OBJECT", "OBJNAME", "TARGET")))
+
+
 def infer_target_from_path(path: str) -> str:
+    """The target a file name states before its exposure (``M31_300s_001``).
+
+    A prefix that holds a date or a time (N.I.N.A.'s default file pattern)
+    differs from frame to frame and names no target.
+    """
+
     name = Path(path).stem
     match = re.match(r"(.+?)[_\- ]+[0-9]+(?:\.[0-9]+)?s(?:[_\- ]|$)", name, re.I)
-    if not match:
+    if not match or _DATE_IN_NAME.search(match.group(1)) or _TIME_IN_NAME.search(match.group(1)):
         return "UNKNOWN"
     target = re.sub(r"\s+", " ", match.group(1).replace("_", " ")).strip()
     return target.upper() if target else "UNKNOWN"
+
+
+def infer_target_from_folders(path: str, *, root: str | None, filter_name: str = "UNKNOWN") -> str | None:
+    """The target the folders of a Light without ``OBJECT`` name, else ``None``.
+
+    The nearest folder below ``root`` (the folder that holds every input)
+    whose name, without a date, is more than frame-type words (``LIGHT``),
+    the Light's filter, exposure or binning words and grouping keywords
+    (``NIGHT_1``): ``M31/2026-03-22/LIGHT/L/x.fits`` is ``M31``, and so is
+    ``M31_2026-03-22/LIGHT/x.fits``.
+    """
+
+    parts = Path(path).parts[:-1]
+    if root is not None:
+        root_parts = Path(root).parts
+        if parts[: len(root_parts)] != root_parts:
+            return None
+        parts = parts[len(root_parts):]
+    for component in reversed(parts):
+        if grouping_keywords_from_path(str(Path(component) / "x")):
+            continue
+        name = _TIME_IN_NAME.sub(" ", _DATE_IN_NAME.sub(" ", component))
+        name = re.sub(r"[\s_]+", " ", name).strip(" -.,")
+        filters = {filter_name, *_FILTER_ALIASES.values()}
+        words = [word for word in re.split(r"[^\w+]+", name.upper()) if word]
+        if not any(character.isalnum() for character in name) or normalize_filter(name) in filters:
+            continue
+        if all(
+            word in _ROLE_ALIASES or word.isdigit() or _EXPOSURE_WORD.fullmatch(word) or normalize_filter(word) in filters
+            for word in words
+        ):
+            continue
+        return name.upper()
+    return None
 
 
 def normalize_metadata(metadata: FrameMetadata) -> FrameMetadata:
@@ -510,6 +701,8 @@ def normalize_metadata(metadata: FrameMetadata) -> FrameMetadata:
     metadata.filter_name = normalize_filter(filter_value)
     if metadata.filter_name == "UNKNOWN":
         metadata.filter_name = infer_filter_from_path(metadata.path)
+    if metadata.role in {FrameRole.LIGHT, FrameRole.RAW_FLAT, FrameRole.MASTER_FLAT}:
+        metadata.filter_name = filter_or_filterless(metadata.filter_name)
 
     exposure = _number(
         _header_lookup(header, ("EXPTIME", "EXPOSURE", "EXPOSURETIME"))
@@ -574,18 +767,11 @@ def normalize_metadata(metadata: FrameMetadata) -> FrameMetadata:
             # Camera model strings with an explicit monochrome suffix are
             # authoritative enough to distinguish mono masters from CFA data.
             metadata.cfa_pattern = "NONE"
-    metadata.target = (
-        _clean_text(_header_lookup(header, ("OBJECT", "OBJNAME", "TARGET")))
-        or infer_target_from_path(metadata.path)
-    ).upper()
+    metadata.target = (header_target(header) or infer_target_from_path(metadata.path)).upper()
     metadata.grouping_keywords = dict(grouping_keywords_from_path(metadata.path))
 
-    metadata.ra_degrees = _angle_degrees(
-        _header_lookup(header, ("OBJCTRA", "RA", "CRVAL1")), hour_angle=True
-    )
-    metadata.dec_degrees = _angle_degrees(
-        _header_lookup(header, ("OBJCTDEC", "DEC", "CRVAL2")), hour_angle=False
-    )
+    metadata.ra_degrees = _right_ascension_degrees(header)
+    metadata.dec_degrees = _declination_degrees(header)
     metadata.altitude_degrees = _number(
         _header_lookup(header, ("ALTITUDE", "OBJCTALT", "CENTALT"))
     )

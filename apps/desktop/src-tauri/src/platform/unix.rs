@@ -1,6 +1,7 @@
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
+use std::time::{Duration, Instant};
 
 pub(crate) fn configure_child_process(command: &mut Command) {
     command.process_group(0);
@@ -58,15 +59,52 @@ pub(crate) fn terminate_process_tree(child: &mut Child) -> Result<(), String> {
             return Err(error);
         }
     };
-    // Cancellation has no resumable/checkpoint contract. Force the verified
-    // private group in one step so a parent cannot exit after SIGTERM while a
-    // helper remains alive, and so the PGID cannot be reused during a grace
-    // interval before escalation.
-    if !signal_group(group, libc::SIGKILL)? {
-        let _ = child.kill();
-        return Ok(());
+    // Two steps. SIGTERM lets the engine kill the solver processes it started:
+    // each leads its own session, where no signal to this group reaches it.
+    // SIGKILL then stops whatever the group still holds, so a parent cannot
+    // exit after SIGTERM while a helper remains alive, and an engine that
+    // ignores SIGTERM is killed all the same. The leader is not reaped in
+    // between (the caller owns it and reaps it afterwards), so its PID, and
+    // with it the PGID, cannot be reused during the grace interval.
+    if matches!(signal_group(group, libc::SIGTERM), Ok(true)) {
+        // The group ID is the leader's PID.
+        let deadline = Instant::now() + TERMINATION_GRACE;
+        while !exited_unreaped(group) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
-    Ok(())
+    match signal_group(group, libc::SIGKILL) {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            let _ = child.kill();
+            Ok(())
+        }
+        // macOS refuses the signal (EPERM) when the group holds nothing but
+        // exited processes: the leader is gone and no member is left to kill.
+        Err(_) if exited_unreaped(group) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// How long the engine has to stop its solver processes after SIGTERM.
+const TERMINATION_GRACE: Duration = Duration::from_millis(1500);
+
+/// Whether the child `pid` has exited.  The child stays unreaped: its exit
+/// status is left for the owner of the `Child` to collect.
+fn exited_unreaped(pid: libc::pid_t) -> bool {
+    // SAFETY: the record is plain data, so all-zero is a valid value.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` outlives the call and is the only pointer passed.
+    let status = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    // Without an exited child the record stays zeroed.
+    status == 0 && info.si_signo != 0
 }
 
 #[cfg(test)]
@@ -84,5 +122,83 @@ mod tests {
         assert!(error.contains("refusing process-group signal"));
         let status = child.wait().expect("reap directly killed child");
         assert!(!status.success());
+    }
+
+    fn process_exists(pid: libc::pid_t) -> bool {
+        // SAFETY: signal 0 only checks that the process exists.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    fn first_line(child: &mut Child) -> String {
+        use std::io::BufRead;
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().expect("piped stdout"))
+            .read_line(&mut line)
+            .expect("read the child's first line");
+        line.trim().to_owned()
+    }
+
+    /// A stand-in engine with a solver: the solver leads its own session, and
+    /// SIGTERM makes the engine kill the solver's group before dying of the
+    /// signal, as the engine's own handler does.
+    const ENGINE_WITH_SOLVER: &str = r#"
+import os, signal, subprocess, time
+solver = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
+def stop(signum, frame):
+    os.killpg(solver.pid, signal.SIGKILL)
+    solver.wait()
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+signal.signal(signal.SIGTERM, stop)
+print(solver.pid, flush=True)
+time.sleep(60)
+"#;
+
+    #[test]
+    fn termination_stops_a_solver_that_runs_in_its_own_session() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let mut command = Command::new("python3");
+        command
+            .args(["-c", ENGINE_WITH_SOLVER])
+            .stdout(std::process::Stdio::piped());
+        configure_child_process(&mut command);
+        let mut child = command.spawn().expect("spawn the stand-in engine");
+        let solver: libc::pid_t = first_line(&mut child).parse().expect("solver PID");
+        assert!(process_exists(solver));
+        // SAFETY: getpgid takes no pointer.
+        let solver_group = unsafe { libc::getpgid(solver) };
+        assert_eq!(solver_group, solver, "the solver leads its own group");
+
+        let started = Instant::now();
+        terminate_process_tree(&mut child).expect("terminate the engine tree");
+        // The engine's exit ends the grace interval; it is not waited out.
+        assert!(started.elapsed() < TERMINATION_GRACE);
+        let status = child.wait().expect("reap the engine");
+        assert_eq!(status.signal(), Some(libc::SIGTERM));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_exists(solver) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!process_exists(solver), "the solver outlived the engine");
+    }
+
+    #[test]
+    fn an_engine_that_ignores_sigterm_is_killed_after_the_grace_interval() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "trap '' TERM; echo ready; sleep 60"])
+            .stdout(std::process::Stdio::piped());
+        configure_child_process(&mut command);
+        let mut child = command.spawn().expect("spawn a child that ignores SIGTERM");
+        assert_eq!(first_line(&mut child), "ready");
+
+        let started = Instant::now();
+        terminate_process_tree(&mut child).expect("terminate the stubborn tree");
+        assert!(started.elapsed() >= TERMINATION_GRACE);
+        let status = child.wait().expect("reap the killed child");
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
     }
 }

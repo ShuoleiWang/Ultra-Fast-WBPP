@@ -40,6 +40,9 @@ pub(super) fn checked_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
+/// The canonical output parent, in the spelling the engine and the interface
+/// share: the run's output directory, its staging and every path reported
+/// about them are built on it.
 pub(super) fn canonical_output_parent(value: &str) -> Result<PathBuf, String> {
     let path = Path::new(value)
         .canonicalize()
@@ -47,7 +50,7 @@ pub(super) fn canonical_output_parent(value: &str) -> Result<PathBuf, String> {
     if !path.is_dir() {
         return Err("output parent must be an existing directory".to_owned());
     }
-    Ok(path)
+    Ok(platform::plain_path(&path))
 }
 
 pub(super) fn validate_master_override(value: &UiMasterOverride) -> Result<(), String> {
@@ -273,7 +276,9 @@ pub(super) fn project_request_json(
             if !canonical.is_file() && !canonical.is_dir() {
                 return Err("input source is not a file or directory".to_owned());
             }
-            let key = canonical.to_string_lossy().into_owned();
+            let key = platform::plain_path(&canonical)
+                .to_string_lossy()
+                .into_owned();
             if !seen_paths.insert(key.clone()) {
                 return Err("one input path appears more than once".to_owned());
             }

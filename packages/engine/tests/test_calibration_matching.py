@@ -183,3 +183,62 @@ def test_missing_bias_and_dark_are_warnings_not_refusals() -> None:
     assert (pairing.bias, pairing.dark, pairing.flat) == (None, None, "L")
     assert [issue.code for issue in match.warnings] == ["BIAS_MISSING"]
     assert match.errors == ()
+
+
+def test_a_light_takes_the_dark_of_its_exposure_before_its_nights_flat_darks() -> None:
+    # NIGHT_1/{LIGHT,FLAT,DARKFLAT} with a 300 s dark library outside the night folders.
+    light = frame("/d/NIGHT_1/LIGHT/l.fits", LIGHT, keywords={"NIGHT": "1"})
+    flats = [frame(f"/d/NIGHT_1/FLAT/f{index}.fits", FLAT, exposure=2.0, keywords={"NIGHT": "1"}) for index in range(3)]
+    flat_darks = [
+        frame(f"/d/NIGHT_1/DARKFLAT/d{index}.fits", DARK, exposure=2.0, keywords={"NIGHT": "1"}) for index in range(3)
+    ]
+    library = [frame(f"/d/DarkLibrary/d{index}.fits", DARK) for index in range(3)]
+    match = match_calibration([light], [*flats, *flat_darks, *library])
+    assert match.lights[light.path].dark == "300"
+    assert match.flats["L"].dark == "2"
+    assert match.warnings == () and match.errors == ()
+
+
+def test_a_dark_that_lost_its_settings_or_names_another_camera_still_wins_by_exposure() -> None:
+    light = frame("/d/l.fits", LIGHT)
+    flat_darks = [frame(f"/d/DARKFLAT/d{index}.fits", DARK, exposure=2.0) for index in range(3)]
+    flat = frame("/d/masterFlat.xisf", FLAT, supplied=True)
+    stripped = replace(
+        frame("/d/masterDark_300s.xisf", DARK, supplied=True, bias_included=True),
+        gain=None,
+        offset=None,
+        readout_mode="UNKNOWN",
+    )
+    match = match_calibration([light], [*flat_darks, stripped, flat])
+    assert match.groups[DARK][match.lights[light.path].dark].traits.exposure_seconds == 300.0
+    assert match.warnings == ()
+    other_driver = [replace(frame(f"/d/DARK/d{index}.fits", DARK), camera="QHYCCD-Cameras-Capture") for index in range(3)]
+    match = match_calibration([light], [*flat_darks, *other_driver, flat])
+    assert match.groups[DARK][match.lights[light.path].dark].traits.exposure_seconds == 300.0
+    assert [issue.code for issue in match.warnings] == ["DARK_SETTINGS_DIFFER"]
+
+
+def test_keywords_and_settings_choose_among_darks_of_one_exposure() -> None:
+    light = frame("/d/NIGHT_1/l.fits", LIGHT, keywords={"NIGHT": "1"})
+    own_night = [frame(f"/d/NIGHT_1/DARK/d{index}.fits", DARK, keywords={"NIGHT": "1"}) for index in range(2)]
+    library = [frame(f"/d/DARK/d{index}.fits", DARK) for index in range(2)]
+    match = match_calibration([light], [*own_night, *library, frame("/d/masterFlat.xisf", FLAT, supplied=True)])
+    assert match.lights[light.path].dark == "300|NIGHT=1"
+    assert match.warnings == ()
+
+
+def test_an_unscaled_dark_of_another_exposure_says_what_it_leaves_in_the_lights() -> None:
+    light = frame("/d/l.fits", LIGHT)
+    flat = frame("/d/masterFlat.xisf", FLAT, supplied=True)
+    for exposure, expected in (
+        (2.0, "the dark signal of the other 298 s stays in these lights; add 300 s darks"),
+        (600.0, "300 s more dark signal than these lights hold is removed; add 300 s darks"),
+    ):
+        match = match_calibration([light], [frame("/d/dark.xisf", DARK, exposure=exposure, supplied=True), flat])
+        (warning,) = match.warnings
+        assert warning.code == "DARK_EXPOSURE_DIFFERS"
+        assert warning.message.endswith(expected), warning.message
+        assert dict(warning.details)["exposureSeconds"] == [300.0, exposure]
+    match = match_calibration([light], [frame("/d/dark.xisf", DARK, exposure=290.0, supplied=True), flat])
+    (warning,) = match.warnings
+    assert warning.message.endswith("as WBPP does without dark optimization")

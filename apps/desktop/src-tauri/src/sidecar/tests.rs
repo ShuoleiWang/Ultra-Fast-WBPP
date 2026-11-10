@@ -1234,3 +1234,202 @@ fn fake_sidecar_error_is_reported_with_its_diagnostic() {
     assert!(error.contains("diagnostic from the engine"));
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn engine_errors_are_recovered_from_the_last_envelope_line() {
+    let diagnostics = concat!(
+        "moved catalog folder not re-pointed (CATALOG_ROOT_MISSING): nothing to move\n",
+        r#"{"ok":false,"error":{"code":"EARLIER","message":"not the last one"}}"#,
+        "\n",
+        r#"{"error":{"code":"NO_SUPPORTED_FRAMES","message":"NO_SUPPORTED_FRAMES: nothing to read under 数据"},"ok":false}"#,
+        "\r\n",
+    );
+    assert_eq!(
+        engine_error(diagnostics),
+        Some((
+            "NO_SUPPORTED_FRAMES".to_owned(),
+            "nothing to read under 数据".to_owned()
+        ))
+    );
+    for other in [
+        "",
+        "Traceback (most recent call last):\nTypeError: broken",
+        // Not a failure, not a code, not the envelope's shape.
+        r#"{"ok":true,"error":{"code":"X","message":"y"}}"#,
+        r#"{"ok":false,"error":{"code":"--output","message":"y"}}"#,
+        r#"{"ok":false,"error":{"code":"X"}}"#,
+        r#"{"ok":false,"error":"X"}"#,
+        r#"{"type":"progress","event":{"stage":"calibration"}}"#,
+        // Spread over several lines, no line is the envelope.
+        "{\n  \"error\": {\n    \"code\": \"X\",\n    \"message\": \"y\"\n  },\n  \"ok\": false\n}",
+    ] {
+        assert_eq!(engine_error(other), None, "{other}");
+    }
+    let long = format!(
+        r#"{{"ok":false,"error":{{"code":"IO_ERROR","message":"{}"}}}}"#,
+        "x".repeat(4 * MAX_DIAGNOSTIC_BYTES)
+    );
+    assert_eq!(engine_error(&long).unwrap().1.len(), MAX_DIAGNOSTIC_BYTES);
+}
+
+#[test]
+fn options_and_relative_names_given_as_paths_never_reach_the_engine() {
+    // The refusal comes before any launch: this engine does not exist.
+    let executable = EngineExecutable {
+        path: std::env::temp_dir().join("ultra-fast-wbpp-engine-that-is-never-launched"),
+    };
+    let absolute = std::env::temp_dir().to_string_lossy().into_owned();
+    for paths in [
+        vec![
+            "--output",
+            "/tmp/overwritten.json",
+            "--force",
+            "/tmp/folder",
+        ],
+        vec!["--force"],
+        vec!["-h"],
+        vec!["--"],
+        vec!["relative/folder"],
+        vec!["~/Astro"],
+        vec![absolute.as_str(), "--output"],
+        vec![""],
+    ] {
+        let error = inspect_paths_with(
+            executable.clone(),
+            InspectRequest {
+                paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+                role_hint: None,
+            },
+        )
+        .expect_err("a name that is not an absolute path must be refused");
+        assert!(error.contains("absolute"), "{error}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_paths_follow_a_double_dash_and_its_errors_name_their_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(new_identifier("inventory-arguments-test").unwrap());
+    fs::create_dir(&root).unwrap();
+    let script = root.join("inventory-engine");
+    fs::write(
+        &script,
+        r###"#!/usr/bin/env python3
+import json, sys
+assert sys.argv[1:4] == ["inventory", "--compact", "--"], sys.argv
+paths = sys.argv[4:]
+if any("empty" in path for path in paths):
+    print(json.dumps({"ok": False, "error": {"code": "NO_SUPPORTED_FRAMES",
+        "message": "no supported frames under " + paths[0]}}, separators=(",", ":")), file=sys.stderr)
+    raise SystemExit(2)
+issues = [{"code": "FITS_HEADER_ERROR", "severity": "ERROR", "message": "No SIMPLE card found",
+           "path": path, "details": {}} for path in paths if "._" in path]
+issues.append({"code": "NO_LIGHTS", "severity": "ERROR", "message": "no Lights", "path": None, "details": {}})
+print(json.dumps({"name": "x", "issues": issues, "assets": [
+    {"path": path, "role": "FLAT", "status": "READY", "roleEvidence": ["FITS:IMAGETYP"]} for path in paths]}))
+"###,
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    let executable = EngineExecutable { path: script };
+    let inspect = |paths: &[&str]| {
+        inspect_paths_with(
+            executable.clone(),
+            InspectRequest {
+                paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+                role_hint: None,
+            },
+        )
+    };
+
+    // A path that only looks like an option further in stays a path.
+    let imported = inspect(&["/data/--output", "/data/night 1/Flat_R.fits"]).unwrap();
+    assert_eq!(
+        imported.sources[0].paths,
+        vec!["/data/--output", "/data/night 1/Flat_R.fits"]
+    );
+
+    let error = inspect(&["/data/Flat_R.fits", "/data/._Flat_R.fits"]).unwrap_err();
+    assert!(error.contains("FITS_HEADER_ERROR: No SIMPLE card found (/data/._Flat_R.fits)"));
+
+    // The engine's own error, not its exit status and raw JSON.
+    assert_eq!(
+        inspect(&["/data/empty"]).unwrap_err(),
+        "NO_SUPPORTED_FRAMES: no supported frames under /data/empty"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn separately_selected_files_are_counted_against_the_windows_command_line() {
+    let executable = Path::new(r"C:\Program Files\Ultra-Fast WBPP\resources\ufwbpp-engine.exe");
+    let path = format!(r"D:\Astro\2026-11-10\LIGHT\{}.fits", "L".repeat(69));
+    assert_eq!(path.encode_utf16().count(), 100);
+    assert!(fits_windows_command_line(
+        executable,
+        &vec![path.clone(); 300]
+    ));
+    assert!(!fits_windows_command_line(executable, &vec![path; 320]));
+    // UTF-16 units decide, not bytes: a CJK folder name costs one unit a character.
+    let cjk = format!(r"D:\天文\{}.fits", "仙".repeat(89));
+    assert_eq!(cjk.encode_utf16().count(), 100);
+    assert!(fits_windows_command_line(executable, &vec![cjk; 300]));
+}
+
+/// The Light paths of a request are the ones the interface holds from the
+/// inventory: plain on Windows, where `canonicalize` answers verbatim.
+#[test]
+fn request_files_name_their_paths_in_the_plain_spelling() {
+    let root = std::env::temp_dir().join(new_identifier("plain-request-files-test").unwrap());
+    fs::create_dir(&root).unwrap();
+    let light = root.join("盾牌座 L_0001.fits");
+    let flat = root.join("MasterFlat_L.fits");
+    fs::write(&light, b"light").unwrap();
+    fs::write(&flat, b"flat").unwrap();
+    let read = |request: &Path| -> serde_json::Value {
+        let value = serde_json::from_slice(&fs::read(request).unwrap()).unwrap();
+        fs::remove_file(request).unwrap();
+        value
+    };
+    let plain_and_same = |sent: &serde_json::Value, file: &Path| {
+        let sent = sent.as_str().unwrap();
+        assert!(!sent.starts_with(r"\\?\"), "{sent}");
+        assert_eq!(
+            Path::new(sent).canonicalize().unwrap(),
+            file.canonicalize().unwrap()
+        );
+    };
+
+    let (request, lights) =
+        create_private_quality_request(&[light.to_string_lossy().into_owned()]).unwrap();
+    plain_and_same(&read(&request)["lightPaths"][0], &light);
+
+    let sessions = root.canonicalize().unwrap();
+    let request = create_private_blink_request(
+        &lights,
+        &sessions.join("0123456789abcdef-20261110-213000"),
+        &[("L".to_owned(), flat.canonicalize().unwrap())],
+        &[],
+        None,
+        None,
+    )
+    .unwrap();
+    let blink = read(&request);
+    plain_and_same(&blink["lightPaths"][0], &light);
+    plain_and_same(&blink["masterFlats"][0]["path"], &flat);
+    let session = blink["sessionDirectory"].as_str().unwrap();
+    assert!(!session.starts_with(r"\\?\"), "{session}");
+    assert_eq!(
+        Path::new(session).parent().unwrap().canonicalize().unwrap(),
+        sessions
+    );
+
+    let hashed = hash_sources(HashSourcesRequest {
+        paths: vec![light.to_string_lossy().into_owned()],
+    })
+    .unwrap();
+    plain_and_same(&serde_json::json!(hashed.entries[0].path), &light);
+    fs::remove_dir_all(root).unwrap();
+}

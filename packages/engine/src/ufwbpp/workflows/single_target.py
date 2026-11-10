@@ -35,7 +35,7 @@ from ..mosaic.astrometry import PanelStars, SipFit
 from ..mosaic.canvas import CanvasProjection
 from ..native_kernels import load_native_kernels
 from ..path_budget import STAGING_SUFFIX, WORK_DIRECTORY
-from ..platform import remove_tree
+from ..platform import remove_file, remove_tree
 from ..products.preview import render_auto_stretch_preview
 from ..solvers.base import SolverBackend, WcsValidation
 from ..stacking.parameters import ShiftField
@@ -47,6 +47,7 @@ from .common import (
     _fsync_directory,
     _rename_directory_no_replace,
     _safe_token,
+    _unpublished_reason,
     _write_json,
 )
 from .contracts import (
@@ -223,7 +224,18 @@ def _failure_result(
     screening: Mapping[str, Any] | None = None,
     selection_policy: str | None = None,
     selection: Mapping[str, Any] | None = None,
+    finished: bool = False,
 ) -> E2EResult:
+    """Publish the staging tree as the run's ``.unsolved`` evidence under a failure receipt.
+
+    A receipt staged earlier is withdrawn first: the success receipt of a
+    run whose final rename failed (``finished``) says SOLVED, which is true
+    only of a published directory.  When the evidence cannot be renamed
+    either, the tree stays where it is staged.  Nothing is deleted, and the
+    result names the directory that holds the evidence or, of a finished
+    run, the products."""
+
+    remove_file(staging / "receipt.json")
     private_work = staging / WORK_DIRECTORY
     remove_tree(private_work)
     _sanitize_shareable_tree(staging, sources)
@@ -272,8 +284,19 @@ def _failure_result(
     receipt_id = "sha256:" + hashlib.sha256(canonical_json_document(receipt_core)).hexdigest()
     _write_json(staging / "receipt.json", {"receiptId": receipt_id, **receipt_core})
     _emit(callback, ProgressStage.PUBLISH, "started", "publishing UNSOLVED evidence")
-    _rename_directory_no_replace(staging, failure_directory)
-    _fsync_directory(failure_directory.parent)
+    kept = failure_directory
+    try:
+        _rename_directory_no_replace(staging, failure_directory)
+        _fsync_directory(failure_directory.parent)
+    except E2EError as error:
+        kept = staging
+        message = (
+            f"{message}; the evidence was not published ({_unpublished_reason(error, failure_directory)}) "
+            f"and stays in {staging}"
+        )
+    else:
+        if finished:
+            message = f"{message}; its products are kept in {failure_directory}"
     try:
         _emit(callback, ProgressStage.FAILED, "completed", message)
     except Exception:
@@ -283,8 +306,8 @@ def _failure_result(
         code=code,
         state=E2EState.UNSOLVED_WORKING,
         output_directory=None,
-        evidence_directory=str(failure_directory),
-        receipt_path=str(failure_directory / "receipt.json"),
+        evidence_directory=str(kept),
+        receipt_path=str(kept / "receipt.json"),
         product_paths=(),
         preview_paths=(),
         passed_light_paths=tuple(str(path) for path in passed),
@@ -392,7 +415,9 @@ def run_e2e_stages(
     lights = sources.lights
 
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", suffix=STAGING_SUFFIX, dir=output.parent))
-    published = False
+    # True once the staging tree is published, handed over as evidence or kept
+    # on purpose: only an unsettled tree is deleted when the run aborts.
+    settled = False
     # One spawned worker pool serves quality-gate measurement, star-field
     # analysis and registration: each spawned worker imports NumPy, astropy,
     # SEP and the engine (about 1.7 s per worker on the Windows laptop), so
@@ -428,7 +453,7 @@ def run_e2e_stages(
                 selection_policy=request.selection.policy,
                 selection=screening.explicit_block,
             )
-            published = True
+            settled = True
             return result
 
         (
@@ -747,7 +772,7 @@ def run_e2e_stages(
                 sources=identities,
                 callback=progress,
             )
-            published = True
+            settled = True
             return result
         _emit(progress, ProgressStage.ASTROMETRY, "completed", "all filters have verified WCS")
 
@@ -836,9 +861,35 @@ def run_e2e_stages(
         _write_json(staging / "receipt.json", {"receiptId": receipt_id, **receipt_core})
         _emit(progress, ProgressStage.VERIFY, "completed", f"verified {len(artifacts)} artifacts")
         _emit(progress, ProgressStage.PUBLISH, "started", "atomically publishing solved project")
-        _rename_directory_no_replace(staging, output)
+        try:
+            _rename_directory_no_replace(staging, output)
+        except E2EError as error:
+            # The run is complete and verified; only its last rename failed.
+            settled = True
+            reason = _unpublished_reason(error, output)
+            try:
+                return _failure_result(
+                    staging=staging,
+                    failure_directory=sources.failure_directory,
+                    code=error.code,
+                    message=f"the finished run was not published: {reason}",
+                    passed=screening.passed,
+                    excluded=screening.excluded,
+                    solver={"status": "SOLVED", **astrometry_record},
+                    sources=identities,
+                    callback=progress,
+                    finished=True,
+                )
+            except Exception as evidence_error:
+                raise E2EError(
+                    error.code,
+                    f"the finished run was not published ({reason}) and its failure receipt could not be "
+                    f"written ({type(evidence_error).__name__}: {evidence_error}); its products stay in this "
+                    "staging directory, which is not a published result",
+                    path=str(staging),
+                ) from evidence_error
         _fsync_directory(output.parent)
-        published = True
+        settled = True
         # A UI callback must not be able to turn an already committed success
         # into an apparent processing failure.
         try:
@@ -859,7 +910,7 @@ def run_e2e_stages(
         )
     except (Exception, GeneratorExit):
         # Also when a paused mosaic panel run is closed (another panel failed).
-        if not published:
+        if not settled:
             remove_tree(staging)
         try:
             _emit(progress, ProgressStage.FAILED, "failed", "E2E execution aborted without publishing success")
@@ -873,21 +924,16 @@ def run_e2e_stages(
 
 
 __all__ = [
-    "DrizzleOptions",
     "E2EError",
     "E2ERequest",
     "E2EResult",
     "E2EState",
     "E2E_VERSION",
-    "ExplicitDecision",
     "ExplicitSelection",
     "IntegrationMode",
     "ProgressCallback",
-    "ProgressEvent",
     "ProgressStage",
     "ReviewApproval",
-    "bind_review_approval_selections",
-    "parse_explicit_selection",
     "run_e2e",
     "run_e2e_stages",
 ]

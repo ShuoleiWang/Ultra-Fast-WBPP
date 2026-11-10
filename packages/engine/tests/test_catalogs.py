@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
+import threading
+import time
 from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker
 import pytest
 
+from ufwbpp.solvers import catalogs
 from ufwbpp.solvers.catalogs import (
     CatalogError,
     DownloadResponse,
@@ -444,6 +449,7 @@ def test_configure_adopts_semantically_identical_existing_config_without_replaci
     assert configured["installedSet"]["config"]["sha256"] == hashlib.sha256(existing).hexdigest()
 
 
+@pytest.mark.parametrize("moved", (False, True))
 @pytest.mark.parametrize(
     ("artifact", "identity"),
     (
@@ -453,7 +459,7 @@ def test_configure_adopts_semantically_identical_existing_config_without_replaci
     ),
 )
 def test_installed_set_api_binds_solver_index_to_actual_verified_bytes(
-    tmp_path: Path, artifact: str, identity: str
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], artifact: str, identity: str, moved: bool
 ) -> None:
     payload = b"checked-catalog-bytes"
     manifests = tmp_path / "manifests"
@@ -466,6 +472,24 @@ def test_installed_set_api_binds_solver_index_to_actual_verified_bytes(
         manifest_dir=manifests,
         transport=FakeTransport(payload),
     )
+    if moved:
+        # A folder copied to another computer names its old place until the
+        # next command re-points it; a config edited by hand is left alone.
+        copy = tmp_path / "other-computer" / "catalogs"
+        shutil.copytree(root, copy)
+        generated = (copy / "astrometry.cfg").read_bytes()
+        assert catalog_doctor(catalog_root=copy, manifest_dir=manifests)["ok"] is False
+        doctor = ["catalog", "doctor", "--catalog-dir", str(copy), "--manifest-dir", str(manifests), "--json"]
+        (copy / "astrometry.cfg").write_bytes(generated + b"# edited by hand\n")
+        assert main(doctor) == 3
+        assert (copy / "astrometry.cfg").read_bytes() == generated + b"# edited by hand\n"
+        (copy / "astrometry.cfg").write_bytes(generated)
+        capsys.readouterr()
+        assert main(doctor) == 0
+        assert json.loads(capsys.readouterr().out)["ok"] is True
+        assert f"add_path {copy}\n" in (copy / "astrometry.cfg").read_text(encoding="utf-8")
+        assert catalog_doctor(catalog_root=root, manifest_dir=manifests)["ok"] is True
+        root = copy
     receipts = verified_installed_set_identities(
         catalog_root=root, manifest_dir=manifests
     )
@@ -525,6 +549,170 @@ def test_solver_catalog_snapshot_detects_byte_identical_replacement(tmp_path: Pa
     assert failure.value.code == "CATALOG_FILE_CHANGED"
 
 
+INDEX_4107 = "astrometry.net:index:4107:healpix:-1:hpnside:0"
+CHANGED = b"changed-catalog-bytes"
+
+
+def _installed_index(tmp_path: Path, payload: bytes = b"checked-catalog-bytes") -> tuple[Path, Path]:
+    manifests = tmp_path / "manifests"
+    _, acceptance_id = _fixture_manifest(manifests, payload)
+    root = tmp_path / "catalogs"
+    install_catalog(
+        "fake-astrometry-4107",
+        accepted_terms_id=acceptance_id,
+        catalog_root=root,
+        manifest_dir=manifests,
+        transport=FakeTransport(payload),
+    )
+    return root, manifests
+
+
+@pytest.fixture
+def full_hashes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The index files read in full, in order."""
+
+    hashed: list[str] = []
+    hash_file = catalogs._hash_regular_file_snapshot
+
+    def recording(path: Path, **options: Any) -> dict[str, Any]:
+        if path.name.startswith("index-"):
+            hashed.append(path.name)
+        return hash_file(path, **options)
+
+    monkeypatch.setattr(catalogs, "_hash_regular_file_snapshot", recording)
+    return hashed
+
+
+def test_index_digest_is_reused_only_for_a_settled_unchanged_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, full_hashes: list[str]
+) -> None:
+    payload = b"checked-catalog-bytes"
+    root, manifests = _installed_index(tmp_path, payload)
+    config = root / "astrometry.cfg"
+
+    # Written inside the settling window: read in full by the receipt check
+    # and by the snapshot, at every use.
+    monkeypatch.setattr(catalogs, "_SETTLED_NS", 3600 * 10**9)
+    unsettled = installed_set_snapshot_for_solver_config(config, manifest_dir=manifests)
+    assert verify_installed_set_snapshot(unsettled, manifest_dir=manifests) == unsettled
+    assert len(full_hashes) == 4
+
+    # Settled: the first use still reads every byte and compares it with the
+    # receipt; later uses stat the file and give the identical snapshot.
+    monkeypatch.setattr(catalogs, "_SETTLED_NS", 0)
+    del full_hashes[:]
+    first = installed_set_snapshot_for_solver_config(config, manifest_dir=manifests)
+    assert full_hashes == ["index-4107.fits"]
+    assert first == unsettled
+    assert first["artifacts"][0]["sha256"] == hashlib.sha256(payload).hexdigest()
+    assert installed_set_snapshot_for_solver_config(config, manifest_dir=manifests) == first
+    assert verify_installed_set_snapshot(first, manifest_dir=manifests) == first
+    assert verified_installed_set_identities(catalog_root=root, manifest_dir=manifests)
+    assert full_hashes == ["index-4107.fits"]
+
+    # The index a solution is bound to is read in full once more, and the
+    # binding is what it was without any reuse.
+    monkeypatch.setattr(catalogs, "_SETTLED_NS", 3600 * 10**9)
+    binding = installed_set_identity_for_solver_indexes((INDEX_4107,), catalog_root=root, manifest_dir=manifests)
+    monkeypatch.setattr(catalogs, "_SETTLED_NS", 0)
+    installed_set_snapshot_for_solver_config(config, manifest_dir=manifests)
+    del full_hashes[:]
+    assert installed_set_identity_for_solver_indexes((INDEX_4107,), catalog_root=root, manifest_dir=manifests) == binding
+    assert full_hashes == ["index-4107.fits"]
+
+
+def _rewrite_in_place(index: Path, payload: bytes) -> None:
+    index.write_bytes(CHANGED)
+
+
+def _rewrite_and_restore_mtime(index: Path, payload: bytes) -> None:
+    before = index.stat()
+    index.write_bytes(CHANGED)
+    os.utime(index, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+
+def _truncate(index: Path, payload: bytes) -> None:
+    index.write_bytes(payload[:-1])
+
+
+def _append(index: Path, payload: bytes) -> None:
+    with index.open("ab") as stream:
+        stream.write(b"x")
+
+
+def _replace(content: bytes | None):
+    def replace(index: Path, payload: bytes) -> None:
+        replacement = index.with_name("replacement.fits")
+        replacement.write_bytes(payload if content is None else content)
+        os.replace(replacement, index)
+
+    return replace
+
+
+@pytest.mark.parametrize("reuse", (False, True))
+@pytest.mark.parametrize(
+    ("change", "code"),
+    (
+        (_rewrite_in_place, "CATALOG_INSTALLED_SET_UNBOUND"),
+        pytest.param(
+            _rewrite_and_restore_mtime,
+            "CATALOG_INSTALLED_SET_UNBOUND",
+            # Seen through the change time; Windows keeps the creation time there.
+            marks=pytest.mark.skipif(os.name == "nt", reason="st_ctime is the creation time on Windows"),
+        ),
+        (_truncate, "CATALOG_INSTALLED_SET_UNBOUND"),
+        (_append, "CATALOG_INSTALLED_SET_UNBOUND"),
+        (_replace(CHANGED), "CATALOG_INSTALLED_SET_UNBOUND"),
+        # The same bytes in another file are still drift.
+        (_replace(None), "CATALOG_FILE_CHANGED"),
+    ),
+)
+def test_a_changed_index_fails_the_same_way_with_and_without_reuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, full_hashes: list[str], change: Any, code: str, reuse: bool
+) -> None:
+    payload = b"checked-catalog-bytes"
+    root, manifests = _installed_index(tmp_path, payload)
+    index = root / "index-4107.fits"
+    # Without reuse nothing ever settles: every use reads the file, as before.
+    # With it, a 40 ms window that the pause below outlasts; the change then
+    # falls on a later timestamp on any filesystem a test runs on.
+    monkeypatch.setattr(catalogs, "_SETTLED_NS", 40_000_000 if reuse else 3600 * 10**9)
+    time.sleep(0.1)
+    snapshot = installed_set_snapshot_for_solver_config(root / "astrometry.cfg", manifest_dir=manifests)
+    del full_hashes[:]
+    verify_installed_set_snapshot(snapshot, manifest_dir=manifests)
+    assert len(full_hashes) == (0 if reuse else 2)
+
+    change(index, payload)
+
+    with pytest.raises(CatalogError) as drift:
+        verify_installed_set_snapshot(snapshot, manifest_dir=manifests)
+    assert drift.value.code == code
+    if index.read_bytes() != payload:
+        with pytest.raises(CatalogError) as binding:
+            installed_set_identity_for_solver_indexes((INDEX_4107,), catalog_root=root, manifest_dir=manifests)
+        assert binding.value.code == "CATALOG_INSTALLED_SET_UNBOUND"
+
+
+def test_concurrent_first_uses_read_each_index_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, full_hashes: list[str]
+) -> None:
+    root, manifests = _installed_index(tmp_path)
+    monkeypatch.setattr(catalogs, "_SETTLED_NS", 0)
+    threads = 8
+    barrier = threading.Barrier(threads)
+
+    def use(_: int) -> dict[str, Any]:
+        barrier.wait()
+        snapshot = installed_set_snapshot_for_solver_config(root / "astrometry.cfg", manifest_dir=manifests)
+        return verify_installed_set_snapshot(snapshot, manifest_dir=manifests)
+
+    with ThreadPoolExecutor(threads) as pool:
+        snapshots = list(pool.map(use, range(threads)))
+    assert all(snapshot == snapshots[0] for snapshot in snapshots)
+    assert full_hashes == ["index-4107.fits"]
+
+
 def test_equally_specific_installed_sets_are_ambiguous(tmp_path: Path) -> None:
     payload = b"checked-catalog-bytes"
     manifests = tmp_path / "manifests"
@@ -577,7 +765,7 @@ def test_remove_plan_is_read_only_and_retains_shared_artifacts(tmp_path: Path) -
     assert shared.exists()
 
 
-def test_path_traversal_and_symlink_targets_are_rejected(tmp_path: Path) -> None:
+def test_path_traversal_and_symlink_targets_are_rejected(tmp_path: Path, symlink) -> None:
     manifests = tmp_path / "manifests"
     path, acceptance_id = _fixture_manifest(manifests)
     value = json.loads(path.read_text())
@@ -587,24 +775,23 @@ def test_path_traversal_and_symlink_targets_are_rejected(tmp_path: Path) -> None
         load_catalog_manifests(manifests)
     assert failure.value.code == "CATALOG_PATH_UNSAFE"
 
-    if hasattr(Path, "symlink_to"):
-        safe_manifests = tmp_path / "safe-manifests"
-        _fixture_manifest(safe_manifests)
-        root = tmp_path / "catalogs"
-        root.mkdir()
-        external = tmp_path / "external"
-        external.write_bytes(b"do not touch")
-        (root / "index-4107.fits").symlink_to(external)
-        with pytest.raises(CatalogError) as symlink_failure:
-            install_catalog(
-                "fake-astrometry-4107",
-                accepted_terms_id=acceptance_id,
-                catalog_root=root,
-                manifest_dir=safe_manifests,
-                transport=FakeTransport(b"checked-catalog-bytes"),
-            )
-        assert symlink_failure.value.code == "CATALOG_FILE_UNSAFE"
-        assert external.read_bytes() == b"do not touch"
+    safe_manifests = tmp_path / "safe-manifests"
+    _fixture_manifest(safe_manifests)
+    root = tmp_path / "catalogs"
+    root.mkdir()
+    external = tmp_path / "external"
+    external.write_bytes(b"do not touch")
+    symlink(root / "index-4107.fits", external)
+    with pytest.raises(CatalogError) as symlink_failure:
+        install_catalog(
+            "fake-astrometry-4107",
+            accepted_terms_id=acceptance_id,
+            catalog_root=root,
+            manifest_dir=safe_manifests,
+            transport=FakeTransport(b"checked-catalog-bytes"),
+        )
+    assert symlink_failure.value.code == "CATALOG_FILE_UNSAFE"
+    assert external.read_bytes() == b"do not touch"
 
 
 def test_localhost_ip_and_non_allowlisted_origins_are_rejected(tmp_path: Path) -> None:

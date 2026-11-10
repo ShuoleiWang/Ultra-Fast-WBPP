@@ -3,7 +3,7 @@ import type { InventoryTab } from "../Sidebar";
 import type { Translator } from "../i18n";
 import { BrandMark } from "../icons";
 import { LaunchBar, LaunchSettings, MetadataConfirmations } from "./LaunchSettings";
-import { Alert, StarField, type Workflow } from "./common";
+import { Alert, FailureLines, StarField, type Workflow } from "./common";
 
 export function ImportView({
   workflow,
@@ -113,7 +113,7 @@ export function ImportView({
             <div className="stack hero-stack">
               {workflow.errorMessage && (
                 <Alert tone="stop" title={t("operationFailed")}>
-                  {workflow.errorMessage}
+                  <FailureLines message={workflow.errorMessage} t={t} />
                 </Alert>
               )}
               {pathEntry}
@@ -133,7 +133,7 @@ export function ImportView({
             </h1>
             {workflow.errorMessage && (
               <Alert tone="stop" title={t("operationFailed")}>
-                {workflow.errorMessage}
+                <FailureLines message={workflow.errorMessage} t={t} />
               </Alert>
             )}
             <div className="row-actions">

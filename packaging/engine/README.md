@@ -11,12 +11,22 @@ python scripts/build_engine_sidecar.py \
   --output-dir build/sidecars
 ```
 
-An Apple Silicon release that declares macOS 14 support must be built from
-native libraries whose Mach-O deployment targets are also macOS 14 or older.
+An Apple Silicon release declares macOS 15, and no Mach-O slice of the frozen
+engine may target a newer macOS. On macOS targets the builder refuses, before
+freezing, an interpreter whose framework image targets a newer macOS
+(`INTERPRETER_DEPLOYMENT_TARGET_TOO_NEW`, naming the interpreter, its target
+and the limit), and right after PyInstaller it runs the bundle attestation's
+Mach-O deployment audit on the frozen tree. `--macos-minimum <version>` raises
+that limit for a local build whose interpreter was built for a newer macOS;
+the app must then declare the same version, which `make` arranges
+(`--print-local-macos-minimum` prints it). Releases never pass it.
+
 The builder never resolves a mutable `latest` dependency. Materialize the
 Homebrew OCI layout pinned by
-[`macos14-runtime-libraries-v1.json`](macos14-runtime-libraries-v1.json), then
-pass that immutable input to the sidecar builder:
+[`macos14-runtime-libraries-v1.json`](macos14-runtime-libraries-v1.json)
+(macOS 14 Sonoma bottles of OpenSSL and mpdecimal, which replace the
+interpreter's own Homebrew copies), then pass that immutable input to the
+sidecar builder:
 
 ```bash
 python scripts/fetch_macos14_runtime_libraries.py \

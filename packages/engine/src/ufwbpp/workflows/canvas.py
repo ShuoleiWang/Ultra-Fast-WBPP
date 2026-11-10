@@ -136,6 +136,7 @@ def _measure_reference(
         hints=hints,
         min_matches=request.min_matches,
         max_rms_arcsec=request.max_rms_arcsec,
+        staging_directory=directory,
     )
     if not solved:
         raise E2EError(

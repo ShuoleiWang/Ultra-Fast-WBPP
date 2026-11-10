@@ -12,12 +12,43 @@ pub(crate) fn inspect_paths<R: Runtime>(
     inspect_paths_with(discover_engine(app)?, request)
 }
 
+/// Windows hands a process one command line of at most 32 767 UTF-16 units;
+/// the rest is left for the options and for quoting that doubles a backslash.
+const WINDOWS_COMMAND_LINE_UNITS: usize = 32_000;
+
+/// Whether the engine and `paths` fit one Windows command line, each argument
+/// with its quotes and separator.
+pub(super) fn fits_windows_command_line(executable: &Path, paths: &[String]) -> bool {
+    let argument = |text: &str| text.encode_utf16().count() + 3;
+    let units = argument(&executable.to_string_lossy())
+        + paths.iter().map(|path| argument(path)).sum::<usize>();
+    units <= WINDOWS_COMMAND_LINE_UNITS
+}
+
 pub(super) fn inspect_paths_with(
     executable: EngineExecutable,
     request: InspectRequest,
 ) -> Result<InspectResponse, String> {
+    // The paths are command-line arguments of the engine.  An absolute path
+    // cannot begin like an option, and everything after `--` is a path to the
+    // engine's parser, so no string from the interface selects an option.
+    if let Some(path) = request
+        .paths
+        .iter()
+        .find(|path| !Path::new(path).is_absolute())
+    {
+        return Err(format!(
+            "import takes absolute file or folder paths, not: {path}"
+        ));
+    }
+    if cfg!(windows) && !fits_windows_command_line(&executable.path, &request.paths) {
+        return Err(format!(
+            "{} separately selected files are too many for one import on Windows; choose or drop the folder that holds them",
+            request.paths.len()
+        ));
+    }
     let mut command = executable.command("inventory");
-    command.args(&request.paths).arg("--compact");
+    command.arg("--compact").arg("--").args(&request.paths);
     let stdout = command_output(command, "inventory")?;
     let inventory: InventoryPayload = serde_json::from_slice(&stdout)
         .map_err(|error| format!("sidecar inventory returned invalid JSON: {error}"))?;
@@ -35,7 +66,10 @@ pub(super) fn inspect_paths_with(
         let summary = blocking
             .iter()
             .take(4)
-            .map(|issue| format!("{}: {}", issue.code, issue.message))
+            .map(|issue| match &issue.path {
+                Some(path) => format!("{}: {} ({path})", issue.code, issue.message),
+                None => format!("{}: {}", issue.code, issue.message),
+            })
             .collect::<Vec<_>>()
             .join("; ");
         return Err(format!(
@@ -141,7 +175,7 @@ pub(crate) fn hash_sources(request: HashSourcesRequest) -> Result<HashSourcesRes
             return Err("hashSources accepts unique regular files only".to_owned());
         }
         entries.push(SourceHash {
-            path: path.to_string_lossy().into_owned(),
+            path: platform::plain_path(&path).to_string_lossy().into_owned(),
             source_sha256: format!("sha256:{}", sha256_file(&path)?),
         });
     }
@@ -168,7 +202,7 @@ pub(super) fn create_private_quality_request(
         .map_err(|error| format!("cannot create private quality request: {error}"))?;
     let payload = serde_json::json!({
         "schemaVersion": 1,
-        "lightPaths": canonical.iter().map(|path| path.to_string_lossy()).collect::<Vec<_>>(),
+        "lightPaths": canonical.iter().map(|path| platform::plain_path(path).to_string_lossy().into_owned()).collect::<Vec<_>>(),
     });
     let mut encoded = serde_json::to_vec(&payload).map_err(|error| error.to_string())?;
     encoded.push(b'\n');
@@ -207,7 +241,7 @@ pub(super) fn inspect_calibration_with(
     ));
     let payload = serde_json::json!({
         "schemaVersion": 1,
-        "paths": paths.iter().map(|path| path.to_string_lossy()).collect::<Vec<_>>(),
+        "paths": paths.iter().map(|path| platform::plain_path(path).to_string_lossy().into_owned()).collect::<Vec<_>>(),
         "recipe": request.recipe,
     });
     let mut options = OpenOptions::new();

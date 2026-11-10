@@ -3,7 +3,7 @@ calibration group a run uses (see :mod:`ufwbpp.calibration.matching`)."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from pathlib import Path
 from typing import Any
@@ -18,6 +18,7 @@ from .integration import (
     FitsFrame,
     FrameExpression,
     FrameInfo,
+    IntegrationParameters,
     integrate_expressions,
     robust_location,
 )
@@ -120,6 +121,19 @@ def _not_used(plan: _RunPlan, kind: str, key: str, ledger: _RunLedger, reference
         ledger.stage_statistics[_statistics_key(kind, key)] = {"mode": "NOT_USED"}
 
 
+def calibration_stack_parameters(parameters: PipelineParameters) -> IntegrationParameters:
+    """The Lights' integration parameters for a stack of Bias, Dark or Flat frames.
+
+    The trail search looks for satellite and aircraft trails against the
+    registered sky.  Calibration frames have none to find (a trail in one
+    twilight Flat is an ordinary outlier of the per-pixel rejection), and the
+    search measured about 37 candidate lines per Flat on real sky flats and accepted
+    none: 54 s of a 160 s project.
+    """
+
+    return replace(parameters.integration, transient_rejection=False)
+
+
 def _build_master_biases(
     plan: _RunPlan, dirs: _StagingDirs, parameters: PipelineParameters, ledger: _RunLedger
 ) -> tuple[dict[str, Path], dict[str, FrameInfo]]:
@@ -166,7 +180,7 @@ def _build_master_biases(
                 **cfa_metadata(reference),
                 **numeric_domain_metadata(reference),
             },
-            parameters=parameters.integration,
+            parameters=calibration_stack_parameters(parameters),
             native_threads=None,
             durable=parameters.durable_intermediates,
         )
@@ -235,7 +249,7 @@ def _build_master_darks(
                 **cfa_metadata(reference),
                 **numeric_domain_metadata(reference),
             },
-            parameters=parameters.integration,
+            parameters=calibration_stack_parameters(parameters),
             durable=parameters.durable_intermediates,
         )
         masters[key] = destination
@@ -417,7 +431,7 @@ def _build_master_flats(
                 "OAFNSCL": 1.0,
                 **cfa_metadata(reference),
             },
-            parameters=parameters.integration,
+            parameters=calibration_stack_parameters(parameters),
             durable=parameters.durable_intermediates,
         )
         master_flats[key] = destination

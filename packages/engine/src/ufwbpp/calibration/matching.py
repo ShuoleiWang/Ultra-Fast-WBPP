@@ -13,9 +13,10 @@ Each Light, and each raw Flat group, is then paired with a Bias, a Dark and
 * compatible: the same size, binning and colour (mono or one Bayer pattern),
   the same filter for a Flat, and no grouping keyword with a different value;
   a frame without a keyword is compatible with every value of it;
-* preferred: the most matching keywords (WBPP's "high-compatible" group),
-  then the most matching acquisition settings, then for a Dark the closest
-  exposure and a temperature within tolerance, then raw frames before a
+* preferred: for a Dark the closest exposure first (the Dark of the frame's
+  own exposure when one exists), then the most matching keywords (WBPP's
+  "high-compatible" group), then the most matching acquisition settings,
+  then for a Dark a temperature within tolerance, then raw frames before a
   supplied master and the lexically first group;
 * a raw Flat group takes a Dark only within 0.5 s of its exposure when a Bias
   exists, and the Bias otherwise.
@@ -48,7 +49,13 @@ FLAT_DARK_EXPOSURE_TOLERANCE_SECONDS = 0.5
 EXPOSURE_EPSILON_SECONDS = 1e-6
 SETTINGS = ("camera", "gain", "offset", "readout_mode")
 _SETTING_LABELS = {"camera": "camera", "gain": "gain", "offset": "offset", "readout_mode": "readoutMode"}
-MATCHING_ALGORITHM = "wbpp-compatible-calibration-matching-v1"
+# A Dark within this fraction of a frame's exposure removes its dark signal
+# to that fraction; beyond it the warning says what the unscaled Dark leaves.
+DARK_EXPOSURE_SIMILAR_FRACTION = 0.1
+# v2: a Dark is chosen by exposure before grouping keywords and settings. v1
+# ranked keywords and settings first, so Lights in ``NIGHT_1/`` took that
+# night's Flat-Darks although a Dark of their own exposure existed.
+MATCHING_ALGORITHM = "wbpp-compatible-calibration-matching-v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +261,34 @@ def _exposure_distance(left: FrameTraits, right: FrameTraits) -> float:
     return abs(float(left.exposure_seconds) - float(right.exposure_seconds))
 
 
+def _exposure_rank(left: FrameTraits, right: FrameTraits) -> float:
+    """The exposure distance Darks are ranked by: zero for the same exposure,
+    microsecond steps otherwise, so equal distances tie exactly."""
+
+    if _same_exposure(left.exposure_seconds, right.exposure_seconds):
+        return 0.0
+    return round(_exposure_distance(left, right), 6)
+
+
+def _dark_exposure_message(target: FrameTraits, dark: FrameTraits) -> str:
+    """What subtracting ``dark`` unscaled from frames of another exposure does."""
+
+    frames = "lights" if target.kind == LIGHT else "flats"
+    message = "no dark of this exposure; the closest one is subtracted unscaled, as WBPP does without dark optimization"
+    wanted, found = target.exposure_seconds, dark.exposure_seconds
+    if wanted is None or found is None:
+        return message
+    message = (
+        f"no dark of this exposure ({wanted:g} s); the closest one ({found:g} s) is subtracted unscaled, "
+        "as WBPP does without dark optimization"
+    )
+    if abs(found - wanted) <= DARK_EXPOSURE_SIMILAR_FRACTION * wanted:
+        return message
+    if found < wanted:
+        return f"{message}: the dark signal of the other {wanted - found:g} s stays in these {frames}; add {wanted:g} s darks"
+    return f"{message}: {found - wanted:g} s more dark signal than these {frames} hold is removed; add {wanted:g} s darks"
+
+
 def _group_identity(traits: FrameTraits) -> tuple[Any, ...]:
     """Raw frames with equal identities are integrated into one master."""
 
@@ -380,10 +415,13 @@ def _rank(
         if reasons:
             impossible.append((group, reasons))
             continue
+        # Exposure decides a Dark: the dark signal an unscaled Dark removes
+        # is that of its own exposure. Keywords and settings choose among
+        # Darks of one exposure, and alone among Bias and Flat groups.
         score = (
+            _exposure_rank(target, candidate) if dark else 0.0,
             -_keyword_matches(target, candidate),
             -_setting_matches(target, candidate),
-            _exposure_distance(target, candidate) if dark else 0.0,
             int(_temperature_differs(target, candidate, temperature_tolerance)) if dark else 0,
             int(group.supplied_master),
         )
@@ -442,8 +480,7 @@ def _choose(
             warnings.append(
                 _issue(
                     "DARK_EXPOSURE_DIFFERS",
-                    "no dark of this exposure; the closest one is subtracted unscaled, "
-                    "as WBPP does without dark optimization",
+                    _dark_exposure_message(target, chosen.traits),
                     group=chosen.key,
                     exposureSeconds=[target.exposure_seconds, chosen.traits.exposure_seconds],
                 )
@@ -613,6 +650,7 @@ def match_calibration(
 __all__ = [
     "BIAS",
     "DARK",
+    "DARK_EXPOSURE_SIMILAR_FRACTION",
     "EXPOSURE_EPSILON_SECONDS",
     "FLAT",
     "FLAT_DARK_EXPOSURE_TOLERANCE_SECONDS",

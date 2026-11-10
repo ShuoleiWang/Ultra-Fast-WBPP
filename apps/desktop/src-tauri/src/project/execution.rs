@@ -115,7 +115,33 @@ pub(super) fn stream_progress<R: Runtime, S: Read + Send + 'static>(
     })
 }
 
-pub(super) fn emit_error<R: Runtime>(app: &AppHandle<R>, job_id: &str, code: &str, message: &str) {
+/// Reports a failed run with what it left on disk: `evidenceDirectory` when
+/// the engine published its `.unsolved` evidence, and `outputPublished` when
+/// the output directory exists (a result the final verification refused stays
+/// where the engine published it).  The message does not repeat the code.
+pub(super) fn emit_error<R: Runtime>(
+    app: &AppHandle<R>,
+    job_id: &str,
+    code: &str,
+    message: &str,
+    output: &Path,
+) {
+    let mut details = BTreeMap::new();
+    let evidence = evidence_directory(output);
+    if evidence.is_dir() {
+        details.insert(
+            "evidenceDirectory".to_owned(),
+            serde_json::json!(evidence.to_string_lossy()),
+        );
+    }
+    details.insert(
+        "outputPublished".to_owned(),
+        serde_json::json!(output.is_dir()),
+    );
+    let message = message
+        .strip_prefix(code)
+        .and_then(|rest| rest.strip_prefix(": "))
+        .unwrap_or(message);
     let _ = app.emit(
         ERROR_EVENT,
         ErrorEvent {
@@ -123,9 +149,93 @@ pub(super) fn emit_error<R: Runtime>(app: &AppHandle<R>, job_id: &str, code: &st
             code: code.to_owned(),
             message: message.to_owned(),
             retryable: false,
-            details: BTreeMap::new(),
+            details,
         },
     );
+}
+
+/// `<output>.unsolved`, where the engine publishes the evidence of a run
+/// whose final solve failed.
+fn evidence_directory(output: &Path) -> PathBuf {
+    let mut name = output.file_name().unwrap_or_default().to_os_string();
+    name.push(".unsolved");
+    output.with_file_name(name)
+}
+
+/// Whether `name` is a staging directory of the run that publishes into a
+/// directory called `output_name`.  The engine stages a project run beside
+/// its output as `.<output name>.<8>.pstage` (`tempfile.mkdtemp`), the eight
+/// characters taken from `[a-z0-9_]`.
+pub(super) fn is_run_staging_name(name: &str, output_name: &str) -> bool {
+    name.strip_prefix('.')
+        .and_then(|rest| rest.strip_prefix(output_name))
+        .and_then(|rest| rest.strip_prefix('.'))
+        .and_then(|rest| rest.strip_suffix(".pstage"))
+        .is_some_and(|random| {
+            random.len() == 8
+                && random
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        })
+}
+
+/// The names beside `output` that have the form of its run's staging.
+pub(super) fn run_staging_names(output: &Path) -> BTreeSet<std::ffi::OsString> {
+    let (Some(parent), Some(output_name)) = (
+        output.parent(),
+        output.file_name().and_then(|name| name.to_str()),
+    ) else {
+        return BTreeSet::new();
+    };
+    std::fs::read_dir(parent)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name())
+                .filter(|name| {
+                    name.to_str()
+                        .is_some_and(|name| is_run_staging_name(name, output_name))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+const STAGING_REMOVAL_ATTEMPTS: u32 = 5;
+const STAGING_REMOVAL_RETRY: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Removes the staging trees a run left beside `output`.
+///
+/// Only a real directory (never a link) directly inside the output parent is
+/// removed, only when the parent is still the canonical directory the run was
+/// launched in, only when its name is the engine's staging name for this
+/// output, and never one that was there before the run (`present_at_launch`).
+/// The output and its `.unsolved` evidence are not staging and are kept.  A
+/// tree that cannot be removed is left: on Windows a file of a process that
+/// was just killed stays open for a moment, hence the few attempts.
+pub(super) fn remove_run_staging(output: &Path, present_at_launch: &BTreeSet<std::ffi::OsString>) {
+    let Some(parent) = output.parent() else {
+        return;
+    };
+    if !parent
+        .canonicalize()
+        .is_ok_and(|canonical| platform::plain_path(&canonical) == parent)
+    {
+        return;
+    }
+    for name in run_staging_names(output).difference(present_at_launch) {
+        let path = parent.join(name);
+        // `symlink_metadata` describes a link itself, so a link is no directory.
+        if !std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
+            continue;
+        }
+        for _ in 0..STAGING_REMOVAL_ATTEMPTS {
+            if std::fs::remove_dir_all(&path).is_ok() || std::fs::symlink_metadata(&path).is_err() {
+                break;
+            }
+            std::thread::sleep(STAGING_REMOVAL_RETRY);
+        }
+    }
 }
 
 pub(crate) fn start<R: Runtime>(
@@ -224,6 +334,7 @@ pub(super) fn start_with<R: Runtime>(
         request.run_label.as_str()
     };
     let output = unique_output_directory(&parent, label, chrono::Local::now())?;
+    let staging_at_launch = run_staging_names(&output);
     let request_value = project_request_json(&request, &output)?;
     let request_path = create_private_request(&request_value)?;
     let mut command = executable.command("run-project");
@@ -267,7 +378,7 @@ pub(super) fn start_with<R: Runtime>(
     let thread_registry = registry.clone();
     let thread_job = job_id.clone();
     let thread_output = output.clone();
-    std::thread::spawn(move || {
+    let worker = std::thread::spawn(move || {
         let diagnostics_thread = stream_progress(thread_app.clone(), thread_job.clone(), stderr);
         let mut bytes = Vec::new();
         let read_result = stdout
@@ -281,19 +392,30 @@ pub(super) fn start_with<R: Runtime>(
             .lock()
             .ok()
             .map(|mut jobs| jobs.remove(&thread_job));
-        if read_result.is_err() || bytes.len() > MAX_RESULT_BYTES {
+        let unread = read_result.is_err() || bytes.len() > MAX_RESULT_BYTES;
+        // The engine turns its staging tree into the result or into the
+        // `.unsolved` evidence before it prints either.  A run that was reaped
+        // without a result was cancelled, killed or crashed: the tree is still
+        // beside the output, and nothing will ever use it.
+        if status.is_some()
+            && (unread || serde_json::from_slice::<serde::de::IgnoredAny>(&bytes).is_err())
+        {
+            remove_run_staging(&thread_output, &staging_at_launch);
+        }
+        if unread {
             emit_error(
                 &thread_app,
                 &thread_job,
                 "PROJECT_RESPONSE_INVALID",
                 &response_failure_detail("project result could not be read safely", &diagnostics),
+                &thread_output,
             );
             return;
         }
         let result = match decode_project_response(&bytes, status, &diagnostics) {
             Ok(value) => value,
             Err((code, detail)) => {
-                emit_error(&thread_app, &thread_job, &code, &detail);
+                emit_error(&thread_app, &thread_job, &code, &detail, &thread_output);
                 return;
             }
         };
@@ -348,9 +470,14 @@ pub(super) fn start_with<R: Runtime>(
                 &thread_job,
                 "PROJECT_RESULT_GATE_BLOCKED",
                 &error,
+                &thread_output,
             ),
         }
     });
+    if let Ok(mut workers) = registry.workers.lock() {
+        workers.retain(|worker| !worker.is_finished());
+        workers.push(worker);
+    }
     Ok(ProjectRunReceipt {
         job_id,
         accepted: true,
@@ -372,6 +499,9 @@ pub(crate) fn cancel(registry: &ProjectRegistry, job_id: &str) -> Result<(), Str
         .map_err(|_| "project child lock was poisoned".to_owned())?;
     platform::terminate_process_tree(&mut child)
 }
+
+/// How long application shutdown waits for killed runs to be cleaned up.
+const SHUTDOWN_CLEANUP_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub(crate) fn terminate_all(registry: &ProjectRegistry) -> Result<(), String> {
     registry.shutting_down.store(true, Ordering::Release);
@@ -397,6 +527,18 @@ pub(crate) fn terminate_all(registry: &ProjectRegistry) -> Result<(), String> {
                 failures.push(format!("cannot remove private project request: {error}"));
             }
         }
+    }
+    // The result thread of a killed run removes the run's staging tree; the
+    // application must not exit under it.
+    let workers = registry
+        .workers
+        .lock()
+        .map(|mut workers| std::mem::take(&mut *workers))
+        .unwrap_or_default();
+    let deadline = std::time::Instant::now() + SHUTDOWN_CLEANUP_BUDGET;
+    while workers.iter().any(|worker| !worker.is_finished()) && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
     if failures.is_empty() {
         Ok(())

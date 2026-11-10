@@ -18,6 +18,7 @@ import { DiagnosticPanel } from "./blink/DiagnosticPanel";
 import { PreviewCanvas } from "./blink/PreviewCanvas";
 import type { BlinkDecision, BlinkFlag, BlinkFrame } from "./types";
 import type { BlinkChannelSummary, useWorkflow } from "./useWorkflow";
+import { engineBlockerText, filterName } from "./views/common";
 
 type Workflow = ReturnType<typeof useWorkflow>;
 type Fps = 2 | 4 | 8;
@@ -434,10 +435,10 @@ function BlinkChannelRail({
                 style={{ ["--channel-accent" as string]: filterAccent(item.filter) }}
                 aria-pressed={current}
                 aria-current={current ? "step" : undefined}
-                aria-label={`${item.filter} · ${viewedText}${item.confirmed ? " ✓" : ""} · ${keptText}${
+                aria-label={`${filterName(item.filter, t)} · ${viewedText}${item.confirmed ? " ✓" : ""} · ${keptText}${
                   state === "idle" ? ` · ${stateLabel}` : ""
                 }`}
-                title={`${item.target} · ${item.filter}`}
+                title={`${item.target} · ${filterName(item.filter, t)}`}
                 onClick={() => onSelect(index)}
               >
                 <span className="blink-rail-key" aria-hidden="true">
@@ -445,7 +446,7 @@ function BlinkChannelRail({
                 </span>
                 <span className="blink-rail-body">
                   <span className="blink-rail-line">
-                    <span className="blink-rail-filter">{item.filter}</span>
+                    <span className="blink-rail-filter">{filterName(item.filter, t)}</span>
                     <span className="blink-rail-target">{item.target}</span>
                     {state === "done" && (
                       <span className="blink-rail-tick" aria-hidden="true">
@@ -492,7 +493,7 @@ function BlinkLaunchBar({ workflow, t }: { workflow: Workflow; t: Translator }) 
                 <li key={`review-${channel.channelId}`}>
                   {t("blockerBlinkChannelReview", {
                     target: channel.target,
-                    filter: channel.filter,
+                    filter: filterName(channel.filter, t),
                     viewed: channel.viewed,
                     total: channel.total,
                   })}
@@ -502,7 +503,7 @@ function BlinkLaunchBar({ workflow, t }: { workflow: Workflow; t: Translator }) 
               <li key={channel.channelId}>
                 {t("blockerBlinkChannel", {
                   target: channel.target,
-                  filter: channel.filter,
+                  filter: filterName(channel.filter, t),
                   kept: channel.kept,
                   total: channel.total,
                   required: workflow.minimumKeptPerChannel,
@@ -510,7 +511,7 @@ function BlinkLaunchBar({ workflow, t }: { workflow: Workflow; t: Translator }) 
               </li>
             ))}
             {!workflow.capabilities?.available && (
-              <li>{workflow.capabilities?.unavailableReason ?? t("blockerEngine")}</li>
+              <li>{engineBlockerText(workflow.capabilities?.unavailableReason, t)}</li>
             )}
             {!workflow.calibrationReady && <li>{t("blockerCalibration")}</li>}
             {!workflow.allRequiredConfirmed && <li>{t("blockerTypes")}</li>}
@@ -547,10 +548,10 @@ function BlinkLaunchBar({ workflow, t }: { workflow: Workflow; t: Translator }) 
               key={channel.channelId}
               className={`${done ? "done" : "pending"}${short ? " short" : ""}`}
               style={{ ["--channel-accent" as string]: filterAccent(channel.filter) }}
-              title={`${channel.target} · ${channel.filter}`}
+              title={`${channel.target} · ${filterName(channel.filter, t)}`}
             >
               <span className={`dot ${short ? "stop" : done ? "ok" : "warn"}`} />
-              <span className="blink-launch-filter">{channel.filter}</span>
+              <span className="blink-launch-filter">{filterName(channel.filter, t)}</span>
               <span className="blink-launch-counts">
                 {t("blinkViewedCount", { viewed: channel.viewed, total: channel.total })} ·{" "}
                 {t("blinkKeptCount", { kept: channel.kept, total: channel.total })}
@@ -1297,16 +1298,16 @@ export function BlinkView({
       />
       <div className="blink-review-progress" style={{ ["--channel-accent" as string]: accent }}>
         <span className="blink-channel-mark" aria-hidden="true">
-          {channel.filter}
+          {filterName(channel.filter, t)}
         </span>
         <div>
           <strong title={t("blinkHumanReviewHint")}>
-            {t("blinkChannelHeading", { filter: channel.filter, target: channel.target })}
+            {t("blinkChannelHeading", { filter: filterName(channel.filter, t), target: channel.target })}
           </strong>
           <small title={reference?.name}>
             {t("blinkChannelFacts", { frames: channel.total, nights: channelNightSpan(channel) })} ·{" "}
             {t(current?.diagnostics ? "blinkDiagReference" : "blinkReferenceNormalization", {
-              filter: channel.filter,
+              filter: filterName(channel.filter, t),
               name: reference?.name ?? "—",
             })}
           </small>
@@ -1345,7 +1346,9 @@ export function BlinkView({
             workflow.confirmBlinkChannel(channel.channelId);
           }}
         >
-          {channel.confirmed ? t("blinkChannelConfirmed") : t("blinkConfirmChannel", { filter: channel.filter })}
+          {channel.confirmed
+            ? t("blinkChannelConfirmed")
+            : t("blinkConfirmChannel", { filter: filterName(channel.filter, t) })}
         </button>
       </div>
       {current?.diagnostics && (
@@ -1379,7 +1382,7 @@ export function BlinkView({
                   ✓
                 </span>
                 <div>
-                  <strong>{t("blinkChannelDone", { filter: channel.filter })}</strong>
+                  <strong>{t("blinkChannelDone", { filter: filterName(channel.filter, t) })}</strong>
                   <small>
                     {t("blinkChannelDoneDetail", {
                       kept: channel.kept,
@@ -1392,8 +1395,8 @@ export function BlinkView({
                 {nextChannel ? (
                   <button type="button" className="btn primary" disabled={confirmBlocked} onClick={advanceChannel}>
                     {nextChannelDone
-                      ? t("blinkBackToChannel", { filter: nextChannel.filter })
-                      : t("blinkNextChannel", { filter: nextChannel.filter })}
+                      ? t("blinkBackToChannel", { filter: filterName(nextChannel.filter, t) })
+                      : t("blinkNextChannel", { filter: filterName(nextChannel.filter, t) })}
                   </button>
                 ) : (
                   <span className="badge ok">{t("blinkAllChannelsDone")}</span>

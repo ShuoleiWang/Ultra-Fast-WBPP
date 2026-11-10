@@ -15,11 +15,14 @@ from scripts.attest_bundled_runtime import (
     BundleAttestationError,
     _attest_runtime_libraries,
     attest_legal_resources,
+    attest_macho_tree_deployment,
     attest_macos_deployment,
     attest_runtime,
     attest_windows_deployment,
     inspect_macos_bundle,
     inspect_windows_runtime,
+    main as attest_main,
+    parse_macos_minimum,
     write_create_only,
 )
 from scripts.build_engine_sidecar import (
@@ -123,12 +126,15 @@ def _test_app(root: Path) -> Path:
         plistlib.dump(
             {
                 "CFBundleExecutable": "Ultra-Fast WBPP",
-                "LSMinimumSystemVersion": "14.0",
+                "LSMinimumSystemVersion": "15.0",
             },
             stream,
         )
+    # The app executable targets the declared minimum, the libraries may be
+    # older (the native kernels and the pinned Sonoma overlay are 14.0).
     (macos / "Ultra-Fast WBPP").write_bytes(
         _thin_macho_bytes(
+            minimum=(15, 0, 0),
             file_type=2,
             dependencies=(
                 "@rpath/libworker.dylib",
@@ -325,9 +331,9 @@ def test_macos_deployment_attestation_scans_every_macho_and_resolves_loads(
     payload = attest_macos_deployment(app)
 
     assert payload["verified"] is True
-    assert payload["policy"]["maximumMachOMinimumVersion"] == "14.0.0"
-    assert payload["declaredMinimumSystemVersion"] == "14.0.0"
-    assert payload["maximumObservedMachOMinimumVersion"] == "14.0.0"
+    assert payload["policy"]["maximumMachOMinimumVersion"] == "15.0.0"
+    assert payload["declaredMinimumSystemVersion"] == "15.0.0"
+    assert payload["maximumObservedMachOMinimumVersion"] == "15.0.0"
     assert payload["machOFileCount"] == 2
     assert payload["sliceCount"] == 2
     assert payload["dependencyClosure"] == {
@@ -348,7 +354,7 @@ def test_macos_deployment_attestation_scans_every_macho_and_resolves_loads(
     assert all(not str(value).startswith(str(tmp_path)) for value in executable.values())
 
 
-def test_macos_deployment_attestation_rejects_any_slice_newer_than_14(
+def test_macos_deployment_attestation_rejects_any_slice_newer_than_15(
     tmp_path: Path,
 ) -> None:
     app = _test_app(tmp_path)
@@ -365,8 +371,68 @@ def test_macos_deployment_attestation_rejects_any_slice_newer_than_14(
             "minimumVersion": "26.0.0",
         }
     ]
-    with pytest.raises(BundleAttestationError, match="DEPLOYMENT_TARGET_TOO_NEW"):
+    with pytest.raises(
+        BundleAttestationError,
+        match="macOS 15 deployment audit found 1 violation.*DEPLOYMENT_TARGET_TOO_NEW",
+    ):
         attest_macos_deployment(app)
+
+
+def test_local_bundle_declaring_a_newer_macos_is_audited_against_that_macos(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A local build frozen from an interpreter built for macOS 26 declares 26.
+    app = _test_app(tmp_path)
+    (app / "Contents" / "Frameworks" / "libnewer.dylib").write_bytes(
+        _thin_macho_bytes(minimum=(26, 0, 0))
+    )
+    info_path = app / "Contents" / "Info.plist"
+    with info_path.open("wb") as stream:
+        plistlib.dump(
+            {"CFBundleExecutable": "Ultra-Fast WBPP", "LSMinimumSystemVersion": "26.0"},
+            stream,
+        )
+
+    with pytest.raises(BundleAttestationError, match="macOS 15 deployment audit"):
+        attest_macos_deployment(app)
+    payload = attest_macos_deployment(app, maximum_deployment_target=parse_macos_minimum("26.0"))
+    assert payload["declaredMinimumSystemVersion"] == "26.0.0"
+    with pytest.raises(ValueError, match="older than the release minimum 15.0.0"):
+        parse_macos_minimum("14.0")
+    output = tmp_path / "attestation.json"
+    assert attest_main(["--app", str(app), "--target", TARGET, "--output", str(output), "--macos-minimum", "13.0"]) == 2
+    assert not output.exists()
+    assert "older than the release minimum" in capsys.readouterr().err
+
+
+def test_staged_runtime_tree_gets_the_bundle_deployment_audit(tmp_path: Path) -> None:
+    runtime = tmp_path / "ufwbpp-engine-aarch64-apple-darwin"
+    internal = runtime / "_internal"
+    internal.mkdir(parents=True)
+    (runtime / "ufwbpp-engine-aarch64-apple-darwin").write_bytes(
+        _thin_macho_bytes(
+            minimum=(15, 0, 0),
+            file_type=2,
+            dependencies=("@executable_path/_internal/Python",),
+        )
+    )
+    (internal / "Python").write_bytes(_thin_macho_bytes(minimum=(15, 0, 0)))
+    (internal / "data.txt").write_text("not a Mach-O\n", encoding="utf-8")
+
+    payload = attest_macho_tree_deployment(runtime)
+    assert payload["verified"] is True
+    assert payload["machOFileCount"] == 2
+    assert payload["dependencyClosure"]["unresolvedEdgeCount"] == 0
+
+    (internal / "_asyncio.cpython-312-darwin.so").write_bytes(
+        _thin_macho_bytes(minimum=(26, 0, 0), file_type=8)
+    )
+    with pytest.raises(
+        BundleAttestationError,
+        match="macOS 15 deployment audit found 1 violation.*_asyncio",
+    ):
+        attest_macho_tree_deployment(runtime)
+    assert attest_macho_tree_deployment(runtime, maximum_deployment_target=(26, 0, 0))["verified"]
 
 
 def test_macos_deployment_attestation_checks_every_universal_binary_slice(
@@ -381,7 +447,7 @@ def test_macos_deployment_attestation_checks_every_universal_binary_slice(
                 (
                     0x01000007,
                     _thin_macho_bytes(
-                        minimum=(15, 0, 0), cpu_type=0x01000007
+                        minimum=(16, 0, 0), cpu_type=0x01000007
                     ),
                 ),
             )

@@ -92,3 +92,4 @@ def test_linux_and_apple_profiles() -> None:
     )
     assert linux.cpu_family == CpuFamily.X86_64
     assert linux.optimization_profile == "linux-x86-64-cpu-v1"
+    assert apple.cpu_family == CpuFamily.APPLE_M

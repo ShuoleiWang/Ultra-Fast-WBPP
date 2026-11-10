@@ -16,6 +16,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import sysconfig
 import tempfile
 from typing import Any, Mapping, Sequence
 
@@ -713,6 +714,120 @@ def apply_macos14_runtime_libraries(
         stream.flush()
         os.fsync(stream.fileno())
     return provenance
+
+
+def _deployment_audit() -> Any:
+    """The bundle attestation module, which owns the Mach-O deployment audit.
+
+    Imported on use: it imports this module at load time.
+    """
+
+    try:
+        from scripts import attest_bundled_runtime
+    except ModuleNotFoundError:  # direct ``python scripts/...`` execution
+        import attest_bundled_runtime
+    return attest_bundled_runtime
+
+
+def _version_name(version: Sequence[int]) -> str:
+    return f"{version[0]}.{version[1]}"
+
+
+def release_macos_minimum() -> tuple[int, int, int]:
+    """The macOS a release bundle declares and no Mach-O slice may exceed."""
+
+    return _deployment_audit().MACOS_MAXIMUM_DEPLOYMENT_TARGET
+
+
+def interpreter_macos_image() -> Path:
+    """The Mach-O image whose ``minos`` is the running interpreter's target.
+
+    A framework build (Homebrew's, python.org's) keeps the interpreter in the
+    framework dylib, which every ``lib-dynload`` module was built with; a
+    ``venv`` only links to it. ``sysconfig``'s ``MACOSX_DEPLOYMENT_TARGET`` is
+    the configure-time setting, not what dyld enforces, so it is only reported.
+    """
+
+    framework = sysconfig.get_config_var("PYTHONFRAMEWORK")
+    if framework:
+        return Path(sys.base_prefix) / str(framework)
+    return Path(os.path.realpath(getattr(sys, "_base_executable", sys.executable)))
+
+
+def interpreter_macos_deployment_target(
+    image: Path | None = None,
+) -> tuple[int, int, int]:
+    audit = _deployment_audit()
+    image = interpreter_macos_image() if image is None else image
+    try:
+        return audit.macho_minimum_version(image)
+    except (audit.BundleAttestationError, OSError) as error:
+        raise SidecarBuildError(
+            "INTERPRETER_DEPLOYMENT_TARGET_UNKNOWN",
+            f"cannot read the deployment target of the interpreter image {image}: {error}",
+        ) from error
+
+
+def require_interpreter_deployment_target(
+    target_triple: str,
+    macos_minimum: tuple[int, int, int],
+    *,
+    image: Path | None = None,
+) -> None:
+    """Refuse, before freezing, an interpreter newer than the bundle's minimum.
+
+    Its framework and ``lib-dynload`` modules carry its ``minos`` into the
+    bundle, where the deployment audit would reject them after the full build.
+    """
+
+    if not target_triple.endswith("-apple-darwin"):
+        return
+    image = interpreter_macos_image() if image is None else image
+    found = interpreter_macos_deployment_target(image)
+    if found > macos_minimum:
+        configured = sysconfig.get_config_var("MACOSX_DEPLOYMENT_TARGET")
+        raise SidecarBuildError(
+            "INTERPRETER_DEPLOYMENT_TARGET_TOO_NEW",
+            f"the interpreter {sys.executable} ({image}) targets macOS "
+            f"{_version_name(found)} (sysconfig MACOSX_DEPLOYMENT_TARGET {configured}), "
+            f"newer than the limit macOS {_version_name(macos_minimum)}: the frozen "
+            "engine would not launch there. Freeze from an interpreter built for "
+            f"macOS {_version_name(macos_minimum)} or older, or, for a local build "
+            f"only, pass --macos-minimum {_version_name(found)} (what make does)",
+        )
+
+
+def local_macos_minimum(image: Path | None = None) -> tuple[int, int, int]:
+    """The release minimum, or the interpreter's newer target for a local build."""
+
+    return max(release_macos_minimum(), interpreter_macos_deployment_target(image))
+
+
+def parse_macos_minimum(value: str) -> tuple[int, int, int]:
+    """A ``--macos-minimum`` value: never older than the release minimum."""
+
+    return _deployment_audit().parse_macos_minimum(value)
+
+
+def audit_staged_macos_runtime(
+    runtime: Path, macos_minimum: tuple[int, int, int]
+) -> dict[str, Any]:
+    """Run the bundle attestation's Mach-O deployment audit on a frozen tree."""
+
+    audit = _deployment_audit()
+    try:
+        report = audit.attest_macho_tree_deployment(
+            runtime, maximum_deployment_target=macos_minimum
+        )
+    except audit.BundleAttestationError as error:
+        raise SidecarBuildError("DEPLOYMENT_TARGET_TOO_NEW", str(error)) from error
+    print(
+        f"deployment audit: {report['machOFileCount']} Mach-O files, newest minos "
+        f"{report['maximumObservedMachOMinimumVersion']}, limit macOS "
+        f"{_version_name(macos_minimum)}",
+        file=sys.stderr,
+    )
+    return report
 
 
 def run_runtime_library_smoke(
@@ -1422,10 +1537,18 @@ def build_sidecar(
     output_dir: Path,
     *,
     macos14_bottle_root: Path | None = None,
+    macos_minimum: tuple[int, int, int] | None = None,
     require_native_kernels: bool = True,
 ) -> tuple[Path, Path, dict[str, Any]]:
     target = normalize_target_triple(target_triple)
     _require_native_target(target)
+    is_macos = target.endswith("-apple-darwin")
+    if macos_minimum is not None and not is_macos:
+        raise SidecarBuildError(
+            "MACOS_MINIMUM_UNSUPPORTED", "--macos-minimum applies to macOS targets only"
+        )
+    if is_macos and macos_minimum is None:
+        macos_minimum = release_macos_minimum()
     if macos14_bottle_root is not None and target != "aarch64-apple-darwin":
         raise SidecarBuildError(
             "RUNTIME_LIBRARY_OVERLAY_UNSUPPORTED",
@@ -1436,6 +1559,16 @@ def build_sidecar(
     artifact_destination, manifest_destination = ensure_outputs_absent(output, target)
 
     # These gates intentionally precede dependency collection and PyInstaller.
+    if is_macos:
+        require_interpreter_deployment_target(target, macos_minimum)
+        if macos_minimum > release_macos_minimum():
+            print(
+                f"LOCAL BUILD: the bundle declares macOS {_version_name(macos_minimum)}, "
+                f"newer than the release minimum macOS "
+                f"{_version_name(release_macos_minimum())}; it runs only on macOS "
+                f"{_version_name(macos_minimum)} or later and is not a release build",
+                file=sys.stderr,
+            )
     source_version = run_source_doctor()["engineVersion"]
     run_public_tree_check()
     versions = collect_versions()
@@ -1451,6 +1584,8 @@ def build_sidecar(
         overlay = None
         if macos14_bottle_root is not None:
             overlay = apply_macos14_runtime_libraries(staged, macos14_bottle_root)
+        if macos_minimum is not None:
+            audit_staged_macos_runtime(staged, macos_minimum)
         frozen_command = [str(staged / sidecar_filename(target))]
         runtime_library_smoke = run_runtime_library_smoke(frozen_command)
         if overlay is not None:
@@ -1546,6 +1681,22 @@ def _parser() -> argparse.ArgumentParser:
             "OpenSSL/mpdecimal compatibility overlay"
         ),
     )
+    parser.add_argument(
+        "--macos-minimum",
+        help=(
+            "macOS version the bundle will declare; the interpreter and every frozen "
+            "Mach-O slice must not be newer (default: the release minimum). A local "
+            "build from an interpreter built for a newer macOS passes that version"
+        ),
+    )
+    parser.add_argument(
+        "--print-local-macos-minimum",
+        action="store_true",
+        help=(
+            "print the macOS a local build declares: the release minimum, or the "
+            "running interpreter's newer deployment target"
+        ),
+    )
     return parser
 
 
@@ -1553,6 +1704,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
         target = normalize_target_triple(arguments.target or detect_host_target_triple())
+        macos_minimum = (
+            None if arguments.macos_minimum is None else parse_macos_minimum(arguments.macos_minimum)
+        )
+        if arguments.print_local_macos_minimum:
+            if not target.endswith("-apple-darwin"):
+                raise SidecarBuildError(
+                    "MACOS_MINIMUM_UNSUPPORTED", "the macOS minimum applies to macOS targets only"
+                )
+            minimum = local_macos_minimum()
+            if minimum > release_macos_minimum():
+                print(
+                    f"LOCAL BUILD: the interpreter {sys.executable} targets macOS "
+                    f"{_version_name(minimum)}; the app built from it declares macOS "
+                    f"{_version_name(minimum)} instead of the release minimum macOS "
+                    f"{_version_name(release_macos_minimum())}",
+                    file=sys.stderr,
+                )
+            print(_version_name(minimum))
+            return 0
         if arguments.preflight_only:
             if arguments.macos14_bottle_root is not None:
                 raise SidecarBuildError(
@@ -1573,6 +1743,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 target,
                 arguments.output_dir,
                 macos14_bottle_root=arguments.macos14_bottle_root,
+                macos_minimum=macos_minimum,
                 require_native_kernels=not arguments.allow_missing_native_kernels,
             )
             result = {
@@ -1585,6 +1756,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "sizeBytes": manifest["runtime"]["sizeBytes"],
                 "fileCount": manifest["runtime"]["fileCount"],
             }
+            if target.endswith("-apple-darwin"):
+                result["macosMinimum"] = _version_name(
+                    macos_minimum or release_macos_minimum()
+                )
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
         return 0
     except (FileExistsError, ResourceBoundaryError, SidecarBuildError, ValueError, OSError) as error:
@@ -1621,17 +1796,24 @@ __all__ = [
     "SUPPORTED_TARGETS",
     "SidecarBuildError",
     "apply_macos14_runtime_libraries",
+    "audit_staged_macos_runtime",
     "build_manifest",
     "build_runtime_record",
     "build_sidecar",
     "collect_versions",
     "detect_host_target_triple",
     "ensure_outputs_absent",
+    "interpreter_macos_deployment_target",
+    "interpreter_macos_image",
     "expected_catalog_ids",
     "main",
     "load_macos14_runtime_policy",
+    "local_macos_minimum",
     "manifest_filename",
     "normalize_target_triple",
+    "parse_macos_minimum",
+    "release_macos_minimum",
+    "require_interpreter_deployment_target",
     "run_public_tree_check",
     "run_runtime_library_smoke",
     "run_catalog_list_smoke",

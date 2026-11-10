@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path, PurePath, PureWindowsPath
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from ..platform import rename_with_retry
 from .contracts import E2EError
@@ -22,6 +22,27 @@ _LOCAL_STAT_KEYS = {
 }
 
 
+def _source_redactor(source_tokens: Mapping[str, str]) -> Callable[[str], str]:
+    """The replacement of every source path by its public token, longest path first.
+
+    A receipt tree holds tens of thousands of strings and a project hundreds
+    of sources, so the paths are ordered once, and a string that names none of
+    the sources' folders (it then names no source) is returned untouched.
+    """
+
+    ordered = sorted(source_tokens.items(), key=lambda item: -len(item[0]))
+    folders = tuple(dict.fromkeys(os.path.dirname(private) for private, _ in ordered))
+
+    def redact(value: str) -> str:
+        if not any(folder in value for folder in folders):
+            return value
+        for private, public in ordered:
+            value = value.replace(private, public)
+        return value
+
+    return redact
+
+
 def _share_safe_string(
     value: str,
     *,
@@ -30,9 +51,11 @@ def _share_safe_string(
 ) -> str:
     """Redact host paths while retaining an auditable opaque source token."""
 
-    result = value
-    for private, public in sorted(source_tokens.items(), key=lambda item: -len(item[0])):
-        result = result.replace(private, public)
+    return _redacted_string(value, staging, _source_redactor(source_tokens))
+
+
+def _redacted_string(value: str, staging: PurePath, redact: Callable[[str], str]) -> str:
+    result = redact(value)
     staging_text = str(staging)
     # Artifact identities use forward slashes on every host. Replacing only
     # the Windows staging prefix leaves backslashes in the suffix and breaks
@@ -61,18 +84,17 @@ def _share_safe_value(
     staging: Path,
     source_tokens: Mapping[str, str],
 ) -> Any:
+    return _redacted_value(value, staging, _source_redactor(source_tokens))
+
+
+def _redacted_value(value: Any, staging: Path, redact: Callable[[str], str]) -> Any:
     if isinstance(value, str):
-        return _share_safe_string(value, staging=staging, source_tokens=source_tokens)
+        return _redacted_string(value, staging, redact)
     if isinstance(value, list):
-        return [
-            _share_safe_value(item, staging=staging, source_tokens=source_tokens)
-            for item in value
-        ]
+        return [_redacted_value(item, staging, redact) for item in value]
     if isinstance(value, dict):
         return {
-            _share_safe_string(key, staging=staging, source_tokens=source_tokens): _share_safe_value(
-                item, staging=staging, source_tokens=source_tokens
-            )
+            _redacted_string(key, staging, redact): _redacted_value(item, staging, redact)
             for key, item in value.items()
             if key.casefold() not in _LOCAL_STAT_KEYS
         }
@@ -84,10 +106,9 @@ def _sanitize_shareable_tree(
 ) -> None:
     """Rewrite every staged JSON document to a share-safe public form."""
 
-    source_tokens = {
-        item.path: f"source/{item.source_id}/{Path(item.path).name}"
-        for item in identities
-    }
+    redact = _source_redactor(
+        {item.path: f"source/{item.source_id}/{Path(item.path).name}" for item in identities}
+    )
     for path in sorted(staging.rglob("*.json")):
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
@@ -95,9 +116,7 @@ def _sanitize_shareable_tree(
             raise E2EError(
                 "PUBLIC_RECEIPT_SANITIZE_FAILED", str(error), path=str(path)
             ) from error
-        sanitized = _share_safe_value(
-            value, staging=staging, source_tokens=source_tokens
-        )
+        sanitized = _redacted_value(value, staging, redact)
         encoded = (
             json.dumps(
                 sanitized,

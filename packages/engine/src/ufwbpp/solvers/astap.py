@@ -33,6 +33,7 @@ from .base import (
     SolveRequest,
     SolverResult,
     SolverStatus,
+    solve_staging,
     validate_wcs_header,
 )
 from .catalog_correspondence import (
@@ -506,9 +507,7 @@ class AstapSolverBackend:
             input_path = Path(request.input_path).expanduser().resolve(strict=True)
             output_path = Path(request.output_path).expanduser().resolve(strict=False)
             catalog_snapshot, catalog_preflight = self._catalog_preflight()
-            with tempfile.TemporaryDirectory(
-                prefix="ultra-fast-wbpp-astap-", dir=self.staging_root
-            ) as raw_stage:
+            with solve_staging(request, adapter="astap", fallback_root=self.staging_root) as raw_stage:
                 stage = Path(raw_stage)
                 try:
                     stage.chmod(0o700)

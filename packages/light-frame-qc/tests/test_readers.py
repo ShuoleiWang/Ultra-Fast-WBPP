@@ -189,3 +189,25 @@ def test_discovery_rejects_explicit_bad_paths_but_ignores_directory_noise(
     with pytest.raises(FrameDiscoveryError) as raised:
         discover_paths(tmp_path / "missing")
     assert raised.value.code == "INPUT_NOT_FOUND"
+
+
+def test_discovery_ignores_housekeeping_files_hidden_folders_and_staging_trees(tmp_path: Path) -> None:
+    frames = tmp_path / "LIGHT"
+    frames.mkdir()
+    kept = frames / "L_0001.fits"
+    kept.write_bytes(b"fits placeholder")
+    # macOS AppleDouble companions, Finder and Explorer files.
+    (frames / "._L_0001.fits").write_bytes(b"\x00\x05\x16\x07")
+    (frames / ".DS_Store").write_bytes(b"store")
+    (frames / "Thumbs.db").write_bytes(b"thumbs")
+    (frames / "desktop.ini").write_text("[.ShellClassInfo]", encoding="utf-8")
+    for folder in (".out.a1b2c3d4.pstage", ".M31.a1b2c3d4.stage", "old.project-staging", "$RECYCLE.BIN", ".Trashes"):
+        (tmp_path / folder / "masters").mkdir(parents=True)
+        (tmp_path / folder / "masters" / "master_light_L.fits").write_bytes(b"fits placeholder")
+
+    assert discover_paths(tmp_path) == [kept.resolve()]
+    # Named one by one (a desktop drop), the housekeeping files are still not frames.
+    assert discover_paths([kept, frames / "._L_0001.fits", frames / ".DS_Store", frames / "Thumbs.db"]) == [kept.resolve()]
+    with pytest.raises(FrameDiscoveryError) as raised:
+        discover_paths([frames / "._L_0001.fits"])
+    assert raised.value.code == "NO_SUPPORTED_FRAMES"

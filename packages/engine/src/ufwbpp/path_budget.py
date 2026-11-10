@@ -22,10 +22,12 @@ to leave room for.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 import re
 from typing import Iterable, Literal
+import unicodedata
 
 from .errors import RuntimeConfigurationError
 from .platform import PathLimit, current
@@ -64,10 +66,31 @@ def name_token(value: str) -> str:
     return re.sub(r"[^A-Z0-9]+", "_", value.upper()).strip("_")
 
 
-def target_key(value: str) -> str:
-    """Lower-case alphanumeric key of a science target (``workflows.project``)."""
+# Names Windows keeps for devices; a file or folder cannot carry one.
+_WINDOWS_DEVICE_NAMES = frozenset(
+    {"con", "prn", "aux", "nul", *(f"{port}{number}" for port in ("com", "lpt") for number in range(10))}
+)
 
-    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+def target_key(value: str) -> str:
+    """The key of a science target: what groups its Lights and, in upper
+    case, names its run directory (``workflows.project``).
+
+    The ASCII letters and digits of the case-folded name, as always. A name
+    with letters or digits beyond ASCII (``玫瑰星云``, ``NGC 7000 北``), or
+    whose letters alone spell a Windows device name (``CON``, ``COM1``),
+    appends ``x`` and eight hex digits of the SHA-256 of all its letters and
+    digits: distinct names keep distinct keys, the same name gives the same
+    key on every platform, and the key stays a short path component of
+    ``[a-z0-9]``. A name without any letter or digit has no key.
+    """
+
+    folded = unicodedata.normalize("NFKC", value).casefold()
+    letters = "".join(character for character in folded if character.isalnum())
+    plain = re.sub(r"[^a-z0-9]+", "", folded)
+    if letters == plain and plain not in _WINDOWS_DEVICE_NAMES:
+        return plain
+    return f"{plain}x{hashlib.sha256(letters.encode('utf-8')).hexdigest()[:8]}"
 
 
 def light_stem(path: str | os.PathLike[str]) -> str:

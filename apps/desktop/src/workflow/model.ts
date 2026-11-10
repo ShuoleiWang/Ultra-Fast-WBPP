@@ -250,11 +250,27 @@ export interface BlinkChannelSummary extends BlinkChannel {
 export const inventoryKeyOf = (paths: string[]) => [...paths].sort().join("\n");
 
 /**
+ * A Windows path in its plain spelling: `\\?\D:\…` becomes `D:\…` and
+ * `\\?\UNC\server\…` becomes `\\server\…`; every other path is unchanged.
+ */
+export function plainPathSpelling(path: string): string {
+  if (/^\\\\\?\\UNC\\/i.test(path)) return `\\\\${path.slice(8)}`;
+  if (/^\\\\\?\\[A-Za-z]:\\/.test(path)) return path.slice(4);
+  return path;
+}
+
+/**
  * Whether a session still describes the current Lights: every imported Light
  * is in the manifest with a usable, unique content digest (the selection is
- * keyed by digest, so a duplicate or malformed one could not be sent).
+ * keyed by digest, so a duplicate or malformed one could not be sent).  A
+ * Light whose inventory entry carries a content digest is matched by it;
+ * otherwise by its path, in either spelling of a Windows path.
  */
-export function blinkSessionCovers(session: BlinkSession, lightPaths: string[]): boolean {
+export function blinkSessionCovers(
+  session: BlinkSession,
+  lightPaths: string[],
+  lightAssets: readonly InspectedAsset[] = [],
+): boolean {
   if (
     inventoryKeyOf(lightPaths) !== session.inventoryKey ||
     !lightPaths.length ||
@@ -262,10 +278,20 @@ export function blinkSessionCovers(session: BlinkSession, lightPaths: string[]):
   )
     return false;
   const frames = session.manifest.frames;
-  const byPath = new Set(frames.map((frame) => frame.path));
+  const byPath = new Set(frames.flatMap((frame) => [frame.path, plainPathSpelling(frame.path)]));
   const digests = frames.map((frame) => frame.sourceSha256);
+  const byDigest = new Set(digests);
+  const digestOf = new Map(
+    lightAssets.flatMap((asset) =>
+      asset.sourceSha256 && CONTENT_DIGEST.test(asset.sourceSha256) ? [[asset.path, asset.sourceSha256] as const] : [],
+    ),
+  );
+  const covered = (path: string) => {
+    const digest = digestOf.get(path);
+    return digest ? byDigest.has(digest) : byPath.has(path) || byPath.has(plainPathSpelling(path));
+  };
   return (
-    lightPaths.every((path) => byPath.has(path)) &&
+    lightPaths.every(covered) &&
     digests.every((digest) => CONTENT_DIGEST.test(digest)) &&
     new Set(digests).size === digests.length
   );
