@@ -197,6 +197,12 @@ export interface ProjectRecipeOptions {
    * user unchecks it. Absent when on, so a default run's recipe is unchanged.
    */
   superLuminance?: false;
+  /**
+   * The engine screens the Lights (`selection.policy` `unattended-v2`) and the
+   * request carries no Blink selection. Absent on the manual path, which
+   * requires a completed Blink review.
+   */
+  automaticScreening?: true;
 }
 export interface ReviewApprovalSelection {
   sourceSha256: string;
@@ -361,7 +367,8 @@ export interface ResultGateReport {
  * One Light the run's quality gate did not pass, with the reasons and a small
  * preview.  With an explicit selection, `reason` says the user decided
  * (`USER_DROP`, or `USER_KEEP_OVERRIDE` for a KEEP over an EXCLUDE flag) and
- * `flags` carries the blink flag codes of the frame.
+ * `flags` carries the blink flag codes of the frame; automatic screening
+ * marks the Lights it left out `AUTO_DROP`, with its `SEL_*` codes in `flags`.
  */
 export interface ScreeningFrame {
   name: string;
@@ -372,8 +379,15 @@ export interface ScreeningFrame {
   evidence: string[];
   starCount?: number;
   previewDataUrl?: string;
-  reason?: "USER_DROP" | "USER_KEEP_OVERRIDE" | string;
+  reason?: "USER_DROP" | "USER_KEEP_OVERRIDE" | "AUTO_DROP" | string;
   flags?: string[];
+}
+/** A channel automatic screening was unsure about, worth a look in Blink. */
+export interface SuspectChannel {
+  target: string;
+  filter: string;
+  codes: string[];
+  summary: string;
 }
 /** The run's Light screening: counts plus every frame that needed a decision. */
 export interface ScreeningSummary {
@@ -381,6 +395,9 @@ export interface ScreeningSummary {
   excluded: number;
   counts: Partial<Record<GateDisposition, number>>;
   frames: ScreeningFrame[];
+  /** `unattended-v2` when automatic screening decided; absent for a Blink selection. */
+  policy?: string;
+  suspectChannels?: SuspectChannel[];
 }
 export interface PipelineCompleteEvent {
   jobId: string;

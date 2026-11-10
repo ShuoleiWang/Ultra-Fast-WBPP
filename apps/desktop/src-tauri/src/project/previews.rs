@@ -282,13 +282,31 @@ pub(super) fn screening_summary(
         .get("frames")
         .and_then(serde_json::Value::as_array)
         .ok_or("screening record has no frames")?;
-    if records.len() > MAX_SCREENING_FRAMES {
+    if records.len() > MAX_SCREENING_RECORDS {
         return Err("screening record lists too many frames".to_owned());
     }
+    // The result page lists at most MAX_SCREENING_FRAMES frames, in the
+    // engine's order; a longer list keeps the Lights left out first, so a
+    // large project still shows every exclusion it can.
+    let admitted = |item: &serde_json::Value| {
+        item.get("admitted")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    };
+    let ordered: Vec<&serde_json::Value> = if records.len() <= MAX_SCREENING_FRAMES {
+        records.iter().collect()
+    } else {
+        records
+            .iter()
+            .filter(|item| !admitted(item))
+            .chain(records.iter().filter(|item| admitted(item)))
+            .take(MAX_SCREENING_FRAMES)
+            .collect()
+    };
     let mut budget = MAX_SCREENING_PREVIEW_TOTAL_BYTES;
     let mut previews = 0_usize;
-    let mut frames = Vec::with_capacity(records.len());
-    for item in records {
+    let mut frames = Vec::with_capacity(records.len().min(MAX_SCREENING_FRAMES));
+    for item in ordered {
         let path = value_string(item, "path")?;
         let disposition = value_string(item, "disposition")?;
         if !matches!(disposition, "PASS" | "REVIEW" | "HARD_FAIL") {
@@ -311,7 +329,10 @@ pub(super) fn screening_summary(
         let reason = match item.get("reason") {
             None | Some(serde_json::Value::Null) => None,
             Some(serde_json::Value::String(value))
-                if matches!(value.as_str(), "USER_DROP" | "USER_KEEP_OVERRIDE") =>
+                if matches!(
+                    value.as_str(),
+                    "USER_DROP" | "USER_KEEP_OVERRIDE" | "AUTO_DROP"
+                ) =>
             {
                 Some(value.clone())
             }
@@ -366,10 +387,58 @@ pub(super) fn screening_summary(
             flags,
         });
     }
+    let policy = record
+        .get("policy")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 32
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
+        .map(str::to_owned);
+    let text = |item: &serde_json::Value, field: &str, limit: usize| {
+        item.get(field)
+            .and_then(serde_json::Value::as_str)
+            .map(|value| value.chars().take(limit).collect::<String>())
+    };
+    let suspect_channels = record
+        .get("suspectChannels")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .take(MAX_SUSPECT_CHANNELS)
+                .filter_map(|item| {
+                    Some(UiSuspectChannel {
+                        target: text(item, "target", 200)?,
+                        filter: text(item, "filter", 64)?,
+                        codes: item
+                            .get("codes")
+                            .and_then(serde_json::Value::as_array)
+                            .map(|codes| {
+                                codes
+                                    .iter()
+                                    .filter_map(serde_json::Value::as_str)
+                                    .filter(|code| checked_flag_code(code))
+                                    .take(16)
+                                    .map(str::to_owned)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        summary: text(item, "summary", 500).unwrap_or_default(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(Some(UiScreening {
         admitted: count("admitted")?,
         excluded: count("excluded")?,
         counts,
         frames,
+        policy,
+        suspect_channels,
     }))
 }

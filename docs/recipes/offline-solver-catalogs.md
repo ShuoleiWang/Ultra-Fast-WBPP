@@ -23,7 +23,7 @@ Use the acceptance ID printed by your installed version of `catalog list`, not o
 
 To install every checked wide-field scale instead, omit `--field-of-view`. To select exact files, repeat `--artifact index-4108.fits`. `--artifact` and `--field-of-view` are mutually exclusive.
 
-For the catalog refit of a solved field's distortion (and for mosaic panels), install the Gaia DR2 LITE index 5205 as well. It has 48 HEALPix tiles, 587 MiB, and about six times the stars of index 4107:
+For the catalog refit of a solved field's distortion (and for mosaic panels), install the Gaia DR2 LITE index 5205 as well. It has 48 HEALPix tiles, 587 MiB, and about six times the stars of index 4107. The desktop offers it under *Advanced options and solver setup* once the Tycho-2 set is installed; from the command line:
 
 ```bash
 ultra-fast-wbpp catalog install astrometry-net-5205-lite \

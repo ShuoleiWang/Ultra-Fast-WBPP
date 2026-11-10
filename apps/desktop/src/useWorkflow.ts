@@ -53,6 +53,7 @@ import {
   blinkSessionCovers,
   buildMasterOverride,
   deduplicate,
+  GAIA_CATALOG_ID,
   initialStages,
   inventoryKeyOf,
   known,
@@ -60,10 +61,12 @@ import {
   monoCfa,
   panelMatrix,
   startBlockers,
+  rememberAutomaticScreening,
   rememberOutputParent,
   runLabel,
   safeSourceId,
   solverScienceReady,
+  storedAutomaticScreening,
   storedOutputParent,
   unknownCfa,
   type BlinkChannelSummary,
@@ -147,6 +150,13 @@ export function useWorkflow(t: Translator) {
   const setOutputParent = (value: string | undefined) => {
     setOutputParentState(value);
     if (nativeRuntime) rememberOutputParent(value);
+  };
+  // Automatic screening (the engine's `unattended-v2`) is on unless the user
+  // turned it off; off, every channel is reviewed in Blink before processing.
+  const [automaticScreening, setAutomaticScreeningState] = useState(storedAutomaticScreening);
+  const setAutomaticScreening = (value: boolean) => {
+    setAutomaticScreeningState(value);
+    rememberAutomaticScreening(value);
   };
   const [outputDirectory, setOutputDirectory] = useState<string>();
   const [errorMessage, setErrorMessage] = useState<string>();
@@ -816,6 +826,9 @@ export function useWorkflow(t: Translator) {
       blinkInFlightRef.current
     )
       return;
+    // Reviewing in Blink is the manual path: the user's decisions replace
+    // automatic screening for this and later projects until they turn it on.
+    if (automaticScreening) setAutomaticScreening(false);
     if (!force && blinkReady) {
       setStep("blink");
       return;
@@ -1047,8 +1060,9 @@ export function useWorkflow(t: Translator) {
     setStep("run");
     // Include launch-command work, but exclude the earlier review and screening.
     startRunClock();
-    // A completed Blink review decides every Light explicitly.
-    const selection = selectionForRun();
+    // Automatic screening lets the engine decide; otherwise a completed Blink
+    // review decides every Light explicitly.
+    const selection = automaticScreening ? undefined : selectionForRun();
     try {
       let sourceIndex = 0;
       const receipt = await desktopBridge.startRun({
@@ -1077,6 +1091,9 @@ export function useWorkflow(t: Translator) {
           // same-grid solved master to inherit a verified WCS from).
           ...(properCoadditionEnabled && !drizzleEnabled ? { properCoaddition: PROPER_COADDITION_REQUEST } : {}),
           ...(superLuminanceEnabled ? {} : { superLuminance: false as const }),
+          // Present only when the engine screens, so a Blink run sends the
+          // recipe it sent before automatic screening existed.
+          ...(automaticScreening ? { automaticScreening: true as const } : {}),
         },
         masterMetadataOverrides: masterOverrideRequests(masterOverrides),
         rawFrameMetadataOverrides: [],
@@ -1135,18 +1152,29 @@ export function useWorkflow(t: Translator) {
     () => catalogList?.catalogs.find((item) => item.catalogId === "astrometry-net-4107-4112"),
     [catalogList],
   );
-  const startCatalogInstall = async () => {
-    if (!recommendedCatalog || !catalogTermsAccepted || catalogStatus === "DOWNLOADING") return;
+  // The Gaia DR2 tiles: optional, for the catalog refit and for mosaic panels
+  // the Tycho-2 set holds too few stars to place.
+  const gaiaCatalog = useMemo<CatalogInfo | undefined>(
+    () => catalogList?.catalogs.find((item) => item.catalogId === GAIA_CATALOG_ID),
+    [catalogList],
+  );
+  const [gaiaTermsAccepted, setGaiaTermsAccepted] = useState(false);
+  // Which catalog the one running download installs.
+  const [catalogInstallTarget, setCatalogInstallTarget] = useState<string>();
+  const startCatalogInstall = async (catalog: CatalogInfo | undefined = recommendedCatalog) => {
+    const accepted = catalog?.catalogId === GAIA_CATALOG_ID ? gaiaTermsAccepted : catalogTermsAccepted;
+    if (!catalog || !accepted || catalogStatus === "DOWNLOADING") return;
     setCatalogError(undefined);
     setCatalogProgress(undefined);
     setCatalogStatus("DOWNLOADING");
+    setCatalogInstallTarget(catalog.catalogId);
     catalogCancellingRef.current = false;
     catalogJobIdRef.current = undefined;
     pendingCatalogCompleteRef.current = undefined;
     try {
       const receipt = await desktopBridge.startCatalogInstall({
-        catalogId: recommendedCatalog.catalogId,
-        acceptedTermsId: recommendedCatalog.providerTerms.acceptanceId,
+        catalogId: catalog.catalogId,
+        acceptedTermsId: catalog.providerTerms.acceptanceId,
       });
       catalogJobIdRef.current = receipt.jobId;
       setCatalogJobId(receipt.jobId);
@@ -1278,16 +1306,18 @@ export function useWorkflow(t: Translator) {
       })),
     };
   };
+  // Blink decisions admit Lights only on the manual path; automatic screening
+  // decides in the engine, so before the run only the imported counts are known.
   const blinkAdmittedPaths = useMemo(
     () =>
-      blinkReady && nativeRuntime
+      blinkReady && nativeRuntime && !automaticScreening
         ? new Set(
             blinkSession!.manifest.frames
               .filter((frame) => decisions[frame.sourceSha256] === "KEEP")
               .map((frame) => frame.path),
           )
         : undefined,
-    [blinkReady, blinkSession, decisions, nativeRuntime],
+    [blinkReady, blinkSession, decisions, nativeRuntime, automaticScreening],
   );
   const admittedPaths = useMemo(
     () => blinkAdmittedPaths ?? new Set(lightSourcePaths),
@@ -1296,9 +1326,8 @@ export function useWorkflow(t: Translator) {
   const matrix = useMemo(() => panelMatrix(assets, admittedPaths), [assets, admittedPaths]);
   const minimumAdmittedLights = 2;
   // Blink channels with fewer kept Lights than a stack needs (the launch bar's blocker).
-  const insufficientBlinkPanels = blinkReady
-    ? blinkChannels.filter((channel) => channel.kept < MINIMUM_KEPT_PER_CHANNEL)
-    : [];
+  const insufficientBlinkPanels =
+    blinkReady && !automaticScreening ? blinkChannels.filter((channel) => channel.kept < MINIMUM_KEPT_PER_CHANNEL) : [];
   // Whether the admitted counts are known: blink decisions or the legacy screening.
   const admissionKnown = Boolean(blinkAdmittedPaths);
   // Before manual review, only the imported counts are known.
@@ -1325,7 +1354,11 @@ export function useWorkflow(t: Translator) {
   const canStart =
     demoMode && !nativeRuntime
       ? !runNavigationLocked
-      : !runNavigationLocked && !inputBusy && nativeRuntime && blockers.length === 0 && blinkReviewComplete;
+      : !runNavigationLocked &&
+        !inputBusy &&
+        nativeRuntime &&
+        blockers.length === 0 &&
+        (automaticScreening || blinkReviewComplete);
   const importedTotal = useMemo(() => sources.reduce((sum, source) => sum + source.fileCount, 0), [sources]);
   const firstSolved = artifacts.find((artifact) => artifact.receipt?.astrometry)?.receipt?.astrometry;
 
@@ -1436,6 +1469,8 @@ export function useWorkflow(t: Translator) {
     setProperCoadditionEnabled,
     superLuminanceEnabled,
     setSuperLuminanceEnabled,
+    automaticScreening,
+    setAutomaticScreening,
     catalogList,
     catalogDoctor,
     solverDoctor,
@@ -1448,6 +1483,10 @@ export function useWorkflow(t: Translator) {
     solverSetupReady,
     catalogTermsAccepted,
     setCatalogTermsAccepted,
+    gaiaCatalog,
+    gaiaTermsAccepted,
+    setGaiaTermsAccepted,
+    catalogInstallTarget,
     catalogProgress,
     catalogStatus,
     catalogError,

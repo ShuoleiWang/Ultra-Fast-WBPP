@@ -32,6 +32,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 COUNTERFACTUAL_MODE = "analytic-leave-one-out-block8-fixed-rows-v2"
+BLOCK_COUNTERFACTUAL_MODE = "analytic-leave-block-out-block8-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +74,32 @@ class FrameCounterfactual:
 
 
 @dataclass(frozen=True, slots=True)
+class BlockCounterfactual:
+    """Leave-block-out deltas of a set of frames removed together (a night)."""
+
+    name: str
+    paths: tuple[str, ...]
+    weight: float
+    delta_depth_mag: float | None
+    delta_depth_ci: tuple[float, float] | None
+    delta_background_sigma: float | None
+    delta_background_ci: tuple[float, float] | None
+
+    def serializable(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "paths": list(self.paths),
+            "weight": self.weight,
+            "deltaDepthMag": self.delta_depth_mag,
+            "deltaDepthCi": list(self.delta_depth_ci) if self.delta_depth_ci else None,
+            "deltaBackgroundSigma": self.delta_background_sigma,
+            "deltaBackgroundCi": (
+                list(self.delta_background_ci) if self.delta_background_ci else None
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class CounterfactualReport:
     mode: str
     frames: tuple[FrameCounterfactual, ...]
@@ -84,9 +111,11 @@ class CounterfactualReport:
     fwhm_all_px: float | None
     bootstrap: int
     rejection_mask_source: str = "full-stack"
+    # Leave-block-out results; empty unless the accumulator was given blocks.
+    blocks: tuple[BlockCounterfactual, ...] = ()
 
     def serializable(self) -> dict[str, Any]:
-        return {
+        record = {
             "mode": self.mode,
             "tilesObserved": self.tiles_observed,
             "tilesUsed": self.tiles_used,
@@ -99,6 +128,10 @@ class CounterfactualReport:
             "signConvention": "positive = master improves when the frame is removed",
             "frames": [frame.serializable() for frame in self.frames],
         }
+        if self.blocks:
+            record["blockMode"] = BLOCK_COUNTERFACTUAL_MODE
+            record["blocks"] = [item.serializable() for item in self.blocks]
+        return record
 
 
 def _plane_residual_madn(
@@ -124,12 +157,21 @@ class LeaveOneOutAccumulator:
         star_sigma: float = 5.0,
         minimum_blocks: int = 24,
         statistics_rows: int = 64,
+        blocks: Sequence[tuple[str, Sequence[int]]] = (),
     ) -> None:
         if block < 2:
             raise ValueError("block must be at least 2")
         if statistics_rows < block or statistics_rows % block:
             raise ValueError("statistics_rows must be a positive multiple of block")
         self.paths = tuple(str(path) for path in paths)
+        # Frame sets measured together (leave-block-out), e.g. the frames of
+        # one night; each is a name and the indices into ``paths``.
+        self.blocks: tuple[tuple[str, tuple[int, ...]], ...] = tuple(
+            (str(name), tuple(sorted({int(index) for index in indices}))) for name, indices in blocks
+        )
+        for name, indices in self.blocks:
+            if not indices or any(index < 0 or index >= len(self.paths) for index in indices):
+                raise ValueError(f"block {name!r} names frames outside the accumulator")
         self.block = int(block)
         # Integration bands can be thousands of rows; statistics are gathered
         # on fixed-height sub-tiles so tile counts (and the tile bootstrap) do
@@ -228,6 +270,17 @@ class LeaveOneOutAccumulator:
             (total_weight[None], total_weight[None] - weights[:, None, None] * counts),
             axis=0,
         )
+        if self.blocks:
+            # The leave-block-out means follow from the same block sums:
+            # m_{-B} = (S - sum_{i in B} w_i sum_i) / (W - sum_{i in B} w_i count_i).
+            block_numerator = np.stack(
+                [total_sum - np.einsum("f,fij->ij", weights[list(indices)], sums[list(indices)]) for _, indices in self.blocks]
+            )
+            block_denominator = np.stack(
+                [total_weight - np.einsum("f,fij->ij", weights[list(indices)], counts[list(indices)]) for _, indices in self.blocks]
+            )
+            numerator = np.concatenate((numerator, block_numerator), axis=0)
+            denominator = np.concatenate((denominator, block_denominator), axis=0)
         means = np.full(numerator.shape, np.nan, dtype=np.float64)
         np.divide(numerator, denominator, out=means, where=denominator > 0)
 
@@ -255,11 +308,17 @@ class LeaveOneOutAccumulator:
                 row_index.astype(np.float64) / max(1, rows_b - 1),
             )
         )
-        selected = means[:, usable].T  # (blocks, frames + 1)
-        self._depth.append(_plane_residual_madn(selected, design))
+        selected = means[:, usable].T  # (blocks, frames + 1 [+ block sets])
+        # The block columns are fitted separately so the per-frame numbers
+        # are the same with or without blocks (LAPACK's result depends on
+        # the matrix width at the last bit).
+        depth = _plane_residual_madn(selected[:, : frames + 1], design)
+        if selected.shape[1] > frames + 1:
+            depth = np.concatenate((depth, _plane_residual_madn(selected[:, frames + 1 :], design)))
+        self._depth.append(depth)
 
         segments = max(1, cols_b // self.background_segment_blocks)
-        background = np.full((frames + 1, segments), np.nan, dtype=np.float64)
+        background = np.full((means.shape[0], segments), np.nan, dtype=np.float64)
         for segment in range(segments):
             start = segment * self.background_segment_blocks
             stop = cols_b if segment == segments - 1 else start + self.background_segment_blocks
@@ -293,20 +352,21 @@ class LeaveOneOutAccumulator:
             self._weights if self._weights is not None else np.ones(frames, dtype=np.float64)
         )
         rng = np.random.default_rng(seed)
-        depth = np.asarray(self._depth, dtype=np.float64) if self._depth else np.empty((0, frames + 1))
-        delta_depth: list[float | None] = [None] * frames
-        depth_ci: list[tuple[float, float] | None] = [None] * frames
+        sets = frames + len(self.blocks)
+        depth = np.asarray(self._depth, dtype=np.float64) if self._depth else np.empty((0, sets + 1))
+        delta_depth: list[float | None] = [None] * sets
+        depth_ci: list[tuple[float, float] | None] = [None] * sets
         sigma_all: float | None = None
         if depth.shape[0] >= 1:
             sigma_all = float(np.nanmedian(depth[:, 0]))
             with np.errstate(divide="ignore", invalid="ignore"):
                 point = -2.5 * np.log10(np.nanmedian(depth[:, 1:], axis=0) / sigma_all)
-            low = np.full(frames, np.nan)
-            high = np.full(frames, np.nan)
+            low = np.full(sets, np.nan)
+            high = np.full(sets, np.nan)
             if depth.shape[0] >= 2:
                 # A tile bootstrap needs at least two tiles; a single tile gives
                 # a point estimate without an interval.
-                draws = np.empty((bootstrap, frames), dtype=np.float64)
+                draws = np.empty((bootstrap, sets), dtype=np.float64)
                 for draw in range(bootstrap):
                     pick = rng.integers(0, depth.shape[0], depth.shape[0])
                     sample = depth[pick]
@@ -316,17 +376,17 @@ class LeaveOneOutAccumulator:
                         )
                 low = np.nanpercentile(draws, 2.5, axis=0)
                 high = np.nanpercentile(draws, 97.5, axis=0)
-            for index in range(frames):
+            for index in range(sets):
                 if np.isfinite(point[index]):
                     delta_depth[index] = float(point[index])
                     if np.isfinite(low[index]) and np.isfinite(high[index]):
                         depth_ci[index] = (float(low[index]), float(high[index]))
 
-        delta_background: list[float | None] = [None] * frames
-        background_ci: list[tuple[float, float] | None] = [None] * frames
+        delta_background: list[float | None] = [None] * sets
+        background_ci: list[tuple[float, float] | None] = [None] * sets
         background_all: float | None = None
         if self._background and self._segment_columns is not None and sigma_all:
-            grid = np.stack(self._background, axis=1)  # (frames+1, tiles, segments)
+            grid = np.stack(self._background, axis=1)  # (sets+1, tiles, segments)
             tiles_y = np.asarray(self._tile_rows, dtype=np.float64)
             cols_x = self._segment_columns
             yy, xx = np.meshgrid(tiles_y, cols_x, indexing="ij")
@@ -340,22 +400,28 @@ class LeaveOneOutAccumulator:
                 values = grid[:, valid].T  # (cells, frames+1)
 
                 def rms_residual(design_: NDArray[np.float64], values_: NDArray[np.float64]) -> NDArray[np.float64]:
-                    coefficients, *_ = np.linalg.lstsq(design_, values_, rcond=None)
-                    residual = values_ - design_ @ coefficients
-                    return np.sqrt(np.mean(residual * residual, axis=0))
+                    def fit(columns: NDArray[np.float64]) -> NDArray[np.float64]:
+                        coefficients, *_ = np.linalg.lstsq(design_, columns, rcond=None)
+                        residual = columns - design_ @ coefficients
+                        return np.sqrt(np.mean(residual * residual, axis=0))
+
+                    result = fit(values_[:, : frames + 1])
+                    if values_.shape[1] > frames + 1:
+                        result = np.concatenate((result, fit(values_[:, frames + 1 :])))
+                    return result
 
                 rms = rms_residual(design, values) / sigma_all
                 background_all = float(rms[0])
                 point = rms[0] - rms[1:]
                 cells = values.shape[0]
-                draws = np.empty((max(1, bootstrap // 2), frames), dtype=np.float64)
+                draws = np.empty((max(1, bootstrap // 2), sets), dtype=np.float64)
                 for draw in range(draws.shape[0]):
                     pick = rng.integers(0, cells, cells)
                     sample = rms_residual(design[pick], values[pick]) / sigma_all
                     draws[draw] = sample[0] - sample[1:]
                 low = np.percentile(draws, 2.5, axis=0)
                 high = np.percentile(draws, 97.5, axis=0)
-                for index in range(frames):
+                for index in range(sets):
                     delta_background[index] = float(point[index])
                     background_ci[index] = (float(low[index]), float(high[index]))
 
@@ -395,6 +461,18 @@ class LeaveOneOutAccumulator:
             )
             for index in range(frames)
         )
+        report_blocks = tuple(
+            BlockCounterfactual(
+                name=name,
+                paths=tuple(self.paths[index] for index in indices),
+                weight=float(sum(weights[index] for index in indices)),
+                delta_depth_mag=delta_depth[frames + offset],
+                delta_depth_ci=depth_ci[frames + offset],
+                delta_background_sigma=delta_background[frames + offset],
+                delta_background_ci=background_ci[frames + offset],
+            )
+            for offset, (name, indices) in enumerate(self.blocks)
+        )
         return CounterfactualReport(
             mode=COUNTERFACTUAL_MODE,
             frames=report_frames,
@@ -405,4 +483,5 @@ class LeaveOneOutAccumulator:
             background_rms_all_sigma=background_all,
             fwhm_all_px=fwhm_all,
             bootstrap=bootstrap,
+            blocks=report_blocks,
         )

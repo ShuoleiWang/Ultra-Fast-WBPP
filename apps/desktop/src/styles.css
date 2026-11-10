@@ -1996,6 +1996,25 @@ progress::-webkit-progress-value {
   font-size: 11px;
   color: var(--secondary);
 }
+.screening-suspect {
+  margin: 10px 14px 0;
+  padding: 10px 12px 0;
+  border-radius: var(--radius-card);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn);
+  font-size: 12px;
+}
+.screening-suspect ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+.screening-suspect small {
+  display: block;
+  color: var(--secondary);
+}
+.screening-suspect .screening-hint {
+  padding: 6px 0 10px;
+}
 
 /* ── Master forms, solver setup ───────────────────────────────────── */
 .master-form-grid {
@@ -2816,12 +2835,24 @@ progress::-webkit-progress-value {
 .blink-notes li code {
   color: var(--secondary);
 }
-.screening-notice.blinked {
+.screening-notice.blinked,
+.screening-notice.automatic {
   background: var(--ok-bg);
   border-color: var(--ok);
 }
-.screening-notice.blinked .symbol {
+.screening-notice.blinked .symbol,
+.screening-notice.automatic .symbol {
   background: var(--ok);
+}
+.screening-mode {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
 }
 .activity .bar.indeterminate > span {
   width: 40%;

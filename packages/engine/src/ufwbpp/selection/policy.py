@@ -44,6 +44,15 @@ class SelectionDecision:
     psf_factor: float = 1.0
     counterfactual: FrameCounterfactual | None = None
     suggestion: str | None = None
+    # unattended-v2 only (``components`` is set on every v2 decision): a firm
+    # exclusion no guard downgrades, the value V and its components, the
+    # completeness factor of the weight, the frame's block and suspect marks.
+    firm: bool = False
+    value: float | None = None
+    components: Mapping[str, Any] | None = None
+    completeness_factor: float = 1.0
+    block: str | None = None
+    suspect: tuple[str, ...] = ()
 
     @property
     def admitted(self) -> bool:
@@ -51,10 +60,12 @@ class SelectionDecision:
 
     @property
     def weight_multiplier(self) -> float:
-        return 0.0 if self.action == ACTION_EXCLUDE else self.confidence * self.psf_factor
+        if self.action == ACTION_EXCLUDE:
+            return 0.0
+        return self.confidence * self.psf_factor * self.completeness_factor
 
     def serializable(self) -> dict[str, Any]:
-        return {
+        record = {
             "path": self.path,
             "action": self.action,
             "confidence": self.confidence,
@@ -67,6 +78,14 @@ class SelectionDecision:
             ),
             "suggestion": self.suggestion,
         }
+        if self.components is not None:
+            record["firm"] = self.firm
+            record["value"] = self.value
+            record["components"] = dict(self.components)
+            record["completenessFactor"] = self.completeness_factor
+            record["block"] = self.block
+            record["suspect"] = list(self.suspect)
+        return record
 
 
 def _psf_exclusion(
@@ -185,16 +204,19 @@ def decide(
     approved_paths: Iterable[str] = (),
     region_maps: Mapping[str, RegionWeightMap] | None = None,
 ) -> list[SelectionDecision]:
-    """Decide every frame under ``parameters.policy`` (never ``legacy-gate``).
+    """Decide every frame under ``unattended-v1`` or ``include-all``.
 
     ``region_maps`` are the frames' region weight maps by path.  A mapped
     frame keeps its clean area instead of being excluded for a blocked or
     dimmed region, unless the map blanks more than half of the field.
+    ``unattended-v2`` is decided by ``unattended_v2.decide_v2``.
     """
 
     parameters.validate()
     if not parameters.unattended:
         raise ValueError("decide() is only defined for unattended policies")
+    if parameters.policy == "unattended-v2":
+        raise ValueError("unattended-v2 is decided by decide_v2 from the blink evidence")
     approved = {str(path) for path in approved_paths}
     maps = dict(region_maps or {})
     factors = psf_factors(features, parameters)
@@ -413,7 +435,12 @@ def confirmed_harmful(decisions: Sequence[SelectionDecision]) -> list[SelectionD
 
 
 def exclude_confirmed(
-    decisions: Sequence[SelectionDecision], harmful: Iterable[str]
+    decisions: Sequence[SelectionDecision],
+    harmful: Iterable[str],
+    reason: tuple[str, str] = (
+        "SEL_COUNTERFACTUAL_CONFIRMED_HARMFUL",
+        "excluded: the master measured better without this frame",
+    ),
 ) -> list[SelectionDecision]:
     """Return decisions with the listed frames excluded by the counterfactual."""
 
@@ -425,14 +452,9 @@ def exclude_confirmed(
                 replace(
                     item,
                     action=ACTION_EXCLUDE,
-                    reasons=item.reasons
-                    + (
-                        (
-                            "SEL_COUNTERFACTUAL_CONFIRMED_HARMFUL",
-                            "excluded: the master measured better without this frame",
-                        ),
-                    ),
+                    reasons=item.reasons + (reason,),
                     suggestion=None,
+                    suspect=(),
                 )
             )
         else:
@@ -446,8 +468,13 @@ def selection_receipt(
     decisions: Sequence[SelectionDecision],
     reports: dict[str, CounterfactualReport] | None = None,
     region_maps: Mapping[str, RegionWeightMap] | None = None,
+    unattended_v2: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """The ``qualityControl.selection`` receipt block."""
+    """The ``qualityControl.selection`` receipt block.
+
+    ``unattended_v2`` (the thresholds, channel baselines, suspect blocks and
+    block counterfactuals) is attached only under that policy.
+    """
 
     counts = {ACTION_KEEP: 0, ACTION_EXCLUDE: 0, "KEEP_REDUCED_WEIGHT": 0}
     for item in decisions:
@@ -475,4 +502,5 @@ def selection_receipt(
             if region_maps
             else None
         ),
+        **({"unattendedV2": dict(unattended_v2)} if unattended_v2 is not None else {}),
     }

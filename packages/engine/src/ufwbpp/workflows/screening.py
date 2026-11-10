@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import math
 from pathlib import Path
 from time import perf_counter
@@ -31,6 +31,16 @@ from ..quality.review_preview import (
 from ..selection import FrameSelectionFeatures, SelectionDecision, decide, extract_features
 from ..selection.policy import selection_receipt
 from ..selection.region import RegionWeightMap, region_weight_maps
+from ..selection.unattended_v2 import (
+    POLICY_V2,
+    ChannelSummary,
+    SuspectBlock,
+    V2_THRESHOLDS,
+    blink_context,
+    decide_v2,
+    receipt_block,
+    suspect_channels,
+)
 from ..stacking.normalization import StellarScaleHint
 from .common import _emit, _write_json
 from .contracts import IntegrationMode, ProgressStage, E2EError, DrizzleOptions, E2ERequest, ProgressCallback
@@ -68,19 +78,74 @@ def _write_review_previews(
     return previews
 
 
+def _write_selection_previews(
+    staging: Path,
+    qc_dir: Path,
+    results: Sequence[FrameResult],
+    paths: set[str],
+    previews: Mapping[str, str],
+) -> dict[str, str]:
+    """Previews of the frames in ``paths`` (resolved) that have none yet, within the budget.
+
+    The automatic policy excludes PASS frames too; the desktop shows every
+    excluded frame, so they get the same bounded preview the gate's non-PASS
+    frames already have.
+    """
+
+    extended = dict(previews)
+    total = sum((staging / relative).stat().st_size for relative in extended.values() if (staging / relative).is_file())
+    for index, result in enumerate(results):
+        resolved = str(Path(result.path).resolve(strict=True))
+        if resolved not in paths or result.path in extended or result.thumbnail_path is None:
+            continue
+        if len(extended) >= MAX_REVIEW_PREVIEWS:
+            break
+        data = bounded_review_preview(result.thumbnail_path)
+        if data is None or total + len(data) > MAX_TOTAL_PREVIEW_BYTES:
+            continue
+        destination = qc_dir / REVIEW_DIRECTORY / review_preview_name(index, result.path)
+        destination.parent.mkdir(exist_ok=True)
+        with destination.open("xb") as stream:
+            stream.write(data)
+        total += len(data)
+        extended[result.path] = destination.relative_to(staging).as_posix()
+    return extended
+
+
+def _auto_drop_summary(decision: SelectionDecision) -> str:
+    """One sentence with the numbers: the first (deciding) reason of the exclusion."""
+
+    if not decision.reasons:
+        return "Excluded by the automatic policy."
+    deciding = decision.reasons[0]
+    if "COUNTERFACTUAL" in decision.reasons[-1][0]:
+        deciding = decision.reasons[-1]
+    message = deciding[1]
+    sentence = message[0].upper() + message[1:]
+    return sentence if sentence.endswith(".") else sentence + "."
+
+
 def _screening_summary(
     results: Sequence[FrameResult],
     passed: Sequence[Path],
     approved_review_paths: Sequence[str],
     review_previews: Mapping[str, str],
     explicit: Mapping[str, Any] | None = None,
+    *,
+    selection: Sequence[SelectionDecision] | None = None,
+    policy: str | None = None,
+    suspect: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Counts plus the frames that needed a decision, for receipts and the desktop.
 
     With an explicit selection every user drop is listed (``reason``
     ``USER_DROP`` plus its blink flag codes) and so is every keep that
     overrode an EXCLUDE flag (``USER_KEEP_OVERRIDE``), next to the gate's own
-    non-PASS frames, so the result page shows both kinds of decision.
+    non-PASS frames, so the result page shows both kinds of decision.  Under
+    ``unattended-v2`` (``selection`` and ``policy`` given) every frame the
+    policy excluded is listed with ``reason`` ``AUTO_DROP``, its ``SEL_*``
+    codes, a one-sentence summary and the reason messages, and the record
+    carries the policy and the channels a user should look at in Blink.
     """
 
     counts = {disposition.value: 0 for disposition in GateDisposition}
@@ -89,38 +154,55 @@ def _screening_summary(
     explicit_by_path = {
         item["path"]: item for item in (explicit or {}).get("frames", []) if isinstance(item, Mapping)
     }
+    auto_by_path = {
+        item.path: item for item in (selection or ()) if not item.admitted
+    }
     for result in sorted(results, key=lambda item: item.path):
         gate = result.quality_gate
         disposition = gate.disposition.value if gate is not None else "HARD_FAIL"
         counts[disposition] += 1
         resolved = str(Path(result.path).resolve(strict=True))
         decision = explicit_by_path.get(resolved)
+        auto = auto_by_path.get(resolved)
         reason: str | None = None
         if decision is not None:
             if decision["decision"] == "DROP":
                 reason = "USER_DROP"
             elif "EXCLUDE_FLAGS" in decision.get("overrode", ()):
                 reason = "USER_KEEP_OVERRIDE"
-        if gate is not None and gate.disposition is GateDisposition.PASS and reason is None:
+        if gate is not None and gate.disposition is GateDisposition.PASS and reason is None and auto is None:
             continue
-        frames.append(
-            {
-                "path": resolved,
-                "disposition": disposition,
-                "admitted": resolved in passed_set or resolved in approved_review_paths,
-                "summary": gate.summary if gate is not None else "; ".join(result.reasons) or "not measured",
-                "evidence": [item.message for item in gate.evidence][:8] if gate is not None else list(result.reasons)[:8],
-                "starCount": result.star_count,
-                "reviewPreview": review_previews.get(result.path),
-                **({"reason": reason, "flags": list(decision["flags"])} if reason is not None and decision is not None else {}),
-            }
-        )
-    return {
+        record = {
+            "path": resolved,
+            "disposition": disposition,
+            "admitted": resolved in passed_set or resolved in approved_review_paths,
+            "summary": gate.summary if gate is not None else "; ".join(result.reasons) or "not measured",
+            "evidence": [item.message for item in gate.evidence][:8] if gate is not None else list(result.reasons)[:8],
+            "starCount": result.star_count,
+            "reviewPreview": review_previews.get(result.path),
+            **({"reason": reason, "flags": list(decision["flags"])} if reason is not None and decision is not None else {}),
+        }
+        if auto is not None:
+            record.update(
+                {
+                    "admitted": False,
+                    "reason": "AUTO_DROP",
+                    "flags": [code for code, _ in auto.reasons],
+                    "summary": _auto_drop_summary(auto),
+                    "evidence": [message for _, message in auto.reasons][:8],
+                }
+            )
+        frames.append(record)
+    summary = {
         "counts": counts,
         "admitted": len(passed_set),
         "excluded": len(results) - len(passed_set),
         "frames": frames,
     }
+    if policy is not None:
+        summary["policy"] = policy
+        summary["suspectChannels"] = [dict(item) for item in (suspect or ())]
+    return summary
 
 
 def _qc_manifest(
@@ -502,6 +584,13 @@ class _Screening:
     passed_results: list[Any]
     solver_hints: _SolverHints
     drizzle_sampling: dict[str, Any]
+    # unattended-v2: channel baselines, the suspect blocks the integration
+    # measures, their outcomes (``group/block`` -> NOT_MEASURED/KEPT/REMOVED)
+    # and the channels a user should look at in Blink.
+    selection_summaries: dict[str, ChannelSummary] = field(default_factory=dict)
+    selection_blocks: list[SuspectBlock] = field(default_factory=list)
+    block_outcomes: dict[str, str] = field(default_factory=dict)
+    suspect_channels: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _admitted_lights(
@@ -644,6 +733,23 @@ def _screen_lights(
     selection_decisions: list[SelectionDecision] = []
     selection_confidence: dict[str, float] = {}
     selection_region_maps: dict[str, RegionWeightMap] = {}
+    selection_summaries: dict[str, ChannelSummary] = {}
+    selection_blocks: list[SuspectBlock] = []
+    block_outcomes: dict[str, str] = {}
+    suspect: list[dict[str, Any]] = []
+    v2 = request.selection.policy == POLICY_V2
+    if v2 and blink is None:
+        # v2 decides from the blink flags' cross-night channel statistics as
+        # well as the gate; the same evidence later restricts the anchors.
+        qc_started = perf_counter()
+        blink = blink_evidence(
+            frame_results,
+            measurements,
+            flags_policy=request.blink_flags_policy,
+            gate_policy=request.gate_policy,
+            qc_config=request.qc_config,
+        )
+        qc_timings["blinkSeconds"] = perf_counter() - qc_started
     if request.selection.unattended:
         selection_features = extract_features(
             frame_results,
@@ -651,16 +757,42 @@ def _screen_lights(
             night_boundary_hours=request.gate_policy.night_boundary_hours,
             observing_timezone=request.qc_config.observing_timezone,
         )
-        if request.selection.region_weights:
+        maps_unavailable: str | None = None
+        canvas_drizzle = (
+            request.mosaic_canvas is not None and request.integration_mode is IntegrationMode.DRIZZLE
+        )
+        if request.selection.region_weights and not (v2 and canvas_drizzle):
             # Region weight maps come from the QC grid alone, so they are
             # built before the decisions that depend on them.
             selection_region_maps = region_weight_maps(frame_results)
-        selection_decisions = decide(
-            selection_features,
-            request.selection,
-            approved_paths=approved_review_paths,
-            region_maps=selection_region_maps,
-        )
+        elif v2 and canvas_drizzle:
+            # The drizzle onto a mosaic canvas does not read region maps; v2
+            # excludes what a map would have rescued and says so (v1 keeps
+            # building maps and the pipeline refuses the combination).
+            maps_unavailable = "region weight maps are not applied when drizzling onto a mosaic canvas"
+        elif v2:
+            maps_unavailable = "region weight maps are disabled by the recipe"
+        if v2:
+            assert blink is not None
+            selection_decisions, selection_summaries, selection_blocks = decide_v2(
+                selection_features,
+                request.selection,
+                blink_context(blink.inputs, blink.flags, blink.statistics),
+                approved_paths=approved_review_paths,
+                region_maps=selection_region_maps,
+                region_maps_unavailable=maps_unavailable,
+            )
+            block_outcomes = {f"{item.group_id}/{item.name}": "NOT_MEASURED" for item in selection_blocks}
+            suspect = suspect_channels(
+                selection_decisions, selection_features, selection_summaries, selection_blocks, block_outcomes
+            )
+        else:
+            selection_decisions = decide(
+                selection_features,
+                request.selection,
+                approved_paths=approved_review_paths,
+                region_maps=selection_region_maps,
+            )
         selection_confidence = {
             item.path: item.weight_multiplier for item in selection_decisions if item.admitted
         }
@@ -669,10 +801,12 @@ def _screen_lights(
             selection_features,
             selection_decisions,
             region_maps=selection_region_maps,
+            unattended_v2=(
+                receipt_block(V2_THRESHOLDS, selection_summaries, selection_decisions, selection_blocks, [])
+                if v2
+                else None
+            ),
         )
-    _write_json(qc_dir / "manifest.json", qc_manifest)
-    if blink is not None:
-        _write_json(qc_dir / "blink.json", blink.serializable())
     gate_by_path = {
         str(Path(result.path).resolve(strict=True)): result.quality_gate
         for result in frame_results
@@ -682,8 +816,24 @@ def _screen_lights(
     )
     passed_set = set(passed)
     excluded = tuple(path for path in lights if path not in passed_set)
+    if v2:
+        review_previews = _write_selection_previews(
+            staging, qc_dir, frame_results, {str(path) for path in excluded}, review_previews
+        )
+        for payload in qc_manifest["frames"]:
+            payload["reviewPreviewPath"] = review_previews.get(payload.get("path"), payload.get("reviewPreviewPath"))
+    _write_json(qc_dir / "manifest.json", qc_manifest)
+    if blink is not None:
+        _write_json(qc_dir / "blink.json", blink.serializable())
     screening = _screening_summary(
-        frame_results, passed, approved_review_paths, review_previews, explicit_block
+        frame_results,
+        passed,
+        approved_review_paths,
+        review_previews,
+        explicit_block,
+        selection=selection_decisions if v2 else None,
+        policy=POLICY_V2 if v2 else None,
+        suspect=suspect if v2 else None,
     )
     passed_results = [
         result for result in frame_results if Path(result.path).resolve(strict=True) in passed_set
@@ -731,6 +881,10 @@ def _screen_lights(
         passed_results=passed_results,
         solver_hints=solver_hints,
         drizzle_sampling=drizzle_sampling,
+        selection_summaries=selection_summaries,
+        selection_blocks=selection_blocks,
+        block_outcomes=block_outcomes,
+        suspect_channels=suspect,
     )
 
 
@@ -794,6 +948,14 @@ def _registration_anchor_exclusions(
             path
             for path, gate in screening.gate_by_path.items()
             if path in passed_text and (gate is None or gate.disposition is not GateDisposition.PASS)
+        )
+    if request.selection.policy == POLICY_V2:
+        # A frame v2 kept at reduced confidence or marked suspect is
+        # integrated at its weight but never anchors.
+        excluded.update(
+            item.path
+            for item in screening.selection_decisions
+            if item.admitted and (item.confidence < 1.0 or item.suspect)
         )
     return excluded
 
@@ -902,13 +1064,15 @@ def _counterfactual_exclusions(
     registration: Any,
     admitted_at_start: int,
     soft_exclusion_fraction_guard: float,
+    fraction_guard: bool = True,
 ) -> tuple[list[str], dict[str, str]]:
     """Which confirmed-harmful frames an integration pass may remove.
 
     Frames that other frames' normalization hints reference, and frames whose
     removal would leave a panel below the registration minimum, stay; the
-    cumulative exclusions stay under the soft-exclusion guard.  Returns the
-    removable originals and why each other harmful frame was kept.
+    cumulative exclusions stay under the soft-exclusion guard unless
+    ``fraction_guard`` is off (a whole measured night may be removed).
+    Returns the removable originals and why each other harmful frame was kept.
     """
 
     reference_originals = {
@@ -950,6 +1114,8 @@ def _counterfactual_exclusions(
             removable.remove(item.path)
             remaining_by_panel[key] = remaining_by_panel.get(key, 0) + 1
             kept_reasons[item.path] = "fewer than 2 Lights would remain in its panel"
+    if not fraction_guard:
+        return removable, kept_reasons
     already_removed = admitted_at_start - len(light_subset)
     allowed = int(soft_exclusion_fraction_guard * admitted_at_start) - already_removed
     if len(removable) > max(0, allowed):

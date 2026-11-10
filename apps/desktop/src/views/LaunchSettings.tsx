@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { Translator } from "../i18n";
 import { CheckIcon, CpuIcon, FolderIcon, PlayIcon } from "../icons";
-import { DRIZZLE_KERNELS, DRIZZLE_SCALES, type DrizzleKernel, type DrizzleScale } from "../types";
+import { DRIZZLE_KERNELS, DRIZZLE_SCALES, type CatalogInfo, type DrizzleKernel, type DrizzleScale } from "../types";
 import type { StartBlocker } from "../useWorkflow";
 import { MasterForm, SolverRow } from "./MasterForm";
 import { Alert, formatBytes, type Workflow } from "./common";
@@ -106,9 +106,6 @@ export function LaunchSettings({
   setOutputPathText: (value: string) => void;
   t: Translator;
 }) {
-  const catalogFraction = workflow.catalogProgress?.sizeBytes
-    ? Math.min(1, workflow.catalogProgress.downloadedBytes / workflow.catalogProgress.sizeBytes)
-    : 0;
   return (
     <div className="stack" style={{ padding: 0 }}>
       <div className="panel">
@@ -269,75 +266,38 @@ export function LaunchSettings({
                 {!workflow.nativeRuntime ? (
                   <p className="mock-notice">{t("browserNoSolver")}</p>
                 ) : workflow.catalogDoctor?.ok ? (
-                  <div className="catalog-ready">
-                    <CheckIcon />
-                    <div>
-                      <strong>{t("catalogReady")}</strong>
-                      <p>{workflow.catalogDoctor.catalogRoot}</p>
+                  <>
+                    <div className="catalog-ready">
+                      <CheckIcon />
+                      <div>
+                        <strong>{t("catalogReady")}</strong>
+                        <p>{workflow.catalogDoctor.catalogRoot}</p>
+                      </div>
                     </div>
-                  </div>
+                    {workflow.gaiaCatalog && !workflow.gaiaCatalog.fullyInstalledBySize && (
+                      <CatalogInstallCard
+                        workflow={workflow}
+                        catalog={workflow.gaiaCatalog}
+                        title={t("gaiaInstallTitle")}
+                        body={t("gaiaInstallBody")}
+                        accepted={workflow.gaiaTermsAccepted}
+                        setAccepted={workflow.setGaiaTermsAccepted}
+                        primary={false}
+                        t={t}
+                      />
+                    )}
+                  </>
                 ) : workflow.recommendedCatalog ? (
-                  <div className="catalog-install">
-                    <div>
-                      <strong>{t("catalogInstallTitle")}</strong>
-                      <p className="hint">{t("catalogInstallBody")}</p>
-                    </div>
-                    <div className="terms-box">
-                      <p>{workflow.recommendedCatalog.providerTerms.summary}</p>
-                      <a
-                        href={workflow.recommendedCatalog.providerTerms.url}
-                        onClick={(event) => {
-                          event.preventDefault();
-                          void workflow.openCatalogTerms(workflow.recommendedCatalog!.providerTerms.url);
-                        }}
-                      >
-                        {t("viewTerms")}
-                      </a>
-                      <label>
-                        <input
-                          type="checkbox"
-                          checked={workflow.catalogTermsAccepted}
-                          disabled={workflow.catalogStatus === "DOWNLOADING" || workflow.catalogStatus === "VERIFYING"}
-                          onChange={(event) => workflow.setCatalogTermsAccepted(event.target.checked)}
-                        />
-                        {t("acceptTerms", { id: workflow.recommendedCatalog.providerTerms.acceptanceId })}
-                      </label>
-                    </div>
-                    {workflow.catalogStatus === "DOWNLOADING" && (
-                      <div className="catalog-progress" role="status">
-                        <progress max={1} value={catalogFraction} />
-                        <span>
-                          {workflow.catalogProgress
-                            ? `${workflow.catalogProgress.artifactId} · ${(catalogFraction * 100).toFixed(1)}%`
-                            : t("waitProgress")}
-                        </span>
-                        <button
-                          type="button"
-                          className="btn small"
-                          onClick={() => void workflow.cancelCatalogInstall()}
-                        >
-                          {t("cancelDownload")}
-                        </button>
-                      </div>
-                    )}
-                    {workflow.catalogStatus === "VERIFYING" && (
-                      <p role="status" className="status-note">
-                        {t("verifyingCatalog")}
-                      </p>
-                    )}
-                    {workflow.catalogStatus !== "DOWNLOADING" && workflow.catalogStatus !== "VERIFYING" && (
-                      <div className="row-actions">
-                        <button
-                          type="button"
-                          className="btn primary"
-                          disabled={!workflow.catalogTermsAccepted}
-                          onClick={() => void workflow.startCatalogInstall()}
-                        >
-                          {t("downloadCatalog", { size: formatBytes(workflow.recommendedCatalog.totalSizeBytes, t) })}
-                        </button>
-                      </div>
-                    )}
-                  </div>
+                  <CatalogInstallCard
+                    workflow={workflow}
+                    catalog={workflow.recommendedCatalog}
+                    title={t("catalogInstallTitle")}
+                    body={t("catalogInstallBody")}
+                    accepted={workflow.catalogTermsAccepted}
+                    setAccepted={workflow.setCatalogTermsAccepted}
+                    primary
+                    t={t}
+                  />
                 ) : (
                   <p className="error-text" role="alert">
                     {t("noCatalogManifest")}
@@ -366,9 +326,99 @@ export function LaunchSettings({
   );
 }
 
+/**
+ * One provider-terms download: the managed index set the solver needs, or the
+ * optional Gaia DR2 tiles.  One download runs at a time; only the card of the
+ * catalog being installed shows its progress.
+ */
+function CatalogInstallCard({
+  workflow,
+  catalog,
+  title,
+  body,
+  accepted,
+  setAccepted,
+  primary,
+  t,
+}: {
+  workflow: Workflow;
+  catalog: CatalogInfo;
+  title: string;
+  body: string;
+  accepted: boolean;
+  setAccepted: (value: boolean) => void;
+  primary: boolean;
+  t: Translator;
+}) {
+  const busy = workflow.catalogStatus === "DOWNLOADING" || workflow.catalogStatus === "VERIFYING";
+  const installing = busy && workflow.catalogInstallTarget === catalog.catalogId;
+  const fraction = workflow.catalogProgress?.sizeBytes
+    ? Math.min(1, workflow.catalogProgress.downloadedBytes / workflow.catalogProgress.sizeBytes)
+    : 0;
+  return (
+    <div className="catalog-install">
+      <div>
+        <strong>{title}</strong>
+        <p className="hint">{body}</p>
+      </div>
+      <div className="terms-box">
+        <p>{catalog.providerTerms.summary}</p>
+        <a
+          href={catalog.providerTerms.url}
+          onClick={(event) => {
+            event.preventDefault();
+            void workflow.openCatalogTerms(catalog.providerTerms.url);
+          }}
+        >
+          {t("viewTerms")}
+        </a>
+        <label>
+          <input
+            type="checkbox"
+            checked={accepted}
+            disabled={busy}
+            onChange={(event) => setAccepted(event.target.checked)}
+          />
+          {t("acceptTerms", { id: catalog.providerTerms.acceptanceId })}
+        </label>
+      </div>
+      {installing && workflow.catalogStatus === "DOWNLOADING" && (
+        <div className="catalog-progress" role="status">
+          <progress max={1} value={fraction} />
+          <span>
+            {workflow.catalogProgress
+              ? `${workflow.catalogProgress.artifactId} · ${(fraction * 100).toFixed(1)}%`
+              : t("waitProgress")}
+          </span>
+          <button type="button" className="btn small" onClick={() => void workflow.cancelCatalogInstall()}>
+            {t("cancelDownload")}
+          </button>
+        </div>
+      )}
+      {installing && workflow.catalogStatus === "VERIFYING" && (
+        <p role="status" className="status-note">
+          {t("verifyingCatalog")}
+        </p>
+      )}
+      {!busy && (
+        <div className="row-actions">
+          <button
+            type="button"
+            className={`btn ${primary ? "primary" : ""}`}
+            disabled={!accepted}
+            onClick={() => void workflow.startCatalogInstall(catalog)}
+          >
+            {t("downloadCatalog", { size: formatBytes(catalog.totalSizeBytes, t) })}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Why the run cannot start yet, with the one action that resolves most of them. */
 function StartBlockerList({ workflow, mode, t }: { workflow: Workflow; mode: "import" | "inspect"; t: Translator }) {
-  const blinkPanels = workflow.blinkReady && workflow.nativeRuntime;
+  const blinkPanels = workflow.blinkReady && workflow.nativeRuntime && !workflow.automaticScreening;
   const describe = (blocker: StartBlocker): string => {
     switch (blocker.kind) {
       case "engine":
@@ -472,7 +522,23 @@ function SolverRows({ workflow, t }: { workflow: Workflow; t: Translator }) {
   return <>{windows ? [astap, solveField] : [solveField, astap]}</>;
 }
 
-/** Manual decisions are the only GUI admission source. */
+/** Automatic screening (default) or the manual Blink review; the choice is remembered. */
+function ScreeningModeToggle({ workflow, t }: { workflow: Workflow; t: Translator }) {
+  if (workflow.demoMode) return null;
+  return (
+    <label className="screening-mode">
+      <input
+        type="checkbox"
+        checked={workflow.automaticScreening}
+        disabled={workflow.runNavigationLocked || workflow.inputBusy}
+        onChange={(event) => workflow.setAutomaticScreening(event.target.checked)}
+      />
+      {t("automaticScreening")}
+    </label>
+  );
+}
+
+/** The completed manual review: the user's decisions admit the Lights. */
 function ScreeningNotice({ workflow, t }: { workflow: Workflow; t: Translator }) {
   if (workflow.demoMode || !workflow.blinkReviewComplete) return null;
   const kept = workflow.blinkChannels.reduce((sum, channel) => sum + channel.kept, 0);
@@ -494,6 +560,7 @@ function ScreeningNotice({ workflow, t }: { workflow: Workflow; t: Translator })
       >
         {t("blinkOpen")}
       </button>
+      <ScreeningModeToggle workflow={workflow} t={t} />
     </div>
   );
 }
@@ -509,34 +576,51 @@ export function LaunchBar({
   lightCount: number;
   t: Translator;
 }) {
-  // Blink is primary until every channel has been reviewed and confirmed.
-  const blinkPrimary = !workflow.blinkReviewComplete;
+  // Automatic screening needs no review, so Start is primary; on the manual
+  // path Blink is primary until every channel has been reviewed and confirmed.
+  const automatic = workflow.automaticScreening && !workflow.demoMode;
+  const blinkPrimary = !automatic && !workflow.blinkReviewComplete;
   const blinkButton = (
     <button
       type="button"
-      className={`btn ${blinkPrimary ? "primary" : ""}`}
+      className={`btn ${blinkPrimary ? "primary" : automatic ? "quiet" : ""}`}
       disabled={!workflow.canInspect || !workflow.allRequiredConfirmed || workflow.inputBusy}
       onClick={() => void workflow.runBlink()}
     >
       {workflow.blinkBusy
         ? t("blinkMeasuring", { count: lightCount, seconds: workflow.blinkElapsedSeconds })
-        : workflow.blinkReady
-          ? t("blinkOpen")
-          : t("blinkAndSelect", { count: lightCount || "" })}
+        : automatic
+          ? t("blinkInstead")
+          : workflow.blinkReady
+            ? t("blinkOpen")
+            : t("blinkAndSelect", { count: lightCount || "" })}
     </button>
   );
   const kept = workflow.blinkChannels.reduce((sum, channel) => sum + channel.kept, 0);
   const total = workflow.blinkChannels.reduce((sum, channel) => sum + channel.total, 0);
-  const startLabel = workflow.blinkReviewComplete ? t("startSelected", { kept, total }) : t("start");
+  const startLabel = !automatic && workflow.blinkReviewComplete ? t("startSelected", { kept, total }) : t("start");
+  const modeToggle = <ScreeningModeToggle workflow={workflow} t={t} />;
   return (
     <footer className="launchbar">
-      {!workflow.blinkReviewComplete && !workflow.demoMode ? (
+      {automatic ? (
+        <div className="screening-notice automatic" role="status">
+          <span className="symbol" aria-hidden="true">
+            ✓
+          </span>
+          <div>
+            <strong>{t("automaticScreeningTitle")}</strong>
+            <span>{t("automaticScreeningHint")}</span>
+          </div>
+          {modeToggle}
+        </div>
+      ) : !workflow.blinkReviewComplete && !workflow.demoMode ? (
         <div className="screening-notice" role="status">
           <span className="symbol">!</span>
           <div>
             <strong>{t("blinkHumanReviewTitle")}</strong>
             <span>{t("blockerBlinkReview")}</span>
           </div>
+          {modeToggle}
         </div>
       ) : (
         <ScreeningNotice workflow={workflow} t={t} />

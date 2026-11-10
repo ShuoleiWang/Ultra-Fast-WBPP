@@ -91,6 +91,7 @@ fn advanced_algorithms_are_absent_unless_enabled_and_refuse_drizzle() {
     assert!(default_value["recipe"].get("properCoaddition").is_none());
     assert!(default_value["recipe"].get("integration").is_none());
     assert!(default_value["recipe"].get("superLuminance").is_none());
+    assert!(default_value["recipe"].get("selection").is_none());
 
     // Unchecking the super luminance is the only way the block appears.
     let mut without_super_luminance = base.clone();
@@ -156,6 +157,31 @@ fn blink_selection_travels_top_level_and_is_validated() {
         .unwrap()
         .get("selection")
         .is_none());
+    // Automatic screening: the engine's policy rides in the recipe, and no
+    // manual selection, Blink proof or REVIEW approval may come with it.
+    let mut automatic = selection_request(&root, &light, serde_json::Value::Null);
+    automatic.selection = None;
+    automatic.recipe.automatic_screening = true;
+    let value = project_request_json(&automatic, &output).unwrap();
+    assert_eq!(
+        value["recipe"]["selection"],
+        serde_json::json!({"policy": AUTOMATIC_SCREENING_POLICY})
+    );
+    assert!(value.get("selection").is_none());
+    let sessions = root.join("blink-sessions");
+    validate_screening(&automatic, &sessions).unwrap();
+    let mut mixed = selection_request(&root, &light, sample_selection());
+    mixed.recipe.automatic_screening = true;
+    assert!(project_request_json(&mixed, &output)
+        .unwrap_err()
+        .starts_with("AUTOMATIC_SCREENING_CONFLICT"));
+    assert!(validate_screening(&mixed, &sessions)
+        .unwrap_err()
+        .starts_with("AUTOMATIC_SCREENING_CONFLICT"));
+    // The manual path still needs its review proof.
+    assert!(validate_screening(&legacy, &sessions)
+        .unwrap_err()
+        .starts_with("BLINK_REVIEW_REQUIRED"));
     // Legacy REVIEW approvals and a blink selection are two policies.
     let mut conflict = selection_request(&root, &light, sample_selection());
     conflict.review_selections.push(UiReviewSelection {
@@ -268,6 +294,47 @@ fn screening_summary_carries_user_selection_reasons_and_flags() {
     let unknown = serde_json::json!({"execution": {"screening": {"admitted": 1, "excluded": 0, "counts": {},
             "frames": [{"path": "x", "disposition": "PASS", "reason": "GATE"}]}}});
     assert!(screening_summary(&root, &unknown).is_err());
+    // Automatic screening names its own drops and the channels worth a look.
+    let automatic = serde_json::json!({"execution": {"screening": {
+        "admitted": 40, "excluded": 1, "counts": {"PASS": 41}, "policy": "unattended-v2",
+        "frames": [{"path": "source/src-1/M 31_L_moon.fits", "disposition": "PASS", "admitted": false,
+                    "summary": "sky 2.1x the clean sky with 0.52 of the stars", "evidence": [],
+                    "reason": "AUTO_DROP", "flags": ["SEL_NIGHT_SKY_BRIGHT", "not a code"]}],
+        "suspectChannels": [
+            {"target": "M 31 Panel 5", "filter": "L", "codes": ["SEL_NIGHT_SKY_BRIGHT"], "summary": "one bright night"},
+            {"filter": "R", "codes": []}
+        ]
+    }}});
+    let screening = screening_summary(&root, &automatic).unwrap().unwrap();
+    assert_eq!(screening.frames[0].reason.as_deref(), Some("AUTO_DROP"));
+    assert_eq!(screening.frames[0].flags, vec!["SEL_NIGHT_SKY_BRIGHT"]);
+    assert_eq!(screening.policy.as_deref(), Some("unattended-v2"));
+    assert_eq!(screening.suspect_channels.len(), 1);
+    assert_eq!(screening.suspect_channels[0].target, "M 31 Panel 5");
+    let encoded = serde_json::to_value(&screening).unwrap();
+    assert_eq!(
+        encoded["suspectChannels"][0]["codes"][0],
+        "SEL_NIGHT_SKY_BRIGHT"
+    );
+    // A list longer than the page shows keeps every Light left out.
+    let frames: Vec<serde_json::Value> = (0..MAX_SCREENING_FRAMES + 40)
+        .map(|index| {
+            serde_json::json!({"path": format!("f{index:04}.fits"), "disposition": "REVIEW",
+                               "admitted": index % 2 == 0})
+        })
+        .collect();
+    let long = serde_json::json!({"execution": {"screening": {
+        "admitted": 276, "excluded": 276, "counts": {"REVIEW": 552}, "frames": frames}}});
+    let screening = screening_summary(&root, &long).unwrap().unwrap();
+    assert_eq!(screening.frames.len(), MAX_SCREENING_FRAMES);
+    assert_eq!(
+        screening
+            .frames
+            .iter()
+            .filter(|frame| !frame.admitted)
+            .count(),
+        (MAX_SCREENING_FRAMES + 40) / 2
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -842,6 +909,7 @@ sys.exit(1)
             run_label: String::new(),
             recipe: UiRecipeOptions {
                 balanced: true,
+                automatic_screening: false,
                 drizzle_enabled: false,
                 drizzle_scale: default_drizzle_scale(),
                 drizzle_drop_shrink: default_drizzle_drop_shrink(),
@@ -942,6 +1010,7 @@ fn standard_master_workflow_reaches_worker_without_fabricated_metadata() {
         run_label: String::new(),
         recipe: UiRecipeOptions {
             balanced: true,
+            automatic_screening: false,
             drizzle_enabled: false,
             drizzle_scale: default_drizzle_scale(),
             drizzle_drop_shrink: default_drizzle_drop_shrink(),
@@ -1226,6 +1295,7 @@ print(json.dumps({"success":True,"code":"PROJECT_MONO_SUCCEEDED","state":"SOLVED
             run_label: "盾牌座 马赛克".to_owned(),
             recipe: UiRecipeOptions {
                 balanced: true,
+                automatic_screening: false,
                 drizzle_enabled: false,
                 drizzle_scale: default_drizzle_scale(),
                 drizzle_drop_shrink: default_drizzle_drop_shrink(),

@@ -213,9 +213,8 @@ def write_synthetic_index(
 def synthetic_field(seed: int = 7, *, in_field_stars: int = 40) -> dict[str, np.ndarray]:
     """Catalog positions (1-based pixels and sky) for the synthetic master.
 
-    Stars sit on a jittered 40 px grid: the detector drops blended sources,
-    and the bright Tycho-2 stars this check relies on are isolated in real
-    fields, so the fixture must not manufacture blends.
+    Stars sit on a jittered 40 px grid, so no two catalog stars blend; the
+    deblended neighbours of a deep stack are added by the test that needs them.
     """
 
     rng = np.random.default_rng(seed)
@@ -561,6 +560,42 @@ def test_verify_solution_recovers_exact_matches_and_evidence_shape(tmp_path: Pat
     assert quality.catalog_identity == expected_identity
 
 
+@pytest.mark.parametrize("shift_pixels", (0.0, 4.0))
+def test_verify_solution_matches_the_bright_stars_a_deep_stack_deblends(
+    tmp_path: Path, field: dict[str, np.ndarray], index_root: Path, shift_pixels: float
+) -> None:
+    # A deep stack shows a fainter neighbour beside most catalog stars; SEP
+    # deblends each pair and flags both pieces OBJ_MERGED.  Clean-only
+    # detection keeps only the isolated stars, the verification keeps all,
+    # and a WCS off by more than the 2" gate still fails: neighbours at random
+    # angles do not stand in for the stars.
+    stars = field["inside_pixels"]
+    angles = np.random.default_rng(5).uniform(0.0, 2.0 * np.pi, 30)
+    neighbours = stars[:30] + 7.0 * np.column_stack((np.cos(angles), np.sin(angles)))
+    image = render_master(stars).astype(np.float64)
+    yy, xx = np.mgrid[0:FIELD_HEIGHT, 0:FIELD_WIDTH]
+    for x, y in neighbours:
+        image += 800.0 * np.exp(-(((xx - (x - 1.0)) ** 2 + (yy - (y - 1.0)) ** 2) / (2.0 * STAR_SIGMA_PX**2)))
+    common = {
+        "image": image.astype(np.float32),
+        "wcs_header": synthetic_wcs(crpix_offset=(shift_pixels, 0.0)),
+        "image_shape": (FIELD_HEIGHT, FIELD_WIDTH),
+        "catalog_root": index_root,
+        "index_artifacts": [{"relativeName": f"index-{INDEX_ID}.fits"}],
+    }
+    (tmp_path / "clean").mkdir()
+    (tmp_path / "verification").mkdir()
+    verification = verify_solution(**common, artifact_dir=tmp_path / "verification")
+    residual = clipped_residual(tmp_path / "verification", gate_arcsec=2.0)["rmsArcsec"]
+    if shift_pixels:
+        assert residual > 2.0
+        return
+    clean_only = verify_solution(**common, artifact_dir=tmp_path / "clean", parameters=CorrespondenceParameters())
+    assert clean_only.quality.matched_stars < 12 <= stars.shape[0]
+    assert verification.quality.matched_stars == stars.shape[0]
+    assert residual < 1.0
+
+
 def test_verify_solution_reports_positive_parity_from_the_wcs(tmp_path: Path, field: dict[str, np.ndarray]) -> None:
     header = synthetic_wcs(positive_parity=True)
     celestial = WCS(header).celestial
@@ -624,6 +659,8 @@ def test_correspondence_parameters_validate_bounds() -> None:
         CorrespondenceParameters(detection_sigma=0.5).validate()
     with pytest.raises(ValueError, match="match_radius_fwhm_factor"):
         CorrespondenceParameters(match_radius_fwhm_factor=0.0).validate()
+    with pytest.raises(ValueError, match="accepted_source_flags"):
+        CorrespondenceParameters(accepted_source_flags=256).validate()
 
 
 def _astap_backend(tmp_path: Path, script: Path, header: fits.Header, *, mode: str = "success", **overrides):

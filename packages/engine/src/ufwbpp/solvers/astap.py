@@ -40,6 +40,7 @@ from .catalog_correspondence import (
     MATCH_ARTIFACT_NAME,
     VERIFICATION_METHOD,
     CatalogCorrespondenceError,
+    VERIFICATION_PARAMETERS,
     CorrespondenceParameters,
     bind_installed_set,
     verify_solution,
@@ -312,7 +313,7 @@ class AstapSolverBackend:
             raise ValueError("require_managed_catalog must be a boolean")
         self.require_managed_catalog = require_managed_catalog
         self.catalog_manifest_dir = catalog_manifest_dir
-        self.correspondence_parameters = correspondence_parameters or CorrespondenceParameters()
+        self.correspondence_parameters = correspondence_parameters or VERIFICATION_PARAMETERS
         self.correspondence_parameters.validate()
         self.star_database_dir = (
             Path(star_database_dir).expanduser() if star_database_dir is not None else None

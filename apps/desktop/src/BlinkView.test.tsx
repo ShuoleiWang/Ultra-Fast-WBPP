@@ -206,6 +206,8 @@ beforeEach(() => {
   native.handlers = undefined;
   window.localStorage.clear();
   window.sessionStorage.clear();
+  // These tests review in Blink, the manual path; automatic screening is off.
+  window.localStorage.setItem("ultra-fast-wbpp.automaticScreening", "off");
   // Reduced motion keeps playback off until a test asks for it, so the current frame is deterministic.
   vi.spyOn(window, "matchMedia").mockImplementation((query: string) => ({
     matches: query.includes("reduced-motion"),

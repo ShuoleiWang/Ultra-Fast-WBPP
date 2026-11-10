@@ -620,7 +620,7 @@ def _screening_record(receipt_path: Path, staging: Path, target: str) -> dict[st
                 "reviewPreview": f"{run_root}/{preview}" if isinstance(preview, str) else None,
             }
         )
-    return {
+    record = {
         "target": target,
         "counts": dict(screening.get("counts", {})),
         "admitted": screening.get("admitted"),
@@ -628,6 +628,15 @@ def _screening_record(receipt_path: Path, staging: Path, target: str) -> dict[st
         "frames": frames,
         "selectionPolicy": receipt.get("qualityControl", {}).get("selectionPolicy"),
     }
+    if "policy" in screening:
+        # The automatic policy's record: its id and the channels to look at.
+        record["policy"] = screening.get("policy")
+        record["suspectChannels"] = [
+            {**item, "target": item.get("target") or target}
+            for item in screening.get("suspectChannels", [])
+            if isinstance(item, Mapping)
+        ]
+    return record
 
 
 def _project_screening(subruns: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -638,6 +647,8 @@ def _project_screening(subruns: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     admitted = 0
     excluded = 0
     policies: list[str] = []
+    automatic: list[str] = []
+    suspect: list[dict[str, Any]] = []
     for record in subruns:
         screening = record.get("screening")
         if not isinstance(screening, Mapping):
@@ -650,7 +661,11 @@ def _project_screening(subruns: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         policy = screening.get("selectionPolicy")
         if isinstance(policy, str) and policy not in policies:
             policies.append(policy)
-    return {
+        if "policy" in screening:
+            if screening["policy"] not in automatic:
+                automatic.append(screening["policy"])
+            suspect.extend(screening.get("suspectChannels", []))
+    summary = {
         "counts": counts,
         "admitted": admitted,
         "excluded": excluded,
@@ -659,6 +674,10 @@ def _project_screening(subruns: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         # run has reported one.
         "selectionPolicy": policies[0] if len(policies) == 1 else None,
     }
+    if automatic:
+        summary["policy"] = automatic[0] if len(automatic) == 1 else None
+        summary["suspectChannels"] = suspect
+    return summary
 
 
 def _accepted_quality(receipt_path: Path, filter_name: str) -> dict[str, Any]:
