@@ -122,11 +122,15 @@ visually and scientifically relevant aspect, and better in SNR?" Implementable w
   must be accompanied by FWHM PASS (§4) and flux preservation (§3.5, §6.1) — otherwise it is smoothing or
   signal loss and the SNR gate is voided (status WARN with reason).
 ### 3.4 Photometric depth (empty-aperture noise)
-- 3000 random positions in Ω (drawn on the P grid, mapped by T^-1 for O), rejecting apertures overlapping
-  the star mask. `F_empty = sep.sum_circle(sub, x, y, 4.0, bkgann=(8,12))`; `σ_F4 = MADN(F_empty)`
+- 3000 random positions in Ω (drawn on the P grid, mapped by T^-1 for O). On **each native grid**, reject a
+  pair if either its source aperture or its local-sky annulus overlaps the star mask or invalid footprint.
+  Pixels wholly in the gap between the aperture and annulus do not contribute. Draw batches of 12000
+  candidates until 3000 pairs are available; report depth as unmeasured if four batches do not suffice.
+  `F_empty = sep.sum_circle(sub, x, y, 4.0, bkgann=(8,12))`; `σ_F4 = MADN(F_empty)`
   (automatically includes correlation and local-sky error). Same with r = 1.5, 8, 10 px for §2.3/§6.
 - `F_lim(5σ) = 5·σ_F4`; `Δm = −2.5·log10(a·σ_F4,O / σ_F4,P)` (positive = O deeper). §1 with d = −Δm,
-  τ = 0.02 (not worse); BETTER if Δm_lo ≥ +0.02. CI by bootstrap over apertures. Must agree with G_8 within ±0.03 mag.
+  τ = 0.02 (not worse); BETTER if Δm_lo ≥ +0.02. Bootstrap the same aperture-pair indices on both grids;
+  a finite positive scatter on both sides is required. Must agree with G_8 within ±0.03 mag.
 ### 3.5 Faint-star SNR and flux preservation
 - Matched clean B5 (and B4) stars: `SNR_i = F4_i/σ_F4,i`; `ρ_SNR = median(SNR_O/SNR_P)` (paired); must
   equal G_8 within ±0.03, else the noise model or the flux scale is inconsistent (WARN).
