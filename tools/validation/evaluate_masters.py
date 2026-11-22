@@ -35,7 +35,8 @@ from scipy.stats import theilslopes
 
 SEED = 0
 BOOTSTRAP = 300
-EVALUATION_VERSION = "native-grid-summary-gates-v2"
+EVALUATION_VERSION = "native-grid-paired-depth-v3"
+DEPTH_APERTURES = 3000
 
 
 # --------------------------------------------------------------------------- io
@@ -296,6 +297,70 @@ def map_o_to_p(model: np.ndarray, x: np.ndarray, y: np.ndarray):
     return model[0, 0] * x + model[0, 1] * y + model[0, 2], model[1, 0] * x + model[1, 1] * y + model[1, 2]
 
 
+def _blank_flux(an: Analysis, positions: np.ndarray) -> np.ndarray:
+    """Measure flux only when neither photometric footprint intersects an excluded pixel."""
+    rejected = an.star_mask | ~an.valid
+    xpos, ypos = positions.T
+    overlap, _, circle_flags = sep.sum_circle(rejected, xpos, ypos, 4., subpix=0)
+    sky_overlap, _, annulus_flags = sep.sum_circann(rejected, xpos, ypos, 8., 12., subpix=0)
+    clean = (overlap == 0) & (sky_overlap == 0) & (circle_flags == 0) & (annulus_flags == 0)
+    flux = np.full(len(positions), np.nan)
+    if clean.any():
+        values, _, flags = sep.sum_circle(an.sub, xpos[clean], ypos[clean], 4., bkgann=(8., 12.), subpix=5)
+        flux[clean] = np.where(flags == 0, values, np.nan)
+    return flux
+
+
+def _paired_depth(ours: Analysis, pi: Analysis, model: np.ndarray, scale: float,
+                  rng: np.random.Generator) -> dict[str, Any]:
+    missing = float("nan")
+    result = {"dm": missing, "ci": [missing, missing], "flim5_pi": missing,
+              "flim5_ours_Punits": missing, "apertures": 0, "reason": "insufficient paired blank apertures"}
+    if min(pi.height, pi.width, ours.height, ours.width) <= 128:
+        return result
+    try:
+        inverse = np.linalg.inv(np.vstack([model, [0, 0, 1]]))
+    except np.linalg.LinAlgError:
+        result["reason"] = "non-invertible aperture alignment"
+        return result
+    batches = []
+    count = 0
+    batch_size = 4 * DEPTH_APERTURES
+    for _ in range(4):
+        positions = np.column_stack((rng.uniform(64, pi.width - 64, batch_size),
+                                     rng.uniform(64, pi.height - 64, batch_size)))
+        mapped = positions @ inverse[:2, :2].T + inverse[:2, 2]
+        inside = ((mapped >= 64) & (mapped < [ours.width - 64, ours.height - 64])).all(axis=1)
+        if not inside.any():
+            continue
+        reference = _blank_flux(pi, positions[inside])
+        candidate = _blank_flux(ours, mapped[inside])
+        paired = np.flatnonzero(np.isfinite(reference) & np.isfinite(candidate))[:DEPTH_APERTURES - count]
+        batches.append(np.column_stack((reference[paired], candidate[paired])))
+        count += len(paired)
+        if count == DEPTH_APERTURES:
+            break
+    result["apertures"] = count
+    if count < DEPTH_APERTURES:
+        return result
+    reference, candidate = np.concatenate(batches).T
+    sigma_ref, sigma_ours = madn(reference), scale * madn(candidate)
+    result["reason"] = "invalid depth scatter or photometric scale"
+    if not (0 < sigma_ref < math.inf and 0 < sigma_ours < math.inf):
+        return result
+    draws = []
+    for _ in range(BOOTSTRAP):
+        indices = rng.integers(0, count, count)
+        ref_draw, ours_draw = madn(reference[indices]), scale * madn(candidate[indices])
+        if not (0 < ref_draw < math.inf and 0 < ours_draw < math.inf):
+            return result
+        draws.append(2.5 * (math.log10(ref_draw) - math.log10(ours_draw)))
+    result.update(dm=2.5 * (math.log10(sigma_ref) - math.log10(sigma_ours)),
+                  ci=np.percentile(draws, [2.5, 97.5]).tolist(),
+                  flim5_pi=5 * sigma_ref, flim5_ours_Punits=5 * sigma_ours, reason=None)
+    return result
+
+
 # ------------------------------------------------------------- evaluation
 def evaluate_pair(filter_name: str, ours_path: str, pi_path: str, out_dir: Path) -> dict[str, Any]:
     rng = np.random.default_rng(SEED)
@@ -377,33 +442,11 @@ def evaluate_pair(filter_name: str, ours_path: str, pi_path: str, out_dir: Path)
                1 - hi, 1 - lo, note=f"G={g:.4f} CI[{lo:.4f},{hi:.4f}]", verdict=(bsize == 8))
     report["info"]["noise"]["G"] = {str(k): [v[0], v[1], v[2]] for k, v in gains.items()}
 
-    # empty-aperture depth
-    def empty_apertures(an: Analysis, positions: np.ndarray) -> np.ndarray:
-        x, y = positions[:, 0], positions[:, 1]
-        f, _, _ = sep.sum_circle(an.sub, x, y, 4.0, bkgann=(8.0, 12.0), subpix=5)
-        return f
-
-    pos_p = np.c_[rng.uniform(64, pi.width - 64, 12000), rng.uniform(64, pi.height - 64, 12000)]
-    keep = ~pi.star_mask[pos_p[:, 1].astype(int), pos_p[:, 0].astype(int)]
-    pos_p = pos_p[keep][:3000]
-    inv = np.linalg.inv(np.vstack([model, [0, 0, 1]]))
-    ox_e = inv[0, 0] * pos_p[:, 0] + inv[0, 1] * pos_p[:, 1] + inv[0, 2]
-    oy_e = inv[1, 0] * pos_p[:, 0] + inv[1, 1] * pos_p[:, 1] + inv[1, 2]
-    ok = (ox_e >= 64) & (oy_e >= 64) & (ox_e < ours.width - 64) & (oy_e < ours.height - 64)
-    ok &= ~ours.star_mask[np.clip(oy_e.astype(int), 0, ours.height - 1), np.clip(ox_e.astype(int), 0, ours.width - 1)]
-    fe_p = empty_apertures(pi, pos_p[ok])
-    fe_o = empty_apertures(ours, np.c_[ox_e[ok], oy_e[ok]])
-    sf_p, sf_o = madn(fe_p), a * madn(fe_o)
-    dm = -2.5 * math.log10(sf_o / sf_p)
-    draws = []
-    for _ in range(BOOTSTRAP):
-        s1 = fe_p[rng.integers(0, fe_p.size, fe_p.size)]
-        s2 = fe_o[rng.integers(0, fe_o.size, fe_o.size)]
-        draws.append(-2.5 * math.log10(a * madn(s2) / madn(s1)))
-    dm_lo, dm_hi = float(np.percentile(draws, 2.5)), float(np.percentile(draws, 97.5))
-    metric("noise", "depth Δm (mag, >0 = ours deeper)", 5 * sf_p, 5 * sf_o, -dm, 0.02, -dm_hi, -dm_lo,
-           note=f"Δm={dm:+.3f} CI[{dm_lo:+.3f},{dm_hi:+.3f}] apertures={int(ok.sum())}")
-    report["info"]["depth"] = {"dm": dm, "ci": [dm_lo, dm_hi], "flim5_pi": 5 * sf_p, "flim5_ours_Punits": 5 * sf_o}
+    depth = _paired_depth(ours, pi, model, a, np.random.default_rng(SEED))
+    report["info"]["depth"] = depth
+    metric("noise", "depth Δm (mag, >0 = ours deeper)", depth["flim5_pi"], depth["flim5_ours_Punits"],
+           -depth["dm"], 0.02, -depth["ci"][1], -depth["ci"][0],
+           note=f"paired apertures={depth['apertures']}/{DEPTH_APERTURES}")
 
     # faint-star flux preservation (B5: SNR 10-30) and SNR ratio
     bins = {"B1": snr_p >= 1000, "B2": (snr_p >= 300) & (snr_p < 1000), "B3": (snr_p >= 100) & (snr_p < 300),
@@ -860,6 +903,8 @@ def summarize(reports: list[dict[str, Any]], cross: list[dict[str, Any]], out_di
         g8 = info["noise"]["G"]["8"]
         g4 = info["noise"]["G"]["4"]
         dm = info["depth"]
+        if dm.get("reason"):
+            lines.append(f"Depth unavailable: {dm['reason']} ({dm['apertures']}/{DEPTH_APERTURES} paired apertures).")
         verdict, not_worse, sci, better_snr = filter_verdict(rep)
         overall.append(verdict)
         missing = info.get("unmeasured_standard_gates")

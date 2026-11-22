@@ -4,6 +4,10 @@ All notable changes are documented here. The format follows Keep a Changelog and
 
 ## [Unreleased]
 
+### Master validation
+
+- Photometric-depth comparisons now exclude contaminated apertures and sky annuli on both native grids and bootstrap matched sky positions together. Sparse or degenerate pairs no longer yield a depth verdict. This changes validation reports, not the integrated masters.
+
 ### The release workflow builds again; macOS 15 is the minimum
 
 - No release could be built from `main`. The macOS bundle job (`macos-15` runner) failed after 19 minutes, in the mounted-DMG attestation, with `macOS 14 deployment audit found 58 violation(s): DEPLOYMENT_TARGET_TOO_NEW` for `_internal/Python`, the `Python.framework` image and the `lib-dynload` modules, and because the draft release needed both bundle jobs, the Windows installers that had passed stayed a workflow artifact. Homebrew pours the bottle built for the runner's macOS, so on `macos-15` the frozen interpreter targets macOS 15.0; the pinned Sonoma OpenSSL/mpdecimal overlay replaces only three libraries, and the workflow comment that it kept every slice at 14.0 was wrong.
