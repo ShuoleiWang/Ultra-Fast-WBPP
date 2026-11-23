@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import threading
 from typing import Any, Callable, Mapping, Sequence
 
 from astropy.io import fits
@@ -20,7 +21,9 @@ from ..integrity import sha256_digest
 from ..mosaic.astrometry import (
     SIP_FIT_ALGORITHM,
     MosaicAstrometryError,
+    PanelStars,
     catalog_source_from_backends,
+    measure_panel,
     refine_solution,
 )
 from ..platform import remove_file
@@ -38,6 +41,7 @@ from ..solvers.base import (
     validate_wcs_header,
     wcs_parity,
 )
+from ..solvers.catalogs import CatalogError, install_command, provide_catalog
 from ..solvers.process import (
     verify_solver_execution_result,
 )
@@ -56,6 +60,68 @@ _REFIT_SEED_MAXIMUM_RMS_RATIO = 1.5
 # The refit's catalog verification on each master, recorded as that master's
 # last accepted solve; its artifacts sit beside the master.
 CATALOG_REFIT_VERIFICATION_BACKEND = "catalog-refit-verification"
+# The Gaia DR2 tiles: about six times the stars of the Tycho-2 set, for a field that set cannot place.
+DENSER_CATALOG_ID = "astrometry-net-5205-lite"
+DENSER_CATALOG_COMMAND = install_command(DENSER_CATALOG_ID)
+# Too few catalog stars on a frame: what a denser catalog cures.
+CATALOG_SHORTAGE_CODES = frozenset(
+    {"MOSAIC_REFERENCE_STARS_INSUFFICIENT", "MOSAIC_CATALOG_TOO_SPARSE", "MOSAIC_CATALOG_FIELD_UNCOVERED"}
+)
+_PROVIDE_LOCK = threading.Lock()
+
+
+def _provide_denser_catalog(backends: Sequence[SolverBackend]) -> str | None:
+    """Bring the Gaia tiles into the managed catalog directory the solver reads: copied from another catalog
+    directory, else downloaded under terms the user accepted.  Returns why they were not added, or None when
+    the solver now has them."""
+
+    for backend in backends:
+        config_path = getattr(backend, "config_path", None)
+        if config_path is None:
+            continue
+        root = Path(config_path).expanduser().resolve().parent
+        if not any(root.glob("installed-set-*.json")):
+            return f"{root} is not a managed catalog directory"
+        try:
+            with _PROVIDE_LOCK:
+                provided = provide_catalog(
+                    DENSER_CATALOG_ID,
+                    catalog_root=root,
+                    manifest_dir=getattr(backend, "catalog_manifest_dir", None),
+                    environment=dict(os.environ) | dict(getattr(backend, "environment", None) or {}),
+                )
+        except CatalogError as error:
+            return f"{error.code}: {error}"
+        return None if provided["copied"] or provided["downloaded"] else "it is installed already"
+    return "the solver has no managed catalog directory"
+
+
+def _measure_panel_stars(
+    image: np.ndarray, header: Mapping[str, Any], backends: Sequence[SolverBackend], *, minimum_matches: int
+) -> PanelStars:
+    """A panel frame's catalog stars and TAN+SIP fit (``measure_panel``).  When the installed catalog gives
+    too few, the Gaia tiles are added to the solver's catalog directory and the frame is measured again; a
+    shortage that stays says how to install them."""
+
+    catalog = catalog_source_from_backends(backends)
+    if catalog is None:
+        raise MosaicAstrometryError(
+            "MOSAIC_CATALOG_UNAVAILABLE", "a mosaic panel needs the managed star catalog to measure its distortion"
+        )
+    try:
+        return measure_panel(image, header, catalog, minimum_matches=minimum_matches)
+    except MosaicAstrometryError as error:
+        if error.code not in CATALOG_SHORTAGE_CODES:
+            raise
+        shortage = error
+    reason = _provide_denser_catalog(backends)
+    if reason is None:
+        return measure_panel(image, header, catalog_source_from_backends(backends), minimum_matches=minimum_matches)
+    raise MosaicAstrometryError(
+        shortage.code,
+        f"{str(shortage).removeprefix(f'{shortage.code}: ')}; a denser catalog was not added for this run "
+        f"({reason}); install it: {DENSER_CATALOG_COMMAND}",
+    ) from shortage
 
 
 

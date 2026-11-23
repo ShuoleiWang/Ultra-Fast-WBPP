@@ -22,25 +22,30 @@ from astropy.io import fits
 import numpy as np
 
 from ..mosaic.assemble import CANVAS_MOSAIC_VERSION, MosaicGateError, assemble_filter
-from ..mosaic.astrometry import CatalogStarSource, MosaicAstrometryError, catalog_source_from_backends
+from ..mosaic.astrometry import CatalogStarSource, MosaicAstrometryError, catalog_source_from_backends, measure_panel
 from ..mosaic.canvas import CanvasError, CanvasPlan, PanelFootprint, frame_boundary, panels_connected, plan_canvas
 from ..mosaic.photometry import PanelImage
 from ..platform import remove_tree
+from ..solvers.catalogs import DEFAULT_CATALOG_ID, install_command
 from ..solvers.base import SolverBackend
 from .canvas import MINIMUM_REFERENCE_MATCHES, _light_header
 from .common import _write_json
 from .contracts import E2ERequest
 from .screening import _inferred_solver_hints
-from .solve import _read_image_header, _solve_one
+from .solve import (
+    CATALOG_SHORTAGE_CODES,
+    DENSER_CATALOG_COMMAND,
+    DENSER_CATALOG_ID,
+    _provide_denser_catalog,
+    _read_image_header,
+    _solve_one,
+)
 
 
 # Lights tried per panel to plan the canvas (middle, first, last).
 SURVEY_CANDIDATES = 3
 # A canvas larger than this is refused before any panel runs.
 MAXIMUM_CANVAS_PIXELS = 1 << 30
-DENSER_CATALOG_COMMAND = (
-    "ultra-fast-wbpp catalog install astrometry-net-5205-lite --accept-provider-terms astrometry-net-index-data-2026-09"
-)
 
 
 class MosaicStageError(RuntimeError):
@@ -125,22 +130,21 @@ def _catalog_stars_in_frame(footprint: PanelFootprint, catalog: CatalogStarSourc
     return int(inside.sum()), found.identity
 
 
-def _check_catalog_density(
-    footprints: Sequence[PanelFootprint], request: E2ERequest, backends: Sequence[SolverBackend], records: Sequence[dict[str, Any]]
-) -> None:
-    """A panel is placed on its catalog stars: refuse a mosaic before any
-    panel runs without a managed catalog, or when it holds fewer stars in a
-    panel's frame than the placement needs (a long focal length on the
-    Tycho-2 set)."""
+def _panels_short_of_stars(
+    footprints: Sequence[PanelFootprint],
+    lights: Sequence[str],
+    catalog: CatalogStarSource,
+    needed: int,
+    records: Sequence[dict[str, Any]],
+) -> list[str]:
+    """The panels the catalog cannot place, each with its star counts: the catalog stars in its frame and,
+    when those suffice, the matches its solved Light gives, measured as the panel's run measures its reference."""
 
-    catalog = catalog_source_from_backends(backends)
-    if catalog is None:
-        raise MosaicStageError(
-            "MOSAIC_CATALOG_UNAVAILABLE", "a mosaic needs the managed star catalog to place its panels"
-        )
-    needed = max(request.min_matches, MINIMUM_REFERENCE_MATCHES)
-    sparse = []
-    for footprint, record in zip(footprints, records):
+    from ufwbpp_registration import read_full_image
+
+    short = []
+    for footprint, light, record in zip(footprints, lights, records):
+        record.pop("referenceMatches", None)
         try:
             count, record["catalogIdentity"] = _catalog_stars_in_frame(footprint, catalog)
         except MosaicAstrometryError as error:
@@ -149,13 +153,56 @@ def _check_catalog_density(
             count = 0
         record["catalogStarsInFrame"] = count
         if count < needed:
-            sparse.append(f"{footprint.key} ({count})")
-    if sparse:
+            short.append(f"{footprint.key} ({count})")
+            continue
+        try:
+            stars = measure_panel(read_full_image(light), footprint.header, catalog, minimum_matches=needed)
+        except MosaicAstrometryError as error:
+            if error.code not in CATALOG_SHORTAGE_CODES:
+                raise MosaicStageError(error.code, str(error).removeprefix(f"{error.code}: ")) from error
+            # A Light that shows fewer isolated stars than the placement needs says nothing about the catalog.
+            if error.detected_stars is not None and error.detected_stars >= needed:
+                short.append(f"{footprint.key} ({count}, too few of them isolated and matched)")
+        else:
+            record["referenceMatches"] = len(stars.catalog_pixels)
+    return short
+
+
+def _check_catalog_density(
+    footprints: Sequence[PanelFootprint],
+    lights: Sequence[str],
+    request: E2ERequest,
+    backends: Sequence[SolverBackend],
+    records: Sequence[dict[str, Any]],
+) -> None:
+    """A panel is placed on its catalog stars: refuse a mosaic before any panel runs without a managed
+    catalog, or when the catalog gives a panel fewer stars than the placement needs (a long focal length or a
+    crowded field on the Tycho-2 set).  A shortage first adds the Gaia tiles to the solver's catalog directory,
+    copied from another directory or downloaded, and counts again."""
+
+    catalog = catalog_source_from_backends(backends)
+    if catalog is None:
         raise MosaicStageError(
-            "MOSAIC_CATALOG_TOO_SPARSE",
-            f"the installed catalog holds fewer than {needed} stars in the frame of panel {', '.join(sparse)}, "
-            f"too few to place it on the mosaic; install a denser catalog: {DENSER_CATALOG_COMMAND}",
+            "MOSAIC_CATALOG_UNAVAILABLE",
+            f"a mosaic needs the managed star catalog to place its panels; install it: {install_command(DEFAULT_CATALOG_ID)}",
         )
+    needed = max(request.min_matches, MINIMUM_REFERENCE_MATCHES)
+    short = _panels_short_of_stars(footprints, lights, catalog, needed, records)
+    if not short:
+        return
+    reason = _provide_denser_catalog(backends)
+    if reason is None:
+        short = _panels_short_of_stars(footprints, lights, catalog_source_from_backends(backends), needed, records)
+        if not short:
+            return
+        remedy = f"the Gaia tiles ({DENSER_CATALOG_ID}) are installed, so the field holds too few isolated stars"
+    else:
+        remedy = f"a denser catalog was not added for this run ({reason}); install it: {DENSER_CATALOG_COMMAND}"
+    raise MosaicStageError(
+        "MOSAIC_CATALOG_TOO_SPARSE",
+        f"the installed catalog holds fewer than {needed} usable stars in the frame of panel {', '.join(short)}, "
+        f"too few to place it on the mosaic; {remedy}",
+    )
 
 
 def _plan_mosaic_canvas(
@@ -170,6 +217,7 @@ def _plan_mosaic_canvas(
     records: list[dict[str, Any]] = []
     try:
         footprints: list[PanelFootprint] = []
+        lights: list[str] = []
         for key, light_files in panels:
             footprint, record = _survey_panel(key, light_files, request, backends, work)
             records.append(record)
@@ -179,7 +227,8 @@ def _plan_mosaic_canvas(
                     f"no Light of panel {key} solved; its place on the mosaic canvas is unknown",
                 )
             footprints.append(footprint)
-        _check_catalog_density(footprints, request, backends, records)
+            lights.append(next(path for path in light_files if Path(path).name == record["solvedLight"]))
+        _check_catalog_density(footprints, lights, request, backends, records)
         try:
             plan = plan_canvas(footprints)
         except CanvasError as error:

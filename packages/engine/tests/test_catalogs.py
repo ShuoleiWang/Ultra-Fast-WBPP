@@ -26,6 +26,7 @@ from ufwbpp.solvers.catalogs import (
     installed_set_identity_for_solver_indexes,
     installed_set_snapshot_for_solver_config,
     load_catalog_manifests,
+    provide_catalog,
     recommended_artifacts,
     remove_catalog_plan,
     verified_installed_set_identities,
@@ -40,13 +41,16 @@ OFFICIAL_MANIFEST_DIR = REPO_ROOT / "packages" / "engine" / "src" / "ufwbpp" / "
 
 
 def _fixture_manifest(
-    directory: Path, payload: bytes = b"checked-catalog-bytes", artifact_id: str = "index-4107.fits"
+    directory: Path,
+    payload: bytes = b"checked-catalog-bytes",
+    artifact_id: str = "index-4107.fits",
+    catalog_id: str = "fake-astrometry-4107",
 ) -> tuple[Path, str]:
-    directory.mkdir(parents=True)
+    directory.mkdir(parents=True, exist_ok=True)
     acceptance_id = "fake-provider-terms-v1"
     manifest = {
         "schemaVersion": 1,
-        "catalogId": "fake-astrometry-4107",
+        "catalogId": catalog_id,
         "provider": "Fake provider",
         "version": "fixture-v1",
         "bundled": False,
@@ -78,7 +82,7 @@ def _fixture_manifest(
             }
         ],
     }
-    path = directory / "fake-v1.json"
+    path = directory / f"{catalog_id}-v1.json"
     path.write_text(json.dumps(manifest), encoding="utf-8")
     return path, acceptance_id
 
@@ -185,6 +189,10 @@ def test_checked_catalog_manifests_validate_and_bind_official_4107_4112() -> Non
     assert wide.total_size_bytes == 349_692_480
     assert wide.license_status == "provider-specific-unresolved"
     assert wide.requires_explicit_acceptance is True
+    # The install commands the engine prints carry every astrometry.net set's own acceptance ID.
+    assert {item.acceptance_id for item in manifests if item.catalog_id.startswith("astrometry-net-")} == {
+        catalogs.INDEX_DATA_ACCEPTANCE_ID
+    }
 
 
 def test_recommended_scales_follow_provider_ten_to_one_hundred_percent_rule() -> None:
@@ -822,6 +830,33 @@ def test_catalog_list_and_doctor_do_not_download_or_create_directories(tmp_path:
     assert not root.exists()
 
 
+def test_catalog_list_and_doctor_name_installed_sets_in_other_directories(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = b"checked-catalog-bytes"
+    manifests = tmp_path / "manifests"
+    _, acceptance_id = _fixture_manifest(manifests, payload)
+    data = tmp_path / "home" / ".ultra-fast-wbpp" / "catalogs"
+    legacy = tmp_path / "home" / ".openastroflow" / "catalogs"
+    for directory in (data / "astrometry-net-gaia", legacy / "astrometry-net"):
+        install_catalog(
+            "fake-astrometry-4107", accepted_terms_id=acceptance_id, catalog_root=directory, manifest_dir=manifests,
+            transport=FakeTransport(payload),
+        )
+    (data / "empty").mkdir()
+    root = data / "astrometry-net"
+    environment = {"HOME": str(tmp_path / "home")}
+    for payload_of in (catalog_list, catalog_doctor):
+        found = payload_of(catalog_root=root, manifest_dir=manifests, environment=environment)["otherCatalogDirectories"]
+        assert [entry["catalogRoot"] for entry in found] == [str(data / "astrometry-net-gaia"), str(legacy / "astrometry-net")]
+        assert all(entry["inUse"] is False and entry["installedSets"][0]["catalogId"] == "fake-astrometry-4107" for entry in found)
+        assert f"UFWBPP_ASTROMETRY_CONFIG={data / 'astrometry-net-gaia' / 'astrometry.cfg'}" in found[0]["use"]
+        assert f"--catalog-dir {legacy / 'astrometry-net'}" in found[1]["use"]
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert main(["catalog", "list", "--manifest-dir", str(manifests), "--catalog-dir", str(root)]) == 0
+    assert f"Found, not in use: {data / 'astrometry-net-gaia'} (fake-astrometry-4107)" in capsys.readouterr().out
+
+
 def test_catalog_cli_exposes_machine_readable_seam_and_stable_terms_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -856,6 +891,45 @@ def test_catalog_cli_exposes_machine_readable_seam_and_stable_terms_error(
     error = json.loads(capsys.readouterr().err)
     assert error["error"]["code"] == "CATALOG_TERMS_NOT_ACCEPTED"
     assert not root.exists()
+
+
+@pytest.mark.parametrize("accepted", [False, True])
+def test_a_run_installs_the_catalog_it_needs_when_its_terms_are_accepted(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, accepted: bool
+) -> None:
+    import ufwbpp.cli as cli
+
+    payload = b"checked-catalog-bytes"
+    manifests = tmp_path / "manifests"
+    _, acceptance_id = _fixture_manifest(manifests, payload)
+    for name, value in {
+        "HOME": str(tmp_path / "home"),
+        "UFWBPP_DATA_DIR": str(tmp_path / "data"),
+        "UFWBPP_CATALOG_MANIFEST_DIR": str(manifests),
+        "UFWBPP_ASTROMETRY_CONFIG": "",
+        "ASTROMETRY_NET_CONFIG": "",
+        catalogs.ACCEPTED_TERMS_VARIABLE: "",
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(cli, "DEFAULT_CATALOG_ID", "fake-astrometry-4107")
+    transport = FakeTransport(payload)
+    monkeypatch.setattr(catalogs, "UrllibDownloadTransport", lambda: transport)
+    (tmp_path / "lights").mkdir()
+    terms = ["--accept-provider-terms", acceptance_id] if accepted else []
+    assert main(["run", str(tmp_path / "lights"), "--output", str(tmp_path / "out"), *terms]) == 2
+    root = tmp_path / "data" / "catalogs" / "astrometry-net"
+    diagnostics = capsys.readouterr().err
+    if accepted:
+        assert transport.calls == [0]
+        assert (root / "index-4107.fits").read_bytes() == payload and (root / "astrometry.cfg").is_file()
+    else:
+        assert transport.calls == [] and not root.exists()
+        # Nothing precedes the command's JSON error: a run that reaches its solver selection is refused there,
+        # with the install command (test_catalog_correspondence).
+        assert "CATALOG_TERMS_NOT_ACCEPTED" not in diagnostics
+        assert json.loads(diagnostics)["error"]["code"]
+    # Inventory then refuses the empty folder: the catalog step never stops a run.
+    assert not (tmp_path / "out").exists()
 
 
 def _bundled_runtime(tmp_path: Path, payload: bytes = b"checked-catalog-bytes") -> dict[str, str]:
@@ -941,6 +1015,95 @@ def test_bundled_catalog_waits_for_a_concurrent_writer(tmp_path: Path) -> None:
         thread.join()
 
 
+def test_a_needed_catalog_is_copied_from_a_sibling_directory_without_terms_or_download(tmp_path: Path) -> None:
+    payload = b"checked-catalog-bytes"
+    manifests = tmp_path / "manifests"
+    _fixture_manifest(manifests, payload)
+    sibling = tmp_path / "catalogs" / "astrometry-net-gaia"
+    sibling.mkdir(parents=True)
+    (sibling / "index-4107.fits").write_bytes(payload)
+    (sibling / "index-4108.fits").write_bytes(b"a file no manifest names")
+    root = tmp_path / "catalogs" / "astrometry-net"
+    transport = FakeTransport(payload)
+    provided = provide_catalog(
+        "fake-astrometry-4107", catalog_root=root, manifest_dir=manifests, transport=transport, environment={}
+    )
+    assert transport.calls == []
+    assert provided["copied"] == ["index-4107.fits"] and provided["downloaded"] == []
+    assert (root / "index-4107.fits").read_bytes() == payload and not (root / "index-4108.fits").exists()
+    assert (root / "astrometry.cfg").read_text(encoding="utf-8").splitlines()[1] == f"add_path {root}"
+    assert verify_catalog("fake-astrometry-4107", catalog_root=root, manifest_dir=manifests)["ok"] is True
+    # The sibling is left as it was.
+    assert sorted(path.name for path in sibling.iterdir()) == ["index-4107.fits", "index-4108.fits"]
+
+
+@pytest.mark.parametrize("terms", ["argument", "environment", "recorded download"])
+def test_a_needed_download_waits_for_the_providers_terms(tmp_path: Path, terms: str) -> None:
+    payload = b"checked-catalog-bytes"
+    manifests = tmp_path / "manifests"
+    _, acceptance_id = _fixture_manifest(manifests, payload)
+    root = tmp_path / "catalogs" / "astrometry-net"
+    transport = FakeTransport(payload)
+    with pytest.raises(CatalogError) as refused:
+        provide_catalog("fake-astrometry-4107", catalog_root=root, manifest_dir=manifests, transport=transport, environment={})
+    assert refused.value.code == "CATALOG_TERMS_NOT_ACCEPTED" and acceptance_id in str(refused.value)
+    assert transport.calls == [] and not root.exists()
+
+    arguments: dict[str, Any] = {"environment": {}}
+    if terms == "argument":
+        arguments["accepted_terms_id"] = acceptance_id
+    elif terms == "environment":
+        arguments["environment"] = {catalogs.ACCEPTED_TERMS_VARIABLE: acceptance_id}
+    else:
+        # The user accepted these terms for a download into another directory; its file is gone since.
+        earlier = tmp_path / "catalogs" / "earlier"
+        install_catalog(
+            "fake-astrometry-4107", accepted_terms_id=acceptance_id, catalog_root=earlier, manifest_dir=manifests,
+            transport=FakeTransport(payload),
+        )
+        (earlier / "index-4107.fits").unlink()
+    provided = provide_catalog("fake-astrometry-4107", catalog_root=root, manifest_dir=manifests, transport=transport, **arguments)
+    assert transport.calls == [0]
+    assert provided["downloaded"] == ["index-4107.fits"] and provided["copied"] == []
+    assert (root / "index-4107.fits").read_bytes() == payload
+
+
+def test_a_second_caller_waits_for_the_first_to_provide_the_catalog(tmp_path: Path) -> None:
+    from ufwbpp.solvers.catalogs import _catalog_lock
+
+    payload = b"checked-catalog-bytes"
+    manifests = tmp_path / "manifests"
+    _fixture_manifest(manifests, payload)
+    sibling = tmp_path / "catalogs" / "astrometry-net-gaia"
+    sibling.mkdir(parents=True)
+    (sibling / "index-4107.fits").write_bytes(payload)
+    root = tmp_path / "catalogs" / "astrometry-net"
+    root.mkdir()
+    held = threading.Event()
+    release = threading.Event()
+
+    def writer() -> None:
+        with _catalog_lock(root):
+            held.set()
+            release.wait(5)
+
+    thread = threading.Thread(target=writer)
+    thread.start()
+    held.wait(5)
+    try:
+        with pytest.raises(CatalogError) as busy:
+            provide_catalog("fake-astrometry-4107", catalog_root=root, manifest_dir=manifests, environment={}, wait_seconds=0)
+        assert busy.value.code == "CATALOG_INSTALL_BUSY"
+        threading.Timer(0.2, release.set).start()
+        provided = provide_catalog(
+            "fake-astrometry-4107", catalog_root=root, manifest_dir=manifests, environment={}, wait_seconds=5
+        )
+        assert provided["copied"] == ["index-4107.fits"]
+    finally:
+        release.set()
+        thread.join()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="the bundled solver runtime is macOS-only")
 def test_bundled_solver_is_preferred_over_the_host_solver(tmp_path: Path) -> None:
     from ufwbpp.solvers.astrometry_net import discover_astrometry_net
@@ -958,3 +1121,19 @@ def test_bundled_solver_is_preferred_over_the_host_solver(tmp_path: Path) -> Non
     assert discover_astrometry_net(environment={**environment, "UFWBPP_BUNDLED_ASTROMETRY_ROOT": ""}) == str(
         host / "solve-field"
     )
+
+
+def test_a_run_without_a_catalog_or_accepted_terms_leaves_stderr_to_its_json(tmp_path, monkeypatch, capsys):
+    from ufwbpp import cli
+
+    for name in ("HOME", "UFWBPP_DATA_DIR", "LOCALAPPDATA", "APPDATA", "XDG_DATA_HOME"):
+        monkeypatch.setenv(name, str(tmp_path / name.lower()))
+    for name in ("UFWBPP_ASTROMETRY_CONFIG", catalogs.ACCEPTED_TERMS_VARIABLE):
+        monkeypatch.delenv(name, raising=False)
+    args = cli._build_parser().parse_args(["run-project", "--output", str(tmp_path / "out"), str(tmp_path / "lights")])
+
+    cli._prepare_catalog(args)
+
+    # The run's solver selection refuses with the install command in its JSON error; nothing precedes it.
+    assert capsys.readouterr().err == ""
+    assert not catalogs.default_catalog_root().exists()

@@ -188,10 +188,12 @@ def _project(
     *,
     filters: tuple[str, ...] = ("R", "G", "B"),
     missing: Mapping[int, tuple[str, ...]] | None = None,
+    stars: bool = False,
 ) -> tuple[Any, E2ERequest, list[Path]]:
     """Four mosaic panels (2x2, 48 px overlaps); the Lights carry their
     panel's true solution, which :class:`TruthSolver` reads back.
-    ``missing`` names the filters a panel (by index) was not shot in."""
+    ``missing`` names the filters a panel (by index) was not shot in;
+    ``stars`` renders the sky into the Lights instead of a flat level."""
 
     lights: list[Path] = []
     for target_index in range(4):
@@ -203,10 +205,16 @@ def _project(
                 header = _science_header(f"dunpai{target_index + 1}", filter_name)
                 for key, value in truth_cards(truth).items():
                     header[key] = value
+                level = 100 + 10 * target_index + sequence
+                data = (
+                    np.clip(render(SKY, truth, PANEL_SHAPE, fwhm=3.0, background=level, noise=2.0, rng=np.random.default_rng(level)), 0, 65535).astype(np.uint16)
+                    if stars
+                    else np.full(PANEL_SHAPE, level, dtype=np.uint16)
+                )
                 lights.append(
                     _write(
                         tmp_path / "input" / f"dunpai{target_index + 1}" / filter_name / f"light-{sequence}.fits",
-                        np.full(PANEL_SHAPE, 100 + 10 * target_index + sequence, dtype=np.uint16),
+                        data,
                         header,
                     )
                 )
@@ -1308,6 +1316,78 @@ def test_mosaic_failures_publish_unsolved_only(tmp_path: Path) -> None:
         )
         assert refused.success is False and refused.code == code, refused
         assert runner.calls == 0
+
+
+class CatalogDirectorySolver(TruthSolver):
+    """A solver reading the managed catalog of one directory: its own set gives the panels few catalog
+    matches (stars where the sky has none), the Gaia tiles all of the sky's stars."""
+
+    def __init__(self, root: Path, manifests: Path) -> None:
+        super().__init__(SKY, scale_arcsec=PANEL_SCALE)
+        self.config_path = root / "astrometry.cfg"
+        self.catalog_manifest_dir = manifests
+        self.decoys = TruthCatalog(make_sky((150.0, 20.0), 0.12, 150, seed=23, flux_range=(3.6, 4.6)))
+
+    @property
+    def catalog_star_source(self) -> TruthCatalog:
+        return TruthCatalog(self.sky) if (self.config_path.parent / "index-5205-00.fits").is_file() else self.decoys
+
+    @catalog_star_source.setter
+    def catalog_star_source(self, _value: Any) -> None:
+        pass
+
+
+@pytest.mark.parametrize("sibling", [False, True])
+def test_a_catalog_short_of_matches_takes_the_gaia_tiles_another_directory_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sibling: bool
+) -> None:
+    """The survey Lights show enough stars and the catalog enough stars in their frames, yet too few of them
+    match: without the Gaia tiles the mosaic is refused before any panel runs and names the install command;
+    with the tiles in another catalog directory they are copied in, nothing is downloaded, and it publishes."""
+
+    import ufwbpp.solvers.catalogs as catalogs
+    import ufwbpp.workflows.mosaic as mosaic_stage
+    from test_catalogs import _fixture_manifest
+
+    # This fixture's 160 px panels show about twenty isolated stars each.
+    needed = 15
+    monkeypatch.setattr(mosaic_stage, "MINIMUM_REFERENCE_MATCHES", needed)
+    monkeypatch.setenv(catalogs.ACCEPTED_TERMS_VARIABLE, "")
+
+    class NoDownload:
+        def open(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("nothing is downloaded")
+
+    monkeypatch.setattr(catalogs, "UrllibDownloadTransport", NoDownload)
+    manifests = tmp_path / "manifests"
+    _fixture_manifest(manifests, b"gaia-tile", artifact_id="index-5205-00.fits", catalog_id="astrometry-net-5205-lite")
+    root = tmp_path / "catalogs" / "astrometry-net"
+    root.mkdir(parents=True)
+    (root / "installed-set-astrometry-net-4107-4112-0000000000000000.json").write_text("{}", encoding="utf-8")
+    if sibling:
+        (tmp_path / "catalogs" / "astrometry-net-gaia").mkdir()
+        (tmp_path / "catalogs" / "astrometry-net-gaia" / "index-5205-00.fits").write_bytes(b"gaia-tile")
+    inventory, base, _ = _project(tmp_path / "project", stars=True)
+    runner = FakePanelRunner()
+    result = run_project_e2e(
+        ProjectE2ERequest(inventory, base, base.output_directory),
+        solver_backends=(CatalogDirectorySolver(root, manifests),),
+        panel_runner=runner,
+        reproject_provider=FakeReproject().provider(),
+    )
+    survey = json.loads(Path(result.receipt_path).read_text())["execution"]["canvas"]["survey"]
+    assert all(record["catalogStarsInFrame"] >= needed for record in survey), survey
+    if not sibling:
+        assert result.success is False and result.code == "MOSAIC_CATALOG_TOO_SPARSE", result
+        assert "too few of them isolated and matched" in (result.message or "")
+        assert "CATALOG_TERMS_NOT_ACCEPTED" in (result.message or "")
+        assert get_catalog_manifest("astrometry-net-5205-lite").acceptance_id in (result.message or "")
+        assert runner.calls == 0 and not (root / "index-5205-00.fits").exists()
+        assert all("referenceMatches" not in record for record in survey), survey
+    else:
+        assert result.success is True, result
+        assert (root / "index-5205-00.fits").read_bytes() == b"gaia-tile"
+        assert all(record["referenceMatches"] >= needed for record in survey), survey
 
 
 def test_misplaced_master_and_source_drift_fail_without_success_tree(

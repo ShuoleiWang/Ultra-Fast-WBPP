@@ -381,6 +381,8 @@ const EN = {
     "Plate solving did not verify a WCS for every channel. The integrated masters are discarded when solving fails: check the solver setup (solve-field with its helper tools, or ASTAP with its star database, and the offline catalog), then run again.",
   mosaicCatalogHint:
     "The installed catalog holds too few stars in a mosaic panel to place it. The Gaia DR2 tiles (astrometry-net-5205-lite) are dense enough: install them under Advanced options and solver setup, then run again.",
+  mosaicReferenceStarsHint:
+    "Too few catalog stars matched on a mosaic panel's reference frame to place it. The engine message below says whether the Gaia DR2 tiles (astrometry-net-5205-lite) could be added; if not, install them under Advanced options and solver setup, then run again.",
   gaiaInstallTitle: "Gaia DR2 tiles (optional, recommended for mosaics)",
   gaiaInstallBody:
     "With these tiles every master's sky coordinates are refitted on Gaia stars (about 0.15″ on real masters), and mosaic panels that hold too few Tycho-2 stars can still be placed.",
@@ -1191,6 +1193,8 @@ const ZH: Record<MessageKey, string> = {
     "天文定位未能为每个通道验证 WCS。天文定位失败时不会保留叠加后的主图：请检查解算器配置（solve-field 及其辅助工具，或 ASTAP 及其星表数据库，以及离线星表），然后重新运行。",
   mosaicCatalogHint:
     "已安装的星表在某块马赛克面板里星数太少，无法为这块面板做天文定位。Gaia DR2 分块星表（astrometry-net-5205-lite）足够密：请在“高级选项与解算器设置”里安装，然后重新运行。",
+  mosaicReferenceStarsHint:
+    "某块马赛克面板的参考帧上与星表匹配的恒星太少，无法定位这块面板。下方的引擎原文写明了 Gaia DR2 分块星表（astrometry-net-5205-lite）是否已加入；如果没有，请在“高级选项与解算器设置”里安装，然后重新运行。",
   gaiaInstallTitle: "Gaia DR2 分块星表（可选，马赛克推荐）",
   gaiaInstallBody:
     "装上后，每张主图的天文坐标都会在 Gaia 恒星上重新拟合（真实主图上约 0.15″）；Tycho-2 星数不够的马赛克面板也能定位。",

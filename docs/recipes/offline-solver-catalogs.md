@@ -1,6 +1,6 @@
 # Offline solver catalogs
 
-Astrometry.net's executable and its indexes are separate prerequisites. Installing `solve-field` proves that the program can start; it does not prove that the angular scale of a new image is covered. Ultra-Fast WBPP never downloads indexes during startup, import, planning, or a processing run.
+Astrometry.net's executable and its indexes are separate prerequisites. Installing `solve-field` proves that the program can start; it does not prove that the angular scale of a new image is covered. Ultra-Fast WBPP never downloads indexes during startup, import or planning, and a processing run downloads one only under provider terms you accepted ([catalogs a run provides](#catalogs-a-run-provides)).
 
 ## 1. Inspect the checked choices
 
@@ -30,6 +30,17 @@ ultra-fast-wbpp catalog install astrometry-net-5205-lite \
   --accept-provider-terms astrometry-net-index-data-2026-09 \
   --progress-json
 ```
+
+## Catalogs a run provides
+
+A run obtains the catalog it needs before it processes anything:
+
+- `run` and `run-project` with no solver config install the Tycho-2 set `astrometry-net-4107-4112`; a mosaic whose survey Lights the installed set cannot place (too few catalog stars in a panel's frame, or too few of them matched) adds the Gaia tiles `astrometry-net-5205-lite` to the directory the solver reads and counts again, and so does a panel whose reference frame matches too few catalog stars.
+- Files already in the directory are kept. Files another catalog directory under the same `catalogs/` folder holds (for example `catalogs/astrometry-net-gaia`) are cloned or copied after their SHA-256 matches the manifest, without any download and without terms.
+- The rest is downloaded only when the provider's terms are accepted: `--accept-provider-terms <ID>` on `run` or `run-project`, `UFWBPP_ACCEPT_PROVIDER_TERMS=<ID>`, or an earlier provider download of a set under the same acceptance ID in a directory beside it (its installed-set receipt records it). Concurrent runs wait for the first.
+- What cannot be provided stops the run before any processing and names the install command: `SOLVER_UNAVAILABLE` when Astrometry.net is the only solver and has no catalog (ASTAP and an explicit `UFWBPP_ASTROMETRY_CONFIG` are unaffected), `MOSAIC_CATALOG_TOO_SPARSE` or `MOSAIC_CATALOG_UNAVAILABLE` for a mosaic.
+
+`catalog list` and `catalog doctor` also report catalog directories beside the one in use, and those under the former `~/.openastroflow` root when the new root exists, that hold installed sets: "found, not in use", with how to use one (`UFWBPP_ASTROMETRY_CONFIG=<dir>/astrometry.cfg` for a run, `--catalog-dir <dir>` for the catalog commands); JSON under `otherCatalogDirectories`.
 
 ## 2. Resume or verify
 

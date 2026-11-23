@@ -221,6 +221,10 @@ class EdgeMeasurement:
     offset_x: NDArray[np.float64] = field(default_factory=lambda: np.empty(0))
     offset_y: NDArray[np.float64] = field(default_factory=lambda: np.empty(0))
     aperture_radius: float = 0.0
+    # Every detection of the overlap (canvas position) and their median FWHM: the star mask of the local backgrounds.
+    detection_x: NDArray[np.float64] = field(default_factory=lambda: np.empty(0))
+    detection_y: NDArray[np.float64] = field(default_factory=lambda: np.empty(0))
+    detection_fwhm: float = 0.0
     # Each panel's seeing (pixels) from its stars' half-light radii; 0 when
     # no star was measured.
     fwhm_left: float = 0.0
@@ -290,9 +294,24 @@ def _log_flux_ratio(
     return math.log(slope), float(np.std(np.log(slopes), ddof=1))
 
 
+def _detection_mask(shape: tuple[int, int], x: NDArray[np.float64], y: NDArray[np.float64], fwhm: float) -> NDArray[np.bool_]:
+    """Every detection, masked at the size of the largest aperture: out of the stars' local backgrounds and of
+    the background bins."""
+
+    mask = np.zeros(shape, dtype=bool)
+    mask_radius = float(np.clip(APERTURE_FWHM * 1.5 * fwhm, 4.0, 60.0))
+    yy, xx = np.ogrid[: shape[0], : shape[1]]
+    r = int(math.ceil(mask_radius))
+    for sx, sy in zip(x, y):
+        ix, iy = int(round(sx)), int(round(sy))
+        sl_y = slice(max(0, iy - r), min(shape[0], iy + r + 1))
+        sl_x = slice(max(0, ix - r), min(shape[1], ix + r + 1))
+        mask[sl_y, sl_x] |= (xx[:, sl_x] - sx) ** 2 + (yy[sl_y, :] - sy) ** 2 <= mask_radius**2
+    return mask
+
+
 def _aperture_photometry(
     work: NDArray[np.float32],
-    residual: NDArray[np.float64],
     invalid: NDArray[np.bool_],
     star_mask: NDArray[np.bool_],
     x: NDArray[np.float64],
@@ -352,6 +371,19 @@ def _aperture_photometry(
     return flux, radius, good
 
 
+def edge_star_fluxes(edge: EdgeMeasurement, image: NDArray[np.float32]) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
+    """The edge's stars measured on ``image``, the edge's box of another image of the field (the mosaic), as
+    the panels were: the same detections masked, each star's own annulus median, an aperture that follows the
+    image's own seeing.  A different background estimate on either side biases every flux of a crowded field."""
+
+    invalid = np.ascontiguousarray(~np.isfinite(image))
+    work = np.ascontiguousarray(np.where(invalid, np.nanmedian(image), image), dtype=np.float32)
+    x0, y0 = edge.box[:2]
+    mask = _detection_mask(image.shape, edge.detection_x - x0, edge.detection_y - y0, edge.detection_fwhm)
+    flux, _, good = _aperture_photometry(work, invalid, mask, edge.star_x - x0, edge.star_y - y0, edge.detection_fwhm)
+    return flux, good
+
+
 def measure_edge(left: PanelImage, right: PanelImage) -> EdgeMeasurement | None:
     """Stars and background bins of one overlap."""
 
@@ -390,18 +422,10 @@ def measure_edge(left: PanelImage, right: PanelImage) -> EdgeMeasurement | None:
     if catalog is not None and catalog.count:
         fwhm = float(np.median(catalog.fwhm)) if catalog.fwhm.size else 3.0
         px, py = catalog.points[:, 0], catalog.points[:, 1]
-        # Every detection is masked out of the local backgrounds (and of the
-        # background bins below), at the size of the largest aperture.
-        mask_radius = float(np.clip(APERTURE_FWHM * 1.5 * fwhm, 4.0, 60.0))
-        yy, xx = np.ogrid[: valid.shape[0], : valid.shape[1]]
-        for sx, sy in zip(px, py):
-            ix, iy = int(round(sx)), int(round(sy))
-            r = int(math.ceil(mask_radius))
-            sl_y = slice(max(0, iy - r), min(valid.shape[0], iy + r + 1))
-            sl_x = slice(max(0, ix - r), min(valid.shape[1], ix + r + 1))
-            star_mask[sl_y, sl_x] |= (xx[:, sl_x] - sx) ** 2 + (yy[sl_y, :] - sy) ** 2 <= mask_radius**2
-        flux_a, radius_a, good_a = _aperture_photometry(work_a, residual_a, invalid, star_mask, px, py, fwhm)
-        flux_b, radius_b, good_b = _aperture_photometry(work_b, residual_b, invalid, star_mask, px, py, fwhm)
+        star_mask = _detection_mask(valid.shape, px, py, fwhm)
+        edge.detection_x, edge.detection_y, edge.detection_fwhm = px + x0, py + y0, fwhm
+        flux_a, radius_a, good_a = _aperture_photometry(work_a, invalid, star_mask, px, py, fwhm)
+        flux_b, radius_b, good_b = _aperture_photometry(work_b, invalid, star_mask, px, py, fwhm)
         sigma = max(fwhm / 2.3548, 0.8)
         cx_a, cy_a, wflag_a = sep.winpos(residual_a, px, py, sigma, mask=invalid)
         cx_b, cy_b, wflag_b = sep.winpos(residual_b, px, py, sigma, mask=invalid)
@@ -1159,6 +1183,7 @@ __all__ = [
     "ScaleObservation",
     "ScaleSolution",
     "SkyBins",
+    "edge_star_fluxes",
     "measure_edge",
     "measure_sky",
     "photometric_components",

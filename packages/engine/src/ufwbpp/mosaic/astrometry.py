@@ -62,8 +62,10 @@ _INVERSE_GRID = 33
 
 
 class MosaicAstrometryError(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, detected_stars: int | None = None) -> None:
         self.code = code
+        # The isolated stars the frame showed, when too few of them matched the catalog.
+        self.detected_stars = detected_stars
         super().__init__(f"{code}: {message}")
 
 
@@ -520,7 +522,8 @@ def measure_panel(
     if rows.size < minimum_matches:
         raise MosaicAstrometryError(
             "MOSAIC_REFERENCE_STARS_INSUFFICIENT",
-            f"{rows.size} catalog matches on the reference frame; at least {minimum_matches} are needed",
+            f"{rows.size} catalog matches on the reference frame (catalog {found.identity}); at least {minimum_matches} are needed",
+            detected_stars=len(detected),
         )
     crval = (float(centre[0][0]) % 360.0, float(centre[1][0]))
     fitted, order, keep = fit_tan_sip(detected[rows], world[catalog_rows], (height, width), crval=crval, maximum_order=maximum_order)
@@ -535,7 +538,8 @@ def measure_panel(
     if rows.size < minimum_matches:
         raise MosaicAstrometryError(
             "MOSAIC_REFERENCE_STARS_INSUFFICIENT",
-            f"{rows.size} catalog matches through the fitted solution; at least {minimum_matches} are needed",
+            f"{rows.size} catalog matches through the fitted solution (catalog {found.identity}); at least {minimum_matches} are needed",
+            detected_stars=len(detected),
         )
     fitted, order, keep = fit_tan_sip(
         detected[rows], world[catalog_rows], (height, width), crval=(float(fitted["CRVAL1"]), float(fitted["CRVAL2"])), maximum_order=maximum_order

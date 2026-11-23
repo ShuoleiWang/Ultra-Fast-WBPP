@@ -683,9 +683,12 @@ def verify_solution(
             stars = candidate
             break
     if stars is None:
+        counts = ", ".join(f"{item['relativeName']} {item['starsWithinSearchRadius']}" for item in selection)
         raise CatalogCorrespondenceError(
             "CATALOG_FIELD_UNCOVERED",
-            f"no managed index holds {parameters.minimum_matches} stars within {search_radius:.4g} degrees of the solved centre",
+            f"no managed index holds {parameters.minimum_matches} stars within {search_radius:.4g} degrees of the "
+            f"solved centre (stars per all-sky index: {counts or 'none'}; HEALPix tiles such as the Gaia set do not "
+            "take part in this check)",
         )
     detected, fwhm, detection_diagnostics = detect_field_stars(image, parameters)
     if detected.shape[0] < parameters.minimum_matches:
@@ -715,7 +718,9 @@ def verify_solution(
     if detection_rows.size < parameters.minimum_matches:
         raise CatalogCorrespondenceError(
             "CORRESPONDENCE_UNIQUE_MATCHES_MISSING",
-            f"{detection_rows.size} mutual image/catalog matches within {radius:.3g} px; at least {parameters.minimum_matches} are needed",
+            f"{detection_rows.size} mutual image/catalog matches within {radius:.3g} px against "
+            f"{stars.summary.relative_name} ({inside_rows.size} catalog stars in the frame); at least "
+            f"{parameters.minimum_matches} are needed",
         )
     # Residuals exactly as the astrometry.net adapter computes them from
     # .corr rows: pixel offsets in the image and spherical offsets on the sky.
