@@ -22,12 +22,16 @@ from .performance_profile import select_execution_tuning
 from .planning import build_plan, default_registry, solver_backend_science_ready
 from .recipe import Recipe, RecipeError
 from .solvers.catalogs import (
+    ACCEPTED_TERMS_VARIABLE,
+    DEFAULT_CATALOG_ID,
     CatalogError,
     catalog_doctor,
     catalog_list,
     default_catalog_root,
     install_bundled_catalog,
     install_catalog,
+    install_command,
+    provide_catalog,
     relocate_catalog,
     remove_catalog_plan,
     verify_catalog,
@@ -492,6 +496,12 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--drizzle-scale", type=int)
     run.add_argument("--drop-shrink", type=float)
     run.add_argument("--drizzle-kernel", choices=("square", "circular", "gaussian", "point"))
+    run.add_argument(
+        "--accept-provider-terms",
+        metavar="ACCEPTANCE_ID",
+        dest="accepted_terms_id",
+        help="accept the catalog provider's versioned terms for this run, so a catalog it needs may be downloaded",
+    )
 
     run_project = subparsers.add_parser(
         "run-project",
@@ -517,6 +527,12 @@ def _build_parser() -> argparse.ArgumentParser:
     run_project.add_argument("--drizzle-scale", type=int)
     run_project.add_argument("--drop-shrink", type=float)
     run_project.add_argument("--drizzle-kernel", choices=("square", "circular", "gaussian", "point"))
+    run_project.add_argument(
+        "--accept-provider-terms",
+        metavar="ACCEPTANCE_ID",
+        dest="accepted_terms_id",
+        help="accept the catalog provider's versioned terms for this run, so a catalog it needs may be downloaded",
+    )
 
     catalog = subparsers.add_parser(
         "catalog",
@@ -624,6 +640,44 @@ def _prepare_catalog(args: argparse.Namespace) -> None:
     except (CatalogError, OSError, ValueError, KeyError) as error:
         code = getattr(error, "code", type(error).__name__)
         sys.stderr.write(f"bundled catalog not installed ({code}): {error}\n")
+    if args.command in {"run", "run-project"} and _chain_may_use_astrometry(args):
+        from .solvers.astrometry_net import discover_astrometry_config
+
+        if discover_astrometry_config() is None:
+            try:
+                provided = provide_catalog(DEFAULT_CATALOG_ID)
+            except (CatalogError, OSError, ValueError) as error:
+                code = getattr(error, "code", type(error).__name__)
+                # Terms not yet accepted is a new install's ordinary state, and the solver selection then refuses
+                # astrometry.net with the install command inside the command's JSON: stderr stays machine-readable.
+                if code != "CATALOG_TERMS_NOT_ACCEPTED":
+                    sys.stderr.write(
+                        f"star catalog not installed ({code}): {error}; install it: {install_command(DEFAULT_CATALOG_ID)}\n"
+                    )
+            else:
+                sys.stderr.write(
+                    f"star catalog {DEFAULT_CATALOG_ID} installed in {provided['catalogRoot']} "
+                    f"({len(provided['copied'])} file(s) copied, {len(provided['downloaded'])} downloaded)\n"
+                )
+
+
+def _chain_may_use_astrometry(args: argparse.Namespace) -> bool:
+    """Whether the solver chain named on the command line, if any, includes astrometry.net."""
+
+    named = [
+        item.strip()
+        for value in (getattr(args, "solver_chain", None), getattr(args, "solver_backend", None))
+        if value
+        for item in value.split(",")
+        if item.strip()
+    ]
+    return not named or any(item in {"auto", "astrometry-net"} for item in named)
+
+
+def _write_other_directories(entries: Sequence[Mapping[str, Any]]) -> None:
+    for entry in entries:
+        sets = ", ".join(item["catalogId"] for item in entry["installedSets"])
+        sys.stdout.write(f"Found, not in use: {entry['catalogRoot']} ({sets})\n  to use it: {entry['use']}\n")
 
 
 def _stop_solvers_on_termination() -> None:
@@ -667,6 +721,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command in {"run", "run-project"}:
         _stop_solvers_on_termination()
+        if args.accepted_terms_id:
+            os.environ[ACCEPTED_TERMS_VARIABLE] = args.accepted_terms_id
     _prepare_catalog(args)
     try:
         if args.command == "doctor":
@@ -883,6 +939,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             f"  terms: {terms['licenseStatus']} — {terms['url']}\n"
                             f"  acceptance ID: {terms['acceptanceId']}\n"
                         )
+                    _write_other_directories(payload["otherCatalogDirectories"])
                 return 0
             if args.catalog_command == "doctor":
                 payload = catalog_doctor(
@@ -897,6 +954,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         f"Ready: {'yes' if payload['ok'] else 'no'}\n"
                         f"{payload['message']}\n"
                     )
+                    _write_other_directories(payload["otherCatalogDirectories"])
                 return 0 if payload["ok"] else 3
             if args.catalog_command == "install":
 

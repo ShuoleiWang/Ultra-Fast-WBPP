@@ -335,7 +335,13 @@ def test_overlap_photometry_passes_and_fails_only_beyond_its_measurement_error(
 
 
 def _six_panels(
-    root: Path, *, curvature: float = 0.0, shared: float = 0.0, halo: float = 300.0, noise: float = 2.0
+    root: Path,
+    *,
+    curvature: float = 0.0,
+    shared: float = 0.0,
+    halo: float = 300.0,
+    noise: float = 2.0,
+    crowd: int = 0,
 ) -> tuple[list[PanelImage], dict[str, float], tuple[int, int], np.ndarray, np.ndarray]:
     """Six panels of one sky with a bright galaxy whose core sits in the
     middle overlap (its halo starts at ``halo`` ADU): each panel with its own transparency, sky plane, seeing and noise.  With
@@ -344,7 +350,9 @@ def _six_panels(
     v² with the sign of its column: curvature the overlaps can see (a strip
     along a panel's edge spans it in one direction only).  With ``shared``
     every panel carries the same canvas gradient of that size, which no
-    overlap can see.  ``noise`` is every panel's pixel noise."""
+    overlap can see.  ``noise`` is every panel's pixel noise; ``crowd`` adds
+    that many faint stars, a star cloud whose light a background mesh and a
+    star's annulus estimate differently."""
 
     rng = np.random.default_rng(7)
     width, height, step_x, step_y = 640, 480, 540, 380
@@ -355,6 +363,11 @@ def _six_panels(
     count = int(canvas_w * canvas_h / 1200)
     sx, sy = rng.uniform(5, canvas_w - 5, count), rng.uniform(5, canvas_h - 5, count)
     flux = 10 ** rng.uniform(3.0, 5.0, count)
+    if crowd:
+        faint = np.random.default_rng(17)
+        sx = np.concatenate((sx, faint.uniform(5, canvas_w - 5, crowd)))
+        sy = np.concatenate((sy, faint.uniform(5, canvas_h - 5, crowd)))
+        flux = np.concatenate((flux, 10 ** faint.uniform(1.5, 2.8, crowd)))
 
     def render(fwhm: float) -> np.ndarray:
         image = np.zeros((canvas_h, canvas_w))
@@ -450,6 +463,22 @@ def test_six_panels_are_matched_by_one_network_and_blended_without_a_background_
         # Up to the level alone: what is left is mostly the halo's faint
         # edge, which passes for sky up to half the pixel noise.
         assert _sky_residual_rms(mosaic, sky * true_scales[reference], galaxy, terms=1) < 0.9
+
+
+def test_a_star_cloud_keeps_the_panels_flux_in_the_mosaic(tmp_path: Path) -> None:
+    """Twenty thousand faint stars under the overlaps: a background mesh puts the mosaic's stars about 5 %
+    brighter than their own annuli do, so the mosaic is measured as the panels were and keeps their flux."""
+
+    panels, _, (width, height), _, _ = _six_panels(tmp_path, crowd=20000)
+    projection = CanvasProjection("TAN", (10.0, 41.0), (1.0, 1.0), ((-1 / 3600, 0.0), (0.0, 1 / 3600)))
+    output = tmp_path / "mosaic"
+    output.mkdir()
+    receipt = assemble_filter(
+        "L", panels, projection=projection, canvas_box=(0, 0, width, height), output_directory=output, verifier=None
+    ).receipt
+    assert receipt["gates"]["fluxConservation"] == "PASS"
+    assert receipt["fluxConservation"]["stars"] > 100
+    assert abs(receipt["fluxConservation"]["medianRatioMinusOne"]) < 0.005
 
 
 def _kept_light(mosaic: Path, truth: np.ndarray, galaxy: np.ndarray, faint: float, bright: float) -> float:

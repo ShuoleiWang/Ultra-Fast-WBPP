@@ -1194,18 +1194,7 @@ def install_catalog(
     )
     client = transport or UrllibDownloadTransport()
     with _catalog_lock(root):
-        results = [
-            _download_artifact(
-                manifest,
-                artifact,
-                root,
-                transport=client,
-                timeout_seconds=timeout_seconds,
-                progress=progress,
-            )
-            for artifact in selected
-        ]
-        receipt = write_installed_set_receipt(manifest, root, results)
+        results, receipt = _install_selected(manifest, selected, root, client, timeout_seconds, progress)
     return {
         "ok": True,
         "catalogId": catalog_id,
@@ -1217,6 +1206,147 @@ def install_catalog(
             "explicit": True,
         },
         "artifacts": results,
+        "installedSet": receipt,
+    }
+
+
+def _install_selected(
+    manifest: CatalogManifest,
+    selected: Sequence[CatalogArtifact],
+    root: Path,
+    transport: DownloadTransport,
+    timeout_seconds: float,
+    progress: ProgressCallback | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Verify or download each artifact and publish the set's receipt; the caller holds the writer lock."""
+
+    results = [
+        _download_artifact(manifest, artifact, root, transport=transport, timeout_seconds=timeout_seconds, progress=progress)
+        for artifact in selected
+    ]
+    return results, write_installed_set_receipt(manifest, root, results)
+
+
+ACCEPTED_TERMS_VARIABLE = "UFWBPP_ACCEPT_PROVIDER_TERMS"
+# The Tycho-2 set a run installs when no solver catalog is configured.
+DEFAULT_CATALOG_ID = "astrometry-net-4107-4112"
+# The acceptance ID of the astrometry.net index data terms that every checked index set's manifest carries.
+INDEX_DATA_ACCEPTANCE_ID = "astrometry-net-index-data-2026-09"
+
+
+def install_command(catalog_id: str) -> str:
+    """The command that installs a checked astrometry.net index set."""
+
+    return f"ultra-fast-wbpp catalog install {catalog_id} --accept-provider-terms {INDEX_DATA_ACCEPTANCE_ID}"
+
+
+def _provider_download_recorded(manifest: CatalogManifest, root: Path) -> bool:
+    """Whether a catalog directory beside ``root`` holds a set that was downloaded from the provider under the
+    manifest's terms: the user accepted exactly these terms then."""
+
+    for path in sorted(root.parent.glob("*/installed-set-*.json")):
+        try:
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (
+            isinstance(receipt, dict)
+            and receipt.get("acceptanceId") == manifest.acceptance_id
+            and any(
+                isinstance(item, dict) and item.get("method") == "provider-download"
+                for item in receipt.get("transportEvidence") or ()
+            )
+        ):
+            return True
+    return False
+
+
+def provide_catalog(
+    catalog_id: str,
+    *,
+    accepted_terms_id: str | None = None,
+    catalog_root: str | os.PathLike[str] | None = None,
+    manifest_dir: str | os.PathLike[str] | None = None,
+    transport: DownloadTransport | None = None,
+    timeout_seconds: float = 60.0,
+    wait_seconds: float = 3600.0,
+    progress: ProgressCallback | None = None,
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Make a whole catalog usable in the managed directory with the least work, for a run that needs it.
+
+    Verified files already there are kept.  Files that another catalog directory of the same data root holds are
+    cloned or copied.  The rest is downloaded from the provider, which needs its terms: the acceptance ID given
+    here or in ``UFWBPP_ACCEPT_PROVIDER_TERMS``, or an earlier provider download under the same terms.  A second
+    caller waits for the first instead of failing on the writer lock.
+    """
+
+    manifest = get_catalog_manifest(catalog_id, manifest_dir, environment=environment)
+    if manifest.redistribution_status not in {"approved", "user-download-required"}:
+        raise CatalogError("CATALOG_DOWNLOAD_FORBIDDEN", f"{catalog_id} is not approved for managed download")
+    if any(item.install_scope != "user" or item.url is None for item in manifest.artifacts):
+        raise CatalogError("CATALOG_NOT_DOWNLOADABLE", f"{catalog_id} contains external-only artifacts")
+    root = (Path(catalog_root) if catalog_root is not None else default_catalog_root(environment=environment)).expanduser().absolute()
+    env = platform_services.environment_view(
+        os.environ if environment is None else environment,
+        platform_id=platform_services.current().platform_id,
+    )
+    accepted = accepted_terms_id or env.get(ACCEPTED_TERMS_VARIABLE)
+
+    def refuse(missing: Sequence[str]) -> CatalogError:
+        megabytes = sum(item.size_bytes or 0 for item in manifest.artifacts if item.artifact_id in missing) / 2**20
+        return CatalogError(
+            "CATALOG_TERMS_NOT_ACCEPTED",
+            f"{len(missing)} files of {catalog_id} ({megabytes:.0f} MiB) must be downloaded and the provider's "
+            f"terms are not accepted yet: review {manifest.terms_url}, then pass the acceptance ID "
+            f"{manifest.acceptance_id!r}",
+        )
+
+    def may_download() -> bool:
+        return (
+            not manifest.requires_explicit_acceptance
+            or accepted == manifest.acceptance_id
+            or _provider_download_recorded(manifest, root)
+        )
+
+    def other_directories() -> list[Path]:
+        try:
+            return [path for path in sorted(root.parent.iterdir()) if path.is_dir() and path != root]
+        except OSError:
+            return []
+
+    # Nothing to copy and no download allowed: refuse without creating the directory.
+    if not root.exists() and not may_download() and not any(
+        (other / item.artifact_id).is_file() for other in other_directories() for item in manifest.artifacts
+    ):
+        raise refuse([item.artifact_id for item in manifest.artifacts])
+    root = _ensure_secure_directory(root, create=True)
+    copied: list[str] = []
+    with _catalog_lock(root, wait_seconds=wait_seconds):
+        others = other_directories()
+        for artifact in manifest.artifacts:
+            if _regular_file(root / artifact.artifact_id) is not None:
+                continue
+            for other in others:
+                found = _regular_file(other / artifact.artifact_id)
+                if found is None or found.st_size != artifact.size_bytes:
+                    continue
+                if _hash_regular_file(other / artifact.artifact_id, expected_size=artifact.size_bytes)[1] == artifact.sha256:
+                    _publish_copy(other / artifact.artifact_id, root / artifact.artifact_id)
+                    copied.append(artifact.artifact_id)
+                    break
+        missing = [item.artifact_id for item in manifest.artifacts if _regular_file(root / item.artifact_id) is None]
+        if missing and not may_download():
+            raise refuse(missing)
+        results, receipt = _install_selected(
+            manifest, manifest.artifacts, root, transport or UrllibDownloadTransport(), timeout_seconds, progress
+        )
+    return {
+        "ok": True,
+        "catalogId": catalog_id,
+        "catalogRoot": str(root),
+        "copied": copied,
+        "downloaded": [item["artifactId"] for item in results if item["status"] == "INSTALLED"],
         "installedSet": receipt,
     }
 
@@ -1420,6 +1550,68 @@ def relocate_catalog(
     return previous
 
 
+def _legacy_data_root(environment: Mapping[str, str] | None) -> Path | None:
+    """The data root under the project's former name, wherever this platform puts it."""
+
+    env = platform_services.environment_view(
+        os.environ if environment is None else environment,
+        platform_id=platform_services.current().platform_id,
+    )
+    if platform_services.current().platform_id == "windows" and env.get("LOCALAPPDATA"):
+        return Path(env["LOCALAPPDATA"]) / "OpenAstroFlow"
+    home = env.get("HOME")
+    return (Path(home).expanduser() if home else Path.home()) / ".openastroflow"
+
+
+def other_catalog_directories(
+    root: str | os.PathLike[str], *, environment: Mapping[str, str] | None = None
+) -> list[dict[str, Any]]:
+    """Catalog directories beside ``root`` (and under the legacy data root) that hold installed sets, by their
+    receipts: found, not in use, with how to use one."""
+
+    root = Path(root).expanduser().absolute()
+    parents = [root.parent]
+    legacy = _legacy_data_root(environment)
+    if legacy is not None and (legacy / "catalogs").is_dir():
+        parents.append((legacy / "catalogs").absolute())
+    found: list[dict[str, Any]] = []
+    for parent in dict.fromkeys(parents):
+        try:
+            directories = sorted(path for path in parent.iterdir() if path.is_dir() and not path.is_symlink())
+        except OSError:
+            continue
+        for directory in directories:
+            if directory == root:
+                continue
+            sets = []
+            for path in sorted(directory.glob("installed-set-*.json")):
+                try:
+                    receipt = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if isinstance(receipt, dict) and isinstance(receipt.get("catalogId"), str):
+                    sets.append(
+                        {
+                            "catalogId": receipt["catalogId"],
+                            "installedSetIdentity": receipt.get("installedSetIdentity"),
+                            "artifactCount": len(receipt.get("artifacts") or ()),
+                        }
+                    )
+            if not sets:
+                continue
+            config = directory / "astrometry.cfg"
+            found.append(
+                {
+                    "catalogRoot": str(directory),
+                    "inUse": False,
+                    "installedSets": sets,
+                    "use": f"set UFWBPP_ASTROMETRY_CONFIG={config} for a run, or pass --catalog-dir {directory} to "
+                    "the catalog commands",
+                }
+            )
+    return found
+
+
 def catalog_list(
     *,
     catalog_root: str | os.PathLike[str] | None = None,
@@ -1445,7 +1637,12 @@ def catalog_list(
                 "fullyInstalledBySize": installed == len(manifest.artifacts),
             }
         )
-    return {"schemaVersion": 1, "catalogRoot": str(root.absolute()), "catalogs": entries}
+    return {
+        "schemaVersion": 1,
+        "catalogRoot": str(root.absolute()),
+        "catalogs": entries,
+        "otherCatalogDirectories": other_catalog_directories(root, environment=environment),
+    }
 
 
 def catalog_doctor(
@@ -1464,6 +1661,7 @@ def catalog_doctor(
             "catalogs": [],
             "installedSetBindingReady": False,
             "installedSets": [],
+            "otherCatalogDirectories": other_catalog_directories(root, environment=environment),
             "message": "No catalog directory exists; use catalog install with explicit provider-term acceptance.",
         }
     root = _ensure_secure_directory(root, create=False)
@@ -1504,6 +1702,7 @@ def catalog_doctor(
             }
             for receipt in receipts
         ],
+        "otherCatalogDirectories": other_catalog_directories(root, environment=environment),
         "message": "At least one checked catalog set and the generated solver config are ready."
         if config_valid and any(report["ok"] for report in reports)
         else "Catalog/index coverage is incomplete or the solver config is not generated.",
@@ -1912,6 +2111,9 @@ def installed_set_identity_for_solver_indexes(
 
 
 __all__ = [
+    "ACCEPTED_TERMS_VARIABLE",
+    "DEFAULT_CATALOG_ID",
+    "INDEX_DATA_ACCEPTANCE_ID",
     "CatalogArtifact",
     "CatalogError",
     "CatalogManifest",
@@ -1923,10 +2125,13 @@ __all__ = [
     "default_catalog_root",
     "get_catalog_manifest",
     "install_catalog",
+    "install_command",
     "installed_set_identity_for_solver_indexes",
     "installed_set_snapshot_for_solver_config",
     "load_catalog_manifests",
     "manifest_search_paths",
+    "other_catalog_directories",
+    "provide_catalog",
     "recommended_artifacts",
     "relocate_catalog",
     "remove_catalog_plan",

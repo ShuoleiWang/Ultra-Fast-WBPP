@@ -34,6 +34,7 @@ from .planning import (
 )
 from .recipe import Recipe, Requirement, SolverPolicy
 from .solvers.base import SolverBackend
+from .solvers.catalogs import DEFAULT_CATALOG_ID, INDEX_DATA_ACCEPTANCE_ID, install_command
 from .stacking.integration import IntegrationParameters
 from .stacking.normalization import GlobalNormalizationParameters
 from .stacking.parameters import PipelineParameters
@@ -434,6 +435,14 @@ def select_solver_chain(
         if not solver_backend_science_ready(backend):
             problems.append(
                 f"{backend_id}: catalog-correspondence quality evidence is unavailable"
+            )
+            continue
+        if getattr(backend, "require_managed_catalog", False) and getattr(backend, "config_path", "") is None:
+            # Its every solve would fail on the missing catalog; refuse now, not after the integration.
+            problems.append(
+                f"{backend_id}: no offline star catalog is installed; install one: "
+                f"{install_command(DEFAULT_CATALOG_ID)}, or run again with --accept-provider-terms "
+                f"{INDEX_DATA_ACCEPTANCE_ID} so the run downloads it"
             )
             continue
         selected.append(backend)

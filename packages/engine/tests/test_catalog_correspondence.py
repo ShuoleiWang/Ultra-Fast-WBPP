@@ -648,6 +648,9 @@ def test_verify_solution_fails_closed(tmp_path: Path, field: dict[str, np.ndarra
             artifact_dir=tmp_path,
         )
     assert failure.value.code == code
+    if code in {"CATALOG_FIELD_UNCOVERED", "CORRESPONDENCE_UNIQUE_MATCHES_MISSING"}:
+        # A catalog shortage names the index it was measured against.
+        assert f"index-{INDEX_ID}.fits" in str(failure.value)
     assert not (tmp_path / "correspondence.json").exists()
 
 
@@ -891,6 +894,29 @@ def test_solver_chain_accepts_science_ready_astap_and_keeps_the_default_order(tm
         select_solver_chain(BackendRegistry([without_database, native]), "astap")
     assert failure.value.code == "SOLVER_UNAVAILABLE"
     assert "star database" in str(failure.value)
+
+    # A strict astrometry.net with no catalog installed: ASTAP still runs, and a chain of astrometry.net alone is
+    # refused before any processing, with the command that installs the catalog.
+    strict = AstrometryNetSolverBackend(
+        executable=sys.executable,
+        executable_args=(str(script),),
+        environment={
+            "FAKE_BACKEND": "astrometry",
+            "FAKE_MODE": "success",
+            "HOME": str(tmp_path / "home"),
+            "LOCALAPPDATA": str(tmp_path / "local"),
+            "UFWBPP_DATA_DIR": str(tmp_path / "data"),
+        },
+        staging_root=tmp_path,
+        timeout_seconds=5.0,
+        probe_timeout_seconds=5.0,
+    )
+    assert [backend.backend_id for backend in select_solver_chain(BackendRegistry([astap, native, strict]), "auto")] == ["astap"]
+    with pytest.raises(RuntimeConfigurationError) as missing:
+        select_solver_chain(BackendRegistry([strict, native]), "astrometry-net")
+    assert missing.value.code == "SOLVER_UNAVAILABLE"
+    assert "install one: ultra-fast-wbpp catalog install astrometry-net-4107-4112 --accept-provider-terms" in str(missing.value)
+    assert "or run again with --accept-provider-terms astrometry-net-index-data-2026-09" in str(missing.value)
 
 
 def test_doctor_reports_per_backend_science_readiness(tmp_path: Path, field: dict[str, np.ndarray], index_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:

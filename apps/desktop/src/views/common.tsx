@@ -181,6 +181,7 @@ export function Alert({
 const FAILURE_HINTS: Record<string, MessageKey> = {
   ASTROMETRY_REQUIRED: "astrometryFailedHint",
   MOSAIC_CATALOG_TOO_SPARSE: "mosaicCatalogHint",
+  MOSAIC_REFERENCE_STARS_INSUFFICIENT: "mosaicReferenceStarsHint",
   OUTPUT_EXISTS: "failureHint_OUTPUT_EXISTS",
   OUTPUT_PATH_TOO_LONG: "failureHint_OUTPUT_PATH_TOO_LONG",
   SOLVER_UNAVAILABLE: "failureHint_SOLVER_UNAVAILABLE",

@@ -28,11 +28,9 @@ from ..mosaic.astrometry import (
     MosaicAstrometryError,
     PanelStars,
     SipFit,
-    catalog_source_from_backends,
     frame_stars,
     measure_frame_field,
     measure_lateral_colour,
-    measure_panel,
     solve_mosaic,
 )
 from ..mosaic.canvas import (
@@ -48,7 +46,7 @@ from ..stacking.parameters import OutputGrid, ShiftField
 from ..solvers.base import SolverBackend
 from .common import _emit, _relativize_solver_attempts, _safe_token
 from .contracts import E2EError, E2ERequest, IntegrationMode, ProgressCallback, ProgressStage
-from .solve import _SolverHints, _read_image_header, _solve_one
+from .solve import _SolverHints, _measure_panel_stars, _read_image_header, _solve_one
 from .sources import _input_frame_info
 
 
@@ -144,15 +142,9 @@ def _measure_reference(
             "the panel's registration reference did not solve; its place on the mosaic canvas is unknown",
         )
     solved_header, _ = _read_image_header(solved_path)
-    catalog = catalog_source_from_backends(backends)
-    if catalog is None:
-        raise E2EError(
-            "MOSAIC_CATALOG_UNAVAILABLE",
-            "a mosaic panel needs the managed star catalog to measure its distortion",
-        )
     try:
-        stars = measure_panel(
-            image, solved_header, catalog, minimum_matches=max(request.min_matches, MINIMUM_REFERENCE_MATCHES)
+        stars = _measure_panel_stars(
+            image, solved_header, backends, minimum_matches=max(request.min_matches, MINIMUM_REFERENCE_MATCHES)
         )
     except MosaicAstrometryError as error:
         raise E2EError(error.code, str(error)) from error

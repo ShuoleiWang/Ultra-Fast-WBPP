@@ -52,6 +52,7 @@ from .photometry import (
     PlaneSolution,
     ScaleObservation,
     ScaleSolution,
+    edge_star_fluxes,
     measure_edge,
     measure_sky,
     photometric_components,
@@ -231,30 +232,19 @@ def _flux_conservation(
     edges: Sequence[EdgeMeasurement],
     scales: ScaleSolution,
 ) -> dict[str, Any]:
-    """The overlap stars' aperture flux in the mosaic against the mean of
-    their corrected panel fluxes."""
-
-    import sep
+    """The overlap stars' flux in the mosaic, measured as in the panels, against the mean of their corrected
+    panel fluxes."""
 
     ratios = []
     for edge in edges:
         if edge.flux_left.size == 0:
             continue
-        x0, y0, _, _ = edge.box
-        crop = _canvas_crop(science_path, canvas_box, edge.box)
-        invalid = np.ascontiguousarray(~np.isfinite(crop))
-        work = np.ascontiguousarray(np.where(invalid, np.nanmedian(crop), crop), dtype=np.float32)
-        background = sep.Background(work, mask=invalid, bw=64, bh=64, fw=3, fh=3)
-        residual = np.ascontiguousarray(work - background.back(), dtype=np.float64)
-        radius = edge.aperture_radius
-        flux, _, flags = sep.sum_circle(
-            residual, edge.star_x - x0, edge.star_y - y0, radius, mask=invalid, subpix=5
-        )
+        flux, good = edge_star_fluxes(edge, _canvas_crop(science_path, canvas_box, edge.box))
         expected = 0.5 * (
             scales.gain(edge.left, edge.star_x, edge.star_y) * edge.flux_left
             + scales.gain(edge.right, edge.star_x, edge.star_y) * edge.flux_right
         )
-        usable = (np.asarray(flags) == 0) & (expected > 0) & np.isfinite(flux)
+        usable = good & (expected > 0)
         ratios.extend((flux[usable] / expected[usable]).tolist())
     if not ratios:
         return {"stars": 0, "verdict": "NOT_MEASURED", "reason": "no overlap stars"}

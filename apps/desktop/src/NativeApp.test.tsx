@@ -1812,6 +1812,22 @@ describe("native run failure", () => {
       "Gaia DR2 分块星表（astrometry-net-5205-lite）足够密：请在“高级选项与解算器设置”里安装",
     );
   });
+
+  it("names the Gaia catalog when a mosaic panel's reference matches too few catalog stars", async () => {
+    render(<App />);
+    await reachRun();
+    await act(async () =>
+      native.handlers?.onError({
+        jobId: "run-native-1",
+        code: "MOSAIC_REFERENCE_STARS_INSUFFICIENT",
+        message: "27 catalog matches on the reference frame (catalog 4107-4112); at least 30 are needed",
+        retryable: false,
+      }),
+    );
+    const card = screen.getByRole("alert");
+    expect(card).toHaveTextContent("Gaia DR2 分块星表（astrometry-net-5205-lite）是否已加入");
+    expect(card).toHaveTextContent("27 catalog matches on the reference frame");
+  });
 });
 
 describe("native failure explanations", () => {
